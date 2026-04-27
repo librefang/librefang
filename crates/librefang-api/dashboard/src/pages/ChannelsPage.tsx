@@ -13,7 +13,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
   Settings, Key, Clock, AlertCircle, CheckSquare, Square,
@@ -177,7 +177,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
   t: (key: string) => string
 }) {
   return (
-    <Modal isOpen onClose={onClose} variant="drawer-right" size="lg" hideCloseButton>
+    <DrawerPanel isOpen onClose={onClose} size="lg" hideCloseButton>
         {/* Coloured strip + custom header are kept inline so the
             configured/unconfigured stripe still renders. */}
         <div className={`h-2 bg-linear-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
@@ -310,7 +310,7 @@ function DetailsModal({ channel, onClose, onConfigure, onTest, t }: {
         <div className="p-4 border-t border-border-subtle flex justify-end">
           <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
         </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -369,7 +369,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   };
 
   return (
-    <Modal isOpen onClose={onClose} variant="panel-right" size="md" hideCloseButton>
+    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -450,7 +450,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
           </Button>
         </div>
         </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -539,7 +539,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
   useEffect(() => { startQr(); }, [startQr]);
 
   return (
-    <Modal isOpen onClose={onClose} variant="panel-right" size="md" hideCloseButton>
+    <DrawerPanel isOpen onClose={onClose} size="md" hideCloseButton>
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -587,7 +587,7 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
         <div className="p-4 border-t border-border-subtle flex justify-end">
           <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
         </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 

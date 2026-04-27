@@ -17,6 +17,7 @@ import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
@@ -586,7 +587,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const models = modelsQuery.data?.models ?? [];
 
   return (
-    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg" variant="drawer-right">
+    <DrawerPanel isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg">
       <div className="p-6 space-y-4">
         {/* Header info */}
         <div className="flex items-center gap-3">
@@ -697,7 +698,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -1334,7 +1335,7 @@ export function ProvidersPage() {
       )}
 
       {/* Config Modal */}
-      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md">
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
@@ -1421,7 +1422,7 @@ export function ProvidersPage() {
             )}
           </div>
         )}
-      </Modal>
+      </DrawerPanel>
 
       {/* Delete Confirmation Modal */}
       <Modal isOpen={!!deleteConfirmProvider} onClose={() => setDeleteConfirmProvider(null)}
@@ -1454,7 +1455,7 @@ export function ProvidersPage() {
       </Modal>
 
       {/* Create Provider Wizard */}
-      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton variant="panel-right">
+      <DrawerPanel isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
         <CreateProviderWizard
           onSubmit={async (values) => {
             await createRegistryContent("provider", values);
@@ -1464,7 +1465,7 @@ export function ProvidersPage() {
           }}
           onCancel={() => setShowCreateForm(false)}
         />
-      </Modal>
+      </DrawerPanel>
     </div>
   );
 }

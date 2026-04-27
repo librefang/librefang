@@ -11,10 +11,9 @@ import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
-import { useDrawerStore } from "../lib/drawerStore";
 import {
   Cpu, Search, Check, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2,
   Brain, Tag, Settings,
@@ -424,51 +423,7 @@ export function ModelsPage() {
     }
   };
 
-  // Mirror detailModel into the global push-drawer slot. Two-way sync:
-  //   1. detailModel set → openDrawer with the body for that model
-  //   2. detailModel cleared → closeDrawer
-  //   3. drawer closed externally (Esc / close button) → clear detailModel
-  // The body re-renders on hiddenSet changes via the inline `hidden` prop —
-  // re-pushed each time hiddenSet flips.
-  const openDrawer = useDrawerStore((s) => s.openDrawer);
-  const closeDrawer = useDrawerStore((s) => s.closeDrawer);
-  const isDrawerOpen = useDrawerStore((s) => s.isOpen);
   const detailHidden = detailModel ? hiddenSet.has(modelKey(detailModel)) : false;
-
-  useEffect(() => {
-    if (!detailModel) {
-      closeDrawer();
-      return;
-    }
-    openDrawer({
-      title: detailModel.display_name || detailModel.id,
-      size: "md",
-      body: (
-        <ModelDetailBody
-          m={detailModel}
-          hidden={detailHidden}
-          onOpenSettings={() => {
-            setSettingsModel(detailModel);
-            setDetailModel(null);
-          }}
-          onToggleHidden={() => {
-            toggleHidden(detailModel);
-            setDetailModel(null);
-          }}
-        />
-      ),
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [detailModel, detailHidden]);
-
-  useEffect(() => {
-    if (!isDrawerOpen && detailModel) setDetailModel(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDrawerOpen]);
-
-  // Close drawer on unmount so a body referencing this page's local state
-  // never lingers in the global slot after navigating away.
-  useEffect(() => () => closeDrawer(), [closeDrawer]);
 
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
@@ -590,12 +545,32 @@ export function ModelsPage() {
         </div>
       )}
 
-      {/* Detail drawer rendered via the global PushDrawer slot — see the
-          openDrawer effect above. The drawer pushes the main content
-          instead of overlaying it (mirrors the left sidebar). */}
+      {/* Detail drawer — pushes content via the global slot, mirroring
+          the sidebar collapse instead of overlaying the page. */}
+      <DrawerPanel
+        isOpen={!!detailModel}
+        onClose={() => setDetailModel(null)}
+        title={detailModel ? (detailModel.display_name || detailModel.id) : undefined}
+        size="md"
+      >
+        {detailModel && (
+          <ModelDetailBody
+            m={detailModel}
+            hidden={detailHidden}
+            onOpenSettings={() => {
+              setSettingsModel(detailModel);
+              setDetailModel(null);
+            }}
+            onToggleHidden={() => {
+              toggleHidden(detailModel);
+              setDetailModel(null);
+            }}
+          />
+        )}
+      </DrawerPanel>
 
       {/* Add Model Modal */}
-      <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg" variant="panel-right">
+      <DrawerPanel isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg">
         <form onSubmit={handleAdd} className="p-5 space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="sm:col-span-2">
@@ -653,7 +628,7 @@ export function ModelsPage() {
             <Button type="button" variant="secondary" onClick={() => resetForm()}>{t("common.cancel")}</Button>
           </div>
         </form>
-      </Modal>
+      </DrawerPanel>
 
       {/* Model Settings Modal */}
       {settingsModel && (
@@ -779,16 +754,16 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   if (overridesQuery.isLoading) {
     return (
-      <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
+      <DrawerPanel isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
         <div className="flex items-center justify-center p-12">
           <Loader2 className="w-6 h-6 animate-spin text-brand" />
         </div>
-      </Modal>
+      </DrawerPanel>
     );
   }
 
   return (
-    <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
+    <DrawerPanel isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
       <div className="p-5 space-y-5">
         {/* Model header */}
         <div className="flex items-center gap-3">
@@ -921,6 +896,6 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }

@@ -7,7 +7,7 @@ import { useA2AAgents } from "../lib/queries/network";
 import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -208,13 +208,11 @@ export function A2APage() {
 
           {/* Send task panel */}
           {taskAgent && (
-            <Modal
+            <DrawerPanel
               isOpen
               onClose={() => setTaskAgent(null)}
-              variant="panel-right"
               size="lg"
               title={t("a2a.send_task")}
-              zIndex={200}
             >
               <div className="p-5 space-y-4">
                 <p className="text-xs text-text-dim">
@@ -244,7 +242,7 @@ export function A2APage() {
                   </button>
                 </div>
               </div>
-            </Modal>
+            </DrawerPanel>
           )}
 
           {/* Tracked tasks */}

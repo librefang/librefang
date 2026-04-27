@@ -57,7 +57,7 @@ import {
 } from "../lib/mutations/hands";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCronJobs } from "../lib/queries/runtime";
 
 
@@ -140,7 +140,7 @@ function HandDetailPanel({
 
   return (
     <>
-      <Modal isOpen onClose={onClose} variant="drawer-right" size="2xl" hideCloseButton>
+      <DrawerPanel isOpen onClose={onClose} size="2xl" hideCloseButton>
         {/* Hero header — sticky inside the drawer's single scroll container
             so identity + close stay reachable on long detail content. */}
         <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface z-10">
@@ -293,7 +293,7 @@ function HandDetailPanel({
               settingsQuery={settingsQuery}
             />
         </div>
-      </Modal>
+      </DrawerPanel>
       <Suspense fallback={null}>
         <TomlViewer
           isOpen={showManifest}

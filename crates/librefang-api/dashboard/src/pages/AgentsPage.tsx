@@ -20,7 +20,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
@@ -776,9 +776,6 @@ export function AgentsPage() {
         const activeConfigMutation = detailAgent.is_hand
           ? patchHandAgentRuntimeConfigMutation
           : patchAgentConfigMutation;
-        // Hold backdrop dismissal during edit-in-flight so a stray click
-        // doesn't close the modal mid-PATCH and still toast "Agent renamed".
-        const lockBackdropDismiss = editingName || patchAgentMutation.isPending;
         const saveModelDisabled =
           activeConfigMutation.isPending
           || !modelDraft.provider.trim()
@@ -789,13 +786,11 @@ export function AgentsPage() {
           || parseFloat(modelDraft.temperature) < 0
           || parseFloat(modelDraft.temperature) > 2;
         return (
-        <Modal
+        <DrawerPanel
           isOpen
           onClose={closeDetailModal}
-          variant="drawer-right"
           size="xl"
           hideCloseButton
-          disableBackdropClose={lockBackdropDismiss}
         >
             {/* Header — sticky, identity + state. */}
             <div className="px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface z-10">
@@ -1253,13 +1248,13 @@ export function AgentsPage() {
                 {t("agents.prompts")}
               </Button>
             </div>
-        </Modal>
+        </DrawerPanel>
         );
       })()}
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
-        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible variant="panel-right">
+        <DrawerPanel isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg">
           <div className="p-6 space-y-5">
             <div>
               <p className="text-[11px] text-text-dim/70">
@@ -1403,16 +1398,15 @@ export function AgentsPage() {
               </div>
             </div>
           </div>
-        </Modal>
+        </DrawerPanel>
       )}
 
       {/* Create Agent Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={showCreate}
         onClose={closeCreateModal}
         title={t("agents.create_agent")}
         size="2xl"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the
@@ -1670,7 +1664,7 @@ export function AgentsPage() {
             <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Prompts & Experiments Modal */}
       {showPrompts && detailAgent && (

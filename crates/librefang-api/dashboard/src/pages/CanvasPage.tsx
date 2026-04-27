@@ -26,7 +26,7 @@ import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, getWorkflow, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
@@ -332,7 +332,7 @@ function TemplateBrowser({
   };
 
   return (
-    <Modal isOpen onClose={onClose} variant="panel-right" size="2xl" hideCloseButton>
+    <DrawerPanel isOpen onClose={onClose} size="2xl" hideCloseButton>
         {/* Header — matches the existing inline icon + custom X. */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface z-10">
           <div className="flex items-center gap-2">
@@ -447,7 +447,7 @@ function TemplateBrowser({
             )}
           </div>
         )}
-    </Modal>
+    </DrawerPanel>
   );
 }
 

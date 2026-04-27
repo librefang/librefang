@@ -52,6 +52,7 @@ import { Select } from "../components/ui/Select";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
@@ -765,12 +766,11 @@ export function AuditPage() {
           live, the operator commits via Apply. The dim backdrop
           signals that and gives Esc / click-outside as the standard
           dismiss paths. */}
-      <Modal
+      <DrawerPanel
         isOpen={filtersOpen}
         onClose={() => setFiltersOpen(false)}
         title={t("audit.filters")}
         size="md"
-        variant="panel-right"
       >
         <form
           onSubmit={(e) => {
@@ -898,7 +898,7 @@ export function AuditPage() {
             </Button>
           </div>
         </form>
-      </Modal>
+      </DrawerPanel>
 
       {isForbidden && (
         <Card padding="lg">

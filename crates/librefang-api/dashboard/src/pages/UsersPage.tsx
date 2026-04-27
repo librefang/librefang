@@ -53,6 +53,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -840,7 +841,7 @@ function UserFormModal({
   };
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={isOpen}
       onClose={onClose}
       title={
@@ -849,7 +850,6 @@ function UserFormModal({
           : t("users.create_title", "New user")
       }
       size="lg"
-      variant="panel-right"
     >
       <div className="space-y-4">
         <Input
@@ -951,7 +951,7 @@ function UserFormModal({
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -1015,12 +1015,11 @@ function IdentityWizardModal({
   ];
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={user !== null}
       onClose={onClose}
       title={t("users.wizard_title", "Link a platform identity")}
       size="lg"
-      variant="panel-right"
     >
       {user ? (
         <div className="space-y-4">
@@ -1273,7 +1272,7 @@ function IdentityWizardModal({
           </div>
         </div>
       ) : null}
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -1314,7 +1313,7 @@ function BulkImportModal({
   const result = importMut.data;
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={isOpen}
       onClose={() => {
         importMut.reset();
@@ -1324,7 +1323,6 @@ function BulkImportModal({
       }}
       title={t("users.import_title", "Bulk import users")}
       size="3xl"
-      variant="panel-right"
     >
       <div className="space-y-4">
         <p className="text-xs text-text-dim">
@@ -1450,7 +1448,7 @@ function BulkImportModal({
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 

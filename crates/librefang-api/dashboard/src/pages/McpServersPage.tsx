@@ -20,7 +20,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
@@ -1131,12 +1131,11 @@ export function McpServersPage() {
       )}
 
       {/* Add / Edit Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={isModalOpen}
         onClose={() => { setShowAddModal(false); setEditingServer(null); setForm(defaultForm); }}
         title={editingServer ? t("mcp.edit_server") : t("mcp.add_server")}
         size="lg"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Name */}
@@ -1261,15 +1260,14 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Catalog env setup modal */}
-      <Modal
+      <DrawerPanel
         isOpen={!!installingTemplate}
         onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
         title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
         size="md"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>
@@ -1313,7 +1311,7 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Delete confirmation */}
       <ConfirmDialog

@@ -15,7 +15,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
@@ -331,7 +331,7 @@ export function PluginsPage() {
       )}
 
       {/* Install Modal */}
-      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md">
         <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
@@ -395,10 +395,10 @@ export function PluginsPage() {
                 <Button variant="secondary" onClick={() => setShowInstall(false)}>{t("common.cancel")}</Button>
               </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Scaffold Modal */}
-      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm" variant="panel-right">
+      <DrawerPanel isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
@@ -446,7 +446,7 @@ export function PluginsPage() {
             <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
     </div>
   );
 }
