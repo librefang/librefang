@@ -69,6 +69,7 @@ pub mod session_repair;
 pub mod silent_response;
 pub use silent_response::{is_silent_response, SilentReason};
 pub mod shell_bleed;
+pub mod stderr_log;
 pub mod str_utils;
 pub mod subprocess_sandbox;
 pub mod tool_budget;
