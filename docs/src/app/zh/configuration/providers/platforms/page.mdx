@@ -328,7 +328,7 @@ provider = "zhipu"
 model = "glm-4-plus"
 ```
 
-**说明:** 智谱开发 GLM(General Language Model)系列。支持工具、vision、embedding。`z.ai`(下面)是同一后端的国际区域前端,与本 provider 共用 `ZHIPU_API_KEY`。Coding Plan 端点(`zhipu_coding`、`zai_coding`)现在分别使用 `ZHIPU_CODING_API_KEY` 与 `ZAI_CODING_API_KEY` —— 在智谱注册一次,把同一个值按需导出到对应的环境变量名下。
+**说明:** 智谱开发 GLM(General Language Model)系列。支持工具、vision、embedding。`z.ai`(下面)是同一后端的国际区域前端,但注册为独立 provider,使用独立的 `ZAI_API_KEY`。Coding Plan 端点(`zhipu_coding`、`zai_coding`)同样使用独立的 `ZHIPU_CODING_API_KEY` 与 `ZAI_CODING_API_KEY`。在智谱注册一次,把同一个 key 值按需导出到对应的环境变量名下。
 
 ---
 
@@ -368,15 +368,15 @@ model = "codegeex-4"
 | **显示名称** | Z.ai |
 | **Provider ID** | `z.ai` |
 | **驱动** | OpenAI 兼容 |
-| **环境变量** | `ZHIPU_API_KEY`(与 Zhipu 共享 key) |
+| **环境变量** | `ZAI_API_KEY` |
 | **基础 URL** | `https://api.z.ai/api/paas/v4` |
 | **需要密钥** | 是 |
 | **免费额度** | 是(算在同一个智谱配额里) |
 | **认证方式** | `Authorization: Bearer` 请求头 |
 
 **设置：**
-1. 复用智谱 API key
-2. `export ZHIPU_API_KEY="..."`
+1. 复用智谱 API key(在智谱开放平台注册一次)
+2. `export ZAI_API_KEY="..."`(与 `ZHIPU_API_KEY` 同值;独立环境变量,避免配置 Zhipu chat 时把 z.ai 端点也自动激活)
 
 **最小 `config.toml`：**
 

@@ -328,7 +328,7 @@ provider = "zhipu"
 model = "glm-4-plus"
 ```
 
-**Notes:** Zhipu develops the GLM (General Language Model) family. Tools, vision, and embeddings supported. `z.ai` (below) is the international-region front-end of the same backend and shares `ZHIPU_API_KEY`. The Coding Plan endpoints (`zhipu_coding`, `zai_coding`) now use `ZHIPU_CODING_API_KEY` and `ZAI_CODING_API_KEY` respectively — register once at Zhipu and re-export the same value under each name you actually use.
+**Notes:** Zhipu develops the GLM (General Language Model) family. Tools, vision, and embeddings supported. `z.ai` (below) is the international-region front-end of the same backend but is registered as its own provider with its own `ZAI_API_KEY`. The Coding Plan endpoints (`zhipu_coding`, `zai_coding`) similarly use their own `ZHIPU_CODING_API_KEY` and `ZAI_CODING_API_KEY`. Register once at Zhipu and re-export the same key value under each env var you actually use.
 
 ---
 
@@ -368,15 +368,15 @@ model = "codegeex-4"
 | **Display Name** | Z.ai |
 | **Provider ID** | `z.ai` |
 | **Driver** | OpenAI-compatible |
-| **Env Var** | `ZHIPU_API_KEY` (shares key with Zhipu) |
+| **Env Var** | `ZAI_API_KEY` |
 | **Base URL** | `https://api.z.ai/api/paas/v4` |
 | **Key Required** | Yes |
 | **Free Tier** | Yes (counted against the same Zhipu quota) |
 | **Auth** | `Authorization: Bearer` header |
 
 **Setup:**
-1. Use the same Zhipu API key
-2. `export ZHIPU_API_KEY="..."`
+1. Use the same Zhipu API key (register once on the Zhipu open platform)
+2. `export ZAI_API_KEY="..."` (same value as `ZHIPU_API_KEY`, separate env so configuring Zhipu chat doesn't auto-activate this endpoint)
 
 **Minimal `config.toml`:**
 
