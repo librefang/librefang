@@ -1324,7 +1324,22 @@ pub async fn run_hook_json(
                 err_line.clear();
                 match stderr_reader.read_line(&mut err_line).await {
                     Ok(0) => break,
-                    Ok(_) => text.push_str(&err_line),
+                    Ok(_) => {
+                        // Stream each line to tracing as it arrives so operators
+                        // can monitor long-running hooks live (issue #3256).
+                        // Filter via `RUST_LOG=plugin_stderr=info`. The post-exit
+                        // summary below is preserved for backwards compatibility.
+                        let trimmed = err_line.trim_end();
+                        if !trimmed.is_empty() {
+                            tracing::info!(
+                                target: "plugin_stderr",
+                                hook = %hook_name,
+                                script = %script_path,
+                                "{trimmed}"
+                            );
+                        }
+                        text.push_str(&err_line);
+                    }
                     Err(_) => break,
                 }
             }

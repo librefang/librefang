@@ -20,6 +20,26 @@ Or for simple scripts without the decorator pattern:
     data = read_input()
     result = f"Echo: {data['message']}"
     respond(result)
+
+Live progress logging
+---------------------
+The LibreFang daemon streams every line your script writes to stderr to
+its own tracing subsystem under the ``python_stderr`` target — visible
+with ``RUST_LOG=python_stderr=info`` (or filtered through ``journalctl``
+/ ``docker logs`` when the daemon runs as a service). This is the
+recommended channel for "still working" / progress heartbeats from
+long-running tools.
+
+**Python buffers stderr by default**, so for the daemon to actually
+see lines as they happen, either:
+
+- pass ``flush=True`` to ``print(..., file=sys.stderr, flush=True)``,
+- run the interpreter line-buffered with ``python -u``, or
+- call ``sys.stderr.reconfigure(line_buffering=True)`` once at startup.
+
+Without one of these, stderr is block-buffered (~4–8 KiB) and the
+daemon will only log lines once the buffer fills or the process exits,
+defeating the purpose of live streaming.
 """
 
 import json

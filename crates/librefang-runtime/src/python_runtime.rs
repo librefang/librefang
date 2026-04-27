@@ -302,6 +302,23 @@ async fn run_python_with_stdin(
             match stderr_reader.read_line(&mut stderr_line).await {
                 Ok(0) => break,
                 Ok(_) => {
+                    // Stream each line to tracing as it arrives so operators
+                    // can monitor long-running Python tools live (issue #3256).
+                    // Filter via `RUST_LOG=python_stderr=info`. The post-exit
+                    // summary below is preserved for backwards compatibility.
+                    // Reminder for tool authors: Python buffers stdout/stderr
+                    // by default — pass `flush=True` to `print()` or run with
+                    // `python -u` for line-buffered output to actually see
+                    // progress in real time.
+                    let trimmed = stderr_line.trim_end();
+                    if !trimmed.is_empty() {
+                        tracing::info!(
+                            target: "python_stderr",
+                            agent_id = %agent_id,
+                            script = %script_path,
+                            "{trimmed}"
+                        );
+                    }
                     stderr_text.push_str(&stderr_line);
                 }
                 Err(_) => break,

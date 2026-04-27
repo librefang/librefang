@@ -736,7 +736,9 @@ curl http://127.0.0.1:4545/api/plugins/doctor
 - **路径穿越**：脚本路径里不能带 `..` 组件 —— 每次调用都会检查，不只是加载时。
 - **环境变量洗白**：子进程启动前所有继承的环境变量会被 `env_clear` 清空。LibreFang 然后设置 `LIBREFANG_AGENT_ID`、`LIBREFANG_MESSAGE`、`LIBREFANG_RUNTIME`，从父进程透传 `PATH` 和 `HOME`，加上 runtime 自己的透传集合（Python 的 `PYTHONPATH`/`VIRTUAL_ENV`、Ruby 的 `GEM_HOME`/`GEM_PATH` 等 —— 见 `runtime_passthrough_vars`），最后透传 agent 的 `allowed_env_vars` 里列出的变量。你的 hook 可以从环境变量读 `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE`，这是解析 stdin JSON 之外的另一种方式。
 
-Hook 的 stderr 会被捕获后打印到 LibreFang 自己的日志里 —— 想打 debug log 直接往 stderr 写就行。
+Hook 的 stderr 会被捕获后打印到 LibreFang 自己的日志里 —— 想打 debug log 直接往 stderr 写就行。每行 stderr 都会**实时**通过 tracing 转发出来（target 为 `plugin_stderr`，Python 工具是 `python_stderr`），所以长时间运行的 hook 可以把进度流到 `journalctl` / `docker logs`，不用等到退出才一口气吐出。用 `RUST_LOG=plugin_stderr=info`(或 `python_stderr=info`) 过滤。
+
+> **缓冲注意（尤其 Python）** —— 大多数语言 runtime 默认按块缓冲 stderr，进度行要等缓冲填满或进程退出才会到 daemon。要实时流式输出，每行后 flush：Python 用 `print(..., file=sys.stderr, flush=True)`，Ruby 加 `STDERR.sync = true`，Node 的 `process.stderr.write(...)` 本身就是无缓冲。或者直接让解释器跑行缓冲模式 (`python -u`)。
 
 ---
 
