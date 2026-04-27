@@ -24,7 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
-use crate::stderr_log::trim_for_log;
+use crate::stderr_log::{trim_for_log, CappedSummary};
 
 /// `tracing` target for per-line Python tool stderr (issue #3256). Filter
 /// in operator logs via `RUST_LOG=python_stderr=info`. Stable wire-format
@@ -286,52 +286,62 @@ async fn run_python_with_stdin(
         let mut stdout_reader = BufReader::new(stdout);
         let mut stderr_reader = BufReader::new(stderr);
 
-        let mut stdout_lines = Vec::new();
-        let mut stderr_text = String::new();
-
-        // Read all stdout lines
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdout_reader.read_line(&mut line).await {
-                Ok(0) => break,
-                Ok(_) => stdout_lines.push(line.trim_end().to_string()),
-                Err(e) => {
-                    warn!("Python stdout read error: {e}");
-                    break;
-                }
-            }
-        }
-
-        // Read stderr
-        let mut stderr_line = String::new();
-        loop {
-            stderr_line.clear();
-            match stderr_reader.read_line(&mut stderr_line).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    // Stream each non-empty line to tracing as it arrives so
-                    // operators can monitor long-running Python tools live
-                    // (#3256). The full line stays in `stderr_text` either way
-                    // — the post-exit `debug!` summary below is independent.
-                    //
-                    // Reminder for tool authors: Python block-buffers
-                    // stdout/stderr by default — pass `flush=True` to
-                    // `print()` or run with `python -u` for line-buffered
-                    // output to actually see progress in real time.
-                    if let Some(trimmed) = trim_for_log(&stderr_line) {
-                        tracing::info!(
-                            target: PYTHON_STDERR_TARGET,
-                            agent_id = %agent_id,
-                            script = %script_path,
-                            "{trimmed}"
-                        );
+        // Read stdout and stderr concurrently to prevent deadlock: a tool
+        // that writes >64 KiB to stderr before closing stdout would
+        // otherwise block the daemon waiting on stdout while the child is
+        // blocked on stderr (and 64 KiB is a single Python traceback's
+        // worth — easy to hit in real workloads). `plugin_runtime` already
+        // uses the same pattern; keeping them in sync.
+        let stdout_fut = async {
+            let mut lines: Vec<String> = Vec::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match stdout_reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => lines.push(line.trim_end().to_string()),
+                    Err(e) => {
+                        warn!("Python stdout read error: {e}");
+                        break;
                     }
-                    stderr_text.push_str(&stderr_line);
                 }
-                Err(_) => break,
             }
-        }
+            lines
+        };
+        let stderr_fut = async {
+            let mut summary = CappedSummary::new();
+            let mut stderr_line = String::new();
+            loop {
+                stderr_line.clear();
+                match stderr_reader.read_line(&mut stderr_line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        // Stream each non-empty line to tracing as it arrives
+                        // so operators can monitor long-running Python tools
+                        // live (#3256). The streaming `info!` channel is
+                        // unbounded; the post-exit summary below is bounded by
+                        // `CappedSummary` so a runaway tool can't OOM us.
+                        //
+                        // Reminder for tool authors: Python block-buffers
+                        // stdout/stderr by default — pass `flush=True` to
+                        // `print()` or run with `python -u` for line-buffered
+                        // output to actually see progress in real time.
+                        if let Some(trimmed) = trim_for_log(&stderr_line) {
+                            tracing::info!(
+                                target: PYTHON_STDERR_TARGET,
+                                agent_id = %agent_id,
+                                script = %script_path,
+                                "{trimmed}"
+                            );
+                        }
+                        summary.push(&stderr_line);
+                    }
+                    Err(_) => break,
+                }
+            }
+            summary.into_string()
+        };
+        let (stdout_lines, stderr_text) = tokio::join!(stdout_fut, stderr_fut);
 
         let status = child
             .wait()

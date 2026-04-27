@@ -37,7 +37,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
-use crate::stderr_log::trim_for_log;
+use crate::stderr_log::{trim_for_log, CappedSummary};
 
 /// `tracing` target for per-line plugin-hook stderr (issue #3256). Filter
 /// in operator logs via `RUST_LOG=plugin_stderr=info`. Stable wire-format
@@ -1327,7 +1327,7 @@ pub async fn run_hook_json(
             lines
         };
         let stderr_fut = async {
-            let mut text = String::new();
+            let mut summary = CappedSummary::new();
             let mut err_line = String::new();
             loop {
                 err_line.clear();
@@ -1336,8 +1336,10 @@ pub async fn run_hook_json(
                     Ok(_) => {
                         // Stream each non-empty line to tracing as it arrives so
                         // operators can monitor long-running hooks live (#3256).
-                        // The full line stays in `text` either way — the
-                        // post-exit `debug!` summary below is independent.
+                        // The streaming `info!` channel is unbounded — the
+                        // post-exit summary below is what's bounded by
+                        // `CappedSummary`, so a runaway hook can't OOM the
+                        // daemon while we drain its pipe.
                         if let Some(trimmed) = trim_for_log(&err_line) {
                             tracing::info!(
                                 target: PLUGIN_STDERR_TARGET,
@@ -1346,12 +1348,12 @@ pub async fn run_hook_json(
                                 "{trimmed}"
                             );
                         }
-                        text.push_str(&err_line);
+                        summary.push(&err_line);
                     }
                     Err(_) => break,
                 }
             }
-            text
+            summary.into_string()
         };
         let (stdout_lines, stderr_text) = tokio::join!(stdout_fut, stderr_fut);
 

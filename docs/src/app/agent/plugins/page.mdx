@@ -744,6 +744,10 @@ After the hook exits, the full captured stderr is *also* emitted as a single `de
 
 > **Don't put secrets on stderr.** Once an operator enables `RUST_LOG=plugin_stderr=info` (or `python_stderr=info`), every stderr line from every hook lands in the daemon log — and from there into `journalctl`, `docker logs`, or whatever sink ships logs off-host. Tokens, API keys, PII, and anything else you don't want persisted by the platform's log retention should never be `print`-ed to stderr. Use `debug` framing (gated by the same `RUST_LOG`) only when you've audited the content.
 
+> **Log volume** — every non-empty stderr line emits an `info!` event. High-frequency hooks (per-step ML inference progress, packet-by-packet network probes, byte-by-byte file scanners) can flood `journalctl`. Either down-rate by routing only milestones to stderr and keeping per-iteration noise on stdout / a side log file, or filter at subscriber level with `RUST_LOG=plugin_stderr=warn` (silences streaming while keeping the post-exit `debug!` summary intact).
+
+> **Memory safety** — the post-exit summary that gets `debug!`-logged is capped at 1 MiB to prevent a runaway hook from OOM-ing the daemon. Output past the cap is silently dropped from the summary with a single truncation marker; the live `*_stderr` tracing channel keeps streaming uninterrupted, so the full output is still observable in real time — just not in the post-exit dump.
+
 ---
 
 ## Plugins vs. Skills
