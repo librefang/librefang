@@ -1,3 +1,13 @@
+# Track latest stable Rust. The MSRV contract for this workspace lives
+# in Cargo.toml's `[workspace.package].rust-version` (currently 1.94.1)
+# — bumping stable's compiler version stays non-breaking for downstream
+# consumers as long as new code respects the declared MSRV.
+#
+# `profile = "minimal"` skips `rust-docs` (~150 MB) which neither CI
+# nor day-to-day development needs. Add it locally with
+# `rustup component add rust-docs` if you want offline std docs.
+
 [toolchain]
 channel = "stable"
+profile = "minimal"
 components = ["rustfmt", "clippy"]
