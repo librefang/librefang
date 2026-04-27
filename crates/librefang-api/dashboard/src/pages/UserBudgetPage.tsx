@@ -9,12 +9,23 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
-import { Wallet, ArrowLeft, AlertTriangle, Check } from "lucide-react";
+import {
+  Wallet,
+  ArrowLeft,
+  AlertTriangle,
+  Check,
+  Clock,
+  Calendar,
+  CalendarDays,
+  Bell,
+  Trash2,
+} from "lucide-react";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
 import { useUserBudget } from "../lib/queries/userBudget";
 import {
   useUpdateUserBudget,
@@ -215,86 +226,139 @@ export function UserBudgetPage() {
       )}
 
       {query.data && (
-        <Card padding="lg">
-          <h2 className="text-sm font-bold mb-3">
-            {t("user_budget.current_spend", "Current spend (USD)")}
-          </h2>
-          <div className="grid grid-cols-3 gap-4">
-            {(["hourly", "daily", "monthly"] as const).map((w) => {
-              const win = query.data![w];
-              const breached =
-                win.limit > 0 && win.pct >= query.data!.alert_threshold;
-              return (
-                <div key={w} className="text-sm">
-                  <div className="text-xs text-text-dim uppercase">
-                    {t(`user_budget.window_${w}`, w)}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
+          {(
+            [
+              ["hourly", Clock] as const,
+              ["daily", Calendar] as const,
+              ["monthly", CalendarDays] as const,
+            ]
+          ).map(([w, WIcon]) => {
+            const win = query.data![w];
+            const unlimited = win.limit <= 0;
+            const breached =
+              !unlimited && win.pct >= query.data!.alert_threshold;
+            const widthPct = unlimited
+              ? 0
+              : Math.min(100, win.pct * 100);
+            return (
+              <Card key={w} padding="md" className="relative overflow-hidden">
+                <div
+                  className={`absolute inset-x-0 top-0 h-1 bg-linear-to-r ${
+                    breached
+                      ? "from-error via-error/60 to-error/30"
+                      : "from-brand via-brand/60 to-brand/30"
+                  }`}
+                />
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/70">
+                      {t(`user_budget.window_${w}`, w)}
+                    </p>
+                    <div className="mt-1 flex items-baseline gap-1.5">
+                      <span
+                        className={`text-2xl sm:text-3xl font-black tracking-tight font-mono ${
+                          breached ? "text-error" : "text-text-main"
+                        }`}
+                      >
+                        ${win.spend.toFixed(4)}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-text-dim font-mono">
+                      {t("user_budget.of_cap", "of {{cap}}", {
+                        cap: unlimited ? "∞" : `$${win.limit.toFixed(2)}`,
+                      })}
+                    </p>
                   </div>
                   <div
-                    className={`mt-1 font-mono ${
-                      breached ? "text-error" : ""
+                    className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                      breached
+                        ? "bg-error/10 text-error"
+                        : "bg-brand/10 text-brand"
                     }`}
                   >
-                    ${win.spend.toFixed(4)}{" "}
-                    <span className="text-text-dim">
-                      / {win.limit > 0 ? `$${win.limit.toFixed(2)}` : "∞"}
-                    </span>
+                    <WIcon className="w-4 h-4" />
                   </div>
-                  {win.limit > 0 && (
-                    <div className="mt-1 h-1 w-full bg-surface-2 rounded">
+                </div>
+                {!unlimited ? (
+                  <>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-main/60">
                       <div
-                        className={`h-1 rounded ${
-                          breached ? "bg-error" : "bg-brand"
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          breached
+                            ? "bg-error shadow-[0_0_8px_rgba(239,68,68,0.45)]"
+                            : "bg-brand shadow-[0_0_8px_var(--brand-color)]"
                         }`}
-                        style={{
-                          width: `${Math.min(100, win.pct * 100).toFixed(1)}%`,
-                        }}
+                        style={{ width: `${widthPct.toFixed(1)}%` }}
                       />
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
+                    <p className="mt-1.5 text-[10px] font-mono text-text-dim">
+                      {widthPct.toFixed(1)}%
+                      {breached && (
+                        <span className="ml-1.5 text-error font-bold uppercase tracking-wider">
+                          {t("user_budget.over_threshold", "over threshold")}
+                        </span>
+                      )}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[10px] text-text-dim/60 italic">
+                    {t("user_budget.no_cap", "no cap on this window")}
+                  </p>
+                )}
+              </Card>
+            );
+          })}
+        </div>
       )}
 
       <Card padding="lg">
-        <h2 className="text-sm font-bold mb-3">
-          {t("user_budget.set_limits", "Set spend limits")}
-        </h2>
-        <p className="text-xs text-text-dim mb-4">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center">
+            <Wallet className="w-4 h-4 text-brand" />
+          </div>
+          <h2 className="text-sm font-black tracking-tight uppercase">
+            {t("user_budget.set_limits", "Set spend limits")}
+          </h2>
+        </div>
+        <p className="text-xs text-text-dim mb-5 leading-relaxed">
           {t(
             "user_budget.zero_means_unlimited",
             "Set any window to 0 for unlimited on that window. Threshold is the fraction of any limit at which a BudgetExceeded audit fires.",
           )}
         </p>
-        <form onSubmit={onSubmit} className="grid grid-cols-2 gap-4">
-          {(
-            [
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {(
               [
-                "max_hourly_usd",
-                t("userBudget.fields.max_hourly", "Max hourly USD"),
-              ],
-              [
-                "max_daily_usd",
-                t("userBudget.fields.max_daily", "Max daily USD"),
-              ],
-              [
-                "max_monthly_usd",
-                t("userBudget.fields.max_monthly", "Max monthly USD"),
-              ],
-              [
-                "alert_threshold",
-                t(
-                  "userBudget.fields.alert_threshold",
-                  "Alert threshold (0–1)",
-                ),
-              ],
-            ] as const
-          ).map(([key, label]) => (
-            <label key={key} className="flex flex-col gap-1 text-xs">
-              <span className="text-text-dim">{label}</span>
-              <input
+                [
+                  "max_hourly_usd",
+                  t("userBudget.fields.max_hourly", "Max hourly USD"),
+                  Clock,
+                ],
+                [
+                  "max_daily_usd",
+                  t("userBudget.fields.max_daily", "Max daily USD"),
+                  Calendar,
+                ],
+                [
+                  "max_monthly_usd",
+                  t("userBudget.fields.max_monthly", "Max monthly USD"),
+                  CalendarDays,
+                ],
+                [
+                  "alert_threshold",
+                  t(
+                    "userBudget.fields.alert_threshold",
+                    "Alert threshold (0–1)",
+                  ),
+                  Bell,
+                ],
+              ] as const
+            ).map(([key, label, FieldIcon]) => (
+              <Input
+                key={key}
+                label={label}
                 type="number"
                 step="0.01"
                 min="0"
@@ -302,19 +366,21 @@ export function UserBudgetPage() {
                 onChange={(e) =>
                   setForm((f) => ({ ...f, [key]: e.target.value }))
                 }
-                className="rounded border border-border bg-surface-2 px-2 py-1 font-mono"
+                leftIcon={<FieldIcon className="h-4 w-4" />}
+                className="font-mono"
               />
-            </label>
-          ))}
+            ))}
+          </div>
           {error && (
-            <div className="col-span-2 text-xs text-error flex items-center gap-2">
-              <AlertTriangle className="h-3.5 w-3.5" />
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-error/5 border border-error/20 text-xs text-error">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
               {error}
             </div>
           )}
-          <div className="col-span-2 flex items-center gap-2 mt-2">
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-border-subtle/50">
             <Button
               type="submit"
+              variant="primary"
               disabled={updateMut.isPending || !dirty}
               leftIcon={<Check className="h-3.5 w-3.5" />}
             >
@@ -335,6 +401,8 @@ export function UserBudgetPage() {
               variant="ghost"
               onClick={onClear}
               disabled={deleteMut.isPending}
+              leftIcon={<Trash2 className="h-3.5 w-3.5" />}
+              className="ml-auto !text-error hover:!bg-error/10"
             >
               {deleteMut.isPending
                 ? t("user_budget.clearing", "Clearing…")

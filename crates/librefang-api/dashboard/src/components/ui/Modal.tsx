@@ -9,7 +9,7 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   /** Width cap. Defaults to "md" (max-w-md). */
-  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl" | "5xl";
+  size?: "sm" | "md" | "lg" | "xl" | "2xl" | "3xl" | "4xl" | "5xl" | "6xl" | "7xl";
   /** Hide the default close X button (e.g. if the body supplies its own). */
   hideCloseButton?: boolean;
   /** Disable close-on-backdrop-click (destructive flows). */
@@ -45,6 +45,8 @@ const SIZE_CLASSES: Record<NonNullable<ModalProps["size"]>, string> = {
   "3xl": "sm:max-w-3xl",
   "4xl": "sm:max-w-4xl",
   "5xl": "sm:max-w-5xl",
+  "6xl": "sm:max-w-6xl",
+  "7xl": "sm:max-w-7xl",
 };
 
 // Apple-style easing, mirrors --apple-ease in index.css so motion-driven
