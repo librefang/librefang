@@ -962,25 +962,38 @@ async fn fetch_registry_plugin_meta(
         entry.hooks = hooks.keys().cloned().collect();
         entry.hooks.sort();
     }
-    if let Some(i18n) = value.get("i18n").and_then(|v| v.as_table()) {
-        for (lang, body) in i18n {
-            let Some(tbl) = body.as_table() else { continue };
-            let pi = PluginI18n {
-                name: tbl
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                description: tbl
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            };
-            if pi.name.is_some() || pi.description.is_some() {
-                entry.i18n.insert(lang.clone(), pi);
-            }
+    entry.i18n = parse_plugin_i18n_blocks(&value);
+    entry
+}
+
+/// Pull `[i18n.<lang>]` tables off a parsed plugin TOML, keeping only the
+/// `name` and `description` overrides. Empty entries (neither field set)
+/// are dropped to keep the map tight.
+///
+/// Exposed as `pub(crate)` so it can be unit-tested without a network
+/// round-trip; the production caller is `fetch_registry_plugin_meta`.
+pub(crate) fn parse_plugin_i18n_blocks(value: &toml::Value) -> HashMap<String, PluginI18n> {
+    let mut out: HashMap<String, PluginI18n> = HashMap::new();
+    let Some(i18n) = value.get("i18n").and_then(|v| v.as_table()) else {
+        return out;
+    };
+    for (lang, body) in i18n {
+        let Some(tbl) = body.as_table() else { continue };
+        let pi = PluginI18n {
+            name: tbl
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            description: tbl
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        };
+        if pi.name.is_some() || pi.description.is_some() {
+            out.insert(lang.clone(), pi);
         }
     }
-    entry
+    out
 }
 
 /// List available plugins in a GitHub registry, enriched with manifest metadata.
@@ -4232,5 +4245,97 @@ after_turn = "hooks/after_turn.py"
         // 4. Remove
         remove_plugin("echo-memory").expect("remove failed");
         assert!(get_plugin_info("echo-memory").is_err());
+    }
+
+    /// Sanity: a manifest with no `[i18n.*]` tables yields an empty map,
+    /// not a serialization error or panic.
+    #[test]
+    fn parse_plugin_i18n_no_block() {
+        let toml_str = r#"
+name = "test-plugin"
+version = "0.1.0"
+description = "English description"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert!(i18n.is_empty());
+    }
+
+    /// Multiple `[i18n.<lang>]` blocks with both fields populate cleanly.
+    #[test]
+    fn parse_plugin_i18n_multi_lang() {
+        let toml_str = r#"
+name = "auto-summarizer"
+version = "0.1.0"
+description = "English description"
+
+[i18n.zh]
+name = "自动摘要"
+description = "持续维护会话摘要。"
+
+[i18n.zh-TW]
+name = "自動摘要"
+description = "持續維護會話摘要。"
+
+[i18n.fr]
+name = "Auto-résumé"
+description = "Maintient un résumé continu."
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 3);
+        assert_eq!(i18n["zh"].name.as_deref(), Some("自动摘要"));
+        assert_eq!(i18n["zh-TW"].name.as_deref(), Some("自動摘要"));
+        assert_eq!(
+            i18n["fr"].description.as_deref(),
+            Some("Maintient un résumé continu.")
+        );
+    }
+
+    /// A block that only sets `name` (no description) survives, with
+    /// description left as `None` so callers know to fall back.
+    #[test]
+    fn parse_plugin_i18n_partial_entry() {
+        let toml_str = r#"
+[i18n.de]
+name = "Beispiel"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 1);
+        assert_eq!(i18n["de"].name.as_deref(), Some("Beispiel"));
+        assert!(i18n["de"].description.is_none());
+    }
+
+    /// A `[i18n.<lang>]` block that sets neither field is dropped — keeping
+    /// it would just take memory for no observable effect at the API
+    /// boundary.
+    #[test]
+    fn parse_plugin_i18n_empty_entry_dropped() {
+        let toml_str = r#"
+[i18n.ja]
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert!(i18n.is_empty(), "empty i18n.ja entry should not be kept");
+    }
+
+    /// Non-string `name` / `description` values (e.g. someone wrote a
+    /// number by mistake) are silently ignored rather than panicking.
+    #[test]
+    fn parse_plugin_i18n_non_string_values_ignored() {
+        let toml_str = r#"
+[i18n.es]
+name = 42
+description = "Spanish description"
+"#;
+        let value: toml::Value = toml::from_str(toml_str).unwrap();
+        let i18n = parse_plugin_i18n_blocks(&value);
+        assert_eq!(i18n.len(), 1);
+        assert!(i18n["es"].name.is_none(), "non-string name dropped");
+        assert_eq!(
+            i18n["es"].description.as_deref(),
+            Some("Spanish description")
+        );
     }
 }

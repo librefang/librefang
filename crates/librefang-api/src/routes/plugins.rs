@@ -2627,3 +2627,106 @@ pub async fn install_plugin_with_deps_handler(
         Err(e) => ApiErrorResponse::bad_request(e).into_response(),
     }
 }
+
+#[cfg(test)]
+mod resolve_plugin_i18n_tests {
+    use super::resolve_plugin_i18n;
+    use librefang_types::config::PluginI18n;
+    use std::collections::HashMap;
+
+    fn entry(name: Option<&str>, description: Option<&str>) -> PluginI18n {
+        PluginI18n {
+            name: name.map(String::from),
+            description: description.map(String::from),
+        }
+    }
+
+    /// No `[i18n.*]` block at all → English fields pass through untouched.
+    #[test]
+    fn empty_map_returns_english() {
+        let i18n: HashMap<String, PluginI18n> = HashMap::new();
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "English Name");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// Exact match on `lang` returns the localized fields.
+    #[test]
+    fn direct_match_overrides_both_fields() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文名"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文名");
+        assert_eq!(description.as_deref(), Some("中文描述"));
+    }
+
+    /// `zh-TW` request, only `zh-TW` registered → exact-match wins, no fallback hop.
+    #[test]
+    fn region_specific_match_preferred_over_base() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("简中"), Some("简中描述")));
+        i18n.insert(
+            "zh-TW".to_string(),
+            entry(Some("正體中文"), Some("繁中描述")),
+        );
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "正體中文");
+        assert_eq!(description.as_deref(), Some("繁中描述"));
+    }
+
+    /// `zh-TW` request, only `zh` registered → soft fallback to base tag.
+    #[test]
+    fn region_falls_back_to_base_tag() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("zh-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文");
+        assert_eq!(description.as_deref(), Some("中文描述"));
+    }
+
+    /// Entry exists but only sets `name` → English description still fills in.
+    #[test]
+    fn partial_entry_falls_back_per_field() {
+        let mut i18n = HashMap::new();
+        i18n.insert("ja".to_string(), entry(Some("プラグイン"), None));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("ja", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "プラグイン");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// Unknown language and no fallback target → both fall back to English.
+    #[test]
+    fn unknown_lang_returns_english() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, description) = resolve_plugin_i18n("ko", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "English Name");
+        assert_eq!(description.as_deref(), Some("English desc"));
+    }
+
+    /// English description itself is `None` → propagates through cleanly.
+    #[test]
+    fn missing_english_description_propagates() {
+        let i18n: HashMap<String, PluginI18n> = HashMap::new();
+        let (name, description) = resolve_plugin_i18n("zh", "English Name", &None, &i18n);
+        assert_eq!(name, "English Name");
+        assert!(description.is_none());
+    }
+
+    /// Multi-segment tag `zh-Hant-TW` should still find `zh` via split_once
+    /// taking the first hyphen as separator.
+    #[test]
+    fn multi_segment_tag_falls_back_to_first_segment() {
+        let mut i18n = HashMap::new();
+        i18n.insert("zh".to_string(), entry(Some("中文"), Some("中文描述")));
+        let en_desc = Some("English desc".to_string());
+        let (name, _) = resolve_plugin_i18n("zh-Hant-TW", "English Name", &en_desc, &i18n);
+        assert_eq!(name, "中文");
+    }
+}

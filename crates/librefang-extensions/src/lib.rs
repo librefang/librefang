@@ -308,4 +308,88 @@ unhealthy_threshold = 5
         let err = ExtensionError::VaultLocked;
         assert!(err.to_string().contains("vault"));
     }
+
+    /// Catalog entries with `[i18n.<lang>]` blocks deserialize all three
+    /// localizable fields and survive a JSON round-trip. Catches future
+    /// regressions where someone reorders / renames a field on
+    /// `McpCatalogI18n` without updating the parser side.
+    #[test]
+    fn catalog_entry_i18n_roundtrip() {
+        let toml_str = r#"
+id = "aws"
+name = "AWS"
+description = "Manage Amazon Web Services resources via MCP."
+category = "cloud"
+icon = "lucide:cloud"
+tags = ["cloud", "aws"]
+setup_instructions = "Set AWS_* env vars."
+
+[transport]
+type = "stdio"
+command = "npx"
+args = ["-y", "@aws-mcp/server-aws"]
+
+[i18n.zh]
+name = "AWS"
+description = "通过 MCP 管理亚马逊云资源。"
+setup_instructions = "请配置 AWS_* 环境变量。"
+
+[i18n.zh-TW]
+name = "AWS"
+description = "透過 MCP 管理亞馬遜雲端資源。"
+
+[i18n.de]
+description = "Verwaltet AWS-Ressourcen über MCP."
+"#;
+        let entry: McpCatalogEntry = toml::from_str(toml_str).unwrap();
+
+        // All three locales are present.
+        assert_eq!(entry.i18n.len(), 3);
+
+        // zh: name + description + setup_instructions all set.
+        let zh = &entry.i18n["zh"];
+        assert_eq!(zh.name.as_deref(), Some("AWS"));
+        assert_eq!(
+            zh.description.as_deref(),
+            Some("通过 MCP 管理亚马逊云资源。")
+        );
+        assert_eq!(
+            zh.setup_instructions.as_deref(),
+            Some("请配置 AWS_* 环境变量。")
+        );
+
+        // zh-TW: name + description but no setup_instructions → field stays
+        // None so render_catalog_entry will fall back to the English value.
+        let zh_tw = &entry.i18n["zh-TW"];
+        assert_eq!(zh_tw.name.as_deref(), Some("AWS"));
+        assert!(zh_tw.setup_instructions.is_none());
+
+        // de: only description; name + setup_instructions remain None and
+        // the resolver will fall through to English for those.
+        let de = &entry.i18n["de"];
+        assert!(de.name.is_none());
+        assert!(de.setup_instructions.is_none());
+        assert_eq!(
+            de.description.as_deref(),
+            Some("Verwaltet AWS-Ressourcen über MCP.")
+        );
+    }
+
+    /// `[i18n.*]`-free entries still deserialize cleanly — the field is
+    /// `#[serde(default)]` so existing single-language catalogs keep working.
+    #[test]
+    fn catalog_entry_without_i18n_block() {
+        let toml_str = r#"
+id = "no-i18n"
+name = "No I18n"
+description = "single language only"
+category = "devtools"
+
+[transport]
+type = "http"
+url = "https://example.com"
+"#;
+        let entry: McpCatalogEntry = toml::from_str(toml_str).unwrap();
+        assert!(entry.i18n.is_empty());
+    }
 }

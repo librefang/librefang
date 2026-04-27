@@ -24,11 +24,21 @@ const queryClient = new QueryClient({
 // changes when the user flips languages in the UI. React Query keys do
 // not encode language, so we invalidate the affected domains on each
 // `languageChanged` event to force a refetch with the new header.
-i18n.on("languageChanged", () => {
+const onLanguageChanged = () => {
   for (const all of [pluginKeys.all, mcpKeys.all, handKeys.all, channelKeys.all]) {
     queryClient.invalidateQueries({ queryKey: all });
   }
-});
+};
+i18n.on("languageChanged", onLanguageChanged);
+
+// Vite HMR re-runs this module on edit, which would stack a fresh listener
+// on top of the previous one each time. Detach on dispose so dev sessions
+// don't accumulate redundant invalidations.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    i18n.off("languageChanged", onLanguageChanged);
+  });
+}
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
