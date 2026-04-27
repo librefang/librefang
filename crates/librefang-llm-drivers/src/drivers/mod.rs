@@ -1115,6 +1115,7 @@ mod tests {
         assert!(providers.contains(&"kimi_coding"));
         assert!(providers.contains(&"qianfan"));
         assert!(providers.contains(&"volcengine"));
+        assert!(providers.contains(&"byteplus"));
         assert!(providers.contains(&"alibaba-coding-plan"));
         assert!(providers.contains(&"deepinfra"));
         assert!(providers.contains(&"claude-code"));
@@ -1126,7 +1127,7 @@ mod tests {
         assert!(providers.contains(&"nvidia-nim"));
         assert!(providers.contains(&"novita"));
         assert!(providers.contains(&"bedrock"));
-        assert_eq!(providers.len(), 41);
+        assert_eq!(providers.len(), 42);
     }
 
     #[test]
