@@ -393,6 +393,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
+        name: "microsoft",
+        aliases: &["github-models"],
+        base_url: "https://models.inference.ai.azure.com",
+        api_key_env: "GITHUB_MODELS_TOKEN",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "claude-code",
         aliases: &[],
         base_url: "",
@@ -1155,7 +1165,24 @@ mod tests {
         assert!(providers.contains(&"nvidia-nim"));
         assert!(providers.contains(&"novita"));
         assert!(providers.contains(&"bedrock"));
-        assert_eq!(providers.len(), 42);
+        assert!(providers.contains(&"microsoft"));
+        assert_eq!(providers.len(), 43);
+    }
+
+    /// `microsoft` (GitHub Models / Azure AI Inference) must declare its own
+    /// env var rather than reusing `GITHUB_TOKEN`, since that token is also
+    /// accepted by the IDE-side `github-copilot` provider — sharing the env
+    /// var made one credential silently activate two distinct products.
+    #[test]
+    fn test_microsoft_provider_split_from_github_copilot() {
+        let microsoft = find_provider("microsoft").expect("microsoft entry missing");
+        assert_eq!(microsoft.api_key_env, "GITHUB_MODELS_TOKEN");
+        assert_eq!(microsoft.base_url, "https://models.inference.ai.azure.com");
+        let copilot = find_provider("github-copilot").expect("github-copilot entry missing");
+        assert_eq!(
+            copilot.api_key_env, "GITHUB_TOKEN",
+            "github-copilot keeps the original env (IDE-side convention)",
+        );
     }
 
     #[test]
