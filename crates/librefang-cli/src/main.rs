@@ -1901,8 +1901,10 @@ fn load_update_channel_from_config() -> Option<librefang_types::config::UpdateCh
 /// otherwise `librefang skill test` would silently allow vars that
 /// production strips. Errors during read/parse degrade to default; this is
 /// a dev-time gate, not a security boundary, but its job is to mirror
-/// what prod will do.
-fn load_skill_env_policy_from_config() -> librefang_types::config::EnvPassthroughPolicy {
+/// what prod will do. Returns `None` only when the operator has explicitly
+/// cleared both `env_passthrough_denied_patterns` and
+/// `env_passthrough_per_skill` — matching the kernel-side semantics.
+fn load_skill_env_policy_from_config() -> Option<librefang_types::config::EnvPassthroughPolicy> {
     let cfg = (|| -> Option<librefang_types::config::SkillsConfig> {
         let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
         let content = std::fs::read_to_string(&config_path).ok()?;
@@ -6944,7 +6946,7 @@ fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<Str
         &prepared.source_dir,
         &tool_name,
         &input_json,
-        Some(&env_policy),
+        env_policy.as_ref(),
     ));
     match result {
         Ok(result) => {

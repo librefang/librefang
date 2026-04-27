@@ -16997,7 +16997,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
     ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
         let cfg = self.config.load();
-        Some(librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills))
+        librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
     }
 
     fn fire_agent_step(&self, agent_id: &str, step: u32) {

@@ -1269,17 +1269,24 @@ pub struct EnvPassthroughPolicy {
 }
 
 impl EnvPassthroughPolicy {
-    /// Construct a policy from a `[skills]` config block. Always returns a
-    /// populated `Self`; callers that want to skip applying the operator
-    /// gate entirely (e.g. an operator with empty deny patterns and no
-    /// per-skill overrides) should drop down to passing `None` for the
-    /// `env_policy` argument instead — that's `KernelHandle::skill_env_passthrough_policy`'s
-    /// job, not this constructor's.
-    pub fn from_skills_config(cfg: &SkillsConfig) -> Self {
-        Self {
+    /// Construct a policy from a `[skills]` config block, or `None` when the
+    /// config carries neither deny patterns nor per-skill overrides. Returning
+    /// `None` lets the caller (and `KernelHandle::skill_env_passthrough_policy`)
+    /// skip the operator-gate plumbing entirely — only the built-in
+    /// `FORBIDDEN_PASSTHROUGH` and kernel-reserved hard blocks apply in that
+    /// case. Note that `SkillsConfig::default()` ships with a non-empty deny
+    /// list, so the default config still produces `Some(...)`; `None` only
+    /// arises when an operator has explicitly cleared both fields.
+    pub fn from_skills_config(cfg: &SkillsConfig) -> Option<Self> {
+        if cfg.env_passthrough_denied_patterns.is_empty()
+            && cfg.env_passthrough_per_skill.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
             denied_patterns: cfg.env_passthrough_denied_patterns.clone(),
             per_skill_overrides: cfg.env_passthrough_per_skill.clone(),
-        }
+        })
     }
 }
 
