@@ -1133,6 +1133,12 @@ jobs:
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
+        # libdbus-1-dev is required by libdbus-sys, pulled in transitively
+        # by the keyring crate's secret-service backend on glibc Linux
+        # (librefang-desktop -> librefang-extensions). webkit2gtk has
+        # historically pulled libdbus-1-dev as a transitive system dep,
+        # but make it explicit so the build doesn't break the day apt
+        # changes its package metadata.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -1140,6 +1146,7 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libdbus-1-dev \
             patchelf
 
       - uses: dtolnay/rust-toolchain@stable
