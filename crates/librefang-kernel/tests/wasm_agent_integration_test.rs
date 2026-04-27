@@ -150,6 +150,7 @@ memory_write = ["self.*"]
 // ---------------------------------------------------------------------------
 
 /// Test that a WASM agent can be spawned and returns a response.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_hello_response() {
     let tmp = tempfile::tempdir().unwrap();
@@ -173,6 +174,7 @@ async fn test_wasm_agent_hello_response() {
 }
 
 /// Test that a WASM echo module returns input data.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_echo() {
     let tmp = tempfile::tempdir().unwrap();
@@ -200,6 +202,7 @@ async fn test_wasm_agent_echo() {
 }
 
 /// Test that WASM fuel exhaustion is caught and reported as an error.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_fuel_exhaustion() {
     let tmp = tempfile::tempdir().unwrap();
@@ -226,6 +229,7 @@ async fn test_wasm_agent_fuel_exhaustion() {
 }
 
 /// Test that a missing WASM module produces a clear error.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_missing_module() {
     let tmp = tempfile::tempdir().unwrap();
@@ -249,6 +253,7 @@ async fn test_wasm_agent_missing_module() {
 }
 
 /// Test that host_call time_now works end-to-end through the kernel.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_host_call_time() {
     let tmp = tempfile::tempdir().unwrap();
@@ -293,6 +298,7 @@ memory_write = ["self.*"]
 }
 
 /// Test WASM agent with streaming (falls back to single event).
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_wasm_agent_streaming_fallback() {
     let tmp = tempfile::tempdir().unwrap();
@@ -329,6 +335,7 @@ async fn test_wasm_agent_streaming_fallback() {
 }
 
 /// Test that spawning multiple WASM agents works concurrently.
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_wasm_agents() {
     let tmp = tempfile::tempdir().unwrap();
@@ -360,6 +367,7 @@ async fn test_multiple_wasm_agents() {
 }
 
 /// Test WASM agent alongside LLM agent (mixed fleet).
+#[ignore = "wasm integration: boots full kernel with embedded SurrealDB + Ollama; run manually"]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_mixed_wasm_and_llm_agents() {
     let tmp = tempfile::tempdir().unwrap();
