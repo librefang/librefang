@@ -2746,6 +2746,7 @@
     "rotate_key_only_chance": "这是复制此密钥的唯一机会。关闭此对话框后，明文将丢失，服务器无法再次生成。",
     "rotate_key_must_copy": "请先点击「复制」。复制到剪贴板后，关闭按钮才会启用。",
     "rotate_key_failed_toast": "轮换失败：{{message}}",
+    "rotate_key_copy_failed": "复制失败，请手动选中并复制密钥后再关闭对话框。",
     "rotate_key_copied_confirm": "已复制，可以关闭",
     "csv_drop_aria": "上传 CSV 文件：拖放到此处或激活以浏览",
     "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",

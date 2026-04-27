@@ -544,11 +544,21 @@ function RotatedKeyModal({
     return () => document.removeEventListener("keydown", handler, true);
   }, [rotatedKey, hasCopied]);
 
-  const handleCopy = useCallback(() => {
+  const handleCopy = useCallback(async () => {
     if (!rotatedKey) return;
-    void navigator.clipboard.writeText(rotatedKey.plaintext);
-    setHasCopied(true);
-    addToast(t("common.copied", "Copied"), "success");
+    try {
+      await navigator.clipboard.writeText(rotatedKey.plaintext);
+      setHasCopied(true);
+      addToast(t("common.copied", "Copied"), "success");
+    } catch {
+      addToast(
+        t(
+          "users.rotate_key_copy_failed",
+          "Copy failed — select the key and copy it manually before closing.",
+        ),
+        "error",
+      );
+    }
   }, [rotatedKey, addToast, t]);
 
   return (
@@ -700,7 +710,7 @@ function RowActionsMenu({
   return (
     <details ref={detailsRef} className="relative">
       <summary
-        className="list-none cursor-pointer h-7 w-7 inline-flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+        className="list-none [&::-webkit-details-marker]:hidden cursor-pointer h-7 w-7 inline-flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
         aria-label={t("users.row_actions", "More actions")}
         title={t("users.row_actions", "More actions")}
       >

@@ -2780,6 +2780,7 @@
     "rotate_key_only_chance": "This is your only chance to copy this key. Closing this dialog will discard the plaintext — the server cannot reproduce it.",
     "rotate_key_must_copy": "Click Copy first. The Close button unlocks once the key is on your clipboard.",
     "rotate_key_failed_toast": "Rotation failed: {{message}}",
+    "rotate_key_copy_failed": "Copy failed — select the key and copy it manually before closing.",
     "rotate_key_copied_confirm": "Copied — you can close now",
     "csv_drop_aria": "Upload CSV file: drop here or activate to browse",
     "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
