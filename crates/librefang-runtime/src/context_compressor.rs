@@ -26,10 +26,12 @@
 //!   that persists in the message list across turns.
 //! - System-prompt messages (`Role::System`) in the head are preserved unchanged.
 
+use crate::aux_client::AuxClient;
 use crate::compactor::{self, CompactionConfig};
 use crate::llm_driver::LlmDriver;
 use librefang_memory::session::Session;
 use librefang_types::agent::{AgentId, SessionId};
+use librefang_types::config::AuxTask;
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use librefang_types::tool::ToolDefinition;
 use std::sync::Arc;
@@ -142,6 +144,12 @@ impl ContextCompressor {
     /// one. Session state is NOT persisted here — that remains the agent
     /// loop's responsibility.
     ///
+    /// This is the legacy entrypoint that always summarises with the
+    /// caller-supplied primary `driver`. Callers wired up to the auxiliary
+    /// LLM client should prefer [`Self::compress_if_needed_with_aux`] which
+    /// routes summarisation through a cheap-tier chain when one is
+    /// configured (see issue #3314).
+    ///
     /// # Parameters
     ///
     /// - `messages` — current LLM working copy of the conversation
@@ -160,6 +168,58 @@ impl ContextCompressor {
         model: &str,
         driver: Arc<dyn LlmDriver>,
     ) -> (Vec<Message>, Vec<CompressionEvent>) {
+        self.compress_if_needed_with_aux(
+            messages,
+            system_prompt,
+            tools,
+            context_window,
+            model,
+            driver,
+            None,
+        )
+        .await
+    }
+
+    /// Aux-aware variant of [`Self::compress_if_needed`].
+    ///
+    /// When `aux_client` is `Some`, summarisation routes through
+    /// [`AuxClient::driver_for(AuxTask::Compression)`] — a cheap-tier
+    /// fallback chain. When the chain has no usable entries the resolver
+    /// hands back the primary `driver`, so behaviour is identical for
+    /// users who haven't configured `[llm.auxiliary]`.
+    ///
+    /// `model` is still threaded through but is overridden per-entry by
+    /// the chain's `model_override` so the cheap providers send their own
+    /// model slug rather than the agent's primary model.
+    pub async fn compress_if_needed_with_aux(
+        &self,
+        messages: Vec<Message>,
+        system_prompt: &str,
+        tools: &[ToolDefinition],
+        context_window: usize,
+        model: &str,
+        driver: Arc<dyn LlmDriver>,
+        aux_client: Option<&AuxClient>,
+    ) -> (Vec<Message>, Vec<CompressionEvent>) {
+        // Resolve the summariser driver: aux chain when configured, else
+        // the caller-supplied primary driver. Build it once outside the
+        // iteration loop so we don't re-resolve on every pass.
+        let summariser_driver: Arc<dyn LlmDriver> = match aux_client {
+            Some(aux) => {
+                let resolution = aux.resolve(AuxTask::Compression);
+                if !resolution.used_primary {
+                    debug!(
+                        chain = ?resolution.resolved,
+                        "ContextCompressor: using auxiliary chain for summarisation"
+                    );
+                    resolution.driver
+                } else {
+                    driver.clone()
+                }
+            }
+            None => driver.clone(),
+        };
+        let driver = summariser_driver;
         let mut current = messages;
         let mut events = Vec::new();
 

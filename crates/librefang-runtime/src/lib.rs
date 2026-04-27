@@ -13,6 +13,7 @@ pub mod agent_loop;
 pub mod apply_patch;
 pub mod audit;
 pub mod auth_cooldown;
+pub mod aux_client;
 pub mod browser;
 pub mod catalog_sync;
 pub mod channel_registry;
