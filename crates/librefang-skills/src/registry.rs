@@ -838,11 +838,7 @@ input_schema = {{ type = "object" }}
     // provider prompt caches. The two tests below pin byte-identical output
     // regardless of insertion order.
 
-    fn install_with_tool(
-        registry: &mut SkillRegistry,
-        skill_name: &str,
-        tool_name: &str,
-    ) {
+    fn install_with_tool(registry: &mut SkillRegistry, skill_name: &str, tool_name: &str) {
         let path = std::path::PathBuf::from(format!("/tmp/fake-{skill_name}"));
         let installed = crate::InstalledSkill {
             manifest: crate::SkillManifest {
