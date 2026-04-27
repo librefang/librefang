@@ -896,23 +896,11 @@ impl LlmDriver for OpenAIDriver {
         }
         let mut oai_request = self.build_request(&request)?;
 
-        // Cross-process / cross-restart rate-limit guard.  If a previous
-        // run (or sibling process) recorded a 429 lockout for this provider
-        // + key, short-circuit before hitting the network.
+        // Cross-process / cross-restart rate-limit guard. A previously
+        // recorded 429 short-circuits before any HTTP work.
         let guard_provider = self.shared_guard_provider();
         let guard_key_id = self.shared_guard_key_id();
-        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
-            warn!(
-                target: "librefang::shared_rate_guard",
-                provider = guard_provider,
-                remaining_secs = remaining.as_secs(),
-                "skipping request — provider is rate-limited per persistent guard"
-            );
-            return Err(LlmError::RateLimited {
-                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
-                message: Some("rate limit recorded from previous response".into()),
-            });
-        }
+        crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "OpenAI")?;
 
         let max_retries = 3;
         for attempt in 0..=max_retries {
@@ -960,23 +948,14 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(std::time::Duration::ZERO);
-                // Persist the lockout so other processes / future runs see
-                // it and short-circuit. Honors the rate-limit headers'
-                // RPH-over-RPM precedence.
-                let snap = RateLimitSnapshot::from_headers(resp.headers());
-                crate::shared_rate_guard::record_from_snapshot(
+                // Persist the lockout (honors RPH > RPM > retry-after >
+                // 5min default precedence) and reuse the parsed
+                // retry-after for the in-process backoff.
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
                     guard_provider,
                     &guard_key_id,
-                    snap.as_ref(),
-                    Some(retry_after),
-                    Some(format!("HTTP 429 from {}", self.base_url)),
+                    resp.headers(),
+                    &format!("HTTP 429 from {}", self.base_url),
                 );
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
@@ -1306,18 +1285,11 @@ impl LlmDriver for OpenAIDriver {
         // Cross-process / cross-restart rate-limit guard (streaming path).
         let guard_provider = self.shared_guard_provider();
         let guard_key_id = self.shared_guard_key_id();
-        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
-            warn!(
-                target: "librefang::shared_rate_guard",
-                provider = guard_provider,
-                remaining_secs = remaining.as_secs(),
-                "skipping streaming request — provider is rate-limited per persistent guard"
-            );
-            return Err(LlmError::RateLimited {
-                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
-                message: Some("rate limit recorded from previous response".into()),
-            });
-        }
+        crate::shared_rate_guard::pre_request_check(
+            guard_provider,
+            &guard_key_id,
+            "OpenAI streaming",
+        )?;
 
         // Retry loop for the initial HTTP request
         let max_retries = 3;
@@ -1366,20 +1338,11 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(std::time::Duration::ZERO);
-                let snap = RateLimitSnapshot::from_headers(resp.headers());
-                crate::shared_rate_guard::record_from_snapshot(
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
                     guard_provider,
                     &guard_key_id,
-                    snap.as_ref(),
-                    Some(retry_after),
-                    Some(format!("HTTP 429 (stream) from {}", self.base_url)),
+                    resp.headers(),
+                    &format!("HTTP 429 (stream) from {}", self.base_url),
                 );
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);

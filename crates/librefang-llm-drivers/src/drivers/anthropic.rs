@@ -350,18 +350,7 @@ impl LlmDriver for AnthropicDriver {
         // lockout for this api_key short-circuits the request.
         let guard_provider = "anthropic";
         let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
-        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
-            warn!(
-                target: "librefang::shared_rate_guard",
-                provider = guard_provider,
-                remaining_secs = remaining.as_secs(),
-                "skipping Anthropic request — rate-limited per persistent guard"
-            );
-            return Err(LlmError::RateLimited {
-                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
-                message: Some("rate limit recorded from previous response".into()),
-            });
-        }
+        crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "Anthropic")?;
 
         // Retry loop for rate limits and overloads
         let max_retries = 3;
@@ -390,26 +379,25 @@ impl LlmDriver for AnthropicDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 529 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(std::time::Duration::ZERO);
-                // Persist 429 lockouts only — 529 (overloaded) is a server
-                // capacity issue, not an account-level rate limit, and
-                // should not lock the key out across processes.
-                if status == 429 {
-                    let snap = RateLimitSnapshot::from_headers(resp.headers());
-                    crate::shared_rate_guard::record_from_snapshot(
+                // Persist 429 lockouts only — 529 (overloaded) is a
+                // server-capacity issue, not an account-level rate
+                // limit, so it must not lock the key out across
+                // processes.
+                let retry_after = if status == 429 {
+                    crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
                         &guard_key_id,
-                        snap.as_ref(),
-                        Some(retry_after),
-                        Some("Anthropic HTTP 429".into()),
-                    );
-                }
+                        resp.headers(),
+                        "Anthropic HTTP 429",
+                    )
+                } else {
+                    resp.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or(std::time::Duration::ZERO)
+                };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
@@ -484,18 +472,11 @@ impl LlmDriver for AnthropicDriver {
         // Cross-process rate-limit guard (streaming path).
         let guard_provider = "anthropic";
         let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
-        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
-            warn!(
-                target: "librefang::shared_rate_guard",
-                provider = guard_provider,
-                remaining_secs = remaining.as_secs(),
-                "skipping Anthropic streaming request — rate-limited per persistent guard"
-            );
-            return Err(LlmError::RateLimited {
-                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
-                message: Some("rate limit recorded from previous response".into()),
-            });
-        }
+        crate::shared_rate_guard::pre_request_check(
+            guard_provider,
+            &guard_key_id,
+            "Anthropic streaming",
+        )?;
 
         // Retry loop for the initial HTTP request
         let max_retries = 3;
@@ -524,23 +505,24 @@ impl LlmDriver for AnthropicDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 529 {
-                let retry_after = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(std::time::Duration::ZERO);
-                if status == 429 {
-                    let snap = RateLimitSnapshot::from_headers(resp.headers());
-                    crate::shared_rate_guard::record_from_snapshot(
+                // 529 (overloaded) is a server-capacity issue, not an
+                // account-level rate limit — don't persist a key-wide
+                // lockout for it.
+                let retry_after = if status == 429 {
+                    crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
                         &guard_key_id,
-                        snap.as_ref(),
-                        Some(retry_after),
-                        Some("Anthropic HTTP 429 (stream)".into()),
-                    );
-                }
+                        resp.headers(),
+                        "Anthropic HTTP 429 (stream)",
+                    )
+                } else {
+                    resp.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs)
+                        .unwrap_or(std::time::Duration::ZERO)
+                };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(

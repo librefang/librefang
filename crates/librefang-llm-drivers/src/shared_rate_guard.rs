@@ -154,6 +154,34 @@ fn record_inner(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let final_path = lockout_path(provider, key_id);
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Max-merge with any existing lockout. A sibling process or earlier
+    // 429 may have recorded a *longer* cooldown (e.g. the 1h RPH header
+    // called out in #3315). The current response might only carry a
+    // short `retry-after` — overwriting unconditionally would forget the
+    // stronger lockout. Read-modify-write here is not atomic across
+    // processes, but the "take the longer of the two" invariant
+    // converges across repeated writes and recovers the worst-case
+    // bound (a 1h reset surviving until it really expires).
+    if let Ok(bytes) = fs::read(&final_path) {
+        if let Ok(existing) = serde_json::from_slice::<StoredLockout>(&bytes) {
+            if existing.until_unix > until_unix {
+                debug!(
+                    target: "librefang::shared_rate_guard",
+                    provider, key_id,
+                    existing_until = existing.until_unix,
+                    new_until = until_unix,
+                    "skipping record — existing lockout is longer"
+                );
+                return Ok(());
+            }
+        }
+    }
+
     let stored = StoredLockout {
         provider: provider.to_string(),
         until_unix,
@@ -161,11 +189,6 @@ fn record_inner(
     };
     let bytes = serde_json::to_vec_pretty(&stored)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    let final_path = lockout_path(provider, key_id);
-    if let Some(parent) = final_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     write_atomic(&final_path, &bytes)?;
     debug!(
         target: "librefang::shared_rate_guard",
@@ -300,6 +323,59 @@ pub fn check(provider: &str, key_id: &str) -> Option<Duration> {
         return None;
     }
     Some(Duration::from_secs(stored.until_unix - now))
+}
+
+/// Pre-request guard for drivers.
+///
+/// Returns `Ok(())` if no lockout is in effect, or
+/// `Err(LlmError::RateLimited)` sized to the remaining cooldown so the
+/// caller can short-circuit before any HTTP work.
+pub fn pre_request_check(
+    provider: &str,
+    key_id: &str,
+    label: &str,
+) -> Result<(), librefang_llm_driver::LlmError> {
+    if let Some(remaining) = check(provider, key_id) {
+        warn!(
+            target: "librefang::shared_rate_guard",
+            provider,
+            remaining_secs = remaining.as_secs(),
+            "skipping {label} request — provider is rate-limited per persistent guard"
+        );
+        return Err(librefang_llm_driver::LlmError::RateLimited {
+            retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
+            message: Some("rate limit recorded from previous response".into()),
+        });
+    }
+    Ok(())
+}
+
+/// Persist a 429 lockout from a `reqwest` response's headers and return
+/// the parsed `Retry-After` so the caller can reuse it for backoff.
+///
+/// Header parsing precedence (RPH > RPM > Retry-After > 5min default) is
+/// delegated to [`record_from_snapshot`].
+pub fn record_429_from_headers(
+    provider: &str,
+    key_id: &str,
+    headers: &reqwest::header::HeaderMap,
+    reason: &str,
+) -> Duration {
+    let retry_after = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::ZERO);
+    let snap = crate::rate_limit_tracker::RateLimitSnapshot::from_headers(headers);
+    record_from_snapshot(
+        provider,
+        key_id,
+        snap.as_ref(),
+        Some(retry_after),
+        Some(reason.to_string()),
+    );
+    retry_after
 }
 
 #[cfg(test)]
@@ -475,6 +551,67 @@ mod tests {
             "path traversal not sanitised: {s}"
         );
         assert!(s.contains("___etc_passwd__abc"), "got {s}");
+    }
+
+    #[test]
+    fn record_keeps_longer_lockout_against_shorter_followup() {
+        // Simulates two processes hitting 429 in sequence:
+        //   A: x-ratelimit-reset-requests-1h: 3540  → records 1h cooldown
+        //   B: only retry-after: 30                 → would shorten to 30s
+        // The 1h lockout MUST survive — that's the strongest guarantee
+        // #3315 asks for and the regression we're locking down here.
+        let _g = ENV_GUARD.lock().unwrap();
+        let home = fresh_home();
+        std::env::set_var("LIBREFANG_HOME", home.path());
+
+        let key_id = key_id_hash("sk-max-merge");
+
+        let long_until = SystemTime::now() + Duration::from_secs(3540);
+        record("openai", &key_id, long_until, Some("1h RPH".into()));
+
+        let short_until = SystemTime::now() + Duration::from_secs(30);
+        record(
+            "openai",
+            &key_id,
+            short_until,
+            Some("retry-after 30s".into()),
+        );
+
+        let remaining = check("openai", &key_id).expect("locked out");
+        assert!(
+            remaining.as_secs() > 3000,
+            "longer lockout must survive a shorter follow-up record(); \
+             got {}s remaining (expected ~3540)",
+            remaining.as_secs()
+        );
+
+        std::env::remove_var("LIBREFANG_HOME");
+    }
+
+    #[test]
+    fn record_extends_existing_shorter_lockout() {
+        // Inverse of `record_keeps_longer_lockout_against_shorter_followup`:
+        // if the new lockout is *longer*, it MUST replace the old one.
+        let _g = ENV_GUARD.lock().unwrap();
+        let home = fresh_home();
+        std::env::set_var("LIBREFANG_HOME", home.path());
+
+        let key_id = key_id_hash("sk-extend");
+
+        let short_until = SystemTime::now() + Duration::from_secs(30);
+        record("openai", &key_id, short_until, None);
+
+        let long_until = SystemTime::now() + Duration::from_secs(3540);
+        record("openai", &key_id, long_until, None);
+
+        let remaining = check("openai", &key_id).expect("locked out");
+        assert!(
+            remaining.as_secs() > 3000,
+            "newer longer lockout must replace shorter; got {}s",
+            remaining.as_secs()
+        );
+
+        std::env::remove_var("LIBREFANG_HOME");
     }
 
     #[test]
