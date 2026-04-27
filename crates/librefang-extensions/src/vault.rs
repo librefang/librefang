@@ -18,16 +18,96 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
-/// Service name for OS keyring storage.
-#[cfg(not(test))]
-const KEYRING_SERVICE: &str = "librefang-vault";
-/// Username for OS keyring entry. Each librefang install stores a single
-/// master key per host, so the username is a fixed sentinel — the keyring
-/// crate's `Entry` constructor needs both a service and a username regardless.
-#[cfg(not(test))]
-const KEYRING_USER: &str = "master-key";
 /// Env var fallback for vault key.
 const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
+
+/// Service name used by the legacy v1 XOR-obfuscated keyring file as a salt
+/// in the unmasking hash. Must remain stable across targets so v1 → v2
+/// migrations keep working on every platform we ever ran on. The OS-keyring
+/// backend's own service/user constants live in the `os_keyring` module.
+#[cfg(not(test))]
+const KEYRING_SERVICE: &str = "librefang-vault";
+
+/// OS keyring backend abstraction. The real impl is only compiled on
+/// targets where the `keyring` crate has a usable backend (glibc Linux,
+/// macOS, Windows). On musl Linux, Android, and other targets the crate
+/// itself isn't pulled — see Cargo.toml — so we provide a stub that
+/// always reports unavailability. Callers fall through to the
+/// AES-256-GCM file-based store either way.
+#[cfg(all(
+    not(test),
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "macos",
+        target_os = "windows",
+    )
+))]
+mod os_keyring {
+    const SERVICE: &str = "librefang-vault";
+    // Each install stores a single master key per host; `Entry` needs a
+    // username field so we use a fixed sentinel.
+    const USER: &str = "master-key";
+
+    /// Returns true if the key was stored in the OS keyring; false means
+    /// the backend was unavailable / refused, and the caller should fall
+    /// through to the file-based store. Backend errors are logged at
+    /// debug and surfaced as `false` — never propagated.
+    pub fn try_store(key_b64: &str) -> bool {
+        match keyring::Entry::new(SERVICE, USER) {
+            Ok(entry) => match entry.set_password(key_b64) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!(
+                        "OS keyring set_password failed ({e}) — falling back to file-based store"
+                    );
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::debug!(
+                    "OS keyring entry initialisation failed ({e}) — falling back to file-based store"
+                );
+                false
+            }
+        }
+    }
+
+    /// Returns Some(key) if found; None means no entry / backend
+    /// unavailable, and the caller should try the file-based store.
+    pub fn try_load() -> Option<String> {
+        match keyring::Entry::new(SERVICE, USER) {
+            Ok(entry) => match entry.get_password() {
+                Ok(s) => Some(s),
+                Err(keyring::Error::NoEntry) => None,
+                Err(e) => {
+                    tracing::debug!(
+                        "OS keyring get_password failed ({e}) — trying file-based fallback"
+                    );
+                    None
+                }
+            },
+            Err(_) => None,
+        }
+    }
+}
+
+#[cfg(all(
+    not(test),
+    not(any(
+        all(target_os = "linux", not(target_env = "musl")),
+        target_os = "macos",
+        target_os = "windows",
+    ))
+))]
+mod os_keyring {
+    pub fn try_store(_key_b64: &str) -> bool {
+        false
+    }
+
+    pub fn try_load() -> Option<String> {
+        None
+    }
+}
 /// Salt length for Argon2.
 const SALT_LEN: usize = 16;
 /// Nonce length for AES-256-GCM.
@@ -443,23 +523,9 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
         // Try the OS keyring first. The previous behaviour silently dropped
         // through to the file fallback even on hosts that had a working
         // keyring — see issue #3178.
-        match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-            Ok(entry) => match entry.set_password(key_b64) {
-                Ok(()) => {
-                    debug!("Stored master key in OS keyring");
-                    return Ok(());
-                }
-                Err(e) => {
-                    debug!(
-                        "OS keyring set_password failed ({e}) — falling back to file-based store"
-                    );
-                }
-            },
-            Err(e) => {
-                debug!(
-                    "OS keyring entry initialisation failed ({e}) — falling back to file-based store"
-                );
-            }
+        if os_keyring::try_store(key_b64) {
+            debug!("Stored master key in OS keyring");
+            return Ok(());
         }
 
         // File-based fallback — wraps the master key with AES-256-GCM using an
@@ -521,21 +587,13 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
-        // OS keyring first (issue #3178).
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
-            match entry.get_password() {
-                Ok(s) => {
-                    debug!("Loaded master key from OS keyring");
-                    return Ok(Zeroizing::new(s));
-                }
-                Err(keyring::Error::NoEntry) => {
-                    // Empty keyring is normal for a host that previously stored
-                    // the key in the file fallback — drop through silently.
-                }
-                Err(e) => {
-                    debug!("OS keyring get_password failed ({e}) — trying file-based fallback");
-                }
-            }
+        // OS keyring first (issue #3178). `try_load` returns None for both
+        // "no entry" (normal on a host that previously stored to the file
+        // fallback) and "backend unavailable" — both cases drop through
+        // silently to the file path below.
+        if let Some(s) = os_keyring::try_load() {
+            debug!("Loaded master key from OS keyring");
+            return Ok(Zeroizing::new(s));
         }
 
         let keyring_path = dirs::data_local_dir()
