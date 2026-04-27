@@ -121,6 +121,44 @@ impl OpenAIDriver {
         self.base_url.contains("moonshot")
     }
 
+    /// Stable provider tag used by [`crate::shared_rate_guard`].
+    ///
+    /// Derived from the host of `base_url` so that `api.openai.com`,
+    /// `api.groq.com`, `nous-portal.example` each get their own lockout
+    /// file. Falls back to `"openai-compat"` when the URL cannot be parsed.
+    fn shared_guard_provider(&self) -> &'static str {
+        // We map known hosts to short stable strings. Unknown hosts fall
+        // back to "openai-compat" — they still get isolated by key-id-hash
+        // even when the provider tag collides.
+        let url = self.base_url.to_ascii_lowercase();
+        if url.contains("openai.com") {
+            "openai"
+        } else if url.contains("groq.com") {
+            "groq"
+        } else if url.contains("openrouter") {
+            "openrouter"
+        } else if url.contains("nous") {
+            "nous"
+        } else if url.contains("moonshot") {
+            "moonshot"
+        } else if url.contains("deepseek") {
+            "deepseek"
+        } else if url.contains("dashscope") {
+            "dashscope"
+        } else if url.contains("byteplus") {
+            "byteplus"
+        } else if url.contains("azure") {
+            "azure-openai"
+        } else {
+            "openai-compat"
+        }
+    }
+
+    /// 16-hex key identifier for [`crate::shared_rate_guard`].
+    fn shared_guard_key_id(&self) -> String {
+        crate::shared_rate_guard::key_id_hash(self.api_key.as_str())
+    }
+
     /// Upload a file to Moonshot's `/v1/files` endpoint and return the file ID.
     async fn upload_file_to_moonshot(
         &self,
@@ -858,6 +896,26 @@ impl LlmDriver for OpenAIDriver {
         }
         let mut oai_request = self.build_request(&request)?;
 
+        // Cross-process / cross-restart rate-limit guard.  If a previous
+        // run (or sibling process) recorded a 429 lockout for this provider
+        // + key, short-circuit before hitting the network.
+        let guard_provider = self.shared_guard_provider();
+        let guard_key_id = self.shared_guard_key_id();
+        if let Some(remaining) =
+            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
+        {
+            warn!(
+                target: "librefang::shared_rate_guard",
+                provider = guard_provider,
+                remaining_secs = remaining.as_secs(),
+                "skipping request — provider is rate-limited per persistent guard"
+            );
+            return Err(LlmError::RateLimited {
+                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
+                message: Some("rate limit recorded from previous response".into()),
+            });
+        }
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
@@ -904,14 +962,25 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(std::time::Duration::ZERO);
+                // Persist the lockout so other processes / future runs see
+                // it and short-circuit. Honors the rate-limit headers'
+                // RPH-over-RPM precedence.
+                let snap = RateLimitSnapshot::from_headers(resp.headers());
+                crate::shared_rate_guard::record_from_snapshot(
+                    guard_provider,
+                    &guard_key_id,
+                    snap.as_ref(),
+                    Some(retry_after),
+                    Some(format!("HTTP 429 from {}", self.base_url)),
+                );
                 if attempt < max_retries {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO);
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,
@@ -1236,6 +1305,24 @@ impl LlmDriver for OpenAIDriver {
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
 
+        // Cross-process / cross-restart rate-limit guard (streaming path).
+        let guard_provider = self.shared_guard_provider();
+        let guard_key_id = self.shared_guard_key_id();
+        if let Some(remaining) =
+            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
+        {
+            warn!(
+                target: "librefang::shared_rate_guard",
+                provider = guard_provider,
+                remaining_secs = remaining.as_secs(),
+                "skipping streaming request — provider is rate-limited per persistent guard"
+            );
+            return Err(LlmError::RateLimited {
+                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
+                message: Some("rate limit recorded from previous response".into()),
+            });
+        }
+
         // Retry loop for the initial HTTP request
         let max_retries = 3;
         for attempt in 0..=max_retries {
@@ -1283,14 +1370,22 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(std::time::Duration::ZERO);
+                let snap = RateLimitSnapshot::from_headers(resp.headers());
+                crate::shared_rate_guard::record_from_snapshot(
+                    guard_provider,
+                    &guard_key_id,
+                    snap.as_ref(),
+                    Some(retry_after),
+                    Some(format!("HTTP 429 (stream) from {}", self.base_url)),
+                );
                 if attempt < max_retries {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO);
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,

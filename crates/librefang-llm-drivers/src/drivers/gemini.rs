@@ -795,6 +795,24 @@ impl LlmDriver for GeminiDriver {
             }),
         };
 
+        // Cross-process rate-limit guard.
+        let guard_provider = "gemini";
+        let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
+        if let Some(remaining) =
+            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
+        {
+            warn!(
+                target: "librefang::shared_rate_guard",
+                provider = guard_provider,
+                remaining_secs = remaining.as_secs(),
+                "skipping Gemini request — rate-limited per persistent guard"
+            );
+            return Err(LlmError::RateLimited {
+                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
+                message: Some("rate limit recorded from previous response".into()),
+            });
+        }
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = format!(
@@ -822,6 +840,21 @@ impl LlmDriver for GeminiDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 503 {
+                if status == 429 {
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs);
+                    crate::shared_rate_guard::record_from_snapshot(
+                        guard_provider,
+                        &guard_key_id,
+                        None,
+                        retry_after,
+                        Some("Gemini HTTP 429".into()),
+                    );
+                }
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
                     warn!(status, retry_ms, "Rate limited/overloaded, retrying");
@@ -886,6 +919,24 @@ impl LlmDriver for GeminiDriver {
             }),
         };
 
+        // Cross-process rate-limit guard (streaming path).
+        let guard_provider = "gemini";
+        let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
+        if let Some(remaining) =
+            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
+        {
+            warn!(
+                target: "librefang::shared_rate_guard",
+                provider = guard_provider,
+                remaining_secs = remaining.as_secs(),
+                "skipping Gemini streaming request — rate-limited per persistent guard"
+            );
+            return Err(LlmError::RateLimited {
+                retry_after_ms: remaining.as_millis().min(u64::MAX as u128) as u64,
+                message: Some("rate limit recorded from previous response".into()),
+            });
+        }
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = format!(
@@ -913,6 +964,21 @@ impl LlmDriver for GeminiDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 503 {
+                if status == 429 {
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .map(std::time::Duration::from_secs);
+                    crate::shared_rate_guard::record_from_snapshot(
+                        guard_provider,
+                        &guard_key_id,
+                        None,
+                        retry_after,
+                        Some("Gemini HTTP 429 (stream)".into()),
+                    );
+                }
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
                     warn!(
