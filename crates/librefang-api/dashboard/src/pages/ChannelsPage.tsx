@@ -57,9 +57,36 @@ interface ChannelCardProps {
 }
 
 function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
+  // Whole-card click opens the details drawer. Inner controls
+  // (checkbox, Configure button) call e.stopPropagation() so the
+  // card-level handler doesn't fire when the user clicks them.
+  // Keyboard: Enter / Space on the focused card mirrors the click —
+  // `role="button" + tabIndex={0}` makes the card itself focusable.
+  // The trailing chevron is now decorative (`aria-hidden`) since the
+  // entire surface is the activator.
+  const openDetails = () => onViewDetails(c);
+  const cardKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openDetails();
+    }
+  };
+  const cardA11y = {
+    onClick: openDetails,
+    onKeyDown: cardKeyDown,
+    role: "button" as const,
+    tabIndex: 0,
+    "aria-label": c.display_name || c.name,
+  };
+
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex items-center gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      <Card
+        hover
+        padding="sm"
+        className={`flex items-center gap-4 group transition-all focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:outline-none ${isSelected ? "ring-2 ring-brand" : ""}`}
+        {...cardA11y}
+      >
         <button
           onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
           className="shrink-0 text-text-dim hover:text-brand transition-colors"
@@ -93,13 +120,16 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
           )}
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
-          <Button variant="secondary" size="sm" onClick={() => onConfigure(c)} leftIcon={<Settings className="w-3 h-3" />}>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+            leftIcon={<Settings className="w-3 h-3" />}
+          >
             {t("channels.config")}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => onViewDetails(c)}>
-            <ChevronRight className="w-4 h-4" />
-          </Button>
+          <ChevronRight className="w-4 h-4 text-text-dim/60" aria-hidden="true" />
         </div>
       </Card>
     );
@@ -107,7 +137,12 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
 
   // Grid view
   return (
-    <Card hover padding="none" className={`flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+    <Card
+      hover
+      padding="none"
+      className={`flex flex-col overflow-hidden group transition-all focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:outline-none ${isSelected ? "ring-2 ring-brand" : ""}`}
+      {...cardA11y}
+    >
       <div className={`h-1.5 bg-linear-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
       <div className="p-5 flex-1 flex flex-col">
         {/* Header */}
@@ -155,13 +190,17 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
         </div>
 
         {/* Actions */}
-        <div className="flex gap-2 mt-auto">
-          <Button variant="secondary" size="sm" className="flex-1" onClick={() => onConfigure(c)} leftIcon={<Settings className="w-3 h-3" />}>
+        <div className="flex gap-2 mt-auto items-center">
+          <Button
+            variant="secondary"
+            size="sm"
+            className="flex-1"
+            onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+            leftIcon={<Settings className="w-3 h-3" />}
+          >
             {t("channels.config")}
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => onViewDetails(c)}>
-            <ChevronRight className="w-4 h-4" />
-          </Button>
+          <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
         </div>
       </div>
     </Card>
