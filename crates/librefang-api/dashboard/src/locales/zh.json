@@ -141,7 +141,11 @@
     "add": "添加",
     "remove": "移除",
     "discard": "放弃更改",
-    "more_actions": "更多操作"
+    "more_actions": "更多操作",
+    "none": "无",
+    "metadata": "元数据",
+    "size": "大小",
+    "path": "路径"
   },
   "status": {
     "running": "运行中",
@@ -786,7 +790,11 @@
     "err_security_blocked": "内容被安全扫描拦截，请移除可疑模式。",
     "err_invalid_name": "技能名称非法：仅允许小写字母、数字、连字符、下划线。",
     "err_create_failed": "创建技能失败，请重试。",
-    "outputs": "技能输出"
+    "outputs": "技能输出",
+    "evo_load_failed": "加载文件失败",
+    "evo_action_failed": "操作失败",
+    "evo_delete_failed": "删除失败",
+    "reload_failed": "刷新失败"
   },
   "hands": {
     "title": "Hands",
@@ -2359,7 +2367,9 @@
     "scaffold_failed": "创建失败",
     "scaffold_success": "插件已创建",
     "uninstall_failed": "卸载失败",
-    "uninstall_success": "插件已移除"
+    "uninstall_success": "插件已移除",
+    "invalid": "无效",
+    "hooks": "钩子"
   },
   "telemetry": {
     "badge": "可观测性",
@@ -2564,7 +2574,11 @@
     "taint_skip_rule_sets_hint": "default = skip 会完全跳过扫描——上方 rule_sets 不会触发（包括 Log）。如需仅审计，请改回 default = scan。",
     "taint_rule_sets_placeholder": "[[taint_rules]] 中定义的名称，逗号分隔",
     "taint_rule_sets_overlap_hint": "多个集合覆盖同一规则时，最宽松的动作生效（log > warn > block）——仅审计的集合会静默使同规则上的 block 失效。",
-    "taint_rule_sets_unknown_hint": "未知 rule_set 名称：{{names}} —— 未在任何 [[taint_rules]] 中定义，扫描器会按 no-op 处理。"
+    "taint_rule_sets_unknown_hint": "未知 rule_set 名称：{{names}} —— 未在任何 [[taint_rules]] 中定义，扫描器会按 no-op 处理。",
+    "view_detail": "查看服务器详情",
+    "transport": "传输",
+    "required_env": "必需环境变量",
+    "setup_instructions": "设置说明"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
