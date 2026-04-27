@@ -393,6 +393,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
+        name: "microsoft",
+        aliases: &["github-models"],
+        base_url: "https://models.inference.ai.azure.com",
+        api_key_env: "GITHUB_MODELS_TOKEN",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "claude-code",
         aliases: &[],
         base_url: "",
@@ -486,7 +496,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "zhipu_coding",
         aliases: &["codegeex"],
         base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
-        api_key_env: "ZHIPU_API_KEY",
+        api_key_env: "ZHIPU_CODING_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -496,7 +506,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "zai",
         aliases: &["z.ai"],
         base_url: "https://api.z.ai/api/paas/v4",
-        api_key_env: "ZHIPU_API_KEY",
+        api_key_env: "ZAI_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -506,7 +516,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "zai_coding",
         aliases: &[],
         base_url: "https://api.z.ai/api/coding/paas/v4",
-        api_key_env: "ZHIPU_API_KEY",
+        api_key_env: "ZAI_CODING_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -536,7 +546,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "volcengine_coding",
         aliases: &[],
         base_url: "https://ark.cn-beijing.volces.com/api/coding/v3",
-        api_key_env: "VOLCENGINE_API_KEY",
+        api_key_env: "VOLCENGINE_CODING_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -556,7 +566,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "byteplus_coding",
         aliases: &[],
         base_url: "https://ark.ap-southeast.bytepluses.com/api/coding",
-        api_key_env: "BYTEPLUS_API_KEY",
+        api_key_env: "BYTEPLUS_CODING_API_KEY",
         key_required: true,
         api_format: ApiFormat::Anthropic,
         alt_api_key_env: None,
@@ -942,6 +952,34 @@ pub fn known_providers() -> Vec<&'static str> {
         .collect()
 }
 
+/// `(env_var, provider_id)` pairs for every cloud provider in the registry
+/// that requires an API key. Both the canonical `api_key_env` and the
+/// optional `alt_api_key_env` (e.g. `GOOGLE_API_KEY` for `gemini`) are
+/// returned as separate entries so callers like `doctor` can probe each
+/// independently without losing the alias mapping.
+///
+/// Hidden providers (alternate-protocol variants like `*_coding`) are
+/// excluded — they share an env var with their parent and listing them
+/// would double-count.
+///
+/// This is the single source of truth so adding a new provider to
+/// `PROVIDER_REGISTRY` automatically surfaces it everywhere that
+/// enumerates cloud keys, instead of silently drifting from a hardcoded
+/// whitelist.
+pub fn cloud_provider_key_specs() -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+    for p in PROVIDER_REGISTRY {
+        if !p.key_required || p.hidden {
+            continue;
+        }
+        out.push((p.api_key_env, p.name));
+        if let Some(alt) = p.alt_api_key_env {
+            out.push((alt, p.name));
+        }
+    }
+    out
+}
+
 /// Check if a CLI-based provider is available (binary on PATH or credentials exist).
 pub fn cli_provider_available(name: &str) -> bool {
     match name {
@@ -1127,7 +1165,40 @@ mod tests {
         assert!(providers.contains(&"nvidia-nim"));
         assert!(providers.contains(&"novita"));
         assert!(providers.contains(&"bedrock"));
-        assert_eq!(providers.len(), 42);
+        assert!(providers.contains(&"microsoft"));
+        assert_eq!(providers.len(), 43);
+    }
+
+    /// `microsoft` (GitHub Models / Azure AI Inference) must declare its own
+    /// env var rather than reusing `GITHUB_TOKEN`, since that token is also
+    /// accepted by the IDE-side `github-copilot` provider — sharing the env
+    /// var made one credential silently activate two distinct products.
+    #[test]
+    fn test_microsoft_provider_split_from_github_copilot() {
+        let microsoft = find_provider("microsoft").expect("microsoft entry missing");
+        assert_eq!(microsoft.api_key_env, "GITHUB_MODELS_TOKEN");
+        assert_eq!(microsoft.base_url, "https://models.inference.ai.azure.com");
+        let copilot = find_provider("github-copilot").expect("github-copilot entry missing");
+        assert_eq!(
+            copilot.api_key_env, "GITHUB_TOKEN",
+            "github-copilot keeps the original env (IDE-side convention)",
+        );
+    }
+
+    /// `zai` (api.z.ai, international) and `zhipu` (open.bigmodel.cn, China)
+    /// target the same Zhipu account system but are surfaced as distinct
+    /// providers in the dashboard, so they need distinct env vars to avoid
+    /// auto-activating both off a single credential.
+    #[test]
+    fn test_zai_provider_split_from_zhipu() {
+        let zai = find_provider("zai").expect("zai entry missing");
+        assert_eq!(zai.api_key_env, "ZAI_API_KEY");
+        assert_eq!(zai.base_url, "https://api.z.ai/api/paas/v4");
+        let zhipu = find_provider("zhipu").expect("zhipu entry missing");
+        assert_eq!(
+            zhipu.api_key_env, "ZHIPU_API_KEY",
+            "zhipu keeps the original env (more-established name)",
+        );
     }
 
     #[test]

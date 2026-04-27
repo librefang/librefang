@@ -361,7 +361,7 @@ mod tests {
         );
         assert_eq!(
             router.model_for_complexity(TaskComplexity::Complex),
-            "claude-opus-4-6"
+            "claude-opus-4-7"
         );
     }
 

@@ -1484,6 +1484,11 @@ impl Default for InboxConfig {
     }
 }
 
+/// Default OTLP gRPC endpoint — matches the port the bundled observability
+/// stack (Tempo / OTel collector) binds when
+/// `auto_start_observability_stack = true`.
+pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
 /// Telemetry / observability configuration.
 ///
 /// ```toml
@@ -1520,11 +1525,37 @@ pub struct TelemetryConfig {
     pub auto_start_observability_stack: bool,
 }
 
+impl TelemetryConfig {
+    /// Whether OTLP exporter init should be skipped because no collector is
+    /// reachable. Returns `true` when:
+    ///
+    /// - `otlp_endpoint` is empty (operator opted out), OR
+    /// - `otlp_endpoint` is the default `http://localhost:4317` AND the bundled
+    ///   observability stack is not actually running — either the operator
+    ///   didn't opt in (`auto_start_observability_stack = false`), or they
+    ///   opted in but startup failed (Docker missing, port conflict, compose
+    ///   error). In both cases nothing listens on 4317 and the
+    ///   `BatchSpanProcessor` would spam `ConnectionRefused` every export
+    ///   interval.
+    ///
+    /// `stack_running` reflects the runtime fact, not the config intent — call
+    /// sites pass `Some(handle).is_some()` (or equivalent) after attempting
+    /// startup. Operators with an external collector on the default port
+    /// should set `otlp_endpoint` to the collector's address to opt back in;
+    /// the bundled-stack opt-in only helps when the stack actually comes up.
+    pub fn otlp_export_disabled(&self, stack_running: bool) -> bool {
+        if self.otlp_endpoint.is_empty() {
+            return true;
+        }
+        self.otlp_endpoint == DEFAULT_OTLP_ENDPOINT && !stack_running
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_endpoint: DEFAULT_OTLP_ENDPOINT.to_string(),
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
@@ -7597,5 +7628,73 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert_eq!(nav.default, McpTaintToolAction::Scan);
         assert!(nav.rule_sets.is_empty());
         assert_eq!(nav.paths.len(), 1);
+    }
+
+    // Issue #3136 follow-up: PR #3170 made the bundled observability stack
+    // opt-in but left `otlp_endpoint` defaulting to localhost:4317, so default
+    // installs spammed `ConnectionRefused`. `otlp_export_disabled()` is the
+    // gate that suppresses the exporter when no collector is reachable. The
+    // gate takes the runtime fact `stack_running` rather than just the config
+    // intent — `auto_start_observability_stack = true` only matters when the
+    // stack actually came up, otherwise we'd still spam.
+    #[test]
+    fn otlp_export_disabled_for_default_localhost_without_managed_stack() {
+        let cfg = TelemetryConfig::default();
+        assert!(cfg.enabled, "default still enables tracing wiring");
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "default localhost endpoint with no running stack must skip exporter"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_when_managed_stack_runs() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(true),
+            "running stack on default endpoint; export must run"
+        );
+    }
+
+    // Regression: operator opts in to auto_start but Docker is missing /
+    // compose fails / port conflicts — without this gate, exporter would
+    // still init and spam ConnectionRefused on every export interval.
+    #[test]
+    fn otlp_export_disabled_when_managed_stack_failed_to_start() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "auto_start=true but stack startup failed; default endpoint is dead"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_for_custom_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "http://otel.internal:4317".to_string(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(false),
+            "explicit non-default endpoint signals operator intent regardless of stack"
+        );
+    }
+
+    #[test]
+    fn otlp_export_disabled_for_empty_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: String::new(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(true),
+            "empty endpoint is the explicit opt-out path even when stack is up"
+        );
     }
 }

@@ -8,10 +8,18 @@ import {
 } from "../http/client";
 import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
-// Fire-and-forget: one-shot probe, test result returned to caller, no cache to invalidate.
+// Probes the provider and persists `latency_ms` + `last_tested` on the
+// kernel side, so callers must refetch the provider list to see the new
+// values. Use `onSettled` (not `onSuccess`) because the backend records the
+// timestamp even on probe failure (`result.ok === false` with HTTP 200) and
+// the dashboard surfaces that "last attempted" timing too.
 export function useTestProvider() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: testProvider,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: providerKeys.all });
+    },
   });
 }
 
