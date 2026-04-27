@@ -539,6 +539,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -952,6 +953,11 @@
             "string",
             "null"
           ]
+        },
+        "thread_ownership_enabled": {
+          "default": true,
+          "description": "Whether thread-ownership claiming applies to this channel. When set to `false`, every routed agent dispatches even if another agent already replied in the same thread — useful for \"broadcast\" channels where multiple agents are intended to chime in together. Default `true`: a single agent owns each `(channel, thread)` for the configured TTL (and an explicit @-mention re-claims for the new agent). DMs always bypass the registry. See #3334.",
+          "type": "boolean"
         },
         "threading": {
           "default": false,
@@ -2089,6 +2095,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -2250,6 +2257,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -2345,6 +2353,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -2635,6 +2644,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -2996,6 +3006,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3084,6 +3095,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3149,6 +3161,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3217,6 +3230,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3313,6 +3327,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3414,6 +3429,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3750,6 +3766,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3905,6 +3922,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -3983,6 +4001,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -4090,11 +4109,29 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        }
+      },
+      "type": "object"
+    },
+    "LlmConfig": {
+      "description": "Top-level `[llm]` section. Currently only carries `auxiliary` — primary driver configuration still lives in `[default_model]` / `[[fallback_providers]]` so this struct exists purely to namespace future LLM-routing knobs.",
+      "properties": {
+        "auxiliary": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Per-task auxiliary fallback chains. See [`AuxiliaryConfig`].",
+          "type": "object"
         }
       },
       "type": "object"
@@ -4158,6 +4195,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -4253,6 +4291,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -4338,6 +4377,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -4934,6 +4974,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -5019,6 +5060,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -5173,6 +5215,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -5241,6 +5284,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -5368,6 +5412,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -5574,6 +5619,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -5662,6 +5708,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -5814,6 +5861,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -5905,6 +5953,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6001,6 +6050,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6116,6 +6166,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6214,6 +6265,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6289,6 +6341,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6367,6 +6420,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6473,6 +6527,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6551,6 +6606,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6654,6 +6710,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6755,6 +6812,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6843,6 +6901,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -6928,6 +6987,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7006,6 +7066,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7111,6 +7172,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7206,6 +7268,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7284,6 +7347,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7379,6 +7443,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7472,6 +7537,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7550,6 +7616,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7631,6 +7698,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7719,6 +7787,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7812,6 +7881,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7890,6 +7960,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -7994,6 +8065,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8075,6 +8147,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8171,6 +8244,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8291,6 +8365,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8385,6 +8460,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8502,6 +8578,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8585,6 +8662,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8678,6 +8756,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8774,6 +8853,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8847,6 +8927,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -8946,6 +9027,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9056,6 +9138,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9146,6 +9229,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9247,6 +9331,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9343,6 +9428,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9441,6 +9527,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9539,6 +9626,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -9642,6 +9730,7 @@
                 "reply_precheck": false,
                 "reply_precheck_model": null,
                 "system_prompt": null,
+                "thread_ownership_enabled": true,
                 "threading": false,
                 "typing_mode": null,
                 "usage_footer": null
@@ -10146,6 +10235,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -10229,6 +10319,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -10442,6 +10533,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -10609,6 +10701,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -10680,6 +10773,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -11088,6 +11182,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -11252,6 +11347,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -11493,6 +11589,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -11600,6 +11697,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -11809,6 +11907,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12235,6 +12334,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12321,6 +12421,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12704,6 +12805,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12793,6 +12895,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12893,6 +12996,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -12973,6 +13077,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -13235,6 +13340,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -13321,6 +13427,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -13439,6 +13546,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -13527,6 +13635,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -13620,6 +13729,7 @@
             "reply_precheck": false,
             "reply_precheck_model": null,
             "system_prompt": null,
+            "thread_ownership_enabled": true,
             "threading": false,
             "typing_mode": null,
             "usage_footer": null
@@ -14231,6 +14341,17 @@
         "timeout_secs": 10
       },
       "description": "Link understanding configuration."
+    },
+    "llm": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LlmConfig"
+        }
+      ],
+      "default": {
+        "auxiliary": {}
+      },
+      "description": "`[llm]` section — currently carries the auxiliary side-task chain configuration. See [`LlmConfig`] / [`AuxiliaryConfig`]."
     },
     "local_probe_interval_secs": {
       "default": 60,

@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { animate } from 'motion/react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -28,37 +29,38 @@ const mdComponents = {
   a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
+/// Streams `text` character-by-character into the markdown output to
+/// give an LLM-style "typing" effect. The reveal is driven by motion's
+/// `animate()` (instead of a hand-rolled RAF) so it joins the same
+/// animation scheduler as the rest of the dashboard and respects
+/// `prefers-reduced-motion`.
+///
+/// `speed` is milliseconds-per-character (kept from the legacy API).
+/// When the source text shrinks below the already-displayed length
+/// (e.g. the upstream message restarted), the typewriter rewinds to 0.
 export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
-  const fullTextRef = useRef(text);
-  const currentIndexRef = useRef(0);
-  const lastUpdateTimeRef = useRef(0);
 
   useEffect(() => {
-    fullTextRef.current = text;
-    if (text.length < currentIndexRef.current) {
-      currentIndexRef.current = 0;
-      setDisplayed("");
-    }
-  }, [text]);
-
-  useEffect(() => {
-    let requestRef: number;
-    
-    const animate = (time: number) => {
-      if (currentIndexRef.current < fullTextRef.current.length) {
-        if (time - lastUpdateTimeRef.current >= speed) {
-          currentIndexRef.current = Math.min(currentIndexRef.current + 2, fullTextRef.current.length);
-          setDisplayed(fullTextRef.current.slice(0, currentIndexRef.current));
-          lastUpdateTimeRef.current = time;
-        }
-      }
-      requestRef = requestAnimationFrame(animate);
-    };
-
-    requestRef = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(requestRef);
-  }, [speed]);
+    // If upstream restarted the stream (new text shorter than what we already
+    // typed out), rewind. Otherwise resume from where we are.
+    const start = displayed.length > text.length ? 0 : displayed.length;
+    if (start === 0 && displayed !== "") setDisplayed("");
+    const remaining = text.length - start;
+    if (remaining <= 0) return;
+    const controls = animate(start, text.length, {
+      duration: (remaining * speed) / 1000,
+      ease: "linear",
+      onUpdate: (latest) => {
+        const idx = Math.min(Math.floor(latest), text.length);
+        setDisplayed(text.slice(0, idx));
+      },
+    });
+    return () => controls.stop();
+    // displayed intentionally excluded — re-running on every char update
+    // would restart the animation each frame. Only react to source changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, speed]);
 
   return useMemo(() => (
     <Markdown

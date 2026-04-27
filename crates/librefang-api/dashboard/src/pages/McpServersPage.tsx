@@ -1,6 +1,8 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
@@ -20,7 +22,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
@@ -655,6 +657,18 @@ export function McpServersPage() {
   const configured = data?.configured ?? [];
   const connected = data?.connected ?? [];
 
+  // First-time visitors with no servers configured land on the marketplace
+  // tab — installing a template is the obvious next step, and the empty
+  // "Servers" tab gave them nothing to act on. Only fires once per mount;
+  // if the user manually switches back to "servers", we don't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!serversQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (configured.length === 0) setTab("catalog");
+  }, [serversQuery.isSuccess, configured.length]);
+
   const connectedMap = useMemo(() => {
     const map = new Map<string, McpServerConnected>();
     for (const c of connected) map.set(serverIdentityOf(c), c);
@@ -896,6 +910,8 @@ export function McpServersPage() {
         </button>
       </div>
 
+      <AnimatePresence mode="wait">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -1129,14 +1145,15 @@ export function McpServersPage() {
           )}
         </>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Add / Edit Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={isModalOpen}
         onClose={() => { setShowAddModal(false); setEditingServer(null); setForm(defaultForm); }}
         title={editingServer ? t("mcp.edit_server") : t("mcp.add_server")}
         size="lg"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Name */}
@@ -1261,15 +1278,14 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Catalog env setup modal */}
-      <Modal
+      <DrawerPanel
         isOpen={!!installingTemplate}
         onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
         title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
         size="md"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>
@@ -1313,7 +1329,7 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Delete confirmation */}
       <ConfirmDialog

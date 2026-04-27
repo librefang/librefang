@@ -1,13 +1,16 @@
 import { formatTime } from "../lib/datetime";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { fadeInScale } from "../lib/motion";
+import { StaggerList } from "../components/ui/StaggerList";
 import { sendA2ATask, getA2ATaskStatus } from "../lib/http/client";
 import type { A2AAgentItem, A2ATaskStatus } from "../lib/http/client";
 import { useA2AAgents } from "../lib/queries/network";
 import { useDiscoverA2AAgent } from "../lib/mutations/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
@@ -101,8 +104,10 @@ export function A2APage() {
       />
 
       {/* Discover overlay */}
+      <AnimatePresence>
       {showDiscover && (
-        <Card padding="md" className="animate-fade-in-scale">
+        <motion.div variants={fadeInScale} initial="initial" animate="animate" exit="exit">
+        <Card padding="md">
           <h3 className="text-sm font-black mb-3">{t("a2a.discover_agent")}</h3>
           <div className="flex flex-col sm:flex-row gap-3">
             <input
@@ -127,7 +132,9 @@ export function A2APage() {
             </button>
           </div>
         </Card>
+        </motion.div>
       )}
+      </AnimatePresence>
 
       {agentsQuery.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2">
@@ -159,7 +166,7 @@ export function A2APage() {
                 }
               />
             ) : (
-              <div className="grid gap-3 md:grid-cols-2 stagger-children">
+              <StaggerList className="grid gap-3 md:grid-cols-2">
                 {agents.map((agent, idx) => (
                   <Card key={agent.url || idx} hover padding="md">
                     <div className="flex items-start justify-between">
@@ -202,19 +209,17 @@ export function A2APage() {
                     </div>
                   </Card>
                 ))}
-              </div>
+              </StaggerList>
             )}
           </div>
 
           {/* Send task panel */}
           {taskAgent && (
-            <Modal
+            <DrawerPanel
               isOpen
               onClose={() => setTaskAgent(null)}
-              variant="panel-right"
               size="lg"
               title={t("a2a.send_task")}
-              zIndex={200}
             >
               <div className="p-5 space-y-4">
                 <p className="text-xs text-text-dim">
@@ -244,14 +249,14 @@ export function A2APage() {
                   </button>
                 </div>
               </div>
-            </Modal>
+            </DrawerPanel>
           )}
 
           {/* Tracked tasks */}
           {trackedTasks.length > 0 && (
             <div>
               <h2 className="text-lg font-black tracking-tight mb-4">{t("a2a.tracked_tasks")}</h2>
-              <div className="space-y-2 stagger-children">
+              <StaggerList className="space-y-2">
                 {trackedTasks.map((task) => (
                   <Card key={task.id} padding="sm">
                     <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
@@ -296,7 +301,7 @@ export function A2APage() {
                     )}
                   </Card>
                 ))}
-              </div>
+              </StaggerList>
             </div>
           )}
         </>

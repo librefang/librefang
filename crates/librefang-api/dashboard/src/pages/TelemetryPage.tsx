@@ -13,6 +13,7 @@ import {
   Activity, BarChart3, Clock, Globe, TrendingUp, Zap, CheckCircle2,
   ExternalLink, Cpu, DollarSign, Bot, Wrench, MessageSquare, AlertTriangle, RotateCcw, Users,
 } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // ── Parsed metric types ──────────────────────────────────────────────
 
@@ -240,7 +241,7 @@ export function TelemetryPage() {
               <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge>
             ) : null}
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 xl:grid-cols-8 stagger-children">
+          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 xl:grid-cols-8">
             <MetricCard
               label={t("telemetry.uptime")}
               icon={<Clock className="w-3.5 h-3.5 text-success" />}
@@ -302,7 +303,7 @@ export function TelemetryPage() {
               }
               variant="success"
             />
-          </div>
+          </StaggerList>
 
           {/* ── LLM & Token Usage ── */}
           <div className="flex items-center gap-2 mt-4">
@@ -310,7 +311,7 @@ export function TelemetryPage() {
             <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.llm_usage")}</h2>
             <Badge variant="default" className="ml-2">{t("telemetry.tokens_1h")}</Badge>
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5 stagger-children">
+          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
             <MetricCard
               label={t("telemetry.total_tokens")}
               icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
@@ -341,10 +342,10 @@ export function TelemetryPage() {
               value={<p className="text-2xl font-black tracking-tight" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>}
               variant="brand"
             />
-          </div>
+          </StaggerList>
 
           {/* ── Per-Agent Table + HTTP Endpoints ── */}
-          <div className="grid gap-6 md:grid-cols-2 stagger-children">
+          <StaggerList className="grid gap-6 md:grid-cols-2">
             {/* Per-Agent Token Usage */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
@@ -389,7 +390,7 @@ export function TelemetryPage() {
                 </div>
               )}
             </Card>
-          </div>
+          </StaggerList>
 
           {/* ── Raw Prometheus ── */}
           <Card padding="lg">

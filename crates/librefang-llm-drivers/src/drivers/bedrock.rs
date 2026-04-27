@@ -811,12 +811,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            driver.build_endpoint("anthropic.claude-sonnet-4-6"),
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/model/anthropic.claude-sonnet-4-6/converse"
+            driver.build_endpoint("anthropic.canonical-model-one"),
+            "https://bedrock-runtime.eu-west-1.amazonaws.com/model/anthropic.canonical-model-one/converse"
         );
         assert_eq!(
-            driver.build_endpoint("eu.anthropic.claude-sonnet-4-6"),
-            "https://bedrock-runtime.eu-west-1.amazonaws.com/model/eu.anthropic.claude-sonnet-4-6/converse"
+            driver.build_endpoint("eu.anthropic.canonical-model-one"),
+            "https://bedrock-runtime.eu-west-1.amazonaws.com/model/eu.anthropic.canonical-model-one/converse"
         );
     }
 

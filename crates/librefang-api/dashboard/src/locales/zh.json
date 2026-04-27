@@ -25,7 +25,7 @@
     "skills": "技能",
     "hands": "Hands",
     "plugins": "插件",
-    "mcp_servers": "MCP 服务器",
+    "mcp_servers": "MCP",
     "models": "模型",
     "media": "媒体生成",
     "analytics": "分析",
@@ -139,7 +139,9 @@
     "expand": "展开",
     "collapse": "收起",
     "add": "添加",
-    "remove": "移除"
+    "remove": "移除",
+    "discard": "放弃更改",
+    "more_actions": "更多操作"
   },
   "status": {
     "running": "运行中",
@@ -1123,7 +1125,7 @@
     "nodes_unit": "个节点",
     "automation_hub": "自动化中心",
     "templates": "模板",
-    "template_library": "模板库",
+    "template_library": "工作流市场",
     "my_workflows": "我的工作流",
     "use_template": "使用模板",
     "create_blank": "创建空白工作流",
@@ -2117,6 +2119,7 @@
     "all_tiers": "全部",
     "available_only": "仅可用",
     "available": "可用",
+    "availability": "可用性",
     "results": "个模型",
     "free": "免费",
     "no_results": "没有匹配的模型。",
@@ -2516,7 +2519,7 @@
     "auth_start_failed": "启动认证失败",
     "auth_revoke_failed": "撤销认证失败",
     "tab_my_servers": "服务器",
-    "tab_catalog": "目录",
+    "tab_catalog": "MCP 市场",
     "catalog_subtitle": "浏览并安装预配置的 MCP 服务器模板",
     "catalog_empty": "暂无可用的 MCP 服务器模板",
     "catalog_empty_desc": "MCP 服务器模板将在 Registry 同步后显示。",
@@ -2737,7 +2740,23 @@
         "hint": "已配置企业的企业微信 / 微信 OpenID。",
         "example": "abc123@im.wechat"
       }
-    }
+    },
+    "row_actions": "更多操作",
+    "view_budget_chip": "预算",
+    "view_policy_chip": "权限",
+    "rotate_key_only_chance": "这是复制此密钥的唯一机会。关闭此对话框后，明文将丢失，服务器无法再次生成。",
+    "rotate_key_must_copy": "请先点击「复制」。复制到剪贴板后，关闭按钮才会启用。",
+    "rotate_key_failed_toast": "轮换失败：{{message}}",
+    "rotate_key_copy_failed": "复制失败，请手动选中并复制密钥后再关闭对话框。",
+    "rotate_key_copied_confirm": "已复制，可以关闭",
+    "csv_drop_aria": "上传 CSV 文件：拖放到此处或激活以浏览",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "平台",
+    "wizard_step_identity": "标识",
+    "wizard_user_chip": "正在关联标识到",
+    "wizard_show_warning": "为什么重要",
+    "wizard_hide_warning": "隐藏警告",
+    "wizard_step_back_aria": "返回第 {{n}} 步"
   },
   "userBudget": {
     "fields": {
@@ -2749,6 +2768,9 @@
     "errors": {
       "non_negative": "{{field}} 必须是有限的非负数",
       "threshold_range": "alert_threshold 必须在 0.0..=1.0 范围内"
+    },
+    "toast": {
+      "saved": "支出上限已保存"
     }
   },
   "userPolicy": {
@@ -2760,7 +2782,13 @@
       "empty_entry": "{{field}} 中存在空白条目",
       "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
-    }
+    },
+    "discard": "放弃更改",
+    "no_changes": "无未保存的更改",
+    "unsaved_changes": "有未保存的更改",
+    "save_disabled_invalid": "请先修正上方的校验错误才能保存",
+    "discard_confirm_title": "放弃未保存的更改？",
+    "discard_confirm_body": "将所有字段恢复为上次从服务器加载的值。自上次保存以来的修改将会丢失。"
   },
   "permissionSimulator": {
     "status": {
@@ -2819,6 +2847,7 @@
     "saving": "保存中…",
     "clear": "清除上限",
     "clearing": "清除中…",
+    "discard": "放弃更改",
     "zero_means_unlimited": "将任意时间窗口设为 0 表示该窗口不限额。阈值是任一限额触发 BudgetExceeded 审计事件时的比例。"
   },
   "user_policy": {

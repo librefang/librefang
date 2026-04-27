@@ -1,5 +1,5 @@
 import { formatBytes } from "../lib/format";
-import { useState, useCallback, startTransition } from "react";
+import { useState, useCallback, useEffect, useRef, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 import type { PluginItem, RegistryEntry } from "../api";
 import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
@@ -15,13 +15,16 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 
 const EMPTY_PLUGINS: PluginItem[] = [];
 const EMPTY_REGISTRIES: RegistryEntry[] = [];
@@ -71,6 +74,18 @@ export function PluginsPage() {
   const depsMutation = useInstallPluginDeps();
 
   const plugins = pluginsQuery.data?.plugins ?? EMPTY_PLUGINS;
+
+  // First-time visitors with nothing installed land on the marketplace
+  // tab — installing from the registry is the obvious next step. Fires
+  // once per mount; if the user manually flips back to "Installed", the
+  // next refetch doesn't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!pluginsQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (plugins.length === 0) setTab("registry");
+  }, [pluginsQuery.isSuccess, plugins.length]);
   const registries = registriesQuery.data?.registries ?? EMPTY_REGISTRIES;
 
   const onRefresh = useCallback(() => {
@@ -164,7 +179,9 @@ export function PluginsPage() {
         </button>
       </div>
 
-      {/* Installed Tab */}
+      {/* Installed / Registry Tab content */}
+      <AnimatePresence mode="wait">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit">
       {tab === "installed" && (
         <div>
           {pluginsQuery.isLoading ? (
@@ -176,7 +193,7 @@ export function PluginsPage() {
               description={t("plugins.no_plugins_desc")}
             />
           ) : (
-            <div className="space-y-2 stagger-children">
+            <StaggerList className="space-y-2">
               {plugins.map(p => (
                 <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
                   <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
@@ -219,7 +236,7 @@ export function PluginsPage() {
                   </div>
                 </div>
               ))}
-            </div>
+            </StaggerList>
           )}
         </div>
       )}
@@ -258,7 +275,7 @@ export function PluginsPage() {
                   {reg.plugins.length === 0 ? (
                     <p className="text-xs text-text-dim italic">{t("plugins.no_available")}</p>
                   ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
+                    <StaggerList className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       {reg.plugins.map(rp => (
                         <Card
                           key={rp.name}
@@ -321,7 +338,7 @@ export function PluginsPage() {
                           </div>
                         </Card>
                       ))}
-                    </div>
+                    </StaggerList>
                   )}
                 </div>
               ))}
@@ -329,9 +346,11 @@ export function PluginsPage() {
           )}
         </div>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Install Modal */}
-      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md">
         <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
@@ -395,10 +414,10 @@ export function PluginsPage() {
                 <Button variant="secondary" onClick={() => setShowInstall(false)}>{t("common.cancel")}</Button>
               </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Scaffold Modal */}
-      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm" variant="panel-right">
+      <DrawerPanel isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
@@ -446,7 +465,7 @@ export function PluginsPage() {
             <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
     </div>
   );
 }

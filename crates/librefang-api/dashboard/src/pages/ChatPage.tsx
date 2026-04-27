@@ -3,6 +3,8 @@ import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import rehypeKatex from "rehype-katex";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
+import { motion } from "motion/react";
+import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -854,7 +856,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
   }, [message.content, isUser]);
 
   return (
-    <div className={`flex animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
+    <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
@@ -1054,7 +1056,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
           </div>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 });
 
@@ -2147,7 +2149,7 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
     : null;
 
   return (
-    <div className={`mx-auto w-full max-w-lg rounded-2xl border ${rs.border} ${rs.bg} p-4 shadow-lg animate-fade-in-up`}>
+    <motion.div className={`mx-auto w-full max-w-lg rounded-2xl border ${rs.border} ${rs.bg} p-4 shadow-lg`} variants={fadeInUp} initial="initial" animate="animate">
       {/* Header */}
       <div className="flex items-center gap-2 mb-3">
         <ShieldAlert className={`h-5 w-5 ${rs.text}`} />
@@ -2201,7 +2203,7 @@ function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onReso
           {t("approvals.reject")}
         </button>
       </div>
-    </div>
+    </motion.div>
   );
 }
 

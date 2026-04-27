@@ -2,6 +2,8 @@ import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from
 import type { UseQueryResult } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import { router } from "../router";
 import {
   type HandDefinitionItem,
@@ -43,6 +45,7 @@ import {
   useHandStatsBatch,
   useHandManifestToml,
 } from "../lib/queries/hands";
+import { StaggerList } from "../components/ui/StaggerList";
 
 const TomlViewer = lazy(() => import("../components/TomlViewer").then(m => ({ default: m.TomlViewer })));
 
@@ -57,7 +60,7 @@ import {
 } from "../lib/mutations/hands";
 import { useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from "../lib/mutations/schedules";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCronJobs } from "../lib/queries/runtime";
 
 
@@ -140,7 +143,7 @@ function HandDetailPanel({
 
   return (
     <>
-      <Modal isOpen onClose={onClose} variant="drawer-right" size="2xl" hideCloseButton>
+      <DrawerPanel isOpen onClose={onClose} size="2xl" hideCloseButton>
         {/* Hero header — sticky inside the drawer's single scroll container
             so identity + close stay reachable on long detail content. */}
         <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface z-10">
@@ -293,7 +296,7 @@ function HandDetailPanel({
               settingsQuery={settingsQuery}
             />
         </div>
-      </Modal>
+      </DrawerPanel>
       <Suspense fallback={null}>
         <TomlViewer
           isOpen={showManifest}
@@ -444,6 +447,8 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
 
       {/* Tab content */}
       <div>
+        <AnimatePresence mode="wait">
+        <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
 
         {activeTab === "agents" && (
           <div className="space-y-2">
@@ -511,6 +516,8 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
             handName={hand.name || hand.id}
           />
         )}
+        </motion.div>
+        </AnimatePresence>
       </div>
     </div>
   );
@@ -1516,7 +1523,7 @@ export function HandsPage() {
           }
         />
       ) : (
-        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6 stagger-children">
+        <StaggerList className="grid gap-3 grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 3xl:grid-cols-6">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
             const instance = instanceByHandId.get(h.id);
@@ -1535,7 +1542,7 @@ export function HandsPage() {
               />
             );
           })}
-        </div>
+        </StaggerList>
       )}
 
       {/* Detail side panel */}

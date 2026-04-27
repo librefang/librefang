@@ -14,6 +14,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { StaggerList } from "../components/ui/StaggerList";
 
 export function SessionsPage() {
   const { t } = useTranslation();
@@ -125,7 +126,7 @@ export function SessionsPage() {
           description={t("sessions.empty_desc")}
         />
       ) : (
-        <div className="space-y-2 stagger-children">
+        <StaggerList className="space-y-2">
           {sessions.map(s => {
             const agent = agentMap.get(s.agent_id || "");
             return (
@@ -203,7 +204,7 @@ export function SessionsPage() {
               </div>
             );
           })}
-        </div>
+        </StaggerList>
       )}
     </div>
   );

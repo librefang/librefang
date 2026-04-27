@@ -1163,16 +1163,19 @@ mod tests {
     /// is now only consumed here in `model_catalog`.
     #[test]
     fn test_aliases_catalog_parse() {
+        // Pure parser test — alias names and target ids are placeholders so
+        // the assertions don't have to track whatever the registry's
+        // canonical Sonnet / GPT ids happen to be this week.
         let toml_str = r#"
 [aliases]
-sonnet = "claude-sonnet-4-20250514"
-gpt4 = "gpt-4o"
+my-alias = "canonical-target-one"
+other-alias = "canonical-target-two"
 "#;
         let file: librefang_types::model_catalog::AliasesCatalogFile =
             toml::from_str(toml_str).unwrap();
         assert_eq!(file.aliases.len(), 2);
-        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
-        assert_eq!(file.aliases["gpt4"], "gpt-4o");
+        assert_eq!(file.aliases["my-alias"], "canonical-target-one");
+        assert_eq!(file.aliases["other-alias"], "canonical-target-two");
     }
 
     /// P2 regression: when registry classification is unavailable

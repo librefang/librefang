@@ -3209,7 +3209,7 @@ mod tests {
         // config.yaml
         std::fs::write(
             dir.join("config.yaml"),
-            "provider: anthropic\nmodel: claude-sonnet-4-20250514\napi_key_env: ANTHROPIC_API_KEY\n",
+            "provider: anthropic\nmodel: canonical-id-one\napi_key_env: ANTHROPIC_API_KEY\n",
         )
         .unwrap();
 
@@ -3244,7 +3244,7 @@ mod tests {
         let json5_content = r##"{
   agents: {
     defaults: {
-      model: "anthropic/claude-sonnet-4-20250514",
+      model: "provider-a/canonical-id-one",
       tools: { profile: "coding" }
     },
     list: [
@@ -3562,7 +3562,7 @@ mod tests {
       {
         id: "coder",
         name: "Coder",
-        model: "anthropic/claude-sonnet-4-20250514",
+        model: "provider-a/canonical-id-one",
         tools: { profile: "coding" },
         identity: "You are a coding assistant."
       }
@@ -3694,39 +3694,42 @@ mod tests {
 
     #[test]
     fn test_json5_agent_model_parsing() {
-        // Simple model ref
-        let (p, m) = split_model_ref("anthropic/claude-sonnet-4-20250514");
-        assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        // Pure parser tests — model ids are placeholders so the assertions
+        // don't track which Sonnet / Gemini / DeepSeek id is canonical
+        // in the registry this week. The "no slash fallback" case still
+        // pins the provider to "anthropic" because that's the documented
+        // default-provider behaviour of split_model_ref, not a catalog fact.
+        let (p, m) = split_model_ref("provider-a/canonical-id-one");
+        assert_eq!(p, "provider-a");
+        assert_eq!(m, "canonical-id-one");
 
-        // Provider mapping
-        let (p, m) = split_model_ref("google/gemini-2.5-flash");
-        assert_eq!(p, "google");
-        assert_eq!(m, "gemini-2.5-flash");
+        let (p, m) = split_model_ref("provider-b/canonical-id-two");
+        assert_eq!(p, "provider-b");
+        assert_eq!(m, "canonical-id-two");
 
         // No slash fallback
-        let (p, m) = split_model_ref("claude-sonnet-4-20250514");
+        let (p, m) = split_model_ref("bare-id");
         assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        assert_eq!(m, "bare-id");
 
         // Detailed model
         let json_str =
-            r#"{ "primary": "deepseek/deepseek-chat", "fallbacks": ["groq/llama-3.3-70b"] }"#;
+            r#"{ "primary": "provider-c/primary-id", "fallbacks": ["provider-d/fallback-id"] }"#;
         let model: OpenClawAgentModel = serde_json::from_str(json_str).unwrap();
         match model {
             OpenClawAgentModel::Detailed(d) => {
-                assert_eq!(d.primary.unwrap(), "deepseek/deepseek-chat");
+                assert_eq!(d.primary.unwrap(), "provider-c/primary-id");
                 assert_eq!(d.fallbacks.len(), 1);
             }
             _ => panic!("Expected Detailed variant"),
         }
 
         // Simple model (string)
-        let json_str = r#""anthropic/claude-sonnet-4-20250514""#;
+        let json_str = r#""provider-a/canonical-id-one""#;
         let model: OpenClawAgentModel = serde_json::from_str(json_str).unwrap();
         match model {
             OpenClawAgentModel::Simple(s) => {
-                assert_eq!(s, "anthropic/claude-sonnet-4-20250514");
+                assert_eq!(s, "provider-a/canonical-id-one");
             }
             _ => panic!("Expected Simple variant"),
         }
@@ -4082,21 +4085,24 @@ mod tests {
 
     #[test]
     fn test_model_ref_split() {
-        let (p, m) = split_model_ref("anthropic/claude-sonnet-4-20250514");
-        assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        // Pure split test — provider/model ids are placeholders to keep the
+        // assertions from drifting whenever the registry retires a specific
+        // model id.
+        let (p, m) = split_model_ref("provider-a/canonical-id-one");
+        assert_eq!(p, "provider-a");
+        assert_eq!(m, "canonical-id-one");
 
-        let (p, m) = split_model_ref("deepseek/deepseek-chat");
-        assert_eq!(p, "deepseek");
-        assert_eq!(m, "deepseek-chat");
+        let (p, m) = split_model_ref("provider-b/canonical-id-two");
+        assert_eq!(p, "provider-b");
+        assert_eq!(m, "canonical-id-two");
 
-        let (p, m) = split_model_ref("google/gemini-2.5-flash");
-        assert_eq!(p, "google");
-        assert_eq!(m, "gemini-2.5-flash");
+        let (p, m) = split_model_ref("provider-c/canonical-id-three");
+        assert_eq!(p, "provider-c");
+        assert_eq!(m, "canonical-id-three");
 
-        let (p, m) = split_model_ref("groq/llama-3.3-70b-versatile");
-        assert_eq!(p, "groq");
-        assert_eq!(m, "llama-3.3-70b-versatile");
+        let (p, m) = split_model_ref("provider-d/canonical-id-four");
+        assert_eq!(p, "provider-d");
+        assert_eq!(m, "canonical-id-four");
 
         // No slash
         let (p, m) = split_model_ref("some-model");
@@ -4148,7 +4154,7 @@ mod tests {
         let json5_content = r#"{
   agents: {
     defaults: {
-      model: "anthropic/claude-sonnet-4-20250514"
+      model: "provider-a/canonical-id-one"
     },
     list: [
       {

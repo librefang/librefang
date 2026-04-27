@@ -4542,3 +4542,82 @@ async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Issue #3298 — deterministic prompt ordering for LLM-bound registries.
+//
+// `render_mcp_summary` is the boundary where the MCP server registry crosses
+// into the system prompt. Before #3298 it used a `HashMap<String, Vec<String>>`
+// which iterates non-deterministically, producing byte-different prompts for
+// the same logical input on every process and silently invalidating provider
+// prompt caches. The two tests below pin the contract: the rendered string
+// MUST be byte-identical regardless of input ordering.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_summary_is_byte_identical_across_input_orders() {
+    // Same set of MCP tools, two different insertion orders.
+    let configured = vec![
+        "filesystem".to_string(),
+        "github".to_string(),
+        "weather".to_string(),
+    ];
+
+    let order_a = vec![
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_filesystem_list_directory".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_github_search".to_string(),
+        "mcp_weather_forecast".to_string(),
+    ];
+
+    let order_b = vec![
+        // Reverse order, plus servers interleaved differently.
+        "mcp_weather_forecast".to_string(),
+        "mcp_github_search".to_string(),
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_filesystem_list_directory".to_string(),
+    ];
+
+    let allowlist: Vec<String> = Vec::new();
+    let summary_a = super::render_mcp_summary(&order_a, &configured, &allowlist);
+    let summary_b = super::render_mcp_summary(&order_b, &configured, &allowlist);
+
+    assert_eq!(
+        summary_a, summary_b,
+        "MCP summary must be byte-identical across input orderings (#3298)"
+    );
+
+    // Sanity-check that the summary is non-trivial and mentions every server
+    // in lexicographic order — `filesystem` before `github` before `weather`.
+    let fs_pos = summary_a.find("- filesystem:").expect("filesystem listed");
+    let gh_pos = summary_a.find("- github:").expect("github listed");
+    let wx_pos = summary_a.find("- weather:").expect("weather listed");
+    assert!(fs_pos < gh_pos && gh_pos < wx_pos);
+}
+
+#[test]
+fn mcp_summary_inner_tool_list_is_sorted() {
+    let configured = vec!["github".to_string()];
+
+    // Connect-order Vec puts `search` before `create_issue` — render must
+    // still emit them alphabetically.
+    let tools = vec![
+        "mcp_github_search".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_github_close_pr".to_string(),
+    ];
+
+    let allowlist: Vec<String> = Vec::new();
+    let summary = super::render_mcp_summary(&tools, &configured, &allowlist);
+
+    // The inner list joined with ", " must appear in alphabetical order.
+    let close_pos = summary.find("close_pr").expect("tool listed");
+    let create_pos = summary.find("create_issue").expect("tool listed");
+    let search_pos = summary.find("search").expect("tool listed");
+    assert!(
+        close_pos < create_pos && create_pos < search_pos,
+        "Inner tool list must be sorted; got: {summary}"
+    );
+}

@@ -14,7 +14,7 @@ import type { CronDeliveryTarget } from "../lib/http/client";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { DeliveryTargetsEditor } from "../components/ui/DeliveryTargetsEditor";
 import { truncateId } from "../lib/string";
 import { formatTriggerPattern } from "../lib/triggerPattern";
@@ -29,6 +29,7 @@ import {
   useUpdateTrigger,
   useDeleteTrigger,
 } from "../lib/mutations/schedules";
+import { StaggerList } from "../components/ui/StaggerList";
 
 const TRIGGER_PATTERN_PRESETS = [
   { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
@@ -277,7 +278,7 @@ export function SchedulerPage() {
             title={t("scheduler.no_schedules")}
           />
         ) : (
-          <div className="space-y-2 stagger-children">
+          <StaggerList className="space-y-2">
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               const isEnabled = s.enabled !== false;
@@ -362,7 +363,7 @@ export function SchedulerPage() {
                 </div>
               );
             })}
-          </div>
+          </StaggerList>
         )}
       </div>
 
@@ -377,7 +378,7 @@ export function SchedulerPage() {
             title={t("common.no_data")}
           />
         ) : (
-          <div className="space-y-2 stagger-children">
+          <StaggerList className="space-y-2">
             {triggers.map((tr: TriggerItem) => {
               const isEnabled = tr.enabled !== false;
               const targetAgent = agentMap.get(tr.target_agent_id ?? "");
@@ -435,12 +436,12 @@ export function SchedulerPage() {
                 </div>
               );
             })}
-          </div>
+          </StaggerList>
         )}
       </div>
 
       {/* Create Modal */}
-      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={showCreate} onClose={() => setShowCreate(false)} title={t("scheduler.create_job")} size="md">
         {/* Mode tabs */}
         <div className="flex gap-1 px-5 pt-4">
           <button
@@ -598,10 +599,10 @@ export function SchedulerPage() {
             </div>
           </form>
         )}
-      </Modal>
+      </DrawerPanel>
 
       {/* Edit Delivery Targets Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={!!editTargetsSchedule}
         onClose={() => {
           if (setDeliveryTargetsMut.isPending) return;
@@ -610,7 +611,6 @@ export function SchedulerPage() {
         }}
         title={t("scheduler.delivery.edit_modal_title", { defaultValue: "Edit delivery targets" })}
         size="lg"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {editTargetsSchedule && (
@@ -663,10 +663,10 @@ export function SchedulerPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Edit Trigger Modal */}
-      <Modal isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md" variant="panel-right">
+      <DrawerPanel isOpen={!!editTrigger} onClose={() => setEditTrigger(null)} title="Edit trigger" size="md">
         <form onSubmit={handleEditTrigger} className="p-5 space-y-4">
           {editTrigger && (
             <div className="rounded-xl bg-warning/5 border border-warning/20 px-3 py-2 text-[10px] text-text-dim/60">
@@ -731,7 +731,7 @@ export function SchedulerPage() {
             <Button type="button" variant="secondary" onClick={() => setEditTrigger(null)}>{t("common.cancel")}</Button>
           </div>
         </form>
-      </Modal>
+      </DrawerPanel>
     </div>
   );
 }

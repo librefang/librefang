@@ -1,6 +1,8 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { fadeInScale, pageTransition } from "./lib/motion";
 import {
   Globe,
   Sun,
@@ -41,6 +43,7 @@ import {
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
+import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
@@ -137,7 +140,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
-      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+      <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
             <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
@@ -240,7 +243,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             </button>
           </form>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -311,7 +314,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+      <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
           <div className="flex items-center justify-between px-6 pt-6 pb-4">
             <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
@@ -402,7 +405,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
             </div>
           </form>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -806,17 +809,35 @@ export function App() {
           className={`bg-main ${isFullHeightPage ? "flex flex-col flex-1 overflow-hidden" : "flex-1 overflow-y-auto overflow-x-hidden"}`}
           tabIndex={-1}
         >
-          {isFullHeightPage ? (
-            <div className="flex flex-col flex-1 min-h-0">
-              <Outlet />
-            </div>
-          ) : (
-            <div className="w-full p-3 sm:p-4 lg:p-8">
-              <Outlet />
-            </div>
-          )}
+          <AnimatePresence mode="wait" initial={false}>
+            {isFullHeightPage ? (
+              <motion.div
+                key={`full:${location.pathname}`}
+                className="flex flex-col flex-1 min-h-0"
+                variants={pageTransition}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+              >
+                <Outlet />
+              </motion.div>
+            ) : (
+              <motion.div
+                key={`std:${location.pathname}`}
+                className="w-full p-3 sm:p-4 lg:p-8"
+                variants={pageTransition}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+              >
+                <Outlet />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
       </div>
+
+      <PushDrawer />
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
