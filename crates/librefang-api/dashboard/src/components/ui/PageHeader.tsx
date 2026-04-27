@@ -19,6 +19,17 @@ function toHelpMarkdown(s: string): string {
       // ASCII `:` and the Chinese full-width colon `：`. The trailing
       // colon is dropped — the heading visual replaces it.
       .replace(/^([^\s:：0-9·\-#][^:：\n]*)[:：]\s*$/gm, "## $1")
+      // Bare http(s) URL → `[url](url)` so it renders as a clickable
+      // link. Skips URLs already wrapped in markdown link syntax (`[..](..)`)
+      // by checking the preceding char isn't `[` or `(`. Stops at
+      // whitespace, ASCII `)` / `(`, Chinese `）` / `（`, quotes, `<`, `>`,
+      // and trailing punctuation like `,` / `.` / `;` / `:` so a sentence-
+      // ending dot or full-width close-paren after the URL doesn't get
+      // swallowed into the link.
+      .replace(
+        /(?<![[(])\bhttps?:\/\/[^\s()（）<>"'`,。，；：]+/g,
+        (m) => `[${m}](${m})`,
+      )
   );
 }
 
