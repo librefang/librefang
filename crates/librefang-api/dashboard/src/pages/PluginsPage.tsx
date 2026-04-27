@@ -1,5 +1,5 @@
 import { formatBytes } from "../lib/format";
-import { useState, useCallback, startTransition } from "react";
+import { useState, useCallback, useEffect, useRef, startTransition } from "react";
 import { useTranslation } from "react-i18next";
 import type { PluginItem, RegistryEntry } from "../api";
 import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
@@ -74,6 +74,18 @@ export function PluginsPage() {
   const depsMutation = useInstallPluginDeps();
 
   const plugins = pluginsQuery.data?.plugins ?? EMPTY_PLUGINS;
+
+  // First-time visitors with nothing installed land on the marketplace
+  // tab — installing from the registry is the obvious next step. Fires
+  // once per mount; if the user manually flips back to "Installed", the
+  // next refetch doesn't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!pluginsQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (plugins.length === 0) setTab("registry");
+  }, [pluginsQuery.isSuccess, plugins.length]);
   const registries = registriesQuery.data?.registries ?? EMPTY_REGISTRIES;
 
   const onRefresh = useCallback(() => {
