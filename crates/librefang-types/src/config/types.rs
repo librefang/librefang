@@ -1484,6 +1484,11 @@ impl Default for InboxConfig {
     }
 }
 
+/// Default OTLP gRPC endpoint — matches the port the bundled observability
+/// stack (Tempo / OTel collector) binds when
+/// `auto_start_observability_stack = true`.
+pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
 /// Telemetry / observability configuration.
 ///
 /// ```toml
@@ -1520,11 +1525,33 @@ pub struct TelemetryConfig {
     pub auto_start_observability_stack: bool,
 }
 
+impl TelemetryConfig {
+    /// Whether OTLP exporter init should be skipped because no collector is
+    /// reachable. Returns `true` when:
+    ///
+    /// - `otlp_endpoint` is empty (operator opted out), OR
+    /// - `otlp_endpoint` is the default `http://localhost:4317` AND the daemon
+    ///   isn't auto-starting the bundled stack — i.e. nobody is listening on
+    ///   that port and the BatchSpanProcessor would just spam
+    ///   `ConnectionRefused` every export interval.
+    ///
+    /// Operators with an external collector on the default port should either
+    /// flip `auto_start_observability_stack = true` (if they want our stack)
+    /// or set `otlp_endpoint` explicitly (e.g. `http://127.0.0.1:4317`) to opt
+    /// back in.
+    pub fn otlp_export_disabled(&self) -> bool {
+        if self.otlp_endpoint.is_empty() {
+            return true;
+        }
+        self.otlp_endpoint == DEFAULT_OTLP_ENDPOINT && !self.auto_start_observability_stack
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_endpoint: DEFAULT_OTLP_ENDPOINT.to_string(),
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
@@ -7597,5 +7624,55 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert_eq!(nav.default, McpTaintToolAction::Scan);
         assert!(nav.rule_sets.is_empty());
         assert_eq!(nav.paths.len(), 1);
+    }
+
+    // Issue #3136 follow-up: PR #3170 made the bundled observability stack
+    // opt-in but left `otlp_endpoint` defaulting to localhost:4317, so default
+    // installs spammed `ConnectionRefused`. `otlp_export_disabled()` is the
+    // gate that suppresses the exporter when no collector is reachable.
+    #[test]
+    fn otlp_export_disabled_for_default_localhost_without_managed_stack() {
+        let cfg = TelemetryConfig::default();
+        assert!(cfg.enabled, "default still enables tracing wiring");
+        assert!(
+            cfg.otlp_export_disabled(),
+            "default localhost endpoint + auto_start=false must skip exporter"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_when_managed_stack_runs() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(),
+            "daemon-managed stack listens on default endpoint; export must run"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_for_custom_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "http://otel.internal:4317".to_string(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(),
+            "explicit non-default endpoint signals operator intent"
+        );
+    }
+
+    #[test]
+    fn otlp_export_disabled_for_empty_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: String::new(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(),
+            "empty endpoint is the explicit opt-out path"
+        );
     }
 }

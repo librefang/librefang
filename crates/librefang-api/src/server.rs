@@ -1101,12 +1101,26 @@ pub async fn run_daemon(
     kernel.start_background_agents().await;
 
     // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
-    // in and the config has `telemetry.enabled = true`.
+    // in and the config has `telemetry.enabled = true`. Skip the exporter when
+    // no collector is reachable (default localhost endpoint without daemon-
+    // managed stack, or explicit empty endpoint) — issue #3136 follow-up:
+    // PR #3170 made the bundled stack opt-in but left the exporter pointing
+    // at localhost:4317 by default, so the BatchSpanProcessor would spam
+    // ConnectionRefused on every default install.
     #[cfg(feature = "telemetry")]
     {
         let cfg = kernel.config_ref();
         if cfg.telemetry.enabled {
-            if let Err(e) = crate::telemetry::init_otel_tracing(
+            if cfg.telemetry.otlp_export_disabled() {
+                tracing::info!(
+                    otlp_endpoint = %cfg.telemetry.otlp_endpoint,
+                    auto_start_observability_stack =
+                        cfg.telemetry.auto_start_observability_stack,
+                    "Telemetry OTLP exporter skipped: no collector configured. \
+                     Set telemetry.auto_start_observability_stack = true or \
+                     override telemetry.otlp_endpoint to enable trace export."
+                );
+            } else if let Err(e) = crate::telemetry::init_otel_tracing(
                 &cfg.telemetry.otlp_endpoint,
                 &cfg.telemetry.service_name,
                 cfg.telemetry.sample_rate,
