@@ -831,7 +831,7 @@ async fn handle_text_message(
                             "type": "command_result",
                             "message": format!(
                                 "**Vision not supported** — the current model `{}` cannot analyze images. \
-                                 Switch to a vision-capable model (e.g. `gemini-2.5-flash`, `claude-sonnet-4-20250514`, `gpt-4o`) \
+                                 Switch to a vision-capable model (e.g. `gemini-2.5-flash`, `sonnet`, `gpt-4o`) \
                                  with `/model <name>` for image analysis.",
                                 model_name
                             ),

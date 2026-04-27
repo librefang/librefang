@@ -407,7 +407,7 @@ impl Default for LegacyYamlConfig {
     fn default() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "sonnet".to_string(),
             api_key_env: None,
             base_url: None,
             temperature: None,
@@ -1250,12 +1250,7 @@ fn migrate_config_from_json(
             OpenClawAgentModel::Detailed(d) => d.primary.clone(),
         })
         .map(|m| split_model_ref(&m))
-        .unwrap_or_else(|| {
-            (
-                "anthropic".to_string(),
-                "claude-sonnet-4-20250514".to_string(),
-            )
-        });
+        .unwrap_or_else(|| ("anthropic".to_string(), "sonnet".to_string()));
 
     let api_key_env = default_api_key_env(&provider);
 
@@ -1847,8 +1842,8 @@ fn convert_agent_from_json(
     let display_name = entry.name.clone().unwrap_or_else(|| id.clone());
 
     // Resolve model
-    let primary_ref = extract_primary_model(entry, defaults)
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string());
+    let primary_ref =
+        extract_primary_model(entry, defaults).unwrap_or_else(|| "anthropic/sonnet".to_string());
     let (provider, model) = split_model_ref(&primary_ref);
 
     // Resolve fallback models
@@ -2936,9 +2931,7 @@ fn convert_legacy_agent(
         .map(|p| map_provider(&p))
         .unwrap_or_else(|| "anthropic".to_string());
 
-    let model = oc
-        .model
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+    let model = oc.model.unwrap_or_else(|| "sonnet".to_string());
 
     let system_prompt = oc.system_prompt.unwrap_or_else(|| {
         format!(
@@ -3209,7 +3202,7 @@ mod tests {
         // config.yaml
         std::fs::write(
             dir.join("config.yaml"),
-            "provider: anthropic\nmodel: claude-sonnet-4-20250514\napi_key_env: ANTHROPIC_API_KEY\n",
+            "provider: anthropic\nmodel: sonnet\napi_key_env: ANTHROPIC_API_KEY\n",
         )
         .unwrap();
 
@@ -3244,7 +3237,7 @@ mod tests {
         let json5_content = r##"{
   agents: {
     defaults: {
-      model: "anthropic/claude-sonnet-4-20250514",
+      model: "anthropic/sonnet",
       tools: { profile: "coding" }
     },
     list: [
@@ -3562,7 +3555,7 @@ mod tests {
       {
         id: "coder",
         name: "Coder",
-        model: "anthropic/claude-sonnet-4-20250514",
+        model: "anthropic/sonnet",
         tools: { profile: "coding" },
         identity: "You are a coding assistant."
       }
@@ -3695,9 +3688,9 @@ mod tests {
     #[test]
     fn test_json5_agent_model_parsing() {
         // Simple model ref
-        let (p, m) = split_model_ref("anthropic/claude-sonnet-4-20250514");
+        let (p, m) = split_model_ref("anthropic/sonnet");
         assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        assert_eq!(m, "sonnet");
 
         // Provider mapping
         let (p, m) = split_model_ref("google/gemini-2.5-flash");
@@ -3705,9 +3698,9 @@ mod tests {
         assert_eq!(m, "gemini-2.5-flash");
 
         // No slash fallback
-        let (p, m) = split_model_ref("claude-sonnet-4-20250514");
+        let (p, m) = split_model_ref("sonnet");
         assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        assert_eq!(m, "sonnet");
 
         // Detailed model
         let json_str =
@@ -3722,11 +3715,11 @@ mod tests {
         }
 
         // Simple model (string)
-        let json_str = r#""anthropic/claude-sonnet-4-20250514""#;
+        let json_str = r#""anthropic/sonnet""#;
         let model: OpenClawAgentModel = serde_json::from_str(json_str).unwrap();
         match model {
             OpenClawAgentModel::Simple(s) => {
-                assert_eq!(s, "anthropic/claude-sonnet-4-20250514");
+                assert_eq!(s, "anthropic/sonnet");
             }
             _ => panic!("Expected Simple variant"),
         }
@@ -4082,9 +4075,9 @@ mod tests {
 
     #[test]
     fn test_model_ref_split() {
-        let (p, m) = split_model_ref("anthropic/claude-sonnet-4-20250514");
+        let (p, m) = split_model_ref("anthropic/sonnet");
         assert_eq!(p, "anthropic");
-        assert_eq!(m, "claude-sonnet-4-20250514");
+        assert_eq!(m, "sonnet");
 
         let (p, m) = split_model_ref("deepseek/deepseek-chat");
         assert_eq!(p, "deepseek");
@@ -4148,7 +4141,7 @@ mod tests {
         let json5_content = r#"{
   agents: {
     defaults: {
-      model: "anthropic/claude-sonnet-4-20250514"
+      model: "anthropic/sonnet"
     },
     list: [
       {
