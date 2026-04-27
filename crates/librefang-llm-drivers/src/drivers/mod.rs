@@ -942,6 +942,34 @@ pub fn known_providers() -> Vec<&'static str> {
         .collect()
 }
 
+/// `(env_var, provider_id)` pairs for every cloud provider in the registry
+/// that requires an API key. Both the canonical `api_key_env` and the
+/// optional `alt_api_key_env` (e.g. `GOOGLE_API_KEY` for `gemini`) are
+/// returned as separate entries so callers like `doctor` can probe each
+/// independently without losing the alias mapping.
+///
+/// Hidden providers (alternate-protocol variants like `*_coding`) are
+/// excluded — they share an env var with their parent and listing them
+/// would double-count.
+///
+/// This is the single source of truth so adding a new provider to
+/// `PROVIDER_REGISTRY` automatically surfaces it everywhere that
+/// enumerates cloud keys, instead of silently drifting from a hardcoded
+/// whitelist.
+pub fn cloud_provider_key_specs() -> Vec<(&'static str, &'static str)> {
+    let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+    for p in PROVIDER_REGISTRY {
+        if !p.key_required || p.hidden {
+            continue;
+        }
+        out.push((p.api_key_env, p.name));
+        if let Some(alt) = p.alt_api_key_env {
+            out.push((alt, p.name));
+        }
+    }
+    out
+}
+
 /// Check if a CLI-based provider is available (binary on PATH or credentials exist).
 pub fn cli_provider_available(name: &str) -> bool {
     match name {
