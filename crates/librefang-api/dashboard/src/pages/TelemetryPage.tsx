@@ -216,6 +216,11 @@ function MetricCard({ label, icon, value, variant, sub }: {
   variant: MetricVariant;
   sub?: ReactNode;
 }) {
+  // Sub slot is always rendered (empty `&nbsp;` placeholder when absent)
+  // so every card in the same grid row has matching label / value / sub
+  // baselines. Without this, cards with no `sub` collapse vertically
+  // while cards with `sub` extend down — grid stretches both to match
+  // height but the content alignment looks ragged inside.
   return (
     <Card hover padding="md">
       <div className="flex items-center justify-between">
@@ -223,7 +228,9 @@ function MetricCard({ label, icon, value, variant, sub }: {
         <div className={`w-7 h-7 rounded-lg ${VARIANT_BG[variant]} flex items-center justify-center`}>{icon}</div>
       </div>
       <div className="mt-1.5">{value}</div>
-      {sub && <div className="mt-1 text-[10px] font-medium text-text-dim/60">{sub}</div>}
+      <div className="mt-1 text-[10px] font-medium text-text-dim/60 min-h-[1rem]">
+        {sub ?? " "}
+      </div>
     </Card>
   );
 }
@@ -511,7 +518,7 @@ export function TelemetryPage() {
                             <div style={{ width: `${100 - inputPct}%` }} className="bg-warning/60" />
                           </div>
                         )}
-                        <div className="flex items-center gap-3 text-[10px] font-mono text-text-dim/70">
+                        <div className="flex items-center gap-3 text-[10px] font-mono text-text-dim/70 tabular-nums">
                           <span><span className="text-success">{formatCompact(a.inputTokens)}</span> {t("telemetry.input_short")}</span>
                           <span><span className="text-warning">{formatCompact(a.outputTokens)}</span> {t("telemetry.output_short")}</span>
                           <span className="ml-auto">
