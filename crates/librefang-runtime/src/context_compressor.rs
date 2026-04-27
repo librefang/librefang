@@ -191,6 +191,7 @@ impl ContextCompressor {
     /// `model` is still threaded through but is overridden per-entry by
     /// the chain's `model_override` so the cheap providers send their own
     /// model slug rather than the agent's primary model.
+    #[allow(clippy::too_many_arguments)] // mirrors `compress_if_needed` plus an `aux_client`
     pub async fn compress_if_needed_with_aux(
         &self,
         messages: Vec<Message>,
