@@ -48,6 +48,7 @@ export function PluginsPage() {
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
+  const [detailsPlugin, setDetailsPlugin] = useState<PluginItem | null>(null);
   const openInstall = useCallback(() => setShowInstall(true), []);
   useCreateShortcut(openInstall);
 
@@ -195,7 +196,14 @@ export function PluginsPage() {
           ) : (
             <StaggerList className="space-y-2">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
+                <div
+                  key={p.name}
+                  className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setDetailsPlugin(p)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetailsPlugin(p); } }}
+                >
                   <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
@@ -465,6 +473,100 @@ export function PluginsPage() {
             <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
+      </DrawerPanel>
+
+      {/* Plugin detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsPlugin}
+        onClose={() => setDetailsPlugin(null)}
+        title={detailsPlugin?.name ?? ""}
+        size="md"
+      >
+        {detailsPlugin && (
+          <div className="p-5 space-y-5">
+            {/* Hero */}
+            <div className="flex items-start gap-3">
+              <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                <Puzzle className="w-5 h-5 text-brand" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-black tracking-tight truncate">{detailsPlugin.name}</h2>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{detailsPlugin.version}</span>
+                  {!detailsPlugin.hooks_valid && <Badge variant="error">{t("plugins.invalid")}</Badge>}
+                </div>
+                {detailsPlugin.author && (
+                  <p className="text-[11px] text-text-dim/70 mt-0.5">{detailsPlugin.author}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Description */}
+            {detailsPlugin.description && (
+              <p className="text-xs text-text-dim leading-relaxed whitespace-pre-wrap">{detailsPlugin.description}</p>
+            )}
+
+            {/* Hooks */}
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">{t("plugins.hooks", { defaultValue: "Hooks" })}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {detailsPlugin.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
+                {detailsPlugin.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
+                {!detailsPlugin.hooks?.ingest && !detailsPlugin.hooks?.after_turn && (
+                  <span className="text-[11px] text-text-dim/50 italic">{t("common.none", { defaultValue: "none" })}</span>
+                )}
+              </div>
+            </div>
+
+            {/* Metadata */}
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">{t("common.metadata", { defaultValue: "Metadata" })}</p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[11px]">
+                <dt className="text-text-dim/70">{t("common.size", { defaultValue: "Size" })}</dt>
+                <dd className="font-mono">{formatBytes(detailsPlugin.size_bytes)}</dd>
+                {detailsPlugin.path && (
+                  <>
+                    <dt className="text-text-dim/70">{t("common.path", { defaultValue: "Path" })}</dt>
+                    <dd className="font-mono break-all text-[10px]">{detailsPlugin.path}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+
+            {/* Actions */}
+            <div className="flex flex-wrap gap-2 pt-3 border-t border-border-subtle/50">
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                disabled={depsMutation.isPending}
+                onClick={() => depsMutation.mutate(detailsPlugin.name, {
+                  onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
+                  onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+                })}
+              >
+                {t("plugins.deps", { defaultValue: "Install deps" })}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                className="!text-error hover:!bg-error/10"
+                onClick={() => {
+                  uninstallMutation.mutate(detailsPlugin.name, {
+                    onSuccess: () => {
+                      setDetailsPlugin(null);
+                      addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
+                    },
+                    onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
+                  });
+                }}
+              >
+                {t("common.delete")}
+              </Button>
+            </div>
+          </div>
+        )}
       </DrawerPanel>
     </div>
   );
