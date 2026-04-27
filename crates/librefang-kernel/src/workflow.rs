@@ -276,8 +276,20 @@ impl WorkflowRun {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PauseRequest {
     /// Human-readable explanation surfaced in logs and UI.
+    ///
+    /// **SECURITY:** persisted plaintext to `workflow_runs.json` and
+    /// shown back to operators. Do not pass secrets, PII, or
+    /// approval-gating tokens here — use a side channel referenced by
+    /// id instead.
     pub reason: String,
     /// Token the caller must present to [`WorkflowEngine::resume_run`].
+    ///
+    /// **SECURITY:** today this is stored plaintext in `workflow_runs.json`
+    /// alongside the run. Anyone with read access to the daemon home
+    /// directory can recover live tokens and resume an arbitrary paused
+    /// workflow. Acceptable for the kernel-internal foundation in this
+    /// PR; the future REST handler must hash tokens at rest before that
+    /// surface ships. Tracked as a follow-up against #3335.
     pub resume_token: Uuid,
 }
 
@@ -469,14 +481,44 @@ impl WorkflowEngine {
         }
         let data = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read workflow runs: {e}"))?;
-        let runs: Vec<WorkflowRun> = serde_json::from_str(&data)
-            .map_err(|e| format!("Failed to parse workflow runs: {e}"))?;
+
+        // Per-entry tolerant parse rather than `Vec<WorkflowRun>` in one
+        // shot: an old daemon reading a file written by a newer daemon
+        // may encounter rows with shapes it doesn't know (e.g. the
+        // tagged `Paused { ... }` variant added in #3335). Failing the
+        // whole load on the first bad row would drop *all* persisted
+        // history; instead, skip unrecognized rows with a WARN. Newer
+        // daemons reading older files still parse cleanly because every
+        // post-foundation field is `#[serde(default)]`.
+        let raw_rows: Vec<serde_json::Value> = serde_json::from_str(&data)
+            .map_err(|e| format!("Failed to parse workflow runs (top-level array): {e}"))?;
+        let total = raw_rows.len();
+        let mut runs: Vec<WorkflowRun> = Vec::with_capacity(total);
+        let mut skipped: usize = 0;
+        for (idx, row) in raw_rows.into_iter().enumerate() {
+            match serde_json::from_value::<WorkflowRun>(row) {
+                Ok(run) => runs.push(run),
+                Err(e) => {
+                    skipped += 1;
+                    warn!(
+                        index = idx,
+                        error = %e,
+                        "Skipping unrecognized workflow run during load (likely a newer schema; \
+                         downgrade-safe rollback)"
+                    );
+                }
+            }
+        }
+
         let count = runs.len();
         let mut map = self.runs.blocking_write();
         for run in runs {
             map.insert(run.id, run);
         }
-        debug!(count, "Loaded persisted workflow runs from disk");
+        debug!(
+            count,
+            skipped, total, "Loaded persisted workflow runs from disk"
+        );
         Ok(count)
     }
 
@@ -1001,6 +1043,20 @@ impl WorkflowEngine {
     /// `(step_index, variables, current_input)` and updates the run's
     /// state with the pre-generated token. Calling `pause_run` on an
     /// already-paused run is idempotent: the existing token is returned.
+    ///
+    /// **DAG workflows fail-closed on pause.** Workflows whose steps use
+    /// `depends_on` are routed through the DAG executor, which does not
+    /// yet support pause. If `pause_run` is lodged on a DAG workflow,
+    /// the next `execute_run` call will mark the run `Failed` with a
+    /// "DAG pause not supported" error rather than silently completing.
+    /// Callers that don't know which executor a workflow targets should
+    /// either inspect `Workflow::steps` first or accept the fail-closed
+    /// behavior. Per-layer DAG pause checkpoints track as a follow-up
+    /// against #3335.
+    ///
+    /// **SECURITY:** the `reason` string is persisted plaintext to
+    /// `workflow_runs.json` and surfaced to operators. Do not include
+    /// secrets, PII, or approval-gating values in it.
     ///
     /// Errors:
     /// - `Err` if the run is unknown.
@@ -4535,6 +4591,116 @@ prompt_template = "do {{x}}"
         assert!(
             err.contains("DAG"),
             "error should mention DAG limitation: {err}"
+        );
+
+        // Refuse path must also flip the run to Failed and clear the
+        // lingering pause_request — otherwise a buggy caller sees a run
+        // stuck in Running with a pause_request that nothing will ever
+        // honor (review feedback on #3418).
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(
+            matches!(run.state, WorkflowRunState::Failed),
+            "DAG refuse must mark the run Failed, got {:?}",
+            run.state
+        );
+        assert!(
+            run.pause_request.is_none(),
+            "pause_request must be cleared after DAG refuse"
+        );
+        assert!(run.error.as_deref().unwrap_or("").contains("DAG"));
+    }
+
+    #[tokio::test]
+    async fn pause_run_is_idempotent_returns_same_token() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
+
+        let token1 = engine.pause_run(run_id, "first").await.unwrap();
+        let token2 = engine.pause_run(run_id, "second").await.unwrap();
+        let token3 = engine.pause_run(run_id, "third").await.unwrap();
+        assert_eq!(token1, token2);
+        assert_eq!(token2, token3);
+
+        // Reason from the *first* call wins — later calls must not
+        // overwrite the message that surfaces in logs / UI.
+        let run = engine.get_run(run_id).await.unwrap();
+        let lodged = run.pause_request.expect("request should be present");
+        assert_eq!(lodged.reason, "first");
+    }
+
+    #[tokio::test]
+    async fn resume_run_after_completion_is_rejected() {
+        let engine = Arc::new(WorkflowEngine::new());
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
+
+        // Pause-before-execute → loop pauses at step 0 → resume runs
+        // the workflow to completion.
+        let token = engine.pause_run(run_id, "before-start").await.unwrap();
+        let sender = |_id: AgentId, msg: String| async move {
+            Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .unwrap();
+        let sender2 = |_id: AgentId, msg: String| async move {
+            Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
+        };
+        engine
+            .resume_run(run_id, token, mock_resolver, sender2)
+            .await
+            .unwrap();
+
+        // Run is now Completed. A second resume_run with the same token
+        // must error rather than silently re-running the workflow.
+        let run = engine.get_run(run_id).await.unwrap();
+        assert!(matches!(run.state, WorkflowRunState::Completed));
+        let sender3 = |_id: AgentId, msg: String| async move {
+            Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
+        };
+        let err = engine
+            .resume_run(run_id, token, mock_resolver, sender3)
+            .await
+            .expect_err("double-resume on a completed run must error");
+        assert!(
+            err.contains("expected Paused"),
+            "error should explain state mismatch: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_then_execute_on_pending_pauses_at_step_zero() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
+
+        // Run is Pending — pause is lodged before any step has executed.
+        let token = engine.pause_run(run_id, "pre-start").await.unwrap();
+        let sender = |_id: AgentId, msg: String| async move {
+            Ok((format!("Processed: {msg}"), 1_u64, 1_u64))
+        };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("pause-at-zero path must not error");
+
+        let run = engine.get_run(run_id).await.unwrap();
+        match &run.state {
+            WorkflowRunState::Paused { resume_token, .. } => {
+                assert_eq!(*resume_token, token);
+            }
+            other => panic!("expected Paused, got {:?}", other),
+        }
+        assert_eq!(
+            run.paused_step_index,
+            Some(0),
+            "pre-start pause should snapshot at step index 0"
+        );
+        assert!(
+            run.step_results.is_empty(),
+            "no steps should have executed before the pause"
         );
     }
 }
