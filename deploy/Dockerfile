@@ -29,6 +29,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY packages ./packages
+# librefang-api uses include_str!("../../../deploy/...") to embed the
+# observability stack (prometheus / tempo / otel-collector / grafana
+# configs) at compile time — added in #3062. Without this COPY the
+# build fails with "couldn't read deploy/grafana/...". flake.nix
+# already lists the same paths in its source fileset.
+COPY deploy ./deploy
 COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
