@@ -157,6 +157,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Tighten visibility of internal request structs (#3184) (@houko)
 - Merge duplicate type definitions across crates (#3185) (@houko)
 - Rename Action enums to disambiguate from domain types (#3188) (@houko)
+- **BREAKING**: Split coding-provider API keys onto dedicated env vars — `byteplus_coding` now reads `BYTEPLUS_CODING_API_KEY` (was `BYTEPLUS_API_KEY`), `volcengine_coding` reads `VOLCENGINE_CODING_API_KEY` (was `VOLCENGINE_API_KEY`), `zai_coding` reads `ZAI_CODING_API_KEY` (was `ZHIPU_API_KEY`), `zhipu_coding` reads `ZHIPU_CODING_API_KEY` (was `ZHIPU_API_KEY`). Per-token siblings (`byteplus`, `volcengine`, `zai`, `zhipu`) keep their original env vars. Set the new env var if you use any `_coding` provider. (#3279) (@houko)
 
 ### Documentation
 

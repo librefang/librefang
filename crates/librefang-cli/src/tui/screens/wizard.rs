@@ -139,7 +139,7 @@ const PROVIDERS: &[ProviderInfo] = &[
     },
     ProviderInfo {
         name: "zhipu_coding",
-        env_var: "ZHIPU_API_KEY",
+        env_var: "ZHIPU_CODING_API_KEY",
         default_model: "codegeex-4",
         needs_key: true,
     },
