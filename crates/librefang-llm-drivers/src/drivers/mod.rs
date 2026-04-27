@@ -506,7 +506,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         name: "zai",
         aliases: &["z.ai"],
         base_url: "https://api.z.ai/api/paas/v4",
-        api_key_env: "ZHIPU_API_KEY",
+        api_key_env: "ZAI_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -1182,6 +1182,22 @@ mod tests {
         assert_eq!(
             copilot.api_key_env, "GITHUB_TOKEN",
             "github-copilot keeps the original env (IDE-side convention)",
+        );
+    }
+
+    /// `zai` (api.z.ai, international) and `zhipu` (open.bigmodel.cn, China)
+    /// target the same Zhipu account system but are surfaced as distinct
+    /// providers in the dashboard, so they need distinct env vars to avoid
+    /// auto-activating both off a single credential.
+    #[test]
+    fn test_zai_provider_split_from_zhipu() {
+        let zai = find_provider("zai").expect("zai entry missing");
+        assert_eq!(zai.api_key_env, "ZAI_API_KEY");
+        assert_eq!(zai.base_url, "https://api.z.ai/api/paas/v4");
+        let zhipu = find_provider("zhipu").expect("zhipu entry missing");
+        assert_eq!(
+            zhipu.api_key_env, "ZHIPU_API_KEY",
+            "zhipu keeps the original env (more-established name)",
         );
     }
 
