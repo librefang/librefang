@@ -140,7 +140,9 @@
     "expand": "Expand",
     "collapse": "Collapse",
     "add": "Add",
-    "remove": "Remove"
+    "remove": "Remove",
+    "discard": "Discard",
+    "more_actions": "More actions"
   },
   "status": {
     "running": "Running",
@@ -2771,7 +2773,22 @@
         "hint": "WeCom / WeChat OpenID for the configured corp.",
         "example": "abc123@im.wechat"
       }
-    }
+    },
+    "row_actions": "More actions",
+    "view_budget_chip": "Budget",
+    "view_policy_chip": "Permissions",
+    "rotate_key_only_chance": "This is your only chance to copy this key. Closing this dialog will discard the plaintext — the server cannot reproduce it.",
+    "rotate_key_must_copy": "Click Copy first. The Close button unlocks once the key is on your clipboard.",
+    "rotate_key_failed_toast": "Rotation failed: {{message}}",
+    "rotate_key_copied_confirm": "Copied — you can close now",
+    "csv_drop_aria": "Upload CSV file: drop here or activate to browse",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "Platform",
+    "wizard_step_identity": "Identifier",
+    "wizard_user_chip": "Linking identity to",
+    "wizard_show_warning": "Why this matters",
+    "wizard_hide_warning": "Hide warning",
+    "wizard_step_back_aria": "Go back to step {{n}}"
   },
   "userBudget": {
     "fields": {
@@ -2794,7 +2811,13 @@
       "empty_entry": "{{field}} contains an empty entry",
       "duplicate_entry": "{{field}} contains duplicate entry '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] is not in readable_namespaces (writable must be a subset of readable)"
-    }
+    },
+    "discard": "Discard changes",
+    "no_changes": "No unsaved changes",
+    "unsaved_changes": "You have unsaved changes",
+    "save_disabled_invalid": "Fix validation errors above to enable Save",
+    "discard_confirm_title": "Discard unsaved changes?",
+    "discard_confirm_body": "This reverts every field to the last server-loaded value. Edits made since the last save will be lost."
   },
   "permissionSimulator": {
     "status": {

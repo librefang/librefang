@@ -139,7 +139,9 @@
     "expand": "展开",
     "collapse": "收起",
     "add": "添加",
-    "remove": "移除"
+    "remove": "移除",
+    "discard": "放弃更改",
+    "more_actions": "更多操作"
   },
   "status": {
     "running": "运行中",
@@ -2737,7 +2739,22 @@
         "hint": "已配置企业的企业微信 / 微信 OpenID。",
         "example": "abc123@im.wechat"
       }
-    }
+    },
+    "row_actions": "更多操作",
+    "view_budget_chip": "预算",
+    "view_policy_chip": "权限",
+    "rotate_key_only_chance": "这是复制此密钥的唯一机会。关闭此对话框后，明文将丢失，服务器无法再次生成。",
+    "rotate_key_must_copy": "请先点击「复制」。复制到剪贴板后，关闭按钮才会启用。",
+    "rotate_key_failed_toast": "轮换失败：{{message}}",
+    "rotate_key_copied_confirm": "已复制，可以关闭",
+    "csv_drop_aria": "上传 CSV 文件：拖放到此处或激活以浏览",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "平台",
+    "wizard_step_identity": "标识",
+    "wizard_user_chip": "正在关联标识到",
+    "wizard_show_warning": "为什么重要",
+    "wizard_hide_warning": "隐藏警告",
+    "wizard_step_back_aria": "返回第 {{n}} 步"
   },
   "userBudget": {
     "fields": {
@@ -2760,7 +2777,13 @@
       "empty_entry": "{{field}} 中存在空白条目",
       "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
       "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
-    }
+    },
+    "discard": "放弃更改",
+    "no_changes": "无未保存的更改",
+    "unsaved_changes": "有未保存的更改",
+    "save_disabled_invalid": "请先修正上方的校验错误才能保存",
+    "discard_confirm_title": "放弃未保存的更改？",
+    "discard_confirm_body": "将所有字段恢复为上次从服务器加载的值。自上次保存以来的修改将会丢失。"
   },
   "permissionSimulator": {
     "status": {

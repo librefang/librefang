@@ -6,7 +6,7 @@
 // `useUpdateUserPolicy`. Validation mirrors the daemon's checks so the
 // user sees errors inline before a round-trip.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams, Link } from "@tanstack/react-router";
 import {
@@ -243,12 +243,42 @@ export function UserPolicyPage() {
   const [newChannel, setNewChannel] = useState("");
   const [newChannelError, setNewChannelError] = useState<string | null>(null);
 
+  // Form mutation wrapper. Wrapping every setForm in this clears the
+  // stale "Policy saved." card on the first edit after a successful
+  // save — keeps the success state from shadowing fresh unsaved work.
+  // Cheaper than a useEffect-with-form-hash; we already touch every
+  // setter on edit.
+  const editForm = useCallback(
+    (mutator: (prev: FormState) => FormState) => {
+      setForm(mutator);
+      if (submitOk) setSubmitOk(false);
+    },
+    [submitOk],
+  );
+
   // Re-hydrate the form whenever the underlying query resolves a new value
   // (e.g. on initial load or after invalidation).
   useEffect(() => {
     if (policyQuery.data) {
       setForm(policyToForm(policyQuery.data));
     }
+  }, [policyQuery.data]);
+
+  // Track whether the form differs from the last loaded server state so
+  // we can enable / disable Discard and surface "Unsaved changes" hint.
+  const isDirty = useMemo(() => {
+    if (!policyQuery.data) return false;
+    return JSON.stringify(form) !== JSON.stringify(policyToForm(policyQuery.data));
+  }, [form, policyQuery.data]);
+
+  // Discard: re-seed straight from the last query payload. We keep
+  // submitError / submitOk untouched so the user still sees the
+  // outcome of their last submit attempt.
+  const handleDiscard = useCallback(() => {
+    if (!policyQuery.data) return;
+    setForm(policyToForm(policyQuery.data));
+    setNewChannel("");
+    setNewChannelError(null);
   }, [policyQuery.data]);
 
   const validationError = useMemo(
@@ -275,7 +305,7 @@ export function UserPolicyPage() {
       setNewChannelError(tmpl.replace("{{key}}", key));
       return;
     }
-    setForm(f => ({
+    editForm(f => ({
       ...f,
       channel_tool_rules: {
         ...f.channel_tool_rules,
@@ -372,7 +402,7 @@ export function UserPolicyPage() {
 
       {submitError && (
         <Card padding="md">
-          <div className="flex items-start gap-2 text-sm text-red-500">
+          <div className="flex items-start gap-2 text-sm text-error">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <span>{submitError}</span>
           </div>
@@ -380,7 +410,7 @@ export function UserPolicyPage() {
       )}
       {submitOk && !submitError && (
         <Card padding="md">
-          <div className="text-sm font-bold text-emerald-500">
+          <div className="text-sm font-bold text-success">
             {t("user_policy.saved", "Policy saved.")}
           </div>
         </Card>
@@ -395,7 +425,7 @@ export function UserPolicyPage() {
           )}
           enabled={form.tool_policy.enabled}
           onToggle={enabled =>
-            setForm(f => ({
+            editForm(f => ({
               ...f,
               tool_policy: { ...f.tool_policy, enabled },
             }))
@@ -411,7 +441,7 @@ export function UserPolicyPage() {
               )}
               value={form.tool_policy.allowed}
               onChange={value =>
-                setForm(f => ({
+                editForm(f => ({
                   ...f,
                   tool_policy: { ...f.tool_policy, allowed: value },
                 }))
@@ -422,7 +452,7 @@ export function UserPolicyPage() {
               hint={t("user_policy.glob_hint_deny", "Always wins over allow.")}
               value={form.tool_policy.denied}
               onChange={value =>
-                setForm(f => ({
+                editForm(f => ({
                   ...f,
                   tool_policy: { ...f.tool_policy, denied: value },
                 }))
@@ -441,7 +471,7 @@ export function UserPolicyPage() {
           )}
           enabled={form.tool_categories.enabled}
           onToggle={enabled =>
-            setForm(f => ({
+            editForm(f => ({
               ...f,
               tool_categories: { ...f.tool_categories, enabled },
             }))
@@ -457,7 +487,7 @@ export function UserPolicyPage() {
               )}
               value={form.tool_categories.allowed}
               onChange={value =>
-                setForm(f => ({
+                editForm(f => ({
                   ...f,
                   tool_categories: { ...f.tool_categories, allowed: value },
                 }))
@@ -468,7 +498,7 @@ export function UserPolicyPage() {
               hint={t("user_policy.glob_hint_deny", "Always wins over allow.")}
               value={form.tool_categories.denied}
               onChange={value =>
-                setForm(f => ({
+                editForm(f => ({
                   ...f,
                   tool_categories: { ...f.tool_categories, denied: value },
                 }))
@@ -487,7 +517,7 @@ export function UserPolicyPage() {
           )}
           enabled={form.memory_access.enabled}
           onToggle={enabled =>
-            setForm(f => ({
+            editForm(f => ({
               ...f,
               memory_access: { ...f.memory_access, enabled },
             }))
@@ -504,7 +534,7 @@ export function UserPolicyPage() {
                 )}
                 value={form.memory_access.readable}
                 onChange={value =>
-                  setForm(f => ({
+                  editForm(f => ({
                     ...f,
                     memory_access: { ...f.memory_access, readable: value },
                   }))
@@ -518,7 +548,7 @@ export function UserPolicyPage() {
                 )}
                 value={form.memory_access.writable}
                 onChange={value =>
-                  setForm(f => ({
+                  editForm(f => ({
                     ...f,
                     memory_access: { ...f.memory_access, writable: value },
                   }))
@@ -530,7 +560,7 @@ export function UserPolicyPage() {
                 label={t("user_policy.pii_access", "PII access")}
                 checked={form.memory_access.pii_access}
                 onChange={checked =>
-                  setForm(f => ({
+                  editForm(f => ({
                     ...f,
                     memory_access: { ...f.memory_access, pii_access: checked },
                   }))
@@ -540,7 +570,7 @@ export function UserPolicyPage() {
                 label={t("user_policy.export_allowed", "Export allowed")}
                 checked={form.memory_access.export_allowed}
                 onChange={checked =>
-                  setForm(f => ({
+                  editForm(f => ({
                     ...f,
                     memory_access: {
                       ...f.memory_access,
@@ -553,7 +583,7 @@ export function UserPolicyPage() {
                 label={t("user_policy.delete_allowed", "Delete allowed")}
                 checked={form.memory_access.delete_allowed}
                 onChange={checked =>
-                  setForm(f => ({
+                  editForm(f => ({
                     ...f,
                     memory_access: {
                       ...f.memory_access,
@@ -603,7 +633,7 @@ export function UserPolicyPage() {
                       size="sm"
                       aria-label={t("user_policy.remove_channel", "Remove channel")}
                       onClick={() =>
-                        setForm(f => {
+                        editForm(f => {
                           const next = { ...f.channel_tool_rules };
                           delete next[ch];
                           return { ...f, channel_tool_rules: next };
@@ -619,7 +649,7 @@ export function UserPolicyPage() {
                     label={t("user_policy.allowed_tools", "Allowed tools")}
                     value={rule.allowed}
                     onChange={value =>
-                      setForm(f => ({
+                      editForm(f => ({
                         ...f,
                         channel_tool_rules: {
                           ...f.channel_tool_rules,
@@ -632,7 +662,7 @@ export function UserPolicyPage() {
                     label={t("user_policy.denied_tools", "Denied tools")}
                     value={rule.denied}
                     onChange={value =>
-                      setForm(f => ({
+                      editForm(f => ({
                         ...f,
                         channel_tool_rules: {
                           ...f.channel_tool_rules,
@@ -699,12 +729,61 @@ export function UserPolicyPage() {
 
       {validationError && (
         <Card padding="md">
-          <div className="flex items-start gap-2 text-sm text-amber-500">
+          <div className="flex items-start gap-2 text-sm text-warning">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <span>{validationError}</span>
           </div>
         </Card>
       )}
+
+      {/* Sticky save bar — same Save action as the PageHeader, but always
+          in reach when the form is long. Lives inside the <form> so the
+          Save button still triggers `onSubmit` natively. Discard reverts
+          to the last server-loaded state without an extra round-trip. */}
+      <div className="sticky bottom-0 z-10 -mx-4 sm:-mx-6 mt-2 border-t border-border-subtle bg-surface/95 px-4 sm:px-6 py-3 backdrop-blur supports-[backdrop-filter]:bg-surface/80">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-[11px] text-text-dim">
+            {validationError
+              ? t(
+                  "userPolicy.save_disabled_invalid",
+                  "Fix validation errors above to enable Save",
+                )
+              : isDirty
+                ? t("userPolicy.unsaved_changes", "You have unsaved changes")
+                : t("userPolicy.no_changes", "No unsaved changes")}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={handleDiscard}
+              disabled={!isDirty || updateMutation.isPending}
+            >
+              {t("userPolicy.discard", "Discard changes")}
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              size="sm"
+              disabled={updateMutation.isPending || !!validationError || !isDirty}
+              title={
+                validationError
+                  ? t(
+                      "userPolicy.save_disabled_invalid",
+                      "Fix validation errors above to enable Save",
+                    )
+                  : !isDirty
+                    ? t("userPolicy.no_changes", "No unsaved changes")
+                    : undefined
+              }
+            >
+              <Save className="h-3.5 w-3.5" />
+              {t("user_policy.save", "Save")}
+            </Button>
+          </div>
+        </div>
+      </div>
     </form>
   );
 }

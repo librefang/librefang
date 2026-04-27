@@ -11,7 +11,7 @@
 // All API access lives in `lib/queries/users.ts` and `lib/mutations/users.ts`.
 // This file only renders.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "@tanstack/react-router";
 import {
@@ -28,6 +28,10 @@ import {
   ListChecks,
   Database,
   Wallet,
+  MoreVertical,
+  ChevronDown,
+  ChevronUp,
+  Trash2,
 } from "lucide-react";
 
 import type { UserItem, UserUpsertPayload } from "../lib/http/client";
@@ -40,6 +44,7 @@ import {
   useUpdateUser,
 } from "../lib/mutations/users";
 import { parseUsersCsv } from "../lib/csvParser";
+import { useUIStore } from "../lib/store";
 
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
@@ -48,6 +53,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 
@@ -98,6 +104,7 @@ const PLATFORM_TILES: Array<{
 
 export function UsersPage() {
   const { t } = useTranslation();
+  const addToast = useUIStore(s => s.addToast);
 
   // ── state ────────────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -107,10 +114,11 @@ export function UsersPage() {
   const [confirmDelete, setConfirmDelete] = useState<UserItem | null>(null);
   const [wizardUser, setWizardUser] = useState<UserItem | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  // Rotation flow holds two pieces of state: the user the operator is
-  // confirming a rotate against (pre-confirm), and the freshly-rotated
-  // plaintext key (post-confirm, copy-once display). They are separate so
-  // closing the post-rotate modal does not re-open the confirm.
+  // Rotation flow has two distinct phases with distinct state. The
+  // pre-confirm phase asks "are you sure?" via ConfirmDialog. The
+  // post-confirm phase shows the plaintext key copy-once. Errors do NOT
+  // hijack the success modal — they go through the toast system so the
+  // operator's mental model stays clean: "modal open = you have a key".
   const [confirmRotate, setConfirmRotate] = useState<UserItem | null>(null);
   const [rotatedKey, setRotatedKey] =
     useState<{ name: string; plaintext: string } | null>(null);
@@ -314,54 +322,43 @@ export function UsersPage() {
                   ) : null}
                 </div>
                 <div className="flex flex-col gap-1.5 shrink-0 items-end">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    leftIcon={<Wand2 className="h-3 w-3" />}
-                    onClick={() => setWizardUser(u)}
-                  >
-                    {t("users.link", "Link identity")}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setEditing(u)}
-                  >
-                    {t("common.edit", "Edit")}
-                  </Button>
-                  {u.has_api_key ? (
+                  <div className="flex items-center gap-1">
                     <Button
                       variant="ghost"
                       size="sm"
-                      leftIcon={<RefreshCw className="h-3 w-3" />}
-                      onClick={() => setConfirmRotate(u)}
+                      onClick={() => setEditing(u)}
                     >
-                      {t("users.rotate_key", "Rotate API key")}
+                      {t("common.edit", "Edit")}
                     </Button>
-                  ) : null}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setConfirmDelete(u)}
-                  >
-                    {t("common.delete", "Delete")}
-                  </Button>
+                    <RowActionsMenu
+                      user={u}
+                      onLink={() => setWizardUser(u)}
+                      onRotate={() => setConfirmRotate(u)}
+                      onDelete={() => setConfirmDelete(u)}
+                    />
+                  </div>
                 </div>
               </div>
-              <div className="mt-3 flex flex-wrap gap-2 border-t border-border-subtle pt-2">
+              {/* Promoted "Budget" and "Permissions" affordances. Same
+                  routes/queries as before — we just upgrade them from
+                  11px footer text to ghost-button chips so their hit
+                  area matches their importance. */}
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border-subtle pt-2">
                 <Link
                   to="/users/$name/budget"
                   params={{ name: u.name }}
-                  className="text-[11px] text-text-dim hover:text-brand"
+                  className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-[11px] font-medium text-text-dim hover:border-brand/40 hover:text-brand transition-colors"
                 >
-                  {t("users.view_budget", "Budget →")}
+                  <Wallet className="h-3 w-3" />
+                  {t("users.view_budget_chip", "Budget")}
                 </Link>
                 <Link
                   to="/users/$name/policy"
                   params={{ name: u.name }}
-                  className="text-[11px] text-text-dim hover:text-brand"
+                  className="inline-flex items-center gap-1 rounded-lg border border-border-subtle bg-surface px-2.5 py-1 text-[11px] font-medium text-text-dim hover:border-brand/40 hover:text-brand transition-colors"
                 >
-                  {t("users.view_policy", "Permissions →")}
+                  <ListChecks className="h-3 w-3" />
+                  {t("users.view_policy_chip", "Permissions")}
                 </Link>
               </div>
             </Card>
@@ -417,165 +414,209 @@ export function UsersPage() {
         onClose={() => setImportOpen(false)}
       />
 
-      {/* Delete confirm */}
-      <Modal
+      {/* Delete confirm — uses shared ConfirmDialog for focus trap +
+          keyboard semantics. Body composed as `message`. */}
+      <ConfirmDialog
         isOpen={confirmDelete !== null}
-        onClose={() => setConfirmDelete(null)}
         title={t("users.confirm_delete_title", "Delete user?")}
-        size="sm"
-      >
-        {confirmDelete ? (
-          <div className="space-y-4">
-            <p className="text-sm text-text-dim">
-              {t(
+        message={
+          confirmDelete
+            ? `${confirmDelete.name} — ${t(
                 "users.confirm_delete_body",
                 "This removes the user from config.toml and rebuilds the RBAC channel index. Any platform identity that mapped to this user will fall through to the default-deny path.",
-              )}
-            </p>
-            <p className="text-sm font-mono">{confirmDelete.name}</p>
-            <div className="flex gap-2 justify-end">
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmDelete(null)}
-              >
-                {t("common.cancel", "Cancel")}
-              </Button>
-              <Button
-                variant="danger"
-                isLoading={deleteMut.isPending}
-                onClick={async () => {
-                  await deleteMut.mutateAsync(confirmDelete.name);
-                  setConfirmDelete(null);
-                }}
-              >
-                {t("common.delete", "Delete")}
-              </Button>
-            </div>
-          </div>
-        ) : null}
-      </Modal>
+              )}`
+            : ""
+        }
+        tone="destructive"
+        confirmLabel={t("common.delete", "Delete")}
+        onConfirm={async () => {
+          if (!confirmDelete) return;
+          await deleteMut.mutateAsync(confirmDelete.name);
+        }}
+        onClose={() => setConfirmDelete(null)}
+      />
 
-      {/* Rotate-key confirm */}
-      <Modal
+      {/* Rotate-key confirm — destructive tone (old key dies on
+          confirm, can't be undone). On error: toast + close. On
+          success: open the copy-once modal below. */}
+      <ConfirmDialog
         isOpen={confirmRotate !== null}
-        onClose={() => setConfirmRotate(null)}
         title={t("users.confirm_rotate_title", "Rotate API key?")}
-        size="sm"
-      >
-        {confirmRotate ? (
-          <div className="space-y-4">
-            <p className="text-sm text-text-dim">
-              {t(
+        message={
+          confirmRotate
+            ? `${confirmRotate.name} — ${t(
                 "users.confirm_rotate_body",
                 "Generates a fresh API key for this user. The old key stops working immediately — any client still using it will start receiving 401 errors on the next request. The new plaintext key will be shown ONCE on the next screen; the server cannot reproduce it later.",
+              )}`
+            : ""
+        }
+        tone="destructive"
+        confirmLabel={t("users.rotate_key_confirm", "Rotate now")}
+        onConfirm={async () => {
+          const target = confirmRotate;
+          if (!target) return;
+          try {
+            const res = await rotateMut.mutateAsync(target.name);
+            setRotatedKey({
+              name: target.name,
+              plaintext: res.new_api_key,
+            });
+          } catch (e) {
+            // Surface as a toast — does NOT contaminate the success
+            // modal which has hardened copy-once semantics. Common cause:
+            // caller is Admin, not Owner.
+            const msg = e instanceof Error ? e.message : String(e);
+            addToast(
+              t("users.rotate_key_failed_toast", "Rotation failed: {{message}}", {
+                message: msg,
+              }),
+              "error",
+            );
+          }
+        }}
+        onClose={() => setConfirmRotate(null)}
+      />
+
+      {/* Post-rotation: copy-once display of the new plaintext key.
+          Hardened: no backdrop dismiss, Esc swallowed, Close hidden
+          until the operator has copied at least once. */}
+      <RotatedKeyModal
+        rotatedKey={rotatedKey}
+        onClose={() => setRotatedKey(null)}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Post-rotate copy-once modal
+// ---------------------------------------------------------------------------
+//
+// The plaintext key is shown exactly once — the daemon can't reproduce it.
+// We treat it as load-bearing UI: any accidental dismissal would silently
+// leave the operator with a working API key they can't read.
+//
+// Hardening:
+//   - `disableBackdropClose` — backdrop click is a no-op
+//   - `hideCloseButton` while `hasCopied` is false (no X in header)
+//   - Esc keydown intercepted in the capture phase and `preventDefault`-ed
+//   - Primary "I've copied the key" button is the only dismissal path
+//     until Copy has been clicked
+
+function RotatedKeyModal({
+  rotatedKey,
+  onClose,
+}: {
+  rotatedKey: { name: string; plaintext: string } | null;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore(s => s.addToast);
+  const [hasCopied, setHasCopied] = useState(false);
+
+  // Reset the gate every time a new key shows up. Using a ref-keyed
+  // useEffect keeps this in sync with the prop without leaking state
+  // across rotations.
+  const lastName = useRef<string | null>(null);
+  useEffect(() => {
+    if (rotatedKey && lastName.current !== rotatedKey.name) {
+      lastName.current = rotatedKey.name;
+      setHasCopied(false);
+    } else if (!rotatedKey) {
+      lastName.current = null;
+    }
+  }, [rotatedKey]);
+
+  // Capture-phase Escape interceptor. The shared Modal listens for Esc
+  // on `window` and unconditionally closes; we attach in the capture
+  // phase on `document` so we run first and `stopImmediatePropagation`
+  // before the Modal's bubble-phase handler ever fires. Only active
+  // while the modal is up AND the user hasn't copied yet.
+  useEffect(() => {
+    if (!rotatedKey || hasCopied) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    };
+    document.addEventListener("keydown", handler, true);
+    return () => document.removeEventListener("keydown", handler, true);
+  }, [rotatedKey, hasCopied]);
+
+  const handleCopy = useCallback(() => {
+    if (!rotatedKey) return;
+    void navigator.clipboard.writeText(rotatedKey.plaintext);
+    setHasCopied(true);
+    addToast(t("common.copied", "Copied"), "success");
+  }, [rotatedKey, addToast, t]);
+
+  return (
+    <Modal
+      isOpen={rotatedKey !== null}
+      onClose={onClose}
+      title={t("users.rotate_key_done_title", "New API key — copy now")}
+      size="md"
+      disableBackdropClose
+      hideCloseButton={!hasCopied}
+    >
+      {rotatedKey ? (
+        <div className="space-y-4 p-5">
+          <div className="rounded-xl border border-warning/40 bg-warning/10 p-3">
+            <p className="text-sm text-warning font-bold">
+              {t(
+                "users.rotate_key_only_chance",
+                "This is your only chance to copy this key. Closing this dialog will discard the plaintext — the server cannot reproduce it.",
               )}
             </p>
-            <p className="text-sm font-mono">{confirmRotate.name}</p>
-            <div className="flex gap-2 justify-end">
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmRotate(null)}
-              >
-                {t("common.cancel", "Cancel")}
-              </Button>
-              <Button
-                variant="primary"
-                leftIcon={<RefreshCw className="h-3.5 w-3.5" />}
-                isLoading={rotateMut.isPending}
-                onClick={async () => {
-                  const target = confirmRotate;
-                  setConfirmRotate(null);
-                  try {
-                    const res = await rotateMut.mutateAsync(target.name);
-                    setRotatedKey({
-                      name: target.name,
-                      plaintext: res.new_api_key,
-                    });
-                  } catch (e) {
-                    // Surface failure inline in the same spot — no silent
-                    // swallow. Common cause: caller is Admin, not Owner.
-                    setRotatedKey({
-                      name: target.name,
-                      plaintext: `__ERROR__:${
-                        e instanceof Error ? e.message : String(e)
-                      }`,
-                    });
-                  }
-                }}
-              >
-                {t("users.rotate_key_confirm", "Rotate now")}
-              </Button>
-            </div>
           </div>
-        ) : null}
-      </Modal>
-
-      {/* Post-rotation: copy-once display of the new plaintext key */}
-      <Modal
-        isOpen={rotatedKey !== null}
-        onClose={() => setRotatedKey(null)}
-        title={
-          rotatedKey?.plaintext.startsWith("__ERROR__:")
-            ? t("users.rotate_key_error_title", "Rotation failed")
-            : t("users.rotate_key_done_title", "New API key — copy now")
-        }
-        size="md"
-      >
-        {rotatedKey ? (
-          rotatedKey.plaintext.startsWith("__ERROR__:") ? (
-            <div className="space-y-3">
-              <p className="text-sm text-error">
-                {rotatedKey.plaintext.slice("__ERROR__:".length)}
-              </p>
-              <div className="flex justify-end">
-                <Button
-                  variant="secondary"
-                  onClick={() => setRotatedKey(null)}
-                >
-                  {t("common.close", "Close")}
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <p className="text-sm text-warning font-medium">
-                {t(
-                  "users.rotate_key_done_warning",
-                  "This is the ONLY time the plaintext key will be shown. Copy and store it now — the server cannot reproduce it later.",
-                )}
-              </p>
-              <p className="text-xs text-text-dim">
-                {t("users.rotate_key_done_user", "User")}:{" "}
-                <span className="font-mono">{rotatedKey.name}</span>
-              </p>
-              <div className="flex items-center gap-2">
-                <code className="grow rounded bg-main/40 px-3 py-2 font-mono text-xs break-all">
-                  {rotatedKey.plaintext}
-                </code>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  leftIcon={<Copy className="h-3.5 w-3.5" />}
-                  onClick={() => {
-                    void navigator.clipboard.writeText(rotatedKey.plaintext);
-                  }}
-                >
-                  {t("common.copy", "Copy")}
-                </Button>
-              </div>
-              <div className="flex justify-end">
-                <Button
-                  variant="primary"
-                  onClick={() => setRotatedKey(null)}
-                >
-                  {t("users.rotate_key_done_close", "I've copied the key")}
-                </Button>
-              </div>
-            </div>
-          )
-        ) : null}
-      </Modal>
-    </div>
+          <p className="text-xs text-text-dim">
+            {t("users.rotate_key_done_user", "User")}:{" "}
+            <span className="font-mono">{rotatedKey.name}</span>
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="grow rounded bg-main/40 px-3 py-2 font-mono text-xs break-all">
+              {rotatedKey.plaintext}
+            </code>
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={<Copy className="h-3.5 w-3.5" />}
+              onClick={handleCopy}
+            >
+              {hasCopied ? t("common.copied", "Copied") : t("common.copy", "Copy")}
+            </Button>
+          </div>
+          {!hasCopied ? (
+            <p className="text-[11px] text-text-dim">
+              {t(
+                "users.rotate_key_must_copy",
+                "Click Copy first. The Close button unlocks once the key is on your clipboard.",
+              )}
+            </p>
+          ) : null}
+          <div className="flex justify-end">
+            <Button
+              variant="primary"
+              disabled={!hasCopied}
+              title={
+                !hasCopied
+                  ? t(
+                      "users.rotate_key_must_copy",
+                      "Click Copy first. The Close button unlocks once the key is on your clipboard.",
+                    )
+                  : undefined
+              }
+              onClick={onClose}
+            >
+              {hasCopied
+                ? t("users.rotate_key_copied_confirm", "Copied — you can close now")
+                : t("users.rotate_key_done_close", "I've copied the key")}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+    </Modal>
   );
 }
 
@@ -596,6 +637,120 @@ function roleVariant(
     default:
       return "success";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Row-level overflow menu
+// ---------------------------------------------------------------------------
+//
+// Edit gets pulled out of this menu and stays as a primary affordance on the
+// card. Everything else (Link, Rotate, Delete) lives behind a kebab to keep
+// the visual weight of each row tight. We use `<details>` rather than a
+// custom dropdown primitive because:
+//   - it gives us click-to-toggle + click-outside-to-close + Esc-close for
+//     free, all keyboard-accessible without an extra library
+//   - no shared dropdown component exists in `components/ui/`, and the brief
+//     forbids modifying primitives
+//   - one menu per card on a list page — we don't need the bells of cmdk
+//
+// Trade-off: <details> doesn't have a built-in arrow-key navigation between
+// items, but operators on this surface tab through and Enter/Space, which
+// `<button>` children handle natively.
+
+function RowActionsMenu({
+  user,
+  onLink,
+  onRotate,
+  onDelete,
+}: {
+  user: UserItem;
+  onLink: () => void;
+  onRotate: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
+  // Close the menu on outside click / Escape. <details> keeps `open`
+  // toggled, so we just flip the attribute.
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (
+        detailsRef.current &&
+        !detailsRef.current.contains(e.target as Node)
+      ) {
+        detailsRef.current.removeAttribute("open");
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && detailsRef.current?.hasAttribute("open")) {
+        detailsRef.current.removeAttribute("open");
+      }
+    };
+    document.addEventListener("click", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
+
+  const close = () => detailsRef.current?.removeAttribute("open");
+
+  return (
+    <details ref={detailsRef} className="relative">
+      <summary
+        className="list-none cursor-pointer h-7 w-7 inline-flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+        aria-label={t("users.row_actions", "More actions")}
+        title={t("users.row_actions", "More actions")}
+      >
+        <MoreVertical className="h-3.5 w-3.5" />
+      </summary>
+      <div
+        role="menu"
+        className="absolute right-0 z-20 mt-1 w-48 overflow-hidden rounded-xl border border-border-subtle bg-surface shadow-lg shadow-black/10"
+      >
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            close();
+            onLink();
+          }}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-main hover:bg-surface-hover"
+        >
+          <Wand2 className="h-3.5 w-3.5" />
+          {t("users.link", "Link identity")}
+        </button>
+        {user.has_api_key ? (
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              close();
+              onRotate();
+            }}
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-main hover:bg-surface-hover"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            {t("users.rotate_key", "Rotate API key")}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            close();
+            onDelete();
+          }}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-error hover:bg-error/10"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          {t("common.delete", "Delete")}
+        </button>
+      </div>
+    </details>
+  );
 }
 
 function toUpsert(
@@ -810,10 +965,19 @@ function IdentityWizardModal({
   busy: boolean;
 }) {
   const { t } = useTranslation();
+  // Two-step wizard: 0 = Platform, 1 = Identifier (input + ack + Save).
+  // The old 4-step flow (User → Platform → Identifier → Confirm) had a
+  // wasted "User" step (no input) and an "Identifier" / "Confirm" split
+  // that just retyped the value. The user is now a fixed header chip
+  // outside the step body so the operator never loses context.
   const [step, setStep] = useState(0);
   const [channel, setChannel] = useState<string>("telegram");
   const [platformId, setPlatformId] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // "Why?" disclosure for the ownership warning. Hidden by default to
+  // de-emphasize the wall of text on first view; the ack checkbox + a
+  // short headline still make the risk plain.
+  const [showWarning, setShowWarning] = useState(false);
   // Operator must explicitly attest they've checked the platform_id belongs
   // to the target user. There's no automated ownership check (no bot DM
   // challenge yet), so an Owner could otherwise socially-engineer attribution
@@ -828,12 +992,17 @@ function IdentityWizardModal({
     setChannel("telegram");
     setPlatformId("");
     setError(null);
+    setShowWarning(false);
     setAcknowledged(false);
   } else if (!user) {
     lastUser.current = null;
   }
 
   const tile = PLATFORM_TILES.find(p => p.key === channel);
+  const stepLabels = [
+    t("users.wizard_step_platform", "Platform"),
+    t("users.wizard_step_identity", "Identifier"),
+  ];
 
   return (
     <Modal
@@ -845,58 +1014,72 @@ function IdentityWizardModal({
     >
       {user ? (
         <div className="space-y-4">
+          {/* User chip — fixed header so the operator never loses
+              context about which user they're binding to. Replaces
+              the old "User" wizard step. */}
+          <Card padding="md">
+            <p className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+              {t("users.wizard_user_chip", "Linking identity to")}
+            </p>
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-bold">{user.name}</span>
+              <Badge variant={roleVariant(user.role)}>
+                {t(`users.roles.${user.role}`, user.role)}
+              </Badge>
+              <span className="text-[11px] text-text-dim">
+                {Object.keys(user.channel_bindings).length}{" "}
+                {t("users.bindings_suffix", "channel binding(s)")}
+              </span>
+            </div>
+          </Card>
+
           <ol className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-text-dim">
-            {[
-              t("users.wizard_step1", "User"),
-              t("users.wizard_step2", "Platform"),
-              t("users.wizard_step3", "Identifier"),
-              t("users.wizard_step4", "Confirm"),
-            ].map((label, i) => (
-              <li
-                key={label}
-                className={`flex items-center gap-1 ${
-                  i === step ? "text-brand font-bold" : ""
-                }`}
-              >
-                <span
-                  className={`w-5 h-5 rounded-full text-[10px] flex items-center justify-center ${
-                    i <= step
-                      ? "bg-brand/20 text-brand"
-                      : "bg-main/30 text-text-dim"
+            {stepLabels.map((label, i) => {
+              const isCurrent = i === step;
+              const isPast = i < step;
+              const clickable = isPast; // forward-gating preserved
+              return (
+                <li
+                  key={label}
+                  className={`flex items-center gap-1 ${
+                    isCurrent ? "text-brand font-bold" : ""
                   }`}
                 >
-                  {i + 1}
-                </span>
-                {label}
-                {i < 3 ? <span className="opacity-30">›</span> : null}
-              </li>
-            ))}
+                  {clickable ? (
+                    <button
+                      type="button"
+                      onClick={() => setStep(i)}
+                      className="flex items-center gap-1 hover:text-brand"
+                      aria-label={t("users.wizard_step_back_aria", "Go back to step {{n}}", { n: i + 1 })}
+                    >
+                      <span className="w-5 h-5 rounded-full text-[10px] flex items-center justify-center bg-brand/20 text-brand">
+                        {i + 1}
+                      </span>
+                      {label}
+                    </button>
+                  ) : (
+                    <>
+                      <span
+                        className={`w-5 h-5 rounded-full text-[10px] flex items-center justify-center ${
+                          isCurrent
+                            ? "bg-brand/20 text-brand"
+                            : "bg-main/30 text-text-dim"
+                        }`}
+                      >
+                        {i + 1}
+                      </span>
+                      {label}
+                    </>
+                  )}
+                  {i < stepLabels.length - 1 ? (
+                    <span className="opacity-30">›</span>
+                  ) : null}
+                </li>
+              );
+            })}
           </ol>
 
           {step === 0 ? (
-            <div className="space-y-2">
-              <p className="text-xs text-text-dim">
-                {t(
-                  "users.wizard_user_desc",
-                  "We'll add a binding to this user. The wizard never creates new users — pick a different user from the list to retarget.",
-                )}
-              </p>
-              <Card padding="md">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold">{user.name}</span>
-                  <Badge variant={roleVariant(user.role)}>
-                    {t(`users.roles.${user.role}`, user.role)}
-                  </Badge>
-                </div>
-                <p className="mt-1 text-[11px] text-text-dim">
-                  {Object.keys(user.channel_bindings).length}{" "}
-                  {t("users.bindings_suffix", "channel binding(s)")}
-                </p>
-              </Card>
-            </div>
-          ) : null}
-
-          {step === 1 ? (
             <div className="space-y-2">
               <p className="text-xs text-text-dim">
                 {t(
@@ -928,14 +1111,9 @@ function IdentityWizardModal({
             </div>
           ) : null}
 
-          {step === 2 ? (
-            <div className="space-y-2">
-              <p className="text-xs text-text-dim">
-                {t(
-                  "users.wizard_id_desc",
-                  "Paste the platform's identifier. The format hint matches the channel you picked.",
-                )}
-              </p>
+          {step === 1 ? (
+            <div className="space-y-3">
+              {/* Format hint card — kept from old step 2. */}
               {tile ? (
                 <Card padding="md">
                   <p className="text-sm font-bold">
@@ -950,6 +1128,7 @@ function IdentityWizardModal({
                   </p>
                 </Card>
               ) : null}
+
               <Input
                 label={t("users.wizard_id_label", "platform_id")}
                 value={platformId}
@@ -960,54 +1139,42 @@ function IdentityWizardModal({
                     : undefined
                 }
               />
-            </div>
-          ) : null}
 
-          {step === 3 ? (
-            <div className="space-y-2">
-              <p className="text-xs text-text-dim">
-                {t(
-                  "users.wizard_confirm_desc",
-                  "Confirm and write to config.toml. The kernel rebuilds its RBAC channel index in place — no restart needed.",
-                )}
-              </p>
-              <Card padding="md">
-                <p className="text-xs">
-                  <span className="text-text-dim">{t("users.user", "User")}: </span>
-                  <span className="font-bold">{user.name}</span>
-                </p>
-                <p className="mt-1 text-xs">
-                  <span className="text-text-dim">
-                    {t("users.wizard_platform", "Platform")}:{" "}
-                  </span>
-                  <span className="font-bold">{channel}</span>
-                </p>
-                <p className="mt-1 text-xs font-mono">
-                  <span className="text-text-dim">platform_id: </span>
-                  {platformId || (
-                    <span className="opacity-50">— missing —</span>
-                  )}
-                </p>
-              </Card>
-
-              {/* Ownership warning — there is currently no automated
-                  challenge/response over the channel bot, so the platform_id
-                  is taken on faith. Surface that risk so an Owner can't
-                  silently bind another user's id. */}
+              {/* Ack checkbox always visible — the warning detail is
+                  gated behind a "Why?" disclosure to keep the form
+                  scannable. The headline still names the risk. */}
               <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs space-y-2">
-                <p className="font-bold text-warning">
-                  {t(
-                    "users.wizard_unverified_title",
-                    "No automated ownership check",
-                  )}
-                </p>
-                <p className="text-text-dim">
-                  {t(
-                    "users.wizard_unverified_body",
-                    "LibreFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
-                    { user: user.name },
-                  )}
-                </p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="font-bold text-warning">
+                    {t(
+                      "users.wizard_unverified_title",
+                      "No automated ownership check",
+                    )}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowWarning(s => !s)}
+                    className="inline-flex items-center gap-1 text-[11px] text-warning hover:underline shrink-0"
+                  >
+                    {showWarning
+                      ? t("users.wizard_hide_warning", "Hide warning")
+                      : t("users.wizard_show_warning", "Why this matters")}
+                    {showWarning ? (
+                      <ChevronUp className="h-3 w-3" />
+                    ) : (
+                      <ChevronDown className="h-3 w-3" />
+                    )}
+                  </button>
+                </div>
+                {showWarning ? (
+                  <p className="text-text-dim">
+                    {t(
+                      "users.wizard_unverified_body",
+                      "LibreFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
+                      { user: user.name },
+                    )}
+                  </p>
+                ) : null}
                 <label className="flex items-start gap-2 cursor-pointer pt-1">
                   <input
                     type="checkbox"
@@ -1041,18 +1208,12 @@ function IdentityWizardModal({
             >
               {t("common.back", "Back")}
             </Button>
-            {step < 3 ? (
+            {step < 1 ? (
               <Button
                 variant="primary"
                 onClick={() => {
-                  if (step === 2 && !platformId.trim()) {
-                    setError(
-                      t("users.err_id_required", "platform_id is required."),
-                    );
-                    return;
-                  }
                   setError(null);
-                  setStep(s => Math.min(3, s + 1));
+                  setStep(1);
                 }}
               >
                 {t("common.next", "Next")}
@@ -1061,16 +1222,24 @@ function IdentityWizardModal({
               <Button
                 variant="primary"
                 isLoading={busy}
-                disabled={!acknowledged}
+                disabled={!acknowledged || !platformId.trim()}
                 title={
-                  !acknowledged
-                    ? t(
-                        "users.wizard_ack_required",
-                        "Acknowledge the ownership warning to save.",
-                      )
-                    : undefined
+                  !platformId.trim()
+                    ? t("users.err_id_required", "platform_id is required.")
+                    : !acknowledged
+                      ? t(
+                          "users.wizard_ack_required",
+                          "Acknowledge the ownership warning to save.",
+                        )
+                      : undefined
                 }
                 onClick={async () => {
+                  if (!platformId.trim()) {
+                    setError(
+                      t("users.err_id_required", "platform_id is required."),
+                    );
+                    return;
+                  }
                   if (!acknowledged) {
                     setError(
                       t(
@@ -1165,7 +1334,10 @@ function BulkImportModal({
             className="mt-1.5 w-full font-mono text-xs rounded-xl border border-border-subtle bg-surface p-3 min-h-[160px]"
             value={rawText}
             onChange={e => setRawText(e.target.value)}
-            placeholder="name,role,telegram,discord\nalice,admin,123,\nbob,user,,456"
+            placeholder={t(
+              "users.csv_paste_placeholder",
+              "alice,user,telegram=123456789;email=alice@example.com",
+            )}
           />
         </div>
 
@@ -1276,33 +1448,44 @@ function DropZone({ onFile }: { onFile: (file: File) => void }) {
   const { t } = useTranslation();
   const [active, setActive] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Native <button type="button"> gives us Enter / Space → click for free,
+  // plus a real focus ring without `tabIndex` plumbing. Drag handlers stay
+  // on the button itself; the underlying file `<input>` is hidden but
+  // remains the actual file picker that the click forwards to.
   return (
-    <div
-      onDragOver={e => {
-        e.preventDefault();
-        setActive(true);
-      }}
-      onDragLeave={() => setActive(false)}
-      onDrop={e => {
-        e.preventDefault();
-        setActive(false);
-        const f = e.dataTransfer.files?.[0];
-        if (f) onFile(f);
-      }}
-      onClick={() => inputRef.current?.click()}
-      className={`cursor-pointer rounded-xl border-2 border-dashed p-6 text-center text-xs transition-colors ${
-        active
-          ? "border-brand bg-brand/10 text-brand"
-          : "border-border-subtle text-text-dim hover:border-brand/30"
-      }`}
-    >
-      <UploadCloud className="mx-auto mb-2 h-6 w-6" />
-      <p>
-        {t(
-          "users.csv_drop",
-          "Drop a CSV here, or click to browse.",
+    <>
+      <button
+        type="button"
+        onDragOver={e => {
+          e.preventDefault();
+          setActive(true);
+        }}
+        onDragLeave={() => setActive(false)}
+        onDrop={e => {
+          e.preventDefault();
+          setActive(false);
+          const f = e.dataTransfer.files?.[0];
+          if (f) onFile(f);
+        }}
+        onClick={() => inputRef.current?.click()}
+        aria-label={t(
+          "users.csv_drop_aria",
+          "Upload CSV file: drop here or activate to browse",
         )}
-      </p>
+        className={`w-full block cursor-pointer rounded-xl border-2 border-dashed p-6 text-center text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${
+          active
+            ? "border-brand bg-brand/10 text-brand"
+            : "border-border-subtle text-text-dim hover:border-brand/30"
+        }`}
+      >
+        <UploadCloud className="mx-auto mb-2 h-6 w-6" />
+        <p>
+          {t(
+            "users.csv_drop",
+            "Drop a CSV here, or click to browse.",
+          )}
+        </p>
+      </button>
       <input
         ref={inputRef}
         type="file"
@@ -1314,7 +1497,7 @@ function DropZone({ onFile }: { onFile: (file: File) => void }) {
           e.target.value = "";
         }}
       />
-    </div>
+    </>
   );
 }
 
