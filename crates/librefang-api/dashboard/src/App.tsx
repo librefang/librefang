@@ -558,7 +558,6 @@ export function App() {
         { to: "/config/security", label: t("config.cat_security"), icon: Shield },
         { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
         { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
-        { to: "/settings", label: t("nav.settings"), icon: Settings },
       ],
     },
     {
