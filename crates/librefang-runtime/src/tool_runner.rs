@@ -1881,12 +1881,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Channel send tool (proactive outbound messaging) ---
         ToolDefinition {
             name: "channel_send".to_string(),
-            description: "Send a message or media to a user on a configured channel (email, telegram, slack, etc). For email: recipient is the email address; optionally set subject. For media: set image_url, file_url, or file_path to send an image or file instead of (or alongside) text. Use thread_id to reply in a specific thread/topic. When recipient is omitted, automatically replies to the original sender.".to_string(),
+            description: "Send a message or media to a user on a configured channel (email, telegram, slack, etc). For email: recipient is the email address; optionally set subject. For media: set image_url, file_url, or file_path to send an image or file instead of (or alongside) text. Use thread_id to reply in a specific thread/topic. When recipient is omitted during message handling, the tool automatically replies to the original sender.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "channel": { "type": "string", "description": "Channel adapter name (e.g., 'email', 'telegram', 'slack', 'discord')" },
-                    "recipient": { "type": "string", "description": "Platform-specific recipient identifier (email address, user ID, etc.). Omit to auto-reply to the original sender." },
+                    "recipient": { "type": "string", "description": "Platform-specific recipient identifier (email address, user ID, etc.). Omit only when replying from an inbound message context where the original sender is available." },
                     "subject": { "type": "string", "description": "Optional subject line (used for email; ignored for other channels)" },
                     "message": { "type": "string", "description": "The message body to send (required for text, optional caption for media)" },
                     "image_url": { "type": "string", "description": "URL of an image to send (supported on Telegram, Discord, Slack)" },
@@ -3873,6 +3873,7 @@ async fn tool_channel_send(
     // knowing the platform-specific ID (e.g., Telegram chat_id)
     let recipient = input["recipient"]
         .as_str()
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .or(sender_id)
         .ok_or("Missing 'recipient' parameter. When replying to the original sender, recipient is auto-filled — ensure channel_send is called in response to a message.")?
