@@ -2324,7 +2324,7 @@ mod tests {
         assert!(!rejects_temperature("gpt-4o-mini"));
         assert!(!rejects_temperature("gpt-5"));
         assert!(!rejects_temperature("gpt-5-2025-06-01"));
-        assert!(!rejects_temperature("non-reasoning-placeholder"));
+        assert!(!rejects_temperature("plain-model-placeholder"));
         assert!(!rejects_temperature("llama-3.3-70b-versatile"));
         assert!(!rejects_temperature("deepseek-chat"));
     }
