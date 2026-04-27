@@ -194,6 +194,27 @@ pub struct McpCatalogEntry {
     /// Health check configuration.
     #[serde(default)]
     pub health_check: HealthCheckConfig,
+    /// Per-language translation overrides for `name`, `description`, and
+    /// `setup_instructions`. Keyed by BCP-47 tag (`zh`, `zh-TW`, …).
+    /// API routes resolve `Accept-Language` against this table and fall
+    /// back to the top-level English fields when no entry matches.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub i18n: std::collections::HashMap<String, McpCatalogI18n>,
+}
+
+/// Per-language overrides for an MCP catalog entry's user-facing strings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpCatalogI18n {
+    /// Localized name. Falls back to the top-level `name`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description. Falls back to the top-level `description`.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Localized setup instructions. Falls back to the top-level
+    /// `setup_instructions`.
+    #[serde(default)]
+    pub setup_instructions: Option<String>,
 }
 
 /// Status of an MCP server.

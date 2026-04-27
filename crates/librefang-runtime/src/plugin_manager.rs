@@ -10,7 +10,8 @@
 //! - **Local path**: copy from a local directory
 //! - **Git URL**: clone a git repo into the plugins directory
 
-use librefang_types::config::{PluginManifest, PluginSystemRequirement};
+use librefang_types::config::{PluginI18n, PluginManifest, PluginSystemRequirement};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -893,6 +894,11 @@ pub struct RegistryPluginEntry {
     /// Hook names declared by the plugin (e.g. `ingest`, `after_turn`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<String>,
+    /// Per-language overrides for `name` / `description`. Keyed by BCP-47
+    /// tag (`zh`, `zh-TW`, …). API routes resolve `Accept-Language` against
+    /// this and fall back to the English values above.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub i18n: HashMap<String, PluginI18n>,
 }
 
 /// Disk cache file for an enriched registry listing.
@@ -955,6 +961,24 @@ async fn fetch_registry_plugin_meta(
     if let Some(hooks) = value.get("hooks").and_then(|v| v.as_table()) {
         entry.hooks = hooks.keys().cloned().collect();
         entry.hooks.sort();
+    }
+    if let Some(i18n) = value.get("i18n").and_then(|v| v.as_table()) {
+        for (lang, body) in i18n {
+            let Some(tbl) = body.as_table() else { continue };
+            let pi = PluginI18n {
+                name: tbl
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                description: tbl
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            };
+            if pi.name.is_some() || pi.description.is_some() {
+                entry.i18n.insert(lang.clone(), pi);
+            }
+        }
     }
     entry
 }
