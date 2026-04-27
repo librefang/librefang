@@ -26,12 +26,24 @@ use std::time::{Duration, Instant};
 /// the next agent to dispatch can take ownership.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 
-/// Identity of a single (channel, thread) pair. Built per-message from the
-/// canonical channel-type slug and the platform's thread identifier.
+/// Identity of a single (channel, account, thread) tuple. Built per-message
+/// from the canonical channel-type slug, the optional multi-tenant account
+/// identifier, and the platform's thread identifier.
+///
+/// `account_id` is part of the key because thread identifiers are not
+/// globally unique across workspaces / guilds / orgs on most platforms
+/// (Slack `thread_ts` is monotonic-ish but reused across workspaces;
+/// Discord thread IDs are workspace-scoped). Without it, a claim from
+/// account A's thread `T123` would shadow account B's thread `T123` on the
+/// same channel slug. See #3334 review.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ThreadKey {
     /// Adapter-qualified channel slug (e.g. `"slack"`, `"discord"`).
     pub channel: String,
+    /// Multi-tenant account / workspace / guild identifier when the channel
+    /// supports multi-tenant deployments. `None` for single-tenant channels
+    /// or when the adapter does not surface an account id.
+    pub account_id: Option<String>,
     /// Platform thread identifier (Slack `thread_ts`, Discord thread ID,
     /// etc.). Empty string is invalid; callers should not invoke the
     /// registry without a real thread.
@@ -39,16 +51,23 @@ pub struct ThreadKey {
 }
 
 impl ThreadKey {
-    /// Build a key from a channel slug and thread id. Trims whitespace; both
-    /// fields must be non-empty after trimming or the call is meaningless.
-    pub fn new(channel: &str, thread: &str) -> Option<Self> {
+    /// Build a key from a channel slug, optional account id, and thread id.
+    /// Trims whitespace; channel and thread must be non-empty after trimming
+    /// or the call is meaningless. An empty `account_id` (after trimming)
+    /// is treated as `None`.
+    pub fn new(channel: &str, account_id: Option<&str>, thread: &str) -> Option<Self> {
         let channel = channel.trim();
         let thread = thread.trim();
         if channel.is_empty() || thread.is_empty() {
             return None;
         }
+        let account_id = account_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         Some(Self {
             channel: channel.to_string(),
+            account_id,
             thread: thread.to_string(),
         })
     }
@@ -223,16 +242,60 @@ mod tests {
     }
 
     fn key(thread: &str) -> ThreadKey {
-        ThreadKey::new("slack", thread).expect("key")
+        ThreadKey::new("slack", None, thread).expect("key")
+    }
+
+    fn key_in_account(account: &str, thread: &str) -> ThreadKey {
+        ThreadKey::new("slack", Some(account), thread).expect("key")
     }
 
     #[test]
     fn empty_thread_key_rejected() {
-        assert!(ThreadKey::new("", "T123").is_none());
-        assert!(ThreadKey::new("slack", "").is_none());
-        assert!(ThreadKey::new("  ", "T123").is_none());
-        assert!(ThreadKey::new("slack", "  ").is_none());
-        assert!(ThreadKey::new("slack", "T123").is_some());
+        assert!(ThreadKey::new("", None, "T123").is_none());
+        assert!(ThreadKey::new("slack", None, "").is_none());
+        assert!(ThreadKey::new("  ", None, "T123").is_none());
+        assert!(ThreadKey::new("slack", None, "  ").is_none());
+        assert!(ThreadKey::new("slack", None, "T123").is_some());
+    }
+
+    #[test]
+    fn empty_account_id_normalized_to_none() {
+        // Adapters that surface account_id as "" rather than absent should
+        // produce the same key as the absent variant — otherwise
+        // single-tenant traffic would split into two distinct claim slots.
+        let absent = ThreadKey::new("slack", None, "T1").unwrap();
+        let blank_some = ThreadKey::new("slack", Some(""), "T1").unwrap();
+        let whitespace_some = ThreadKey::new("slack", Some("  "), "T1").unwrap();
+        assert_eq!(absent, blank_some);
+        assert_eq!(absent, whitespace_some);
+    }
+
+    #[test]
+    fn distinct_accounts_do_not_collide_on_same_thread_id() {
+        // Slack `thread_ts` is not globally unique across workspaces. If two
+        // workspaces happen to produce the same `thread_ts`, the registry
+        // must keep their claims independent.
+        let reg = ThreadOwnershipRegistry::new();
+        let alice = fresh_id();
+        let bob = fresh_id();
+        let now = Instant::now();
+        let _ = reg.decide_at(key_in_account("acctA", "T1"), alice, false, now);
+        match reg.decide_at(key_in_account("acctB", "T1"), bob, false, now) {
+            DispatchDecision::Allow { agent_id } => assert_eq!(agent_id, bob),
+            other => panic!(
+                "expected Allow on different account with same thread_id, got {:?}",
+                other
+            ),
+        }
+        // Holders are independent — re-querying acctA must still see alice.
+        assert_eq!(
+            reg.current_holder(&key_in_account("acctA", "T1")),
+            Some(alice)
+        );
+        assert_eq!(
+            reg.current_holder(&key_in_account("acctB", "T1")),
+            Some(bob)
+        );
     }
 
     #[test]

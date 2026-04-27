@@ -916,6 +916,11 @@ pub struct BridgeManager {
     /// Single-process thread-ownership claims. Suppresses multi-agent
     /// duplicate replies in shared group threads (#3334).
     thread_ownership: Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
+    /// Whether the per-process thread-ownership sweep task has already been
+    /// spawned. Started lazily on the first `start_adapter` call so the
+    /// sync constructor never requires an active tokio runtime (some unit
+    /// tests construct `BridgeManager` without one).
+    thread_ownership_sweep_started: bool,
 }
 
 impl BridgeManager {
@@ -934,6 +939,7 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
+            thread_ownership_sweep_started: false,
         }
     }
 
@@ -956,6 +962,7 @@ impl BridgeManager {
             webhook_routes: Vec::new(),
             journal: None,
             thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
+            thread_ownership_sweep_started: false,
         }
     }
 
@@ -996,6 +1003,54 @@ impl BridgeManager {
         }
     }
 
+    /// Start the periodic sweep that drops expired thread-ownership claims.
+    ///
+    /// Called lazily on the first `start_adapter` invocation — the
+    /// constructor cannot spawn because some unit tests build a
+    /// `BridgeManager` outside any tokio runtime, but `start_adapter` is
+    /// always called from inside one. Idempotent across multiple
+    /// `start_adapter` calls (only the first arms the sweeper).
+    ///
+    /// Without this, `ThreadOwnershipRegistry::claims` would grow
+    /// monotonically: `decide` only evicts on access, never proactively, so
+    /// a long-running daemon in a Slack workspace with churning
+    /// `thread_ts` values would accumulate stale entries until restart.
+    /// See #3334 review.
+    fn ensure_thread_ownership_sweep_started(&mut self) {
+        if self.thread_ownership_sweep_started {
+            return;
+        }
+        self.thread_ownership_sweep_started = true;
+        let registry = Arc::clone(&self.thread_ownership);
+        let mut shutdown = self.shutdown_rx.clone();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            // First tick fires immediately by default — skip it so the
+            // first sweep happens 60s after start, giving fresh claims a
+            // full TTL window before any sweep can act on them.
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let dropped = registry.sweep_expired();
+                        if dropped > 0 {
+                            tracing::debug!(
+                                dropped,
+                                "thread_ownership: swept expired claims"
+                            );
+                        }
+                    }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.tasks.push(task);
+    }
+
     /// Start an adapter: subscribe to its message stream and spawn a dispatch task.
     ///
     /// Each incoming message is dispatched as a concurrent task so that slow LLM
@@ -1010,6 +1065,10 @@ impl BridgeManager {
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Lazily arm the thread-ownership sweep on first adapter start —
+        // we know we're in a tokio runtime here. Idempotent.
+        self.ensure_thread_ownership_sweep_started();
+
         // Sweep stale files (>24h) from the download directory on startup.
         // Use Once so that registering multiple adapters doesn't trigger
         // redundant cleanup sweeps.
@@ -1293,6 +1352,16 @@ impl BridgeManager {
     /// Routes the message through the kernel's `send_channel_message` which
     /// looks up the adapter by name and delivers via `ChannelAdapter::send()`.
     /// This is the bridge-level entry point used by the REST API push endpoint.
+    ///
+    /// **Thread-ownership note (#3334):** this path intentionally bypasses
+    /// the thread-ownership registry. Push is the agent-initiated outbound
+    /// channel (cron, workflow, `agent_send`, REST `/push`); the caller has
+    /// already chosen which agent is sending, so there is no routing
+    /// decision to gate. Gating push here would break legitimate flows
+    /// such as a scheduled summary from agent B landing in a thread agent
+    /// A is currently conversing in. If that asymmetry causes user-visible
+    /// pain, expose an opt-in `respect_thread_ownership` flag in a
+    /// follow-up rather than enforcing it unconditionally here.
     pub async fn push_message(
         &self,
         channel_type: &str,
@@ -3165,7 +3234,10 @@ async fn dispatch_message(
 
     // Thread-ownership gate (#3334). Only meaningful for group threads with
     // a platform thread id; DMs and untreaded channels bypass entirely.
-    // An explicit @-mention re-claims the thread for the new agent.
+    // An explicit @-mention re-claims the thread for the new agent. The
+    // key carries `account_id` because thread identifiers are not globally
+    // unique across multi-tenant deployments (Slack workspaces, Discord
+    // guilds, etc.).
     if message.is_group
         && overrides
             .as_ref()
@@ -3173,7 +3245,10 @@ async fn dispatch_message(
             .unwrap_or(true)
     {
         if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
+            let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+            if let Some(key) =
+                crate::thread_ownership::ThreadKey::new(ct_str, account_id, thread_str)
+            {
                 let was_mentioned = message
                     .metadata
                     .get("was_mentioned")
@@ -3184,6 +3259,7 @@ async fn dispatch_message(
                     crate::thread_ownership::DispatchDecision::Suppress { holder } => {
                         debug!(
                             channel = ct_str,
+                            account_id = account_id,
                             thread_id = thread_str,
                             candidate = %agent_id,
                             holder = %holder,
@@ -4223,13 +4299,18 @@ async fn dispatch_with_blocks(
     // Thread-ownership gate (#3334). Mirrors the text-path check in
     // `dispatch_message`. Multimodal messages may not include a
     // platform-level @-mention marker; treat absence as "no override".
+    // The key carries `account_id` for the same multi-tenant reason as the
+    // text path.
     if message.is_group
         && overrides
             .map(|o| o.thread_ownership_enabled)
             .unwrap_or(true)
     {
         if let Some(thread_str) = message.thread_id.as_deref() {
-            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
+            let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+            if let Some(key) =
+                crate::thread_ownership::ThreadKey::new(ct_str, account_id, thread_str)
+            {
                 let was_mentioned = message
                     .metadata
                     .get("was_mentioned")
@@ -4240,6 +4321,7 @@ async fn dispatch_with_blocks(
                     crate::thread_ownership::DispatchDecision::Suppress { holder } => {
                         debug!(
                             channel = ct_str,
+                            account_id = account_id,
                             thread_id = thread_str,
                             candidate = %agent_id,
                             holder = %holder,
@@ -4806,6 +4888,11 @@ mod tests {
     /// Helper: replicate the metadata read + key build the bridge does, then
     /// ask the registry. Exercises the same logic `dispatch_message` runs
     /// without standing up the full channel handle / adapter mocks.
+    ///
+    /// Note: a real-dispatch test that drives `dispatch_message` with stub
+    /// `ChannelBridgeHandle` and a recording adapter is acknowledged debt
+    /// (#3414 review). The helper still catches regressions in metadata
+    /// reads + key build, which is where the real risk lives.
     fn bridge_thread_ownership_decision(
         registry: &crate::thread_ownership::ThreadOwnershipRegistry,
         message: &ChannelMessage,
@@ -4817,7 +4904,8 @@ mod tests {
             return None;
         }
         let thread_str = message.thread_id.as_deref()?;
-        let key = crate::thread_ownership::ThreadKey::new(ct_str, thread_str)?;
+        let account_id = message.metadata.get("account_id").and_then(|v| v.as_str());
+        let key = crate::thread_ownership::ThreadKey::new(ct_str, account_id, thread_str)?;
         let was_mentioned = message
             .metadata
             .get("was_mentioned")
@@ -4827,11 +4915,22 @@ mod tests {
     }
 
     fn group_thread_message(thread: &str, was_mentioned: bool) -> ChannelMessage {
+        group_thread_message_in_account(thread, was_mentioned, None)
+    }
+
+    fn group_thread_message_in_account(
+        thread: &str,
+        was_mentioned: bool,
+        account_id: Option<&str>,
+    ) -> ChannelMessage {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(
             "was_mentioned".to_string(),
             serde_json::json!(was_mentioned),
         );
+        if let Some(acct) = account_id {
+            metadata.insert("account_id".to_string(), serde_json::json!(acct));
+        }
         ChannelMessage {
             channel: ChannelType::Slack,
             platform_message_id: "1".into(),
@@ -4952,6 +5051,44 @@ mod tests {
             decision.is_none(),
             "thread_ownership_enabled = false must bypass the registry"
         );
+    }
+
+    #[test]
+    fn multi_tenant_account_id_flows_into_thread_key() {
+        // Two Slack workspaces (account_id A vs B) happen to use the same
+        // thread_ts. Each workspace's claim must remain independent — A's
+        // claim must not shadow B's. Verifies the bridge actually reads
+        // account_id from message metadata and threads it into ThreadKey.
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let _ = bridge_thread_ownership_decision(
+            &registry,
+            &group_thread_message_in_account("T1", false, Some("acctA")),
+            "slack",
+            alice,
+            true,
+        );
+        let decision = bridge_thread_ownership_decision(
+            &registry,
+            &group_thread_message_in_account("T1", false, Some("acctB")),
+            "slack",
+            bob,
+            true,
+        )
+        .expect("registry must be consulted for group threads");
+        match decision {
+            crate::thread_ownership::DispatchDecision::Allow { agent_id } => {
+                assert_eq!(
+                    agent_id, bob,
+                    "different account on same thread_id must claim independently"
+                );
+            }
+            other => panic!(
+                "expected Allow on different account with same thread_id, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
