@@ -9,6 +9,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 
 ### Added
 
+- TUI setup wizard now offers `microsoft`, `zai`, `zai_coding`, `volcengine`, `volcengine_coding`, `byteplus`, `byteplus_coding` alongside the existing first-run options. The wizard's PROVIDERS list had drifted from `PROVIDER_REGISTRY` and silently hid these from new installs; a unit test now pins these entries against future regressions. (@houko)
 - Treat CLI logins as first-class default providers (#3061) (@houko)
 - Grafana Tempo + business-level span instrumentation (#3064) (@houko)
 - /new creates a new session instead of resetting the current one (#3071) (@neo-wanderer)

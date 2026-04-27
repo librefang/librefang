@@ -144,6 +144,48 @@ const PROVIDERS: &[ProviderInfo] = &[
         needs_key: true,
     },
     ProviderInfo {
+        name: "zai",
+        env_var: "ZAI_API_KEY",
+        default_model: "zai/glm-4.7",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "zai_coding",
+        env_var: "ZAI_CODING_API_KEY",
+        default_model: "glm-4.7-coding",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "volcengine",
+        env_var: "VOLCENGINE_API_KEY",
+        default_model: "doubao-seed-2-0-pro-260215",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "volcengine_coding",
+        env_var: "VOLCENGINE_CODING_API_KEY",
+        default_model: "doubao-seed-2-0-code",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "byteplus",
+        env_var: "BYTEPLUS_API_KEY",
+        default_model: "seed-2-0-pro-260328",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "byteplus_coding",
+        env_var: "BYTEPLUS_CODING_API_KEY",
+        default_model: "ark-code-latest",
+        needs_key: true,
+    },
+    ProviderInfo {
+        name: "microsoft",
+        env_var: "GITHUB_MODELS_TOKEN",
+        default_model: "phi-4",
+        needs_key: true,
+    },
+    ProviderInfo {
         name: "claude-code",
         env_var: "",
         default_model: "claude-code/sonnet",
@@ -694,5 +736,42 @@ fn draw_done(f: &mut Frame, area: Rect, state: &WizardState) {
             theme::dim_style(),
         )]));
         f.render_widget(cont, chunks[1]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// The wizard's `PROVIDERS` array is hand-maintained alongside the driver
+    /// registry's `PROVIDER_REGISTRY`. Whenever a provider was added to the
+    /// driver registry without a matching wizard entry, first-run users would
+    /// silently miss it. This test pins the providers wired up alongside the
+    /// recent env-var splits (#3279 / #3281 / #3285) so they can't regress;
+    /// extending the assertion list when adding new providers is easier than
+    /// rediscovering the drift in user reports.
+    #[test]
+    fn test_wizard_includes_recently_added_providers() {
+        let names: HashSet<&str> = PROVIDERS.iter().map(|p| p.name).collect();
+        let env_vars: HashSet<&str> = PROVIDERS.iter().map(|p| p.env_var).collect();
+        for (name, env_var) in [
+            ("zai", "ZAI_API_KEY"),
+            ("zai_coding", "ZAI_CODING_API_KEY"),
+            ("volcengine", "VOLCENGINE_API_KEY"),
+            ("volcengine_coding", "VOLCENGINE_CODING_API_KEY"),
+            ("byteplus", "BYTEPLUS_API_KEY"),
+            ("byteplus_coding", "BYTEPLUS_CODING_API_KEY"),
+            ("microsoft", "GITHUB_MODELS_TOKEN"),
+        ] {
+            assert!(
+                names.contains(name),
+                "wizard PROVIDERS missing entry for `{name}`",
+            );
+            assert!(
+                env_vars.contains(env_var),
+                "wizard PROVIDERS missing env_var `{env_var}` (expected on `{name}`)",
+            );
+        }
     }
 }
