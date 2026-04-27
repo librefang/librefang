@@ -26,6 +26,23 @@ pub const PER_SECTION_CHAR_CAP: usize = 8 * 1024;
 /// with a `WARN` log per drop. See #3326.
 pub const TOTAL_DYNAMIC_CHAR_CAP: usize = 32 * 1024;
 
+/// Hard byte ceiling applied **before** any per-character counting on a
+/// provider-supplied body. UTF-8 characters take at most 4 bytes, so any
+/// body exceeding `PER_SECTION_CHAR_CAP * 4` bytes is guaranteed to overflow
+/// the char cap regardless of encoding and is safe to byte-truncate first.
+///
+/// Without this guard a buggy or compromised handler returning a multi-MB
+/// body would force an O(n) walk across the full payload on the kernel hot
+/// path. See #3326 review.
+const HARD_BYTE_CEILING: usize = PER_SECTION_CHAR_CAP * 4;
+
+/// Reserved character budget for the "[truncated: X → Y chars]" suffix that
+/// `collect_prompt_sections` appends after a per-section truncation. 40 is
+/// comfortably above the realistic worst case (two 10-digit counts plus the
+/// fixed marker text), keeping post-truncation length under
+/// [`PER_SECTION_CHAR_CAP`].
+const TRUNCATION_MARKER_RESERVE: usize = 40;
+
 /// A labeled section produced by a prompt-context provider, injected into the
 /// system prompt at build time.
 ///
@@ -202,8 +219,22 @@ impl HookRegistry {
 
             match handler.provide_prompt_section(ctx) {
                 Ok(Some(mut section)) => {
+                    // DoS guard: byte-truncate huge bodies before any O(n)
+                    // char counting. UTF-8 max is 4 bytes/char, so any body
+                    // longer than `HARD_BYTE_CEILING` is guaranteed to
+                    // overflow the per-section char cap regardless of
+                    // encoding. See #3326 review.
+                    if section.body.len() > HARD_BYTE_CEILING {
+                        let mut cut = HARD_BYTE_CEILING;
+                        while cut > 0 && !section.body.is_char_boundary(cut) {
+                            cut -= 1;
+                        }
+                        section.body.truncate(cut);
+                    }
+
                     if section.body.chars().count() > PER_SECTION_CHAR_CAP {
-                        let kept_chars = PER_SECTION_CHAR_CAP.saturating_sub(40);
+                        let kept_chars =
+                            PER_SECTION_CHAR_CAP.saturating_sub(TRUNCATION_MARKER_RESERVE);
                         let cutoff = section
                             .body
                             .char_indices()
