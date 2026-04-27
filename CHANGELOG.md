@@ -149,6 +149,7 @@ and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DD).
 - Autonomous-loop tool calls bypass user gate (closes #3243) (#3251) (@houko)
 - Channel dropdown uses /api/channels for full 44-adapter list (#3253) (@houko)
 - Enforce deterministic ordering for LLM-bound MCP server / skill registries to stabilize provider prompt cache (closes #3298) (#3325) (@houko)
+- Multi-tenant ThreadKey collision and unbounded thread-ownership registry growth (#3414 follow-up) (@houko)
 
 ### Changed
 
