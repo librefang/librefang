@@ -235,3 +235,5 @@ opt-level = "s"
 inherits = "release"
 lto = "thin"
 codegen-units = 4
+
+// Contributed for bounty: $99
