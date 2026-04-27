@@ -60,7 +60,10 @@ type CardProps = {
 function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pendingDelete }: CardProps) {
   const { t } = useTranslation();
   const isCustom = m.tier === "custom";
-  const free = (m.input_cost_per_m ?? 0) === 0 && (m.output_cost_per_m ?? 0) === 0;
+  // Treat as free only when both costs are explicitly declared as 0 in the
+  // catalog. `undefined` means "unknown" (e.g. local-model entries that don't
+  // ship pricing) and must NOT render as the green Free badge.
+  const free = m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
 
   const formatCost = (cost?: number) => {
     if (cost === undefined || cost === null) return "—";
@@ -70,8 +73,17 @@ function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pe
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={m.display_name || m.id}
       onClick={onOpen}
-      className={`group relative flex flex-col gap-2.5 p-4 rounded-2xl border bg-surface hover:bg-main/40 hover:border-brand/40 transition-colors cursor-pointer min-h-[124px] ${
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      className={`group relative flex flex-col gap-2.5 p-4 rounded-2xl border bg-surface hover:bg-main/40 hover:border-brand/40 focus-visible:outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/30 transition-colors cursor-pointer min-h-[124px] ${
         hidden ? "border-warning/30 bg-warning/5" : "border-border-subtle"
       } ${!m.available ? "opacity-60" : ""}`}
     >
@@ -482,7 +494,7 @@ export function ModelsPage() {
                 <span className="font-mono">{formatCtx(detailModel.max_output_tokens)}</span>
               </div>
               <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.section")}</div>
+                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.availability")}</div>
                 <span>{detailModel.available ? <span className="text-success font-bold">●</span> : <span className="text-text-dim">○</span>} {detailModel.available ? t("models.available") : t("models.no_key")}</span>
               </div>
             </div>

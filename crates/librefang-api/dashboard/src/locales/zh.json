@@ -2117,6 +2117,7 @@
     "all_tiers": "全部",
     "available_only": "仅可用",
     "available": "可用",
+    "availability": "可用性",
     "results": "个模型",
     "free": "免费",
     "no_results": "没有匹配的模型。",

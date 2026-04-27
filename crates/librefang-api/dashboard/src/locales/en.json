@@ -2171,6 +2171,7 @@
     "all_tiers": "All",
     "available_only": "Available Only",
     "available": "available",
+    "availability": "Availability",
     "results": "models",
     "free": "Free",
     "no_results": "No models match your filters.",
