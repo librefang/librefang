@@ -9287,10 +9287,7 @@ mod tests {
     fn test_strip_provider_prefix_non_openrouter() {
         // Non-OpenRouter providers: bare names should pass through
         assert_eq!(strip_provider_prefix("gpt-4o", "openai"), "gpt-4o");
-        assert_eq!(
-            strip_provider_prefix("claude-sonnet-4-20250514", "anthropic"),
-            "claude-sonnet-4-20250514"
-        );
+        assert_eq!(strip_provider_prefix("sonnet", "anthropic"), "sonnet");
     }
 
     #[test]

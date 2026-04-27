@@ -41,7 +41,7 @@
 
 **可用模型：**
 - `claude-opus-4-20250514` (旗舰)
-- `claude-sonnet-4-20250514` (智能)
+- `sonnet` (智能)
 - `claude-haiku-4-5-20251001` (快速)
 
 **设置：**
@@ -548,7 +548,7 @@ model = "<在 Novita 模型目录里查到的 model id>"
 ```toml
 [default_model]
 provider = "bedrock"
-model = "anthropic.claude-sonnet-4-20250514-v1:0"
+model = "anthropic.sonnet-v1:0"
 ```
 
 `model` 字段会原样拼进 endpoint 路径，所以要写完整的 Bedrock model id（区域前缀如 `eu.` 或区域要求的 inference profile id 都要带上）。

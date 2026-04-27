@@ -594,7 +594,7 @@ fn detect_audio_provider() -> Option<&'static str> {
 /// Get the default vision model for a provider.
 fn default_vision_model(provider: &str) -> &str {
     match provider {
-        "anthropic" => "claude-sonnet-4-20250514",
+        "anthropic" => "sonnet",
         "openai" => "gpt-4o",
         "gemini" => "gemini-2.5-flash",
         _ => "unknown",
@@ -843,10 +843,7 @@ mod tests {
 
     #[test]
     fn test_default_vision_models() {
-        assert_eq!(
-            default_vision_model("anthropic"),
-            "claude-sonnet-4-20250514"
-        );
+        assert_eq!(default_vision_model("anthropic"), "sonnet");
         assert_eq!(default_vision_model("openai"), "gpt-4o");
         assert_eq!(default_vision_model("gemini"), "gemini-2.5-flash");
         assert_eq!(default_vision_model("unknown"), "unknown");

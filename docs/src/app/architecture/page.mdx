@@ -583,7 +583,7 @@ The `ModelCatalog` (`librefang-runtime/src/model_catalog.rs`) provides a registr
 ### Registry Contents
 
 - **130+ builtin models** across 28+ model families (Claude, GPT, Gemini, DeepSeek, Llama, Mixtral, Command, Jamba, Grok, etc.)
-- **20+ aliases** for convenience (e.g., `claude` -> `claude-sonnet-4-20250514`, `grok` -> `grok-2`)
+- **20+ aliases** for convenience (e.g., `claude`, `sonnet`, `grok`) — each resolved to the catalog's current canonical id at runtime
 - **49 providers** with authentication status detection
 - **Dynamic catalog loading**: Provider definitions in `~/.librefang/providers/*.toml` (pre-installed from registry + user custom) are merged at boot time, allowing user-defined providers without recompilation
 

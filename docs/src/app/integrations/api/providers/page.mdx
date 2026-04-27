@@ -16,7 +16,7 @@ List the full model catalog. Returns all known models with their provider, tier,
 {
   "models": [
     {
-      "id": "claude-sonnet-4-20250514",
+      "id": "sonnet",
       "provider": "anthropic",
       "display_name": "Claude Sonnet 4",
       "tier": "frontier",
@@ -46,14 +46,14 @@ List the full model catalog. Returns all known models with their provider, tier,
 
 ### GET /api/models/aliases
 
-List all model aliases. Aliases provide short names that resolve to full model IDs (e.g., `sonnet` resolves to `claude-sonnet-4-20250514`).
+List all model aliases. Aliases provide short names that resolve to full model IDs (e.g., `sonnet` resolves to `sonnet`).
 
 **Response** `200 OK`:
 
 ```json
 {
   "aliases": {
-    "sonnet": "claude-sonnet-4-20250514",
+    "sonnet": "sonnet",
     "opus": "claude-opus-4-20250514",
     "haiku": "claude-3-5-haiku-20241022",
     "flash": "gemini-2.5-flash",
@@ -236,7 +236,7 @@ Test provider connectivity by making a minimal API call. Verifies that the confi
   "status": "ok",
   "provider": "anthropic",
   "latency_ms": 245,
-  "model_tested": "claude-sonnet-4-20250514"
+  "model_tested": "sonnet"
 }
 ```
 

@@ -135,9 +135,12 @@ impl fmt::Display for Modality {
 /// A single model entry in the catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
-    /// Canonical model identifier (e.g. "claude-sonnet-4-20250514").
+    /// Canonical model identifier — the exact string a provider's API
+    /// expects (e.g. an Anthropic Sonnet id, an OpenAI GPT id). The
+    /// concrete value depends on what the registry currently ships;
+    /// anything pinned in this comment would just go stale.
     pub id: String,
-    /// Human-readable display name (e.g. "Claude Sonnet 4").
+    /// Human-readable display name shown in the dashboard's model picker.
     pub display_name: String,
     /// Provider identifier (e.g. "anthropic").
     ///
@@ -475,8 +478,8 @@ impl From<ProviderCatalogToml> for ProviderInfo {
 /// key_required = true
 ///
 /// [[models]]
-/// id = "claude-sonnet-4-20250514"
-/// display_name = "Claude Sonnet 4"
+/// id = "<canonical-model-id>"
+/// display_name = "<Display Name>"
 /// provider = "anthropic"
 /// tier = "smart"
 /// context_window = 200000
@@ -486,7 +489,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
 /// supports_tools = true
 /// supports_vision = true
 /// supports_streaming = true
-/// aliases = ["sonnet", "claude-sonnet"]
+/// aliases = ["<short-alias>", "<other-alias>"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCatalogFile {
@@ -503,8 +506,8 @@ pub struct ModelCatalogFile {
 ///
 /// ```toml
 /// [aliases]
-/// sonnet = "claude-sonnet-4-20250514"
-/// haiku = "claude-haiku-4-5-20251001"
+/// <short-alias> = "<canonical-model-id>"
+/// <other-alias> = "<another-canonical-id>"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AliasesCatalogFile {
@@ -641,10 +644,13 @@ mod tests {
 
     #[test]
     fn test_model_entry_serde_roundtrip() {
+        // Pure serde round-trip — field values are placeholders so the
+        // assertions don't track whichever Sonnet / GPT id is canonical
+        // in the registry this week.
         let entry = ModelCatalogEntry {
-            id: "claude-sonnet-4-20250514".to_string(),
-            display_name: "Claude Sonnet 4".to_string(),
-            provider: "anthropic".to_string(),
+            id: "canonical-id-one".to_string(),
+            display_name: "Display Name One".to_string(),
+            provider: "test-provider".to_string(),
             tier: ModelTier::Smart,
             context_window: 200_000,
             max_output_tokens: 64_000,
@@ -654,7 +660,7 @@ mod tests {
             supports_vision: true,
             supports_streaming: true,
             supports_thinking: true,
-            aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
+            aliases: vec!["short-alias".to_string(), "other-alias".to_string()],
             ..Default::default()
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -746,8 +752,8 @@ base_url = "https://api.anthropic.com"
 key_required = true
 
 [[models]]
-id = "claude-sonnet-4-20250514"
-display_name = "Claude Sonnet 4"
+id = "canonical-id-one"
+display_name = "Canonical Model One"
 provider = "anthropic"
 tier = "smart"
 context_window = 200000
@@ -757,7 +763,7 @@ output_cost_per_m = 15.0
 supports_tools = true
 supports_vision = true
 supports_streaming = true
-aliases = ["sonnet", "claude-sonnet"]
+aliases = ["short-alias", "other-alias"]
 "#;
         let file: ModelCatalogFile = toml::from_str(toml_str).unwrap();
         assert!(file.provider.is_some());
@@ -766,7 +772,7 @@ aliases = ["sonnet", "claude-sonnet"]
         assert_eq!(p.base_url, "https://api.anthropic.com");
         assert!(p.key_required);
         assert_eq!(file.models.len(), 1);
-        assert_eq!(file.models[0].id, "claude-sonnet-4-20250514");
+        assert_eq!(file.models[0].id, "canonical-id-one");
         assert_eq!(file.models[0].tier, ModelTier::Smart);
     }
 
@@ -813,14 +819,17 @@ aliases = []
 
     #[test]
     fn test_aliases_catalog_file() {
+        // Pure parser test — alias names and target ids are placeholders so
+        // the assertions don't track whichever Sonnet / Haiku id is canonical
+        // in the registry this week.
         let toml_str = r#"
 [aliases]
-sonnet = "claude-sonnet-4-20250514"
-haiku = "claude-haiku-4-5-20251001"
+my-alias = "canonical-target-one"
+other-alias = "canonical-target-two"
 "#;
         let file: AliasesCatalogFile = toml::from_str(toml_str).unwrap();
         assert_eq!(file.aliases.len(), 2);
-        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
+        assert_eq!(file.aliases["my-alias"], "canonical-target-one");
     }
 
     #[test]
@@ -888,8 +897,8 @@ base_url = "https://api.anthropic.com"
 key_required = true
 
 [[models]]
-id = "claude-sonnet-4-20250514"
-display_name = "Claude Sonnet 4"
+id = "canonical-id-one"
+display_name = "Canonical Model One"
 provider = "anthropic"
 tier = "smart"
 context_window = 200000

@@ -604,10 +604,9 @@ mod tests {
 
     /// Build a synthetic two-entry catalog (canonical id + alias) so the
     /// next two tests don't depend on registry state. They previously
-    /// hardcoded `claude-sonnet-4-20250514` / `sonnet` against the live
-    /// catalog and broke the moment the registry retired that id in
-    /// favour of the 4.5 variant — same anti-pattern the
-    /// `_chatgpt_zero_price_*` test already moved away from.
+    /// hardcoded a specific Sonnet version id against the live catalog
+    /// and broke the moment the registry retired it — same anti-pattern
+    /// the `_chatgpt_zero_price_*` test already moved away from.
     fn synthetic_priced_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
         use librefang_types::model_catalog::{ModelCatalogEntry, ModelCatalogFile, ModelTier};
         let mut catalog = librefang_runtime::model_catalog::ModelCatalog::new_from_dir(

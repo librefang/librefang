@@ -149,7 +149,8 @@ impl ModelRouter {
 
     /// Resolve aliases in the routing config using the catalog.
     ///
-    /// For example, if "sonnet" is configured, resolves to "claude-sonnet-4-6".
+    /// For example, if "sonnet" is configured, resolves to whichever
+    /// canonical Sonnet id the catalog currently points to.
     pub fn resolve_aliases(&mut self, catalog: &crate::model_catalog::ModelCatalog) {
         if let Some(resolved) = catalog.resolve_alias(&self.config.simple_model) {
             self.config.simple_model = resolved.to_string();
@@ -177,8 +178,8 @@ mod tests {
     fn default_config() -> ModelRoutingConfig {
         ModelRoutingConfig {
             simple_model: "llama-3.3-70b-versatile".to_string(),
-            medium_model: "claude-sonnet-4-6".to_string(),
-            complex_model: "claude-opus-4-6".to_string(),
+            medium_model: "sonnet".to_string(),
+            complex_model: "opus".to_string(),
             simple_threshold: 200,
             complex_threshold: 800,
         }
@@ -286,6 +287,13 @@ mod tests {
 
     #[test]
     fn test_model_for_complexity() {
+        // Asserts the unresolved-router behaviour: model_for_complexity()
+        // returns the raw field value from ModelRoutingConfig without
+        // consulting the catalog. The default_config() above ships
+        // aliases (`sonnet`, `opus`) on purpose so production picks up
+        // whichever canonical Sonnet / Opus the catalog currently
+        // points to — this test just confirms the router doesn't
+        // resolve them prematurely.
         let router = ModelRouter::new(default_config());
         assert_eq!(
             router.model_for_complexity(TaskComplexity::Simple),
@@ -293,12 +301,9 @@ mod tests {
         );
         assert_eq!(
             router.model_for_complexity(TaskComplexity::Medium),
-            "claude-sonnet-4-6"
+            "sonnet"
         );
-        assert_eq!(
-            router.model_for_complexity(TaskComplexity::Complex),
-            "claude-opus-4-6"
-        );
+        assert_eq!(router.model_for_complexity(TaskComplexity::Complex), "opus");
     }
 
     #[test]
