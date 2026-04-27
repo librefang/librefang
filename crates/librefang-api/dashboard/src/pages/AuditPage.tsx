@@ -503,6 +503,15 @@ export function AuditPage() {
     setActive(reset);
   };
 
+  // Apply a quick-pick: snap `from` to `now − N`, clear `to`, and push
+  // the change into `active` so the query re-runs without the operator
+  // pressing Apply (matches the comment on DATE_PRESETS above).
+  const applyDatePreset = (preset: DatePreset) => {
+    const next: AuditQueryFilters = { ...draft, from: preset.since(), to: undefined };
+    setDraft(next);
+    setActive(next);
+  };
+
   // Active-filter → URL sync. `replace: true` so each filter tweak
   // doesn't pollute browser history (back button feels broken
   // otherwise — every chip click would be its own entry). `seq` is
