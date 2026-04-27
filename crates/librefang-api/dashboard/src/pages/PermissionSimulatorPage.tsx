@@ -46,61 +46,85 @@ import { Skeleton } from "../components/ui/Skeleton";
 const ROLE_ORDER = ["viewer", "user", "admin", "owner"] as const;
 type Role = (typeof ROLE_ORDER)[number];
 
-const ACTIONS: Array<{
+type Translate = (key: string, fallback: string) => string;
+
+interface ActionDef {
   id: string;
   label: string;
   required: Role;
   description: string;
+}
+
+// `id` matches the kernel `Action` enum (wire-format, not translated).
+// `label` / `description` defaults are resolved through i18n at render time
+// — see `buildActions()` below.
+const ACTION_IDS: Array<{
+  id: string;
+  required: Role;
+  defaultLabel: string;
+  defaultDescription: string;
 }> = [
   {
     id: "ChatWithAgent",
-    label: "Chat with agent",
     required: "user",
-    description: "Send messages to a running agent.",
+    defaultLabel: "Chat with agent",
+    defaultDescription: "Send messages to a running agent.",
   },
   {
     id: "ViewConfig",
-    label: "View configuration",
     required: "user",
-    description: "Read kernel config (redacted secrets).",
+    defaultLabel: "View configuration",
+    defaultDescription: "Read kernel config (redacted secrets).",
   },
   {
     id: "ViewUsage",
-    label: "View usage / billing",
     required: "admin",
-    description: "Inspect token / cost dashboards.",
+    defaultLabel: "View usage / billing",
+    defaultDescription: "Inspect token / cost dashboards.",
   },
   {
     id: "SpawnAgent",
-    label: "Spawn agent",
     required: "admin",
-    description: "Create and start a new agent process.",
+    defaultLabel: "Spawn agent",
+    defaultDescription: "Create and start a new agent process.",
   },
   {
     id: "KillAgent",
-    label: "Kill agent",
     required: "admin",
-    description: "Stop a running agent.",
+    defaultLabel: "Kill agent",
+    defaultDescription: "Stop a running agent.",
   },
   {
     id: "InstallSkill",
-    label: "Install skill",
     required: "admin",
-    description: "Install ClawHub / Skillhub / local skills.",
+    defaultLabel: "Install skill",
+    defaultDescription: "Install ClawHub / Skillhub / local skills.",
   },
   {
     id: "ModifyConfig",
-    label: "Modify configuration",
     required: "owner",
-    description: "Write changes back to config.toml.",
+    defaultLabel: "Modify configuration",
+    defaultDescription: "Write changes back to config.toml.",
   },
   {
     id: "ManageUsers",
-    label: "Manage users",
     required: "owner",
-    description: "Create / delete users and rebind identities.",
+    defaultLabel: "Manage users",
+    defaultDescription: "Create / delete users and rebind identities.",
   },
 ];
+
+function buildActions(t: Translate): ActionDef[] {
+  return ACTION_IDS.map(a => ({
+    id: a.id,
+    required: a.required,
+    label: t(`permissionSimulator.actions.${a.id}.label`, a.defaultLabel),
+    description: t(
+      `permissionSimulator.actions.${a.id}.description`,
+      a.defaultDescription,
+    ),
+  }));
+}
 
 function roleAllows(actor: Role, required: Role): boolean {
   return ROLE_ORDER.indexOf(actor) >= ROLE_ORDER.indexOf(required);
@@ -214,8 +238,6 @@ export function PermissionSimulatorPage() {
 // Section components
 // ---------------------------------------------------------------------
 
-type Translate = (key: string, fallback: string) => string;
-
 function SectionHeader({
   icon,
   title,
@@ -225,6 +247,7 @@ function SectionHeader({
   title: string;
   configured: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center justify-between mb-3">
       <div className="flex items-center gap-2">
@@ -232,7 +255,9 @@ function SectionHeader({
         <p className="text-sm font-bold">{title}</p>
       </div>
       <Badge variant={configured ? "info" : "default"}>
-        {configured ? "Configured" : "Not configured"}
+        {configured
+          ? t("permissionSimulator.status.configured", "Configured")
+          : t("permissionSimulator.status.not_configured", "Not configured")}
       </Badge>
     </div>
   );
@@ -265,6 +290,7 @@ function RoleMatrixCard({
   selectedName: string;
   t: Translate;
 }) {
+  const actions = buildActions(t);
   return (
     <Card padding="md">
       <div className="flex items-center gap-2 mb-4">
@@ -275,7 +301,7 @@ function RoleMatrixCard({
         </span>
       </div>
       <div className="grid gap-2 md:grid-cols-2">
-        {ACTIONS.map(a => {
+        {actions.map(a => {
           const allowed = roleAllows(role, a.required);
           return (
             <div
@@ -519,6 +545,7 @@ function BudgetCard({
 }
 
 function BudgetRow({ label, value }: { label: string; value: number }) {
+  const { t } = useTranslation();
   return (
     <div className="rounded-xl border border-border-subtle p-3">
       <p className="text-[11px] uppercase tracking-widest text-text-dim">
@@ -528,7 +555,12 @@ function BudgetRow({ label, value }: { label: string; value: number }) {
         {value > 0 ? `$${value.toFixed(2)}` : "—"}
       </p>
       {value === 0 ? (
-        <p className="text-[10px] text-text-dim mt-0.5">unlimited on window</p>
+        <p className="text-[10px] text-text-dim mt-0.5">
+          {t(
+            "permissionSimulator.budget.unlimited_window",
+            "unlimited on window",
+          )}
+        </p>
       ) : null}
     </div>
   );

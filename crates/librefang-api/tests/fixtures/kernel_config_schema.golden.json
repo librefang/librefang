@@ -4099,6 +4099,23 @@
       },
       "type": "object"
     },
+    "LlmConfig": {
+      "description": "Top-level `[llm]` section. Currently only carries `auxiliary` — primary driver configuration still lives in `[default_model]` / `[[fallback_providers]]` so this struct exists purely to namespace future LLM-routing knobs.",
+      "properties": {
+        "auxiliary": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Per-task auxiliary fallback chains. See [`AuxiliaryConfig`].",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "MastodonConfig": {
       "description": "Mastodon Streaming API channel adapter configuration.",
       "properties": {
@@ -14231,6 +14248,17 @@
         "timeout_secs": 10
       },
       "description": "Link understanding configuration."
+    },
+    "llm": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LlmConfig"
+        }
+      ],
+      "default": {
+        "auxiliary": {}
+      },
+      "description": "`[llm]` section — currently carries the auxiliary side-task chain configuration. See [`LlmConfig`] / [`AuxiliaryConfig`]."
     },
     "local_probe_interval_secs": {
       "default": 60,

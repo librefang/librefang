@@ -137,7 +137,11 @@
     "sort_name": "名称",
     "viewAll": "查看全部",
     "expand": "展开",
-    "collapse": "收起"
+    "collapse": "收起",
+    "add": "添加",
+    "remove": "移除",
+    "discard": "放弃更改",
+    "more_actions": "更多操作"
   },
   "status": {
     "running": "运行中",
@@ -2115,6 +2119,7 @@
     "all_tiers": "全部",
     "available_only": "仅可用",
     "available": "可用",
+    "availability": "可用性",
     "results": "个模型",
     "free": "免费",
     "no_results": "没有匹配的模型。",
@@ -2627,5 +2632,317 @@
     "detail_copy_link": "复制永久链接",
     "detail_copied": "已复制",
     "open_detail": "查看详情"
+  },
+  "users": {
+    "title": "用户与权限",
+    "subtitle": "管理操作员账号、渠道绑定，并通过 CSV 批量导入。",
+    "badge": "Phase 4 / M6",
+    "help": "每条记录将一个平台身份（Telegram / Discord / Slack / 邮箱）映射到 LibreFang 角色。仅管理员可访问，所有接口位于鉴权中间件之后。",
+    "simulator_link": "权限模拟器",
+    "import_csv": "批量导入 (CSV)",
+    "create": "新建用户",
+    "create_title": "新建用户",
+    "edit_title": "编辑用户",
+    "search_label": "搜索",
+    "search_placeholder": "用户名或 platform_id…",
+    "role_filter_label": "角色",
+    "all_roles": "全部角色",
+    "role_label": "角色",
+    "name_label": "用户名",
+    "bindings_label": "渠道绑定",
+    "bindings_empty": "暂无绑定。可使用身份绑定向导，按平台格式提示填写 platform_id。",
+    "bindings_suffix": "条渠道绑定",
+    "empty_title": "暂无用户",
+    "empty_desc": "添加用户后再绑定平台身份，聊天事件才能归属到对应角色。",
+    "api_key": "API 密钥",
+    "has_policy_badge": "策略",
+    "has_policy_title": "该用户配置了独立的工具策略 / 类别 / 渠道规则。",
+    "has_memory_badge": "记忆",
+    "has_memory_title": "该用户配置了自定义的记忆命名空间 ACL。",
+    "has_budget_badge": "预算",
+    "has_budget_title": "该用户配置了独立的支出上限。",
+    "link": "绑定身份",
+    "rotate_key": "轮换 API 密钥",
+    "rotate_key_confirm": "立即轮换",
+    "view_budget": "预算 →",
+    "view_policy": "权限 →",
+    "user": "用户",
+    "confirm_delete_title": "删除用户？",
+    "confirm_delete_body": "将从 config.toml 中移除该用户并重建 RBAC 渠道索引。此前映射到该用户的平台身份将回落到默认拒绝路径。",
+    "confirm_rotate_title": "轮换 API 密钥？",
+    "confirm_rotate_body": "为该用户生成新的 API 密钥。旧密钥立即失效，仍在使用旧密钥的客户端在下次请求时会收到 401 错误。新的明文密钥仅在下一屏显示一次，服务器之后无法再次还原。",
+    "rotate_key_error_title": "轮换失败",
+    "rotate_key_done_title": "新 API 密钥 — 请立即复制",
+    "rotate_key_done_warning": "明文密钥仅显示这一次，请立即复制并妥善保存，服务器之后无法再次还原。",
+    "rotate_key_done_user": "用户",
+    "rotate_key_done_close": "我已复制密钥",
+    "err_name_required": "用户名不能为空。",
+    "err_id_required": "platform_id 不能为空。",
+    "wizard_title": "绑定平台身份",
+    "wizard_step1": "用户",
+    "wizard_step2": "平台",
+    "wizard_step3": "标识",
+    "wizard_step4": "确认",
+    "wizard_user_desc": "将为该用户新增一条绑定。此向导不会创建新用户 — 如需切换目标，请在列表中选择其他用户。",
+    "wizard_platform": "平台",
+    "wizard_platform_desc": "选择需要绑定的平台标识来源。",
+    "wizard_id_desc": "粘贴平台标识，格式提示会随所选渠道变化。",
+    "wizard_id_label": "platform_id",
+    "wizard_example": "示例",
+    "wizard_confirm_desc": "确认后将写入 config.toml。内核会就地重建 RBAC 渠道索引，无需重启。",
+    "wizard_unverified_title": "无自动归属校验",
+    "wizard_unverified_body": "LibreFang 暂未通过平台回查该 id 是否真正属于 {{user}}。具备 Owner 权限的人可以将任意 id 绑定到任意用户，导致后续 RBAC 与限流决策被悄悄改向。请在保存前与用户线下核对 platform_id。",
+    "wizard_unverified_ack": "我已通过线下渠道核实 {{platformId}} 属于 {{user}}。",
+    "wizard_ack_required": "请先确认归属警告再保存。",
+    "wizard_commit": "保存绑定",
+    "csv_read_failed": "无法读取文件 — 请尝试直接粘贴内容。",
+    "csv_paste": "或粘贴 CSV",
+    "csv_drop": "将 CSV 拖拽到此处，或点击选择文件。",
+    "import_title": "批量导入用户",
+    "import_desc": "上传包含 name,role,telegram,discord,slack,email 列的 CSV。角色必须为 owner / admin / user / viewer 之一。",
+    "import_preview": "预览",
+    "import_dry_summary": "演练结果",
+    "import_summary": "导入完成",
+    "import_dry_run": "演练导入",
+    "import_commit": "提交导入",
+    "import_bindings_count": "{{count}} 条绑定",
+    "import_result_counts": "新建 {{created}} · 更新 {{updated}} · 失败 {{failed}}",
+    "import_row_error": "第 {{row}} 行（{{name}}）：{{error}}",
+    "roles": {
+      "owner": "所有者",
+      "admin": "管理员",
+      "user": "用户",
+      "viewer": "访客"
+    },
+    "platforms": {
+      "telegram": {
+        "label": "Telegram",
+        "hint": "Telegram 数字用户 ID（可通过 @userinfobot 查看）。",
+        "example": "123456789"
+      },
+      "discord": {
+        "label": "Discord",
+        "hint": "Discord 数字用户 ID（开发者模式下右键 → 复制用户 ID）。",
+        "example": "987654321098765432"
+      },
+      "slack": {
+        "label": "Slack",
+        "hint": "Slack 成员 ID（个人资料 → 更多 → 复制成员 ID）。",
+        "example": "U01ABCDEFGH"
+      },
+      "email": {
+        "label": "邮箱",
+        "hint": "发件邮箱地址（用于 IMAP / Mailgun 渠道）。",
+        "example": "alice@example.com"
+      },
+      "wechat": {
+        "label": "微信",
+        "hint": "已配置企业的企业微信 / 微信 OpenID。",
+        "example": "abc123@im.wechat"
+      }
+    },
+    "row_actions": "更多操作",
+    "view_budget_chip": "预算",
+    "view_policy_chip": "权限",
+    "rotate_key_only_chance": "这是复制此密钥的唯一机会。关闭此对话框后，明文将丢失，服务器无法再次生成。",
+    "rotate_key_must_copy": "请先点击「复制」。复制到剪贴板后，关闭按钮才会启用。",
+    "rotate_key_failed_toast": "轮换失败：{{message}}",
+    "rotate_key_copy_failed": "复制失败，请手动选中并复制密钥后再关闭对话框。",
+    "rotate_key_copied_confirm": "已复制，可以关闭",
+    "csv_drop_aria": "上传 CSV 文件：拖放到此处或激活以浏览",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "平台",
+    "wizard_step_identity": "标识",
+    "wizard_user_chip": "正在关联标识到",
+    "wizard_show_warning": "为什么重要",
+    "wizard_hide_warning": "隐藏警告",
+    "wizard_step_back_aria": "返回第 {{n}} 步"
+  },
+  "userBudget": {
+    "fields": {
+      "max_hourly": "每小时上限（美元）",
+      "max_daily": "每日上限（美元）",
+      "max_monthly": "每月上限（美元）",
+      "alert_threshold": "告警阈值（0–1）"
+    },
+    "errors": {
+      "non_negative": "{{field}} 必须是有限的非负数",
+      "threshold_range": "alert_threshold 必须在 0.0..=1.0 范围内"
+    },
+    "toast": {
+      "saved": "支出上限已保存"
+    }
+  },
+  "userPolicy": {
+    "toggle": {
+      "configured": "已配置",
+      "not_set": "未设置"
+    },
+    "errors": {
+      "empty_entry": "{{field}} 中存在空白条目",
+      "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
+      "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
+    },
+    "discard": "放弃更改",
+    "no_changes": "无未保存的更改",
+    "unsaved_changes": "有未保存的更改",
+    "save_disabled_invalid": "请先修正上方的校验错误才能保存",
+    "discard_confirm_title": "放弃未保存的更改？",
+    "discard_confirm_body": "将所有字段恢复为上次从服务器加载的值。自上次保存以来的修改将会丢失。"
+  },
+  "permissionSimulator": {
+    "status": {
+      "configured": "已配置",
+      "not_configured": "未配置"
+    },
+    "budget": {
+      "unlimited_window": "该窗口不限"
+    },
+    "actions": {
+      "ChatWithAgent": {
+        "label": "与 Agent 对话",
+        "description": "向运行中的 Agent 发送消息。"
+      },
+      "ViewConfig": {
+        "label": "查看配置",
+        "description": "读取内核配置（敏感信息已脱敏）。"
+      },
+      "ViewUsage": {
+        "label": "查看用量 / 账单",
+        "description": "查看 token / 成本仪表盘。"
+      },
+      "SpawnAgent": {
+        "label": "启动 Agent",
+        "description": "创建并启动新的 Agent 进程。"
+      },
+      "KillAgent": {
+        "label": "终止 Agent",
+        "description": "停止正在运行的 Agent。"
+      },
+      "InstallSkill": {
+        "label": "安装技能",
+        "description": "安装 ClawHub / Skillhub / 本地技能。"
+      },
+      "ModifyConfig": {
+        "label": "修改配置",
+        "description": "将变更写回 config.toml。"
+      },
+      "ManageUsers": {
+        "label": "管理用户",
+        "description": "创建 / 删除用户并重新绑定身份。"
+      }
+    }
+  },
+  "user_budget": {
+    "title": "用户预算",
+    "back": "返回用户列表",
+    "loading": "加载中…",
+    "fetch_error": "加载预算失败",
+    "set_limits": "设置消费上限",
+    "current_spend": "当前消费 (USD)",
+    "alert_breach": "告警阈值已超出",
+    "enforced": "已强制执行",
+    "deferred": "强制执行已延迟",
+    "save": "保存",
+    "saving": "保存中…",
+    "clear": "清除上限",
+    "clearing": "清除中…",
+    "discard": "放弃更改",
+    "zero_means_unlimited": "将任意时间窗口设为 0 表示该窗口不限额。阈值是任一限额触发 BudgetExceeded 审计事件时的比例。"
+  },
+  "user_policy": {
+    "title": "权限矩阵",
+    "back": "返回用户列表",
+    "save": "保存",
+    "saved": "策略已保存。",
+    "load_error_title": "加载策略失败",
+    "load_error_body": "守护进程在获取该用户的策略切片时返回了错误。",
+    "section_tool_policy": "工具允许 / 拒绝",
+    "tool_policy_desc": "针对单个用户的允许 + 拒绝模式。叠加在 Agent 和渠道规则之上。拒绝优先。",
+    "allowed_tools": "允许的工具",
+    "denied_tools": "拒绝的工具",
+    "glob_hint": "每行一个模式。允许使用 `*` 通配符。",
+    "glob_hint_deny": "始终优先于允许列表。",
+    "section_categories": "工具分类",
+    "categories_desc": "按工具组名称批量允许 / 拒绝（在 `KernelConfig.tool_policy.groups` 中定义）。",
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组",
+    "group_hint": "每行一个组名（例如 `web_tools`）。",
+    "section_memory": "记忆访问",
+    "memory_desc": "命名空间 ACL + PII 脱敏开关。可写命名空间必须是可读命名空间的子集。",
+    "readable_ns": "可读命名空间",
+    "writable_ns": "可写命名空间",
+    "ns_hint": "每行一个命名空间。`*` 匹配全部。",
+    "writable_hint": "必须是可读命名空间的子集。",
+    "pii_access": "PII 访问",
+    "export_allowed": "允许导出",
+    "delete_allowed": "允许删除",
+    "section_channels": "按渠道的工具规则",
+    "channels_desc": "按渠道适配器（telegram / discord / …）覆盖用户的工具范围。使用下方输入框添加自定义适配器。",
+    "custom_channel": "自定义",
+    "remove_channel": "移除渠道",
+    "add_channel_label": "添加渠道",
+    "add_channel_placeholder": "wechat, matrix, …",
+    "add_channel_hint": "渠道适配器名称（小写）。必须与桥接器发出的键匹配。",
+    "add_channel_err_empty": "渠道名称必填。",
+    "add_channel_err_duplicate": "渠道 '{{key}}' 已存在规则。"
+  },
+  "tool_policy": {
+    "allowed_tools": "允许的工具",
+    "denied_tools": "拒绝的工具"
+  },
+  "tool_categories": {
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组"
+  },
+  "memory_access": {
+    "readable_namespaces": "可读命名空间",
+    "writable_namespaces": "可写命名空间"
+  },
+  "simulator": {
+    "title": "权限模拟器",
+    "subtitle": "选择一名用户，查看所有影响其权限的 RBAC 输入。",
+    "badge": "实时",
+    "user_label": "用户",
+    "choose_user": "选择用户…",
+    "empty_title": "没有可模拟的用户",
+    "empty_desc": "请先在用户页面添加用户。",
+    "not_found_title": "未找到用户",
+    "not_found_desc": "所选用户未在 AuthManager 中注册。该用户可能在用户列表缓存之后已从 config.toml 中移除。",
+    "error_title": "无法加载有效权限",
+    "role_matrix_caption": "角色级粗粒度权限",
+    "requires": "需要",
+    "help": "各分区显示的是原始配置切片——不是单次调用的网关判定（运行时网关会取 Agent ToolPolicy、用户 tool_policy / tool_categories 与渠道规则的交集）。标记为「未配置」的切片会交由其他层决定。",
+    "tool_policy_title": "工具策略（按用户）",
+    "tool_policy_unset": "交由 Agent ToolPolicy 和渠道规则决定。",
+    "allowed_tools": "允许",
+    "denied_tools": "拒绝",
+    "no_allow_list": "未设置允许列表",
+    "no_deny_list": "未设置拒绝列表",
+    "tool_categories_title": "工具分类（按 ToolGroup 批量）",
+    "tool_categories_unset": "该用户没有分类级别的覆盖。",
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组",
+    "memory_title": "记忆访问",
+    "memory_unset": "回退到角色默认 ACL（Owner/Admin = 完全访问，User = proactive + kv:*，Viewer = proactive 只读）。",
+    "readable_namespaces": "可读命名空间",
+    "writable_namespaces": "可写命名空间",
+    "no_namespaces": "无命名空间",
+    "pii_access_on": "PII 访问 已开启",
+    "pii_access_off": "PII 已脱敏",
+    "export_on": "允许导出",
+    "export_off": "禁止导出",
+    "delete_on": "允许删除",
+    "delete_off": "禁止删除",
+    "budget_title": "按用户的预算上限",
+    "budget_unset": "未设置用户级上限。仅受全局 / Agent / 提供商预算约束。",
+    "budget_hourly": "每小时",
+    "budget_daily": "每天",
+    "budget_monthly": "每月",
+    "alert_threshold_label": "告警阈值",
+    "channel_bindings_title": "渠道绑定",
+    "bindings_unset": "未绑定平台 ID。来自任何渠道的入站消息都将无法识别。",
+    "channel_rules_title": "按渠道的工具覆盖",
+    "channel_rules_unset": "未配置渠道级覆盖。全局 ApprovalPolicy.channel_rules 仍生效。"
   }
 }
