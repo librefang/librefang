@@ -251,6 +251,55 @@ model = "ep-20240101120000-abcde"   # endpoint ID, not the model name
 
 ---
 
+## BytePlus ModelArk
+
+International edition of VolcEngine. Same Ark platform, different region (`ap-southeast`) and pricing in USD. Two endpoints share one API key.
+
+### `byteplus` — standard `/api/v3` endpoint
+
+| | |
+|---|---|
+| **Display Name** | BytePlus ModelArk |
+| **Provider ID** | `byteplus` |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `BYTEPLUS_API_KEY` |
+| **Base URL** | `https://ark.ap-southeast.bytepluses.com/api/v3` |
+| **Key Required** | Yes |
+| **Auth** | `Authorization: Bearer` header |
+
+```toml
+[default_model]
+provider = "byteplus"
+model = "seed-2-0-pro-260328"       # versioned snapshot, see byteplus.toml
+```
+
+### `byteplus_coding` — Anthropic-compatible coding endpoint
+
+| | |
+|---|---|
+| **Display Name** | BytePlus ModelArk Coding Plan |
+| **Provider ID** | `byteplus_coding` |
+| **Driver** | Anthropic-compatible (`/v1/messages`) |
+| **Env Var** | `BYTEPLUS_API_KEY` |
+| **Base URL** | `https://ark.ap-southeast.bytepluses.com/api/coding` |
+| **Auth** | `x-api-key` + `anthropic-version` headers |
+
+```toml
+[default_model]
+provider = "byteplus_coding"
+model = "ark-code-latest"           # auto-routed friendly alias
+```
+
+**Setup:**
+1. Sign up at the [BytePlus console](https://console.byteplus.com)
+2. Activate the models you want under **ModelArk > Model Inventory**
+3. Generate an API key under **ModelArk > API Keys**
+4. `export BYTEPLUS_API_KEY="..."`
+
+**Notes:** `byteplus` uses versioned snapshot IDs like `seed-2-0-pro-260328`. `byteplus_coding` uses friendly aliases like `ark-code-latest` (auto-router), `dola-seed-2.0-pro`, `kimi-k2.5`, `glm-4.7`, `gpt-oss-120b` — these stay stable across model upgrades.
+
+---
+
 ## Zhipu (GLM)
 
 | | |
