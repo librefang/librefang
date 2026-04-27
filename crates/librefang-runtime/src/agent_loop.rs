@@ -1478,6 +1478,14 @@ pub struct LoopOptions {
     /// manifest. `None` → use the library fallback. Values below
     /// `MIN_HISTORY_MESSAGES` are clamped up at resolution time.
     pub max_history_messages: Option<usize>,
+    /// Auxiliary LLM client used for cheap-tier side tasks
+    /// (context compression, title generation, search summarisation,
+    /// vision captioning). When `None`, side tasks fall back to the
+    /// primary `driver` — preserving pre-issue-#3314 behaviour.
+    ///
+    /// Kernel populates this from the boot-time-built [`AuxClient`].
+    /// Tests typically leave it as `None`.
+    pub aux_client: Option<std::sync::Arc<crate::aux_client::AuxClient>>,
 }
 
 /// Result of an agent loop execution.
@@ -3200,14 +3208,20 @@ pub async fn run_agent_loop(
         } else {
             // Inline fallback: LLM-based context compression (soft), then
             // overflow recovery (hard trim), then context guard.
+            //
+            // When the kernel wired an [`AuxClient`] through `opts.aux_client`,
+            // summarisation routes to the cheap-tier auxiliary chain
+            // (issue #3314); otherwise the primary `driver` is used —
+            // preserving baseline behaviour.
             let (compressed, compression_events) = context_compressor
-                .compress_if_needed(
+                .compress_if_needed_with_aux(
                     messages.clone(),
                     &system_prompt,
                     available_tools,
                     ctx_window,
                     &manifest.model.model,
                     driver.clone(),
+                    opts.aux_client.as_deref(),
                 )
                 .await;
             if !compression_events.is_empty() {
@@ -4533,14 +4547,16 @@ pub async fn run_agent_loop_streaming(
             result.recovery
         } else {
             // LLM-based soft compression first, then hard overflow recovery.
+            // Routes through the aux client when one is wired (issue #3314).
             let (compressed, compression_events) = context_compressor
-                .compress_if_needed(
+                .compress_if_needed_with_aux(
                     messages.clone(),
                     &system_prompt,
                     available_tools,
                     ctx_window,
                     &manifest.model.model,
                     driver.clone(),
+                    opts.aux_client.as_deref(),
                 )
                 .await;
             if !compression_events.is_empty() {

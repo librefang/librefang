@@ -138,7 +138,11 @@
     "viewAll": "View All",
     "on": "ON",
     "expand": "Expand",
-    "collapse": "Collapse"
+    "collapse": "Collapse",
+    "add": "Add",
+    "remove": "Remove",
+    "discard": "Discard",
+    "more_actions": "More actions"
   },
   "status": {
     "running": "Running",
@@ -2169,6 +2173,7 @@
     "all_tiers": "All",
     "available_only": "Available Only",
     "available": "available",
+    "availability": "Availability",
     "results": "models",
     "free": "Free",
     "no_results": "No models match your filters.",
@@ -2661,5 +2666,317 @@
     "detail_copy_link": "Copy permalink",
     "detail_copied": "Copied",
     "open_detail": "Open details"
+  },
+  "users": {
+    "title": "Users & RBAC",
+    "subtitle": "Manage operator accounts, channel bindings, and bulk-onboard via CSV.",
+    "badge": "Phase 4 / M6",
+    "help": "Each row maps a platform identity (Telegram / Discord / Slack / email) to a LibreFang role. Admin-only — endpoints live behind authenticated middleware.",
+    "simulator_link": "Permission simulator",
+    "import_csv": "Bulk import (CSV)",
+    "create": "New user",
+    "create_title": "New user",
+    "edit_title": "Edit user",
+    "search_label": "Search",
+    "search_placeholder": "Name or platform_id…",
+    "role_filter_label": "Role",
+    "all_roles": "All roles",
+    "role_label": "Role",
+    "name_label": "Name",
+    "bindings_label": "Channel bindings",
+    "bindings_empty": "No bindings. Use the identity wizard for guided platform_id formats.",
+    "bindings_suffix": "channel binding(s)",
+    "empty_title": "No users yet",
+    "empty_desc": "Add a user, then link a platform identity so chat events get attributed to a real role.",
+    "api_key": "API key",
+    "has_policy_badge": "Policy",
+    "has_policy_title": "User has a per-user tool policy / categories / channel rules override.",
+    "has_memory_badge": "Memory",
+    "has_memory_title": "User has a custom memory namespace ACL.",
+    "has_budget_badge": "Budget",
+    "has_budget_title": "User has a per-user spend cap configured.",
+    "link": "Link identity",
+    "rotate_key": "Rotate API key",
+    "rotate_key_confirm": "Rotate now",
+    "view_budget": "Budget →",
+    "view_policy": "Permissions →",
+    "user": "User",
+    "confirm_delete_title": "Delete user?",
+    "confirm_delete_body": "This removes the user from config.toml and rebuilds the RBAC channel index. Any platform identity that mapped to this user will fall through to the default-deny path.",
+    "confirm_rotate_title": "Rotate API key?",
+    "confirm_rotate_body": "Generates a fresh API key for this user. The old key stops working immediately — any client still using it will start receiving 401 errors on the next request. The new plaintext key will be shown ONCE on the next screen; the server cannot reproduce it later.",
+    "rotate_key_error_title": "Rotation failed",
+    "rotate_key_done_title": "New API key — copy now",
+    "rotate_key_done_warning": "This is the ONLY time the plaintext key will be shown. Copy and store it now — the server cannot reproduce it later.",
+    "rotate_key_done_user": "User",
+    "rotate_key_done_close": "I've copied the key",
+    "err_name_required": "Name is required.",
+    "err_id_required": "platform_id is required.",
+    "wizard_title": "Link a platform identity",
+    "wizard_step1": "User",
+    "wizard_step2": "Platform",
+    "wizard_step3": "Identifier",
+    "wizard_step4": "Confirm",
+    "wizard_user_desc": "We'll add a binding to this user. The wizard never creates new users — pick a different user from the list to retarget.",
+    "wizard_platform": "Platform",
+    "wizard_platform_desc": "Pick which platform's identifier you're linking.",
+    "wizard_id_desc": "Paste the platform's identifier. The format hint matches the channel you picked.",
+    "wizard_id_label": "platform_id",
+    "wizard_example": "Example",
+    "wizard_confirm_desc": "Confirm and write to config.toml. The kernel rebuilds its RBAC channel index in place — no restart needed.",
+    "wizard_unverified_title": "No automated ownership check",
+    "wizard_unverified_body": "LibreFang does not yet ping the platform to confirm this id belongs to {{user}}. Anyone with Owner rights can bind any id to any user row, which silently retargets future RBAC and rate-limit decisions. Verify the platform_id with the user out-of-band before saving.",
+    "wizard_unverified_ack": "I have verified out-of-band that {{platformId}} belongs to {{user}}.",
+    "wizard_ack_required": "Acknowledge the ownership warning to save.",
+    "wizard_commit": "Save binding",
+    "csv_read_failed": "Could not read file — try pasting the contents instead.",
+    "csv_paste": "Or paste CSV",
+    "csv_drop": "Drop a CSV here, or click to browse.",
+    "import_title": "Bulk import users",
+    "import_desc": "Drop a CSV with columns name,role,telegram,discord,slack,email. Roles must be one of owner / admin / user / viewer.",
+    "import_preview": "Preview",
+    "import_dry_summary": "Dry-run summary",
+    "import_summary": "Import complete",
+    "import_dry_run": "Dry run",
+    "import_commit": "Commit",
+    "import_bindings_count": "{{count}} bindings",
+    "import_result_counts": "{{created}} created · {{updated}} updated · {{failed}} failed",
+    "import_row_error": "row {{row}} ({{name}}): {{error}}",
+    "roles": {
+      "owner": "Owner",
+      "admin": "Admin",
+      "user": "User",
+      "viewer": "Viewer"
+    },
+    "platforms": {
+      "telegram": {
+        "label": "Telegram",
+        "hint": "Numeric Telegram user ID (visible via @userinfobot).",
+        "example": "123456789"
+      },
+      "discord": {
+        "label": "Discord",
+        "hint": "Numeric Discord user ID (right-click → Copy User ID, dev mode).",
+        "example": "987654321098765432"
+      },
+      "slack": {
+        "label": "Slack",
+        "hint": "Slack member ID (Profile → More → Copy member ID).",
+        "example": "U01ABCDEFGH"
+      },
+      "email": {
+        "label": "Email",
+        "hint": "Sender email address (used by IMAP / Mailgun channels).",
+        "example": "alice@example.com"
+      },
+      "wechat": {
+        "label": "WeChat",
+        "hint": "WeCom / WeChat OpenID for the configured corp.",
+        "example": "abc123@im.wechat"
+      }
+    },
+    "row_actions": "More actions",
+    "view_budget_chip": "Budget",
+    "view_policy_chip": "Permissions",
+    "rotate_key_only_chance": "This is your only chance to copy this key. Closing this dialog will discard the plaintext — the server cannot reproduce it.",
+    "rotate_key_must_copy": "Click Copy first. The Close button unlocks once the key is on your clipboard.",
+    "rotate_key_failed_toast": "Rotation failed: {{message}}",
+    "rotate_key_copy_failed": "Copy failed — select the key and copy it manually before closing.",
+    "rotate_key_copied_confirm": "Copied — you can close now",
+    "csv_drop_aria": "Upload CSV file: drop here or activate to browse",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "Platform",
+    "wizard_step_identity": "Identifier",
+    "wizard_user_chip": "Linking identity to",
+    "wizard_show_warning": "Why this matters",
+    "wizard_hide_warning": "Hide warning",
+    "wizard_step_back_aria": "Go back to step {{n}}"
+  },
+  "userBudget": {
+    "fields": {
+      "max_hourly": "Max hourly USD",
+      "max_daily": "Max daily USD",
+      "max_monthly": "Max monthly USD",
+      "alert_threshold": "Alert threshold (0–1)"
+    },
+    "errors": {
+      "non_negative": "{{field}} must be a finite, non-negative number",
+      "threshold_range": "alert_threshold must be in 0.0..=1.0"
+    },
+    "toast": {
+      "saved": "Spend cap saved"
+    }
+  },
+  "userPolicy": {
+    "toggle": {
+      "configured": "Configured",
+      "not_set": "Not set"
+    },
+    "errors": {
+      "empty_entry": "{{field}} contains an empty entry",
+      "duplicate_entry": "{{field}} contains duplicate entry '{{item}}'",
+      "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] is not in readable_namespaces (writable must be a subset of readable)"
+    },
+    "discard": "Discard changes",
+    "no_changes": "No unsaved changes",
+    "unsaved_changes": "You have unsaved changes",
+    "save_disabled_invalid": "Fix validation errors above to enable Save",
+    "discard_confirm_title": "Discard unsaved changes?",
+    "discard_confirm_body": "This reverts every field to the last server-loaded value. Edits made since the last save will be lost."
+  },
+  "permissionSimulator": {
+    "status": {
+      "configured": "Configured",
+      "not_configured": "Not configured"
+    },
+    "budget": {
+      "unlimited_window": "unlimited on window"
+    },
+    "actions": {
+      "ChatWithAgent": {
+        "label": "Chat with agent",
+        "description": "Send messages to a running agent."
+      },
+      "ViewConfig": {
+        "label": "View configuration",
+        "description": "Read kernel config (redacted secrets)."
+      },
+      "ViewUsage": {
+        "label": "View usage / billing",
+        "description": "Inspect token / cost dashboards."
+      },
+      "SpawnAgent": {
+        "label": "Spawn agent",
+        "description": "Create and start a new agent process."
+      },
+      "KillAgent": {
+        "label": "Kill agent",
+        "description": "Stop a running agent."
+      },
+      "InstallSkill": {
+        "label": "Install skill",
+        "description": "Install ClawHub / Skillhub / local skills."
+      },
+      "ModifyConfig": {
+        "label": "Modify configuration",
+        "description": "Write changes back to config.toml."
+      },
+      "ManageUsers": {
+        "label": "Manage users",
+        "description": "Create / delete users and rebind identities."
+      }
+    }
+  },
+  "user_budget": {
+    "title": "User budget",
+    "back": "Back to users",
+    "loading": "Loading…",
+    "fetch_error": "Failed to load budget",
+    "set_limits": "Set spend limits",
+    "current_spend": "Current spend (USD)",
+    "alert_breach": "alert breach",
+    "enforced": "enforced",
+    "deferred": "enforcement deferred",
+    "save": "Save",
+    "saving": "Saving…",
+    "clear": "Clear cap",
+    "clearing": "Clearing…",
+    "discard": "Discard",
+    "zero_means_unlimited": "Set any window to 0 for unlimited on that window. Threshold is the fraction of any limit at which a BudgetExceeded audit fires."
+  },
+  "user_policy": {
+    "title": "Permission matrix",
+    "back": "Back to users",
+    "save": "Save",
+    "saved": "Policy saved.",
+    "load_error_title": "Failed to load policy",
+    "load_error_body": "The daemon returned an error fetching the per-user policy slice.",
+    "section_tool_policy": "Tool allow / deny",
+    "tool_policy_desc": "Per-user allow + deny patterns. Layered ON TOP of agent + channel rules. Deny wins.",
+    "allowed_tools": "Allowed tools",
+    "denied_tools": "Denied tools",
+    "glob_hint": "One pattern per line. Glob with `*` allowed.",
+    "glob_hint_deny": "Always wins over allow.",
+    "section_categories": "Tool categories",
+    "categories_desc": "Bulk allow / deny by tool group name (defined in `KernelConfig.tool_policy.groups`).",
+    "allowed_groups": "Allowed groups",
+    "denied_groups": "Denied groups",
+    "group_hint": "One group name per line (e.g. `web_tools`).",
+    "section_memory": "Memory access",
+    "memory_desc": "Namespace ACL + PII redaction toggles. Writable must be a subset of readable.",
+    "readable_ns": "Readable namespaces",
+    "writable_ns": "Writable namespaces",
+    "ns_hint": "One namespace per line. `*` matches all.",
+    "writable_hint": "Must be a subset of readable.",
+    "pii_access": "PII access",
+    "export_allowed": "Export allowed",
+    "delete_allowed": "Delete allowed",
+    "section_channels": "Per-channel tool rules",
+    "channels_desc": "Override the user's tool surface per channel adapter (telegram / discord / …). Add custom adapters with the input below.",
+    "custom_channel": "custom",
+    "remove_channel": "Remove channel",
+    "add_channel_label": "Add channel",
+    "add_channel_placeholder": "wechat, matrix, …",
+    "add_channel_hint": "Channel adapter name (lowercase). Must match the key the bridge emits.",
+    "add_channel_err_empty": "Channel name is required.",
+    "add_channel_err_duplicate": "Channel '{{key}}' already has a rule slot."
+  },
+  "tool_policy": {
+    "allowed_tools": "Allowed tools",
+    "denied_tools": "Denied tools"
+  },
+  "tool_categories": {
+    "allowed_groups": "Allowed groups",
+    "denied_groups": "Denied groups"
+  },
+  "memory_access": {
+    "readable_namespaces": "Readable namespaces",
+    "writable_namespaces": "Writable namespaces"
+  },
+  "simulator": {
+    "title": "Permission simulator",
+    "subtitle": "Pick a user and see every RBAC input contributing to their permissions.",
+    "badge": "Live",
+    "user_label": "User",
+    "choose_user": "Select a user…",
+    "empty_title": "No users to simulate",
+    "empty_desc": "Add a user from the Users page first.",
+    "not_found_title": "User not found",
+    "not_found_desc": "The selected user is not registered with the AuthManager. They may have been removed from config.toml since the user list cached.",
+    "error_title": "Could not load effective permissions",
+    "role_matrix_caption": "Role-level coarse permissions",
+    "requires": "Requires",
+    "help": "Sections show RAW configured slices — not the per-call gate decision (the runtime gate intersects per-agent ToolPolicy, per-user tool_policy / tool_categories, and per-channel rules). Slices labelled \"Not configured\" defer to other layers.",
+    "tool_policy_title": "Tool policy (per-user)",
+    "tool_policy_unset": "Defers to per-agent ToolPolicy and channel rules.",
+    "allowed_tools": "Allowed",
+    "denied_tools": "Denied",
+    "no_allow_list": "No allow-list set",
+    "no_deny_list": "No deny-list set",
+    "tool_categories_title": "Tool categories (bulk by ToolGroup)",
+    "tool_categories_unset": "No category-level overrides for this user.",
+    "allowed_groups": "Allowed groups",
+    "denied_groups": "Denied groups",
+    "memory_title": "Memory access",
+    "memory_unset": "Falls back to the role-default ACL (Owner/Admin = full, User = proactive + kv:*, Viewer = proactive read-only).",
+    "readable_namespaces": "Readable namespaces",
+    "writable_namespaces": "Writable namespaces",
+    "no_namespaces": "No namespaces",
+    "pii_access_on": "PII access ON",
+    "pii_access_off": "PII redacted",
+    "export_on": "Export allowed",
+    "export_off": "No export",
+    "delete_on": "Delete allowed",
+    "delete_off": "No delete",
+    "budget_title": "Per-user budget caps",
+    "budget_unset": "No per-user cap. Bounded by global / per-agent / per-provider budgets only.",
+    "budget_hourly": "Hourly",
+    "budget_daily": "Daily",
+    "budget_monthly": "Monthly",
+    "alert_threshold_label": "Alert threshold",
+    "channel_bindings_title": "Channel bindings",
+    "bindings_unset": "No platform IDs bound. Inbound from any channel will be unrecognised.",
+    "channel_rules_title": "Per-channel tool overrides",
+    "channel_rules_unset": "No per-channel overrides. The global ApprovalPolicy.channel_rules still applies."
   }
 }
