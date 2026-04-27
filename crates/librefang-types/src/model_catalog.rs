@@ -203,26 +203,6 @@ impl ModelCatalogEntry {
         self.modality == Modality::Image
     }
 
-    /// Returns true if this entry is a video-generation model.
-    pub fn is_video_generation(&self) -> bool {
-        self.modality == Modality::Video
-    }
-
-    /// Returns true if this entry is a music-generation model.
-    pub fn is_music_generation(&self) -> bool {
-        self.modality == Modality::Music
-    }
-
-    /// Returns true if this entry is a speech / audio model (TTS or STT).
-    pub fn is_audio_generation(&self) -> bool {
-        self.modality == Modality::Audio
-    }
-
-    /// Returns true if this entry is any non-text media-generation model.
-    pub fn is_media_generation(&self) -> bool {
-        !matches!(self.modality, Modality::Text)
-    }
-
     /// Map this entry's `Modality` to the `MediaCapability` that a
     /// `MediaDriver` would advertise for it. Returns `None` for
     /// `Modality::Text` (LLM models go through the regular llm-driver
@@ -280,12 +260,12 @@ impl ModelCatalogEntry {
         }
     }
 
-    /// Resolve the flat per-invocation cost in USD for this model, if
-    /// any. For video/music models the catalog SHOULD declare
-    /// `per_call_cost`; when it's missing the loader emits a WARN and
-    /// this returns 0.0 so the call still goes through (but is
-    /// recorded as $0). The kernel logs the WARN once per
-    /// (provider, model) pair to avoid log spam.
+    /// Resolve the flat per-invocation cost in USD for this model, or
+    /// `0.0` when the catalog entry omits it. Returning zero (rather
+    /// than `Option`) keeps callers from having to choose between
+    /// crashing on missing data and silently masking it — the metering
+    /// layer uses `is_per_call_billed()` to detect "should have had a
+    /// price but didn't" and emits a one-shot warn at the call site.
     pub fn per_call_cost_or_zero(&self) -> f64 {
         self.per_call_cost.unwrap_or(0.0)
     }

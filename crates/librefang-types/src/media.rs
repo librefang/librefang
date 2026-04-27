@@ -616,6 +616,12 @@ pub struct MediaVideoSubmitResult {
     pub task_id: String,
     /// Provider that accepted the task.
     pub provider: String,
+    /// Model the provider actually used to accept the job. Mirrors the
+    /// `model` field on `MediaImageResult` / `MediaTtsResult` /
+    /// `MediaMusicResult`. The metering layer needs this to look up
+    /// `per_call_cost`; without it, video calls without an explicit
+    /// caller-supplied model would bill as $0.
+    pub model: String,
 }
 
 /// Result of a completed video generation.

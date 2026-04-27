@@ -16999,30 +16999,39 @@ impl KernelHandle for LibreFangKernel {
         model: &str,
         latency_ms: u64,
     ) {
-        let cost_usd = match self.model_catalog.read() {
-            Ok(cat) => match cat.find_model_for_provider(provider, model) {
-                Some(entry) => {
-                    let c = entry.per_call_cost_or_zero();
-                    if entry.is_per_call_billed() && entry.per_call_cost.is_none() {
-                        tracing::warn!(
-                            provider = provider,
-                            model = model,
-                            "media model has no per_call_cost in catalog — billing recorded as $0"
-                        );
-                    }
-                    c
-                }
-                None => {
-                    tracing::warn!(
-                        provider = provider,
-                        model = model,
-                        "media model not found in catalog — billing recorded as $0"
-                    );
-                    0.0
-                }
-            },
-            Err(_) => 0.0,
+        // Process-wide dedup so a misconfigured catalog entry doesn't
+        // flood the log on every call. Set is unbounded but the key
+        // space is bounded by the catalog size, so it can't grow
+        // pathologically.
+        static MISSING_COST_WARNED: std::sync::OnceLock<dashmap::DashSet<(String, String)>> =
+            std::sync::OnceLock::new();
+        let warn_once = |reason: &str| {
+            let set = MISSING_COST_WARNED.get_or_init(dashmap::DashSet::new);
+            if set.insert((provider.to_string(), model.to_string())) {
+                tracing::warn!(
+                    provider = provider,
+                    model = model,
+                    reason = reason,
+                    "media model billing recorded as $0; subsequent calls suppressed"
+                );
+            }
         };
+
+        let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+        let cost_usd = match catalog.find_model_for_provider(provider, model) {
+            Some(entry) => {
+                let c = entry.per_call_cost_or_zero();
+                if entry.is_per_call_billed() && entry.per_call_cost.is_none() {
+                    warn_once("per_call_cost missing for per-call modality");
+                }
+                c
+            }
+            None => {
+                warn_once("model not found in catalog");
+                0.0
+            }
+        };
+        drop(catalog);
 
         let Some(parsed_agent) = agent_id.and_then(|s| s.parse::<AgentId>().ok()) else {
             // No caller agent — skip the spend record. Media tools always

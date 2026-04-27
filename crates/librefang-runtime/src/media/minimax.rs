@@ -376,6 +376,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         Ok(MediaVideoSubmitResult {
             task_id,
             provider: "minimax".to_string(),
+            model: model.to_string(),
         })
     }
 

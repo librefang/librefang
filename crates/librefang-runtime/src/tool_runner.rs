@@ -4824,7 +4824,6 @@ async fn tool_video_generate(
     kernel: Option<&Arc<dyn KernelHandle>>,
     caller_agent_id: Option<&str>,
 ) -> Result<String, String> {
-    let started = std::time::Instant::now();
     let cache =
         media_drivers.ok_or("Media drivers not available. Ensure media drivers are configured.")?;
     let prompt = input["prompt"]
@@ -4859,20 +4858,13 @@ async fn tool_video_generate(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Bill on successful submit. Video providers charge at submit time
-    // regardless of whether the caller polls to completion, so the
-    // metering record fires here rather than in `tool_video_status`.
+    // Bill on successful submit. Video providers charge once the job is
+    // accepted; if the polled job later fails the spend is still on
+    // record (conservative direction — the provider already counted it).
+    // Latency here would only cover the submit RTT, not the minutes-long
+    // generation, so we report 0 rather than mislead the dashboard.
     if let Some(k) = kernel {
-        let model_for_billing = request
-            .model
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        k.record_media_usage(
-            caller_agent_id,
-            &result.provider,
-            &model_for_billing,
-            started.elapsed().as_millis() as u64,
-        );
+        k.record_media_usage(caller_agent_id, &result.provider, &result.model, 0);
     }
 
     let response = serde_json::json!({
