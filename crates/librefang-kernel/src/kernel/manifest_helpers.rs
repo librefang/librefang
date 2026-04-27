@@ -173,7 +173,8 @@ pub(super) fn infer_provider_from_model(model: &str) -> Option<String> {
             | "cohere" | "xai" | "ollama" | "together" | "fireworks" | "perplexity"
             | "cerebras" | "sambanova" | "replicate" | "huggingface" | "codex" | "claude-code"
             | "copilot" | "github-copilot" | "qwen" | "zhipu" | "zai" | "moonshot"
-            | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
+            | "openrouter" | "volcengine" | "doubao" | "dashscope" | "byteplus"
+            | "byteplus_coding" => {
                 return Some(prefix.to_string());
             }
             // "z.ai" is a domain alias for the zai provider
