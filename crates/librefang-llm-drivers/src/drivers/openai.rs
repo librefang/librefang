@@ -901,9 +901,7 @@ impl LlmDriver for OpenAIDriver {
         // + key, short-circuit before hitting the network.
         let guard_provider = self.shared_guard_provider();
         let guard_key_id = self.shared_guard_key_id();
-        if let Some(remaining) =
-            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
-        {
+        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
             warn!(
                 target: "librefang::shared_rate_guard",
                 provider = guard_provider,
@@ -1308,9 +1306,7 @@ impl LlmDriver for OpenAIDriver {
         // Cross-process / cross-restart rate-limit guard (streaming path).
         let guard_provider = self.shared_guard_provider();
         let guard_key_id = self.shared_guard_key_id();
-        if let Some(remaining) =
-            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
-        {
+        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
             warn!(
                 target: "librefang::shared_rate_guard",
                 provider = guard_provider,

@@ -350,9 +350,7 @@ impl LlmDriver for AnthropicDriver {
         // lockout for this api_key short-circuits the request.
         let guard_provider = "anthropic";
         let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
-        if let Some(remaining) =
-            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
-        {
+        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
             warn!(
                 target: "librefang::shared_rate_guard",
                 provider = guard_provider,
@@ -486,9 +484,7 @@ impl LlmDriver for AnthropicDriver {
         // Cross-process rate-limit guard (streaming path).
         let guard_provider = "anthropic";
         let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
-        if let Some(remaining) =
-            crate::shared_rate_guard::check(guard_provider, &guard_key_id)
-        {
+        if let Some(remaining) = crate::shared_rate_guard::check(guard_provider, &guard_key_id) {
             warn!(
                 target: "librefang::shared_rate_guard",
                 provider = guard_provider,

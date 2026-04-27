@@ -118,12 +118,8 @@ async fn shared_rate_guard_short_circuits_second_client() {
     let (base_url, hits) = spawn_stub_429_server().await;
 
     // ── First client: hits the server, records the lockout. ────────────
-    let driver_a = OpenAIDriver::with_proxy_and_timeout(
-        api_key.clone(),
-        base_url.clone(),
-        None,
-        Some(2),
-    );
+    let driver_a =
+        OpenAIDriver::with_proxy_and_timeout(api_key.clone(), base_url.clone(), None, Some(2));
     let req = simple_request("gpt-test");
     let result_a = driver_a.complete(req.clone()).await;
     assert!(
@@ -139,12 +135,8 @@ async fn shared_rate_guard_short_circuits_second_client() {
 
     // ── Second client: brand-new instance (= simulated other process). ──
     // It must short-circuit before any TCP connect.
-    let driver_b = OpenAIDriver::with_proxy_and_timeout(
-        api_key.clone(),
-        base_url.clone(),
-        None,
-        Some(2),
-    );
+    let driver_b =
+        OpenAIDriver::with_proxy_and_timeout(api_key.clone(), base_url.clone(), None, Some(2));
     let result_b = driver_b.complete(req.clone()).await;
     assert!(
         matches!(result_b, Err(LlmError::RateLimited { .. })),
@@ -163,12 +155,7 @@ async fn shared_rate_guard_short_circuits_second_client() {
     let entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("rate_limits dir")
         .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "json")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "json").unwrap_or(false))
         .collect();
     assert_eq!(
         entries.len(),
@@ -178,7 +165,10 @@ async fn shared_rate_guard_short_circuits_second_client() {
     );
     let bytes = std::fs::read(entries[0].path()).expect("read lockout file");
     let v: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
-    assert_eq!(v.get("provider").and_then(|x| x.as_str()), Some("openai-compat"));
+    assert_eq!(
+        v.get("provider").and_then(|x| x.as_str()),
+        Some("openai-compat")
+    );
     let until = v
         .get("until_unix")
         .and_then(|x| x.as_u64())
