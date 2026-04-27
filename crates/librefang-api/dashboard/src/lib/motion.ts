@@ -74,8 +74,6 @@ export const staggerContainer: Variants = {
 };
 
 // Single staggered child — same shape as fadeInUp but slightly faster (0.5s).
-// Includes an `exit` variant so list removal inside <AnimatePresence>
-// plays a smooth fade-and-collapse instead of disappearing instantly.
 export const staggerItem: Variants = {
   initial: { opacity: 0, y: 16, filter: "blur(4px)" },
   animate: {
@@ -83,12 +81,6 @@ export const staggerItem: Variants = {
     y: 0,
     filter: "blur(0px)",
     transition: { duration: 0.5, ease: APPLE_SPRING },
-  },
-  exit: {
-    opacity: 0,
-    y: -8,
-    scale: 0.96,
-    transition: { duration: 0.18, ease: APPLE_EASE },
   },
 };
 
