@@ -5372,6 +5372,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         ("TOGETHER_API_KEY", "Together", "together"),
         ("MISTRAL_API_KEY", "Mistral", "mistral"),
         ("FIREWORKS_API_KEY", "Fireworks", "fireworks"),
+        ("BYTEPLUS_API_KEY", "BytePlus", "byteplus"),
     ];
 
     let mut any_key_set = false;
@@ -8431,6 +8432,10 @@ pub(crate) fn test_api_key(provider: &str, key: &str) -> bool {
             .send(),
         "openrouter" => client
             .get("https://openrouter.ai/api/v1/models")
+            .bearer_auth(key)
+            .send(),
+        "byteplus" => client
+            .get("https://ark.ap-southeast.bytepluses.com/api/v3/models")
             .bearer_auth(key)
             .send(),
         "elevenlabs" => client
