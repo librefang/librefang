@@ -248,13 +248,13 @@ provider = "volcengine"
 model = "ep-20240101120000-abcde"   # 端点 ID, 不是模型名
 ```
 
-**说明:** 豆包是字节跳动的 LLM 产品,通过火山引擎 Ark 推理平台暴露。和大多 provider 不同,`model` 字段必须填**端点 ID**(`ep-...`),不是模型家族名。豆包 1.5 / 1.6 端点支持 vision 与工具。
+**说明:** 豆包是字节跳动的 LLM 产品,通过火山引擎 Ark 推理平台暴露。和大多 provider 不同,`model` 字段必须填**端点 ID**(`ep-...`),不是模型家族名。豆包 1.5 / 1.6 端点支持 vision 与工具。Coding Plan 端点(`https://ark.cn-beijing.volces.com/api/coding/v3`)注册为独立 provider `volcengine_coding`,使用 `VOLCENGINE_CODING_API_KEY` —— 两个端点都用就把同一把 key 值同时导出到两个环境变量。
 
 ---
 
 ## BytePlus ModelArk
 
-火山引擎国际版。同一套 Ark 平台,区域为 `ap-southeast`,USD 计价。两个端点共用一把 API key。
+火山引擎国际版。同一套 Ark 平台,区域为 `ap-southeast`,USD 计价。下面两个端点使用**独立环境变量**(`byteplus` 用 `BYTEPLUS_API_KEY`,`byteplus_coding` 用 `BYTEPLUS_CODING_API_KEY`)—— 同一把 BytePlus 账号 key 在两边都能用,只需把同一个值导出到对应环境变量名下。
 
 ### `byteplus` — 标准 `/api/v3` 端点
 
@@ -281,7 +281,7 @@ model = "seed-2-0-pro-260328"       # 版本化快照 ID, 见 byteplus.toml
 | **显示名称** | BytePlus ModelArk Coding Plan |
 | **Provider ID** | `byteplus_coding` |
 | **驱动** | Anthropic 兼容(`/v1/messages`) |
-| **环境变量** | `BYTEPLUS_API_KEY` |
+| **环境变量** | `BYTEPLUS_CODING_API_KEY` |
 | **基础 URL** | `https://ark.ap-southeast.bytepluses.com/api/coding` |
 | **认证方式** | `x-api-key` + `anthropic-version` 请求头 |
 
@@ -295,7 +295,8 @@ model = "ark-code-latest"           # 自动路由的友好别名
 1. 在 [BytePlus 控制台](https://console.byteplus.com) 注册
 2. 在 **ModelArk > Model Inventory** 激活想用的模型
 3. 在 **ModelArk > API Keys** 生成 API key
-4. `export BYTEPLUS_API_KEY="..."`
+4. `export BYTEPLUS_API_KEY="..."`(给标准 `byteplus` 端点用)
+5. `export BYTEPLUS_CODING_API_KEY="..."`(给 `byteplus_coding` 端点用 —— 同一把 key 值,独立环境变量)
 
 **说明:** `byteplus` 用版本化快照 ID(如 `seed-2-0-pro-260328`)。`byteplus_coding` 用友好别名(如 `ark-code-latest` 自动路由,以及 `dola-seed-2.0-pro`、`kimi-k2.5`、`glm-4.7`、`gpt-oss-120b`)— 这些别名在模型升级时保持稳定。
 
@@ -327,7 +328,7 @@ provider = "zhipu"
 model = "glm-4-plus"
 ```
 
-**说明:** 智谱开发 GLM(General Language Model)系列。支持工具、vision、embedding。同一个 `ZHIPU_API_KEY` 可以同时用于下面的 `zhipu-coding` 和 `z.ai` —— 注册一次,跨端点复用。
+**说明:** 智谱开发 GLM(General Language Model)系列。支持工具、vision、embedding。`z.ai`(下面)是同一后端的国际区域前端,与本 provider 共用 `ZHIPU_API_KEY`。Coding Plan 端点(`zhipu_coding`、`zai_coding`)现在分别使用 `ZHIPU_CODING_API_KEY` 与 `ZAI_CODING_API_KEY` —— 在智谱注册一次,把同一个值按需导出到对应的环境变量名下。
 
 ---
 
@@ -338,15 +339,15 @@ model = "glm-4-plus"
 | **显示名称** | CodeGeex |
 | **Provider ID** | `zhipu-coding`(别名 `codegeex`) |
 | **驱动** | OpenAI 兼容 |
-| **环境变量** | `ZHIPU_API_KEY`(与 Zhipu 共享 key) |
+| **环境变量** | `ZHIPU_CODING_API_KEY` |
 | **基础 URL** | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | **需要密钥** | 是 |
 | **免费额度** | 是(算在同一个智谱配额里) |
 | **认证方式** | `Authorization: Bearer` 请求头 |
 
 **设置：**
-1. 复用上面的智谱 API key
-2. `export ZHIPU_API_KEY="..."`
+1. 复用上面的智谱 API key(在智谱开放平台注册一次)
+2. `export ZHIPU_CODING_API_KEY="..."`(与 `ZHIPU_API_KEY` 同值;独立环境变量,避免配置 Zhipu chat 时把 Coding 端点也自动激活)
 
 **最小 `config.toml`：**
 
@@ -385,7 +386,7 @@ provider = "z.ai"
 model = "glm-4-plus"
 ```
 
-**说明:** Z.ai 品牌端点 —— 后端是同一个智谱,做了海外流量路由。如果想用编码变体,设置 `[provider_urls]` 显式覆盖到 `https://api.z.ai/api/coding/paas/v4`。
+**说明:** Z.ai 品牌端点 —— 后端是同一个智谱,做了海外流量路由。Coding 变体 `zai_coding`(基础 URL `https://api.z.ai/api/coding/paas/v4`)注册为独立 provider,使用 `ZAI_CODING_API_KEY`(把同一把智谱 key 值再导出一份)。
 
 ---
 

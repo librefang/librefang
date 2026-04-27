@@ -248,13 +248,13 @@ provider = "volcengine"
 model = "ep-20240101120000-abcde"   # endpoint ID, not the model name
 ```
 
-**Notes:** Doubao is ByteDance's LLM product, exposed via VolcEngine's Ark inference platform. Unlike most providers, the `model` field must be the **endpoint ID** (`ep-...`), not the model family name. Vision and tools are supported on Doubao 1.5 / 1.6 endpoints.
+**Notes:** Doubao is ByteDance's LLM product, exposed via VolcEngine's Ark inference platform. Unlike most providers, the `model` field must be the **endpoint ID** (`ep-...`), not the model family name. Vision and tools are supported on Doubao 1.5 / 1.6 endpoints. The Coding Plan endpoint (`https://ark.cn-beijing.volces.com/api/coding/v3`) is registered as the separate provider `volcengine_coding`, which uses its own `VOLCENGINE_CODING_API_KEY` — set the same key value under both env vars if you use both endpoints.
 
 ---
 
 ## BytePlus ModelArk
 
-International edition of VolcEngine. Same Ark platform, different region (`ap-southeast`) and pricing in USD. Two endpoints share one API key.
+International edition of VolcEngine. Same Ark platform, different region (`ap-southeast`) and pricing in USD. The two endpoints below have **separate env vars** (`BYTEPLUS_API_KEY` for `byteplus`, `BYTEPLUS_CODING_API_KEY` for `byteplus_coding`) — the same BytePlus account key works for both, you just export it under each name you actually use.
 
 ### `byteplus` — standard `/api/v3` endpoint
 
@@ -281,7 +281,7 @@ model = "seed-2-0-pro-260328"       # versioned snapshot, see byteplus.toml
 | **Display Name** | BytePlus ModelArk Coding Plan |
 | **Provider ID** | `byteplus_coding` |
 | **Driver** | Anthropic-compatible (`/v1/messages`) |
-| **Env Var** | `BYTEPLUS_API_KEY` |
+| **Env Var** | `BYTEPLUS_CODING_API_KEY` |
 | **Base URL** | `https://ark.ap-southeast.bytepluses.com/api/coding` |
 | **Auth** | `x-api-key` + `anthropic-version` headers |
 
@@ -295,7 +295,8 @@ model = "ark-code-latest"           # auto-routed friendly alias
 1. Sign up at the [BytePlus console](https://console.byteplus.com)
 2. Activate the models you want under **ModelArk > Model Inventory**
 3. Generate an API key under **ModelArk > API Keys**
-4. `export BYTEPLUS_API_KEY="..."`
+4. `export BYTEPLUS_API_KEY="..."` (for the standard `byteplus` endpoint)
+5. `export BYTEPLUS_CODING_API_KEY="..."` (for the `byteplus_coding` endpoint — same key value, separate env)
 
 **Notes:** `byteplus` uses versioned snapshot IDs like `seed-2-0-pro-260328`. `byteplus_coding` uses friendly aliases like `ark-code-latest` (auto-router), `dola-seed-2.0-pro`, `kimi-k2.5`, `glm-4.7`, `gpt-oss-120b` — these stay stable across model upgrades.
 
@@ -327,7 +328,7 @@ provider = "zhipu"
 model = "glm-4-plus"
 ```
 
-**Notes:** Zhipu develops the GLM (General Language Model) family. Tools, vision, and embeddings supported. The same `ZHIPU_API_KEY` is reused for `zhipu-coding` and `z.ai` (below) — register once, use across endpoints.
+**Notes:** Zhipu develops the GLM (General Language Model) family. Tools, vision, and embeddings supported. `z.ai` (below) is the international-region front-end of the same backend and shares `ZHIPU_API_KEY`. The Coding Plan endpoints (`zhipu_coding`, `zai_coding`) now use `ZHIPU_CODING_API_KEY` and `ZAI_CODING_API_KEY` respectively — register once at Zhipu and re-export the same value under each name you actually use.
 
 ---
 
@@ -338,15 +339,15 @@ model = "glm-4-plus"
 | **Display Name** | CodeGeex |
 | **Provider ID** | `zhipu-coding` (alias: `codegeex`) |
 | **Driver** | OpenAI-compatible |
-| **Env Var** | `ZHIPU_API_KEY` (shares key with Zhipu) |
+| **Env Var** | `ZHIPU_CODING_API_KEY` |
 | **Base URL** | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | **Key Required** | Yes |
 | **Free Tier** | Yes (counted against the same Zhipu quota) |
 | **Auth** | `Authorization: Bearer` header |
 
 **Setup:**
-1. Use the same Zhipu API key from above
-2. `export ZHIPU_API_KEY="..."`
+1. Use the same Zhipu API key from above (register once on the Zhipu open platform)
+2. `export ZHIPU_CODING_API_KEY="..."` (same value as `ZHIPU_API_KEY`, separate env so configuring Zhipu chat doesn't auto-activate this endpoint)
 
 **Minimal `config.toml`:**
 
@@ -385,7 +386,7 @@ provider = "z.ai"
 model = "glm-4-plus"
 ```
 
-**Notes:** Branded Z.ai endpoint — same Zhipu backend, different routing for international traffic. A coding variant is available at `https://api.z.ai/api/coding/paas/v4` if you set the base URL explicitly via `[provider_urls]`.
+**Notes:** Branded Z.ai endpoint — same Zhipu backend, different routing for international traffic. The coding variant `zai_coding` (base URL `https://api.z.ai/api/coding/paas/v4`) is registered as its own provider; it uses `ZAI_CODING_API_KEY` (re-export the same Zhipu key value).
 
 ---
 
