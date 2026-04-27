@@ -131,7 +131,7 @@ export function SessionsPage() {
             const agent = agentMap.get(s.agent_id || "");
             return (
               <div key={s.session_id}
-                className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
+                className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow ${
                   s.active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30 hover:-translate-y-0.5"
                 }`}>
                 {/* Agent avatar */}

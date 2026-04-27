@@ -644,6 +644,7 @@ export function McpServersPage() {
   const [taintEditingServer, setTaintEditingServer] = useState<McpServerConfigured | null>(null);
   const [deletingServer, setDeletingServer] = useState<McpServerConfigured | null>(null);
   const [detailsServer, setDetailsServer] = useState<McpServerConfigured | null>(null);
+  const [detailsCatalog, setDetailsCatalog] = useState<McpCatalogEntry | null>(null);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<ServerFormState>(defaultForm);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1071,7 +1072,13 @@ export function McpServersPage() {
                         ? "from-success via-success/60 to-success/30"
                         : "from-brand via-brand/60 to-brand/30"
                     }`} />
-                    <div className="p-5 flex-1 flex flex-col">
+                    <div
+                      className="p-5 flex-1 flex flex-col cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setDetailsCatalog(tpl)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetailsCatalog(tpl); } }}
+                    >
                       {/* Header */}
                       <div className="flex items-start justify-between gap-3 mb-3">
                         <div className="flex items-center gap-3 min-w-0">
@@ -1518,6 +1525,102 @@ export function McpServersPage() {
                   onClick={() => { const s = detailsServer; setDetailsServer(null); deleteServer(s); }}
                 >
                   {t("common.delete")}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </DrawerPanel>
+
+      {/* Catalog template detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsCatalog}
+        onClose={() => setDetailsCatalog(null)}
+        title={detailsCatalog?.name ?? ""}
+        size="md"
+      >
+        {detailsCatalog && (() => {
+          const alreadyAdded = detailsCatalog.installed || installedTemplateIds.has(detailsCatalog.id);
+          return (
+            <div className="p-5 space-y-5">
+              <div className="flex items-start gap-3">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+                  alreadyAdded ? "bg-success/15 text-success" : "bg-brand/10 text-brand"
+                }`}>
+                  {detailsCatalog.icon
+                    ? <CatalogIcon icon={detailsCatalog.icon} className="w-5 h-5" />
+                    : <Plug className="w-5 h-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-black tracking-tight truncate">{detailsCatalog.name}</h2>
+                    {alreadyAdded && (
+                      <Badge variant="success" dot>
+                        <Check className="h-3 w-3 mr-0.5" />
+                        {t("mcp.catalog_installed")}
+                      </Badge>
+                    )}
+                  </div>
+                  {detailsCatalog.category && (
+                    <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mt-0.5">{detailsCatalog.category}</p>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{detailsCatalog.description}</p>
+
+              {(detailsCatalog.tags ?? []).length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {detailsCatalog.tags!.map(tag => (
+                    <span key={tag} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-brand/10 text-brand">{tag}</span>
+                  ))}
+                </div>
+              )}
+
+              {(detailsCatalog.required_env ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.required_env", { defaultValue: "Required environment" })}
+                  </p>
+                  <div className="space-y-1.5">
+                    {(detailsCatalog.required_env ?? []).map(e => (
+                      <div key={e.name} className="flex items-center gap-2 p-2 rounded-lg bg-main/40 border border-border-subtle/50">
+                        <Key className="w-3 h-3 text-text-dim/60 shrink-0" />
+                        <code className="font-mono text-[11px] font-bold text-text-main">{e.name}</code>
+                        {e.label && <span className="text-[10px] text-text-dim truncate flex-1">{e.label}</span>}
+                        {e.get_url && (
+                          <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {detailsCatalog.setup_instructions && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.setup_instructions", { defaultValue: "Setup" })}
+                  </p>
+                  <pre className="text-[11px] text-text-dim leading-relaxed whitespace-pre-wrap font-sans p-3 rounded-lg bg-main/40 border border-border-subtle/50">{detailsCatalog.setup_instructions}</pre>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-border-subtle/50">
+                <Button
+                  variant="primary"
+                  className="w-full"
+                  disabled={alreadyAdded}
+                  leftIcon={alreadyAdded ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                  onClick={() => {
+                    const tpl = detailsCatalog;
+                    setDetailsCatalog(null);
+                    installFromTemplate(tpl);
+                  }}
+                >
+                  {alreadyAdded ? t("mcp.catalog_installed") : t("mcp.catalog_install")}
                 </Button>
               </div>
             </div>

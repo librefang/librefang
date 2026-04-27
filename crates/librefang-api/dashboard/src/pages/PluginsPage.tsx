@@ -1,7 +1,7 @@
 import { formatBytes } from "../lib/format";
 import { useState, useCallback, useEffect, useRef, startTransition } from "react";
 import { useTranslation } from "react-i18next";
-import type { PluginItem, RegistryEntry } from "../api";
+import type { PluginItem, RegistryEntry, RegistryPluginListing } from "../api";
 import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
 import {
   useInstallPlugin,
@@ -49,6 +49,7 @@ export function PluginsPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
   const [detailsPlugin, setDetailsPlugin] = useState<PluginItem | null>(null);
+  const [detailsRegistryPlugin, setDetailsRegistryPlugin] = useState<{ rp: RegistryPluginListing; repo: string } | null>(null);
   const openInstall = useCallback(() => setShowInstall(true), []);
   useCreateShortcut(openInstall);
 
@@ -288,7 +289,8 @@ export function PluginsPage() {
                         <Card
                           key={rp.name}
                           padding="md"
-                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors"
+                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors cursor-pointer"
+                          onClick={() => setDetailsRegistryPlugin({ rp, repo: reg.github_repo })}
                         >
                           <div className="flex items-start gap-3">
                             <div className="w-9 h-9 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
@@ -334,7 +336,7 @@ export function PluginsPage() {
                               <Button
                                 variant="primary"
                                 size="sm"
-                                onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
+                                onClick={(e) => { e.stopPropagation(); handleRegistryInstall(rp.name, reg.github_repo); }}
                                 disabled={installingName === `${reg.github_repo}:${rp.name}`}
                               >
                                 {installingName === `${reg.github_repo}:${rp.name}`
@@ -567,6 +569,89 @@ export function PluginsPage() {
             </div>
           </div>
         )}
+      </DrawerPanel>
+
+      {/* Registry plugin detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsRegistryPlugin}
+        onClose={() => setDetailsRegistryPlugin(null)}
+        title={detailsRegistryPlugin?.rp.name ?? ""}
+        size="md"
+      >
+        {detailsRegistryPlugin && (() => {
+          const { rp, repo } = detailsRegistryPlugin;
+          const installKey = `${repo}:${rp.name}`;
+          return (
+            <div className="p-5 space-y-5">
+              <div className="flex items-start gap-3">
+                <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 text-brand">
+                  <Puzzle className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-black tracking-tight truncate">{rp.name}</h2>
+                    {rp.version && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{rp.version}</span>
+                    )}
+                    {rp.installed && (
+                      <Badge variant="success">
+                        <Check className="w-3 h-3 mr-1" />
+                        {t("plugins.installed")}
+                      </Badge>
+                    )}
+                  </div>
+                  {rp.author && (
+                    <p className="text-[11px] text-text-dim/70 mt-0.5">{rp.author}</p>
+                  )}
+                  <a
+                    href={`https://github.com/${repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 mt-1 text-[11px] font-mono text-text-dim/70 hover:text-brand transition-colors"
+                  >
+                    <GitBranch className="w-3 h-3" />
+                    {repo}
+                  </a>
+                </div>
+              </div>
+
+              {rp.description && (
+                <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{rp.description}</p>
+              )}
+
+              {(rp.hooks ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("plugins.hooks", { defaultValue: "Hooks" })}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(rp.hooks ?? []).map(h => (
+                      <Badge key={h} variant="brand">{h}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-border-subtle/50">
+                {rp.installed ? (
+                  <Button variant="secondary" className="w-full" disabled leftIcon={<Check className="w-4 h-4" />}>
+                    {t("plugins.installed")}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    className="w-full"
+                    disabled={installingName === installKey}
+                    leftIcon={installingName === installKey ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    onClick={() => handleRegistryInstall(rp.name, repo)}
+                  >
+                    {installingName === installKey ? t("common.loading") : t("plugins.install")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </DrawerPanel>
     </div>
   );
