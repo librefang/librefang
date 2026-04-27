@@ -2553,7 +2553,7 @@
     "auth_start_failed": "Failed to start auth",
     "auth_revoke_failed": "Failed to revoke auth",
     "tab_my_servers": "Servers",
-    "tab_catalog": "Catalog",
+    "tab_catalog": "MCP Marketplace",
     "catalog_subtitle": "Browse and install pre-configured MCP server templates",
     "catalog_empty": "No MCP server templates available",
     "catalog_empty_desc": "MCP server templates will appear after a registry sync.",

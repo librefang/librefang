@@ -2519,7 +2519,7 @@
     "auth_start_failed": "启动认证失败",
     "auth_revoke_failed": "撤销认证失败",
     "tab_my_servers": "服务器",
-    "tab_catalog": "目录",
+    "tab_catalog": "MCP 市场",
     "catalog_subtitle": "浏览并安装预配置的 MCP 服务器模板",
     "catalog_empty": "暂无可用的 MCP 服务器模板",
     "catalog_empty_desc": "MCP 服务器模板将在 Registry 同步后显示。",

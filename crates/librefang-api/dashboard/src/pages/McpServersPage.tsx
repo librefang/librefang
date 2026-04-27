@@ -657,6 +657,18 @@ export function McpServersPage() {
   const configured = data?.configured ?? [];
   const connected = data?.connected ?? [];
 
+  // First-time visitors with no servers configured land on the marketplace
+  // tab — installing a template is the obvious next step, and the empty
+  // "Servers" tab gave them nothing to act on. Only fires once per mount;
+  // if the user manually switches back to "servers", we don't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!serversQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (configured.length === 0) setTab("catalog");
+  }, [serversQuery.isSuccess, configured.length]);
+
   const connectedMap = useMemo(() => {
     const map = new Map<string, McpServerConnected>();
     for (const c of connected) map.set(serverIdentityOf(c), c);
