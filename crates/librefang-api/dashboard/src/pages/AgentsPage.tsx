@@ -158,6 +158,7 @@ export function AgentsPage() {
   const [showHandAgents, setShowHandAgents] = useState(false);
   const [showToolsEditor, setShowToolsEditor] = useState(false);
   const [toolsEditorAgentId, setToolsEditorAgentId] = useState<string | null>(null);
+  const [capabilitiesToolsDraft, setCapabilitiesToolsDraft] = useState<string[]>([]);
   const [toolAllowlistDraft, setToolAllowlistDraft] = useState<string[]>([]);
   const [toolBlocklistDraft, setToolBlocklistDraft] = useState<string[]>([]);
   const [toolsDisabledState, setToolsDisabledState] = useState(false);
@@ -304,6 +305,7 @@ export function AgentsPage() {
     setToolsEditorLoading(false);
     setToolsEditorSaving(false);
     setAvailableToolNames([]);
+    setCapabilitiesToolsDraft([]);
     setToolAllowlistDraft([]);
     setToolBlocklistDraft([]);
     setToolsDisabledState(false);
@@ -328,6 +330,7 @@ export function AgentsPage() {
           ? allTools.map((tool: ToolDefinition) => tool.name).filter(Boolean)
           : [];
         setAvailableToolNames(names);
+        setCapabilitiesToolsDraft(Array.isArray(agentTools?.capabilities_tools) ? agentTools.capabilities_tools : []);
         setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
         setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
         setToolsDisabledState(Boolean(agentTools?.disabled));
@@ -1260,11 +1263,11 @@ export function AgentsPage() {
           <div className="p-6 space-y-5">
             <div>
               <p className="text-[11px] text-text-dim/70">
-                {t("agents.tools_editor_desc", { defaultValue: "Review the current tools state for this agent. Empty allowlist means no allow restriction; blocklist still removes selected tools." })}
+                {t("agents.tools_editor_desc", { defaultValue: "Review and manage the agent's tools. Declared tools are the primary set; allowlist/blocklist are additional filters." })}
               </p>
               {!toolsEditorLoading && (
                 <p className="mt-2 text-[10px] text-text-dim/50 font-mono">
-                  {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
+                  {capabilitiesToolsDraft.length} {t("agents.tools_declared_count", { defaultValue: "declared" })} · {availableToolNames.length} {t("agents.tools_available", { defaultValue: "tools available" })} · {toolAllowlistDraft.length} {t("agents.tools_allowed_count", { defaultValue: "allowed" })} · {toolBlocklistDraft.length} {t("agents.tools_blocked_count", { defaultValue: "blocked" })}
                 </p>
               )}
             </div>
@@ -1295,10 +1298,28 @@ export function AgentsPage() {
                 <div className="space-y-2">
                   <div>
                     <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
+                      {t("agents.tools_declared_title", { defaultValue: "Declared Tools" })}
+                    </h4>
+                    <p className="text-[11px] text-text-dim/70 mb-3">
+                      {t("agents.tools_declared_desc", { defaultValue: "Tools this agent can use. Leave empty for unrestricted access to all tools." })}
+                    </p>
+                  </div>
+                  <MultiSelectCmdk
+                    options={availableToolNames}
+                    value={capabilitiesToolsDraft}
+                    onChange={setCapabilitiesToolsDraft}
+                    placeholder={t("agents.tools_search_placeholder", { defaultValue: "Search tools..." })}
+                    disabled={toolsDisabledState}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-2">
                       {t("agents.tools_allowlist_title", { defaultValue: "Allowlist" })}
                     </h4>
                     <p className="text-[11px] text-text-dim/70 mb-3">
-                      {t("agents.tools_allowlist_desc", { defaultValue: "These tools are explicitly allowed. Leave empty to allow all tools except blocked ones." })}
+                      {t("agents.tools_allowlist_desc", { defaultValue: "Additional filter: only these tools remain available. Leave empty to skip this filter." })}
                     </p>
                   </div>
                   <MultiSelectCmdk
@@ -1352,6 +1373,7 @@ export function AgentsPage() {
                 try {
                   const resolvedAllowlist = toolAllowlistDraft.filter((name) => !toolBlocklistDraft.includes(name));
                   await updateAgentTools(toolsEditorAgentId, {
+                    capabilities_tools: capabilitiesToolsDraft,
                     tool_allowlist: resolvedAllowlist,
                     tool_blocklist: toolBlocklistDraft,
                   });

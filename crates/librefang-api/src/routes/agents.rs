@@ -3304,11 +3304,25 @@ pub async fn get_agent_tools(
     (
         StatusCode::OK,
         Json(serde_json::json!({
+            "capabilities_tools": entry.manifest.capabilities.tools,
             "tool_allowlist": entry.manifest.tool_allowlist,
             "tool_blocklist": entry.manifest.tool_blocklist,
             "disabled": entry.manifest.tools_disabled,
         })),
     )
+}
+
+/// Request body for updating an agent's tool configuration.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct SetAgentToolsRequest {
+    /// Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted.
+    pub capabilities_tools: Option<Vec<String>>,
+    /// Tool allowlist — additional filter. `None` = no change, `Some([])` = clear.
+    #[serde(default)]
+    pub tool_allowlist: Option<Vec<String>>,
+    /// Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear.
+    #[serde(default)]
+    pub tool_blocklist: Option<Vec<String>>,
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
@@ -3317,7 +3331,7 @@ pub async fn get_agent_tools(
     path = "/api/agents/{id}/tools",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Tool allowlist and/or blocklist arrays"),
+    request_body(content = SetAgentToolsRequest, description = "Tool configuration fields"),
     responses(
         (status = 200, description = "Update an agent's tool allowlist and blocklist", body = serde_json::Value)
     )
@@ -3326,7 +3340,7 @@ pub async fn set_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<SetAgentToolsRequest>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -3338,24 +3352,11 @@ pub async fn set_agent_tools(
             )
         }
     };
-    let allowlist = body
-        .get("tool_allowlist")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        });
-    let blocklist = body
-        .get("tool_blocklist")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect::<Vec<_>>()
-        });
 
-    if allowlist.is_none() && blocklist.is_none() {
+    if body.capabilities_tools.is_none()
+        && body.tool_allowlist.is_none()
+        && body.tool_blocklist.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-agent-missing-tools")})),
@@ -3372,10 +3373,12 @@ pub async fn set_agent_tools(
         );
     }
 
-    match state
-        .kernel
-        .set_agent_tool_filters(agent_id, allowlist, blocklist)
-    {
+    match state.kernel.set_agent_tool_filters(
+        agent_id,
+        body.capabilities_tools,
+        body.tool_allowlist,
+        body.tool_blocklist,
+    ) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

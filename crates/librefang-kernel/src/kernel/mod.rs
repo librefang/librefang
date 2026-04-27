@@ -8805,26 +8805,35 @@ system_prompt = "You are a helpful assistant."
     pub fn set_agent_tool_filters(
         &self,
         agent_id: AgentId,
+        capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
     ) -> KernelResult<()> {
+        if capabilities_tools.is_none() && allowlist.is_none() && blocklist.is_none() {
+            return Ok(());
+        }
+
+        info!(
+            agent_id = %agent_id,
+            capabilities_tools = ?capabilities_tools,
+            allowlist = ?allowlist,
+            blocklist = ?blocklist,
+            "Agent tool filters updated"
+        );
+
         self.registry
-            .update_tool_filters(agent_id, allowlist.clone(), blocklist.clone())
+            .update_tool_config(agent_id, capabilities_tools, allowlist, blocklist)
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
             let _ = self.memory.save_agent(&entry);
         }
 
+        self.persist_manifest_to_disk(agent_id);
+
         // Invalidate cached tool list — tool filter change affects available tools
         self.prompt_metadata_cache.tools.remove(&agent_id);
 
-        info!(
-            agent_id = %agent_id,
-            allowlist = ?allowlist,
-            blocklist = ?blocklist,
-            "Agent tool filters updated"
-        );
         Ok(())
     }
 
@@ -16082,7 +16091,8 @@ impl KernelHandle for LibreFangKernel {
 
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
-        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let agent_display = self.approval_agent_display(agent_id);
+        let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
         let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
             id: request_id,
@@ -16165,9 +16175,9 @@ impl KernelHandle for LibreFangKernel {
                 };
 
             let msg = format!(
-                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                "{} Approval needed: agent {} wants to run `{}` — {}",
                 risk_level.emoji(),
-                agent_id,
+                agent_display,
                 tool_name,
                 description,
             );
@@ -16236,7 +16246,8 @@ impl KernelHandle for LibreFangKernel {
 
         let policy = self.approval_manager.policy();
         let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
-        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
+        let agent_display = self.approval_agent_display(agent_id);
+        let description = format!("Agent {} requests to execute {}", agent_display, tool_name);
         let request_id = uuid::Uuid::new_v4();
         let req = TypedRequest {
             id: request_id,
@@ -16310,9 +16321,9 @@ impl KernelHandle for LibreFangKernel {
                 }
             };
             let msg = format!(
-                "{} Approval needed: agent \"{}\" wants to run `{}` — {}",
+                "{} Approval needed: agent {} wants to run `{}` — {}",
                 risk_level.emoji(),
-                agent_id,
+                agent_display,
                 tool_name,
                 description,
             );
@@ -16982,6 +16993,13 @@ impl KernelHandle for LibreFangKernel {
         cfg.max_agent_call_depth
     }
 
+    fn skill_env_passthrough_policy(
+        &self,
+    ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
+        let cfg = self.config.load();
+        librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
+    }
+
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
         self.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,
@@ -17137,6 +17155,30 @@ impl KernelHandle for LibreFangKernel {
 // ---------------------------------------------------------------------------
 
 impl LibreFangKernel {
+    /// Render an agent identifier for human-facing messages: `"name" (short-id)`
+    /// when the agent is in the registry, otherwise the raw id verbatim.
+    ///
+    /// Do not use this for audit detail strings or any field that downstream
+    /// queries filter on — those need the canonical UUID so that
+    /// `/api/audit/query?agent=<uuid>` keeps working. This helper is for
+    /// operator-facing copy (push notifications, channel messages,
+    /// human-readable descriptions) only.
+    fn approval_agent_display(&self, agent_id: &str) -> String {
+        if let Ok(aid) = agent_id.parse::<AgentId>() {
+            if let Some(entry) = self.registry.get(aid) {
+                let short = agent_id.get(..8).unwrap_or(agent_id);
+                // Names are user-configured free text. Escape embedded `"` so
+                // adapters that interpret the surrounding context (Telegram
+                // MarkdownV2, Discord, etc.) don't see a malformed message
+                // that fails to render — operators can't approve what they
+                // can't see.
+                let safe_name = entry.name.replace('"', "\\\"");
+                return format!("\"{}\" ({})", safe_name, short);
+            }
+        }
+        format!("\"{}\"", agent_id)
+    }
+
     async fn notify_escalated_approval(
         &self,
         req: &librefang_types::approval::ApprovalRequest,
@@ -17178,10 +17220,10 @@ impl LibreFangKernel {
             };
 
         let msg = format!(
-            "{} ESCALATION #{}: Approval still needed: agent \"{}\" wants to run `{}` - {}",
+            "{} ESCALATION #{}: Approval still needed: agent {} wants to run `{}` - {}",
             req.risk_level.emoji(),
             req.escalation_count,
-            req.agent_id,
+            self.approval_agent_display(&req.agent_id),
             req.tool_name,
             req.description,
         );

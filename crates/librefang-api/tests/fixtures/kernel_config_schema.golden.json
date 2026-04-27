@@ -11120,6 +11120,33 @@
           },
           "type": "array"
         },
+        "env_passthrough_denied_patterns": {
+          "default": [
+            "*_KEY",
+            "*_TOKEN",
+            "*_PASSWORD",
+            "*_SECRET",
+            "*_API_KEY",
+            "AWS_*",
+            "GITHUB_*"
+          ],
+          "description": "Operator-side gate over skill `env_passthrough` requests: glob patterns that block matching env-var names regardless of what the skill manifest declares. Defaults to a deny list covering common credential conventions (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`, `*_API_KEY`, `AWS_*`, `GITHUB_*`). Set to an empty list to disable the operator deny check; the built-in `FORBIDDEN_PASSTHROUGH` and kernel-reserved hard blocks still apply.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "env_passthrough_per_skill": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "Per-skill explicit allow overrides. Lets the operator grant a specific skill an env var that would otherwise be blocked by `env_passthrough_denied_patterns`. Cannot bypass the built-in `FORBIDDEN_PASSTHROUGH` hard block.\n\nExample: `{ \"gog\" = [\"GOG_KEYRING_PASSWORD\"] }`.",
+          "type": "object"
+        },
         "extra_dirs": {
           "default": [],
           "description": "Extra skill directories to scan in addition to `~/.librefang/skills/`. Each entry must be an absolute path. Scanned read-only after the primary skills dir; local skills with the same name win.",
@@ -14664,6 +14691,16 @@
       ],
       "default": {
         "disabled": [],
+        "env_passthrough_denied_patterns": [
+          "*_KEY",
+          "*_TOKEN",
+          "*_PASSWORD",
+          "*_SECRET",
+          "*_API_KEY",
+          "AWS_*",
+          "GITHUB_*"
+        ],
+        "env_passthrough_per_skill": {},
         "extra_dirs": [],
         "load_user": true
       },

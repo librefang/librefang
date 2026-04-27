@@ -364,6 +364,13 @@ pub(super) fn generate_identity_files(
     use std::io::Write;
 
     let identity_dir = workspace.join(".identity");
+    // Ensure `.identity/` exists before any of the per-file opens below;
+    // without this, every TOOLS.md write from a fresh agent boot warns
+    // "No such file or directory" (and SOUL/USER/MEMORY silently skip
+    // creation because they use create_new). The mirror cleanup helper
+    // at the bottom of this file already does the same — keep them in
+    // sync.
+    let _ = std::fs::create_dir_all(&identity_dir);
 
     let soul_content = format!(
         "# Soul\n\

@@ -221,6 +221,73 @@ db.host = postgres.internal
 
 ---
 
+## Environment Variable Passthrough
+
+Skill subprocesses run with `env_clear()` by default — no host environment variables are inherited. This is the right default for third-party code: API keys, tokens, and other secrets in the host environment must not silently leak into a skill's subprocess.
+
+Some skills legitimately need a specific host variable. The canonical example is a skill that wraps a CLI tool which uses an env-based credential helper (e.g. `gog`'s file-backed keyring needs `GOG_KEYRING_PASSWORD`).
+
+This works as a **two-party opt-in**: the skill author declares which variables the skill *wants*, and the operator (the person running LibreFang) decides which of those requests to *grant*.
+
+### Skill author: declare in `skill.toml`
+
+Add `env_passthrough` at the top level of the manifest, sibling to `[skill]` and `[runtime]`:
+
+```toml
+env_passthrough = ["GOG_KEYRING_PASSWORD", "GOG_KEYRING_BACKEND"]
+
+[skill]
+name = "gog"
+# …
+```
+
+The variable *names* are public (they live in the manifest); only their host-side *values* cross the subprocess boundary, and only when the operator has not blocked the name.
+
+### Operator: gate via `[skills]` config
+
+The operator's config in `~/.librefang/config.toml` decides which requests are honored:
+
+```toml
+[skills]
+# Glob patterns that block matching env-var names regardless of what the
+# skill manifest declares. These are the defaults; replace with your own
+# list, or set to [] to disable the deny check.
+env_passthrough_denied_patterns = [
+    "*_KEY",
+    "*_TOKEN",
+    "*_PASSWORD",
+    "*_SECRET",
+    "*_API_KEY",
+    "AWS_*",
+    "GITHUB_*",
+]
+
+# Per-skill explicit allow overrides. Lets you grant a specific skill an
+# env var that would otherwise be blocked by env_passthrough_denied_patterns.
+[skills.env_passthrough_per_skill]
+gog = ["GOG_KEYRING_PASSWORD"]
+```
+
+If you don't configure `[skills]` at all, the defaults above apply.
+
+### Resolution
+
+For each variable name in a skill's `env_passthrough`, in order:
+
+1. **Hard block** — names like `LD_PRELOAD`, `PYTHONPATH`, `NODE_OPTIONS`, etc. are dropped regardless of skill manifest or operator config. These either inject code or redirect imports/library lookup, and would defeat the `env_clear` isolation. The full list is in `librefang-skills::loader::FORBIDDEN_PASSTHROUGH`.
+2. **Kernel-reserved** — `PATH`, `HOME`, `PYTHONIOENCODING`, etc. are dropped. The kernel sets these explicitly per-runtime (it may have deliberately narrowed `PATH`); skills cannot override them.
+3. **Operator deny** — names matching `env_passthrough_denied_patterns` are dropped *unless* listed under `env_passthrough_per_skill` for the running skill.
+4. Anything that survives is forwarded if it's set in the host environment. Variables not present in the host environment are silently skipped.
+
+Each rejection is logged at `WARN` level so operators can debug why a declared variable did not reach a skill subprocess.
+
+### When to use it
+
+- **Use `env_passthrough`** when a skill calls out to a CLI that authenticates via env-based credential helpers (keyring backends, `*_PASSWORD` vars, etc.).
+- **Don't use `env_passthrough` for API keys/tokens.** Use [Skill Config Variables](#skill-config-variables) instead — those go through `~/.librefang/config.toml` and are injected via the system prompt without giving the skill subprocess access to host secrets.
+
+---
+
 ## Python Skills
 
 Python skills are the simplest to write. They run as subprocesses and communicate via JSON over stdin/stdout.

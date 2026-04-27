@@ -2025,10 +2025,12 @@
           }
         ],
         "requestBody": {
-          "description": "Tool allowlist and/or blocklist arrays",
+          "description": "Tool configuration fields",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/SetAgentToolsRequest"
+              }
             }
           },
           "required": true
@@ -8739,6 +8741,42 @@
         "properties": {
           "content": {
             "type": "string"
+          }
+        }
+      },
+      "SetAgentToolsRequest": {
+        "type": "object",
+        "description": "Request body for updating an agent's tool configuration.",
+        "properties": {
+          "capabilities_tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted."
+          },
+          "tool_allowlist": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool allowlist — additional filter. `None` = no change, `Some([])` = clear."
+          },
+          "tool_blocklist": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear."
           }
         }
       },

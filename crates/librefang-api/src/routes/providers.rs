@@ -839,6 +839,8 @@ pub async fn add_custom_model(
     let modality = match body.get("modality").and_then(|v| v.as_str()) {
         Some("image") => librefang_types::model_catalog::Modality::Image,
         Some("audio") => librefang_types::model_catalog::Modality::Audio,
+        Some("video") => librefang_types::model_catalog::Modality::Video,
+        Some("music") => librefang_types::model_catalog::Modality::Music,
         _ => librefang_types::model_catalog::Modality::Text,
     };
 

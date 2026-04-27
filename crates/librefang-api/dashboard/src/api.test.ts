@@ -159,13 +159,14 @@ describe("dashboard auth helpers", () => {
   it("getAgentTools requests the agent tools endpoint", async () => {
     setApiKey("secret-token");
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ tool_allowlist: ["bash"], tool_blocklist: ["rm"], disabled: false }), {
+      new Response(JSON.stringify({ capabilities_tools: ["bash"], tool_allowlist: ["bash"], tool_blocklist: ["rm"], disabled: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
     );
 
     await expect(getAgentTools("agent-123")).resolves.toEqual({
+      capabilities_tools: ["bash"],
       tool_allowlist: ["bash"],
       tool_blocklist: ["rm"],
       disabled: false,

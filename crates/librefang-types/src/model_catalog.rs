@@ -100,9 +100,10 @@ impl fmt::Display for AuthStatus {
 ///
 /// Mirrors the `modality` field in the librefang-registry schema. Text models
 /// follow the usual chat/completion flow (context_window + max_output_tokens
-/// are required). Image and audio models are priced per-token but have no
-/// conventional context window, so their `context_window` / `max_output_tokens`
-/// fields may be zero/absent in the catalog TOML.
+/// are required). Image, audio, video, and music models are priced per-call
+/// or per-asset but have no conventional context window, so their
+/// `context_window` / `max_output_tokens` fields may be zero/absent in the
+/// catalog TOML.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Modality {
@@ -113,6 +114,10 @@ pub enum Modality {
     Image,
     /// Speech / audio model (TTS, STT).
     Audio,
+    /// Video-generation model (e.g. ByteDance Seedance, MiniMax Hailuo).
+    Video,
+    /// Music / lyrics generation model.
+    Music,
 }
 
 impl fmt::Display for Modality {
@@ -121,6 +126,8 @@ impl fmt::Display for Modality {
             Modality::Text => write!(f, "text"),
             Modality::Image => write!(f, "image"),
             Modality::Audio => write!(f, "audio"),
+            Modality::Video => write!(f, "video"),
+            Modality::Music => write!(f, "music"),
         }
     }
 }

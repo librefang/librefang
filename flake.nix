@@ -33,6 +33,7 @@
 
         buildInputs = with pkgs; [
           openssl
+          dbus
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
           pkgs.apple-sdk
           pkgs.libiconv

@@ -335,10 +335,12 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Update an agent's tool allowlist and blocklist.
-    pub fn update_tool_filters(
+    /// Update an agent's declared tools and/or allowlist/blocklist in a
+    /// single registry lock. Fields left as `None` are not modified.
+    pub fn update_tool_config(
         &self,
         id: AgentId,
+        capabilities_tools: Option<Vec<String>>,
         allowlist: Option<Vec<String>>,
         blocklist: Option<Vec<String>>,
     ) -> LibreFangResult<()> {
@@ -346,6 +348,9 @@ impl AgentRegistry {
             .agents
             .get_mut(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        if let Some(ct) = capabilities_tools {
+            entry.manifest.capabilities.tools = ct;
+        }
         if let Some(al) = allowlist {
             entry.manifest.tool_allowlist = al;
         }
@@ -619,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_tool_filters_reenables_disabled_tools() {
+    fn test_update_tool_config_reenables_disabled_tools() {
         let registry = AgentRegistry::new();
         let mut entry = test_entry("tools-disabled");
         entry.manifest.tools_disabled = true;
@@ -627,7 +632,7 @@ mod tests {
         registry.register(entry).unwrap();
 
         registry
-            .update_tool_filters(id, Some(vec!["file_read".to_string()]), None)
+            .update_tool_config(id, None, Some(vec!["file_read".to_string()]), None)
             .expect("update should succeed");
 
         let updated = registry.get(id).expect("agent should exist");

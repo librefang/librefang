@@ -1,0 +1,91 @@
+name: Docker Build
+
+# Catches Dockerfile / runtime breakage on PR before it reaches the
+# release pipeline. Past incidents — #3058 (logs dir) and #3259 (missing
+# libdbus, blocked the entire v2026.4.27-beta6 image release) — both
+# slipped through because the docker job in release.yml only fires on
+# tag push, not on PRs.
+#
+# Build-only validation isn't enough: #3259 would still pass a pure
+# `docker build` if we only fixed the builder stage and forgot the
+# runtime SO. So we also boot the image and probe /api/health to catch
+# missing runtime libs / entrypoint regressions.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/Dockerfile'
+      - 'deploy/docker-entrypoint.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/pnpm-lock.yaml'
+      - '.github/workflows/docker-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/Dockerfile'
+      - 'deploy/docker-entrypoint.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/pnpm-lock.yaml'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: docker build + smoke
+    # amd64 only — arm64 would double runtime for marginal extra coverage.
+    # The release pipeline still builds both architectures at tag time.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (load to local daemon)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          load: true
+          tags: librefang:ci
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
+
+      - name: Boot container and probe /api/health
+        run: |
+          set -euo pipefail
+          docker run -d --name librefang-ci -p 4545:4545 librefang:ci
+          # Poll for up to 60s — first boot does `librefang init` which
+          # writes a config and seeds the registry.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4545/api/health >/dev/null; then
+              echo "✓ /api/health responded after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::/api/health never came up — dumping container logs"
+          docker logs librefang-ci
+          exit 1
+
+      - name: Container logs (always)
+        if: always()
+        run: docker logs librefang-ci 2>&1 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f librefang-ci 2>&1 || true

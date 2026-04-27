@@ -1223,6 +1223,83 @@ pub struct SkillsConfig {
     /// its directory. Matching is case-sensitive on the skill manifest name.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Operator-side gate over skill `env_passthrough` requests: glob
+    /// patterns that block matching env-var names regardless of what the
+    /// skill manifest declares. Defaults to a deny list covering common
+    /// credential conventions (`*_KEY`, `*_TOKEN`, `*_PASSWORD`, `*_SECRET`,
+    /// `*_API_KEY`, `AWS_*`, `GITHUB_*`). Set to an empty list to disable
+    /// the operator deny check; the built-in `FORBIDDEN_PASSTHROUGH` and
+    /// kernel-reserved hard blocks still apply.
+    #[serde(default = "default_env_passthrough_denied_patterns")]
+    pub env_passthrough_denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Lets the operator grant a
+    /// specific skill an env var that would otherwise be blocked by
+    /// `env_passthrough_denied_patterns`. Cannot bypass the built-in
+    /// `FORBIDDEN_PASSTHROUGH` hard block.
+    ///
+    /// Example: `{ "gog" = ["GOG_KEYRING_PASSWORD"] }`.
+    #[serde(default)]
+    pub env_passthrough_per_skill: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Operator-side gate over skill `env_passthrough` requests.
+///
+/// The skill manifest declares which host env vars the skill *wants*; this
+/// policy is the operator's final say on which of those requests get
+/// granted. Constructed from `[skills]` config at the call site in the
+/// runtime; the resolution algorithm lives in `librefang-skills::loader`.
+///
+/// Resolution order (applied per-skill):
+///
+/// 1. Hard block: names in the built-in `FORBIDDEN_PASSTHROUGH` list
+///    (`LD_PRELOAD`, `PYTHONPATH`, …) — never overridable.
+/// 2. Hard block: names the kernel sets explicitly per-runtime
+///    (`PATH`, `HOME`, `PYTHONIOENCODING`, …).
+/// 3. Operator deny: names matching `denied_patterns` are dropped *unless*
+///    listed in `per_skill_overrides[skill_name]`.
+/// 4. Anything else is forwarded to the subprocess.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvPassthroughPolicy {
+    /// Glob patterns that block matching env-var names regardless of skill
+    /// manifest. Operators can override per-skill via `per_skill_overrides`.
+    pub denied_patterns: Vec<String>,
+    /// Per-skill explicit allow overrides. Keyed by skill manifest name.
+    /// Cannot bypass the built-in `FORBIDDEN_PASSTHROUGH` hard block.
+    pub per_skill_overrides: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl EnvPassthroughPolicy {
+    /// Construct a policy from a `[skills]` config block, or `None` when the
+    /// config carries neither deny patterns nor per-skill overrides. Returning
+    /// `None` lets the caller (and `KernelHandle::skill_env_passthrough_policy`)
+    /// skip the operator-gate plumbing entirely — only the built-in
+    /// `FORBIDDEN_PASSTHROUGH` and kernel-reserved hard blocks apply in that
+    /// case. Note that `SkillsConfig::default()` ships with a non-empty deny
+    /// list, so the default config still produces `Some(...)`; `None` only
+    /// arises when an operator has explicitly cleared both fields.
+    pub fn from_skills_config(cfg: &SkillsConfig) -> Option<Self> {
+        if cfg.env_passthrough_denied_patterns.is_empty()
+            && cfg.env_passthrough_per_skill.is_empty()
+        {
+            return None;
+        }
+        Some(Self {
+            denied_patterns: cfg.env_passthrough_denied_patterns.clone(),
+            per_skill_overrides: cfg.env_passthrough_per_skill.clone(),
+        })
+    }
+}
+
+fn default_env_passthrough_denied_patterns() -> Vec<String> {
+    vec![
+        "*_KEY".to_string(),
+        "*_TOKEN".to_string(),
+        "*_PASSWORD".to_string(),
+        "*_SECRET".to_string(),
+        "*_API_KEY".to_string(),
+        "AWS_*".to_string(),
+        "GITHUB_*".to_string(),
+    ]
 }
 
 impl Default for SkillsConfig {
@@ -1231,6 +1308,8 @@ impl Default for SkillsConfig {
             load_user: true,
             extra_dirs: Vec::new(),
             disabled: Vec::new(),
+            env_passthrough_denied_patterns: default_env_passthrough_denied_patterns(),
+            env_passthrough_per_skill: std::collections::HashMap::new(),
         }
     }
 }
@@ -1405,6 +1484,11 @@ impl Default for InboxConfig {
     }
 }
 
+/// Default OTLP gRPC endpoint — matches the port the bundled observability
+/// stack (Tempo / OTel collector) binds when
+/// `auto_start_observability_stack = true`.
+pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
 /// Telemetry / observability configuration.
 ///
 /// ```toml
@@ -1441,11 +1525,37 @@ pub struct TelemetryConfig {
     pub auto_start_observability_stack: bool,
 }
 
+impl TelemetryConfig {
+    /// Whether OTLP exporter init should be skipped because no collector is
+    /// reachable. Returns `true` when:
+    ///
+    /// - `otlp_endpoint` is empty (operator opted out), OR
+    /// - `otlp_endpoint` is the default `http://localhost:4317` AND the bundled
+    ///   observability stack is not actually running — either the operator
+    ///   didn't opt in (`auto_start_observability_stack = false`), or they
+    ///   opted in but startup failed (Docker missing, port conflict, compose
+    ///   error). In both cases nothing listens on 4317 and the
+    ///   `BatchSpanProcessor` would spam `ConnectionRefused` every export
+    ///   interval.
+    ///
+    /// `stack_running` reflects the runtime fact, not the config intent — call
+    /// sites pass `Some(handle).is_some()` (or equivalent) after attempting
+    /// startup. Operators with an external collector on the default port
+    /// should set `otlp_endpoint` to the collector's address to opt back in;
+    /// the bundled-stack opt-in only helps when the stack actually comes up.
+    pub fn otlp_export_disabled(&self, stack_running: bool) -> bool {
+        if self.otlp_endpoint.is_empty() {
+            return true;
+        }
+        self.otlp_endpoint == DEFAULT_OTLP_ENDPOINT && !stack_running
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_endpoint: DEFAULT_OTLP_ENDPOINT.to_string(),
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
@@ -7518,5 +7628,73 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert_eq!(nav.default, McpTaintToolAction::Scan);
         assert!(nav.rule_sets.is_empty());
         assert_eq!(nav.paths.len(), 1);
+    }
+
+    // Issue #3136 follow-up: PR #3170 made the bundled observability stack
+    // opt-in but left `otlp_endpoint` defaulting to localhost:4317, so default
+    // installs spammed `ConnectionRefused`. `otlp_export_disabled()` is the
+    // gate that suppresses the exporter when no collector is reachable. The
+    // gate takes the runtime fact `stack_running` rather than just the config
+    // intent — `auto_start_observability_stack = true` only matters when the
+    // stack actually came up, otherwise we'd still spam.
+    #[test]
+    fn otlp_export_disabled_for_default_localhost_without_managed_stack() {
+        let cfg = TelemetryConfig::default();
+        assert!(cfg.enabled, "default still enables tracing wiring");
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "default localhost endpoint with no running stack must skip exporter"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_when_managed_stack_runs() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(true),
+            "running stack on default endpoint; export must run"
+        );
+    }
+
+    // Regression: operator opts in to auto_start but Docker is missing /
+    // compose fails / port conflicts — without this gate, exporter would
+    // still init and spam ConnectionRefused on every export interval.
+    #[test]
+    fn otlp_export_disabled_when_managed_stack_failed_to_start() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "auto_start=true but stack startup failed; default endpoint is dead"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_for_custom_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "http://otel.internal:4317".to_string(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(false),
+            "explicit non-default endpoint signals operator intent regardless of stack"
+        );
+    }
+
+    #[test]
+    fn otlp_export_disabled_for_empty_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: String::new(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(true),
+            "empty endpoint is the explicit opt-out path even when stack is up"
+        );
     }
 }
