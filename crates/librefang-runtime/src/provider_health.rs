@@ -179,7 +179,15 @@ fn format_request_error(err: &reqwest::Error) -> String {
 static PROBE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Return the shared probe HTTP client, building it on first call.
-fn probe_client() -> &'static reqwest::Client {
+///
+/// Exposed publicly so on-demand `/api/providers/{name}/test` handlers
+/// can reuse the same connection-pooled client instead of paying a fresh
+/// TLS handshake (~80 ms over the Pacific) on every dashboard click.
+/// Before this was public, that endpoint was rebuilding a `reqwest::Client`
+/// per call and reporting the rebuilt-client + cold-handshake cost as the
+/// "provider latency", roughly doubling what operators saw vs. the steady-
+/// state probe cycle.
+pub fn probe_client() -> &'static reqwest::Client {
     PROBE_CLIENT.get_or_init(|| {
         crate::http_client::proxied_client_builder()
             .connect_timeout(Duration::from_secs(PROBE_REMOTE_CONNECT_TIMEOUT_SECS))

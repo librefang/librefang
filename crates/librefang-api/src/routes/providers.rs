@@ -1349,20 +1349,16 @@ pub async fn test_provider(
         return ApiErrorResponse::bad_request("Provider API key not configured").into_json_tuple();
     }
 
-    let start = std::time::Instant::now();
     let api_key_val = api_key.unwrap_or_default();
-    let client = match librefang_runtime::http_client::proxied_client_builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return ApiErrorResponse::internal(format!(
-                "Failed to build HTTP client for provider test: {e}"
-            ))
-            .into_json_tuple();
-        }
-    };
+    // Reuse the shared probe HTTP client instead of building a fresh
+    // `reqwest::Client` per request. Each rebuild paid a TLS-config init +
+    // root-cert-chain load (~50–100 ms) on top of the actual handshake,
+    // and that cost was being **counted as provider latency** below — so
+    // a single `byteplus_coding 230 ms` round-trip surfaced on the
+    // dashboard as `~500 ms` purely from the rebuilt client. Sharing the
+    // pool also lets the second click reuse the warm TLS session.
+    let client = librefang_runtime::provider_health::probe_client();
+    let start = std::time::Instant::now();
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {
@@ -1382,38 +1378,52 @@ pub async fn test_provider(
     }
 
     // ── Provider-specific test URL ──
-    let test_url_str = match name.as_str() {
-        "anthropic" => format!("{}/v1/models", base_url.trim_end_matches('/')),
-        "gemini" | "google" => format!(
-            "{}/v1beta/models?key={}",
-            base_url.trim_end_matches('/'),
-            api_key_val
-        ),
-        "chatgpt" => format!("{}/me", base_url.trim_end_matches('/')),
-        "github-copilot" => format!("{}/models", base_url.trim_end_matches('/')),
-        "elevenlabs" => format!("{}/user", base_url.trim_end_matches('/')),
-        _ => format!("{}/models", base_url.trim_end_matches('/')),
+    // Anthropic-format providers (anthropic + byteplus_coding +
+    // volcengine_coding + …) all probe via `/v1/models` with x-api-key
+    // headers. Look up the registered ApiFormat instead of duplicating
+    // the registry's name list here, so future Anthropic-protocol
+    // providers don't need a parallel edit in this file.
+    let api_format = librefang_llm_drivers::drivers::provider_api_format(&name);
+    let is_anthropic_shape = matches!(
+        api_format,
+        Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic)
+    );
+    let test_url_str = if is_anthropic_shape {
+        format!("{}/v1/models", base_url.trim_end_matches('/'))
+    } else {
+        match name.as_str() {
+            "gemini" | "google" => format!(
+                "{}/v1beta/models?key={}",
+                base_url.trim_end_matches('/'),
+                api_key_val
+            ),
+            "chatgpt" => format!("{}/me", base_url.trim_end_matches('/')),
+            "github-copilot" => format!("{}/models", base_url.trim_end_matches('/')),
+            "elevenlabs" => format!("{}/user", base_url.trim_end_matches('/')),
+            _ => format!("{}/models", base_url.trim_end_matches('/')),
+        }
     };
 
     let mut req = client.get(&test_url_str);
-    match name.as_str() {
-        "anthropic" => {
-            req = req
-                .header("x-api-key", &api_key_val)
-                .header("anthropic-version", "2023-06-01");
-        }
-        "gemini" | "google" => {
-            // Key is in query param, no header needed
-        }
-        "github-copilot" => {
-            req = req.header("Authorization", format!("token {}", api_key_val));
-        }
-        "elevenlabs" => {
-            req = req.header("xi-api-key", &api_key_val);
-        }
-        _ => {
-            if !api_key_val.is_empty() {
-                req = req.header("Authorization", format!("Bearer {}", api_key_val));
+    if is_anthropic_shape {
+        req = req
+            .header("x-api-key", &api_key_val)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        match name.as_str() {
+            "gemini" | "google" => {
+                // Key is in query param, no header needed
+            }
+            "github-copilot" => {
+                req = req.header("Authorization", format!("token {}", api_key_val));
+            }
+            "elevenlabs" => {
+                req = req.header("xi-api-key", &api_key_val);
+            }
+            _ => {
+                if !api_key_val.is_empty() {
+                    req = req.header("Authorization", format!("Bearer {}", api_key_val));
+                }
             }
         }
     }
