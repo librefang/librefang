@@ -322,7 +322,7 @@ impl MediaDriver for MiniMaxMediaDriver {
         request.validate().map_err(MediaError::InvalidRequest)?;
 
         let api_key = self.api_key()?;
-        let model = request.model.as_deref().unwrap_or("MiniMax-Hailuo-2.3");
+        let model = resolve_video_model(request.model.as_deref());
 
         let mut body = serde_json::json!({
             "model": model,
@@ -603,6 +603,14 @@ impl MediaDriver for MiniMaxMediaDriver {
     }
 }
 
+/// Resolve which Hailuo model handles a video request when the caller
+/// didn't pin one. The fallback **must** name a real catalog entry so
+/// downstream metering can resolve `per_call_cost`; returning
+/// `"unknown"` here would silently bill every call as $0.
+fn resolve_video_model(requested: Option<&str>) -> &str {
+    requested.unwrap_or("MiniMax-Hailuo-2.3")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,5 +662,26 @@ mod tests {
         });
         let err = MiniMaxMediaDriver::check_base_resp(&json).unwrap_err();
         assert!(matches!(err, MediaError::ContentFiltered(_)));
+    }
+
+    #[test]
+    fn test_resolve_video_model_default_is_real_catalog_entry() {
+        // Regression guard for PR #3270/#3272: when the caller omits a
+        // model, the fallback must name a real model id that exists in
+        // the registry catalog so per_call_cost lookup succeeds.
+        // Returning a placeholder like "unknown" here would silently
+        // bill every video call as $0.
+        let resolved = resolve_video_model(None);
+        assert!(
+            !resolved.is_empty() && resolved != "unknown",
+            "default video model must be a concrete catalog entry, got {resolved:?}"
+        );
+        assert_eq!(resolved, "MiniMax-Hailuo-2.3");
+    }
+
+    #[test]
+    fn test_resolve_video_model_explicit_wins() {
+        let resolved = resolve_video_model(Some("MiniMax-Hailuo-2.3-Fast"));
+        assert_eq!(resolved, "MiniMax-Hailuo-2.3-Fast");
     }
 }

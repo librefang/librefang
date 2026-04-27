@@ -17017,21 +17017,22 @@ impl KernelHandle for LibreFangKernel {
             }
         };
 
-        let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
-        let cost_usd = match catalog.find_model_for_provider(provider, model) {
-            Some(entry) => {
-                let c = entry.per_call_cost_or_zero();
-                if entry.is_per_call_billed() && entry.per_call_cost.is_none() {
-                    warn_once("per_call_cost missing for per-call modality");
+        let cost_usd = {
+            let catalog = self.model_catalog.read().unwrap_or_else(|e| e.into_inner());
+            match catalog.find_model_for_provider(provider, model) {
+                Some(entry) => {
+                    let c = entry.per_call_cost_or_zero();
+                    if entry.is_per_call_billed() && entry.per_call_cost.is_none() {
+                        warn_once("per_call_cost missing for per-call modality");
+                    }
+                    c
                 }
-                c
-            }
-            None => {
-                warn_once("model not found in catalog");
-                0.0
+                None => {
+                    warn_once("model not found in catalog");
+                    0.0
+                }
             }
         };
-        drop(catalog);
 
         let Some(parsed_agent) = agent_id.and_then(|s| s.parse::<AgentId>().ok()) else {
             // No caller agent — skip the spend record. Media tools always
