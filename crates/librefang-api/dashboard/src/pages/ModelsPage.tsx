@@ -14,6 +14,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
+import { useDrawerStore } from "../lib/drawerStore";
 import {
   Cpu, Search, Check, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2,
   Brain, Tag, Settings,
@@ -165,6 +166,99 @@ function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pe
             </button>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── ModelDetailBody ───────────────────────────────────────────────
+// Body rendered inside the global PushDrawer when a card is opened.
+// Reads hiddenSet from UIStore directly so the toggle button reflects
+// changes without re-pushing the whole drawer body to drawerStore.
+function ModelDetailBody({
+  m,
+  hidden,
+  onOpenSettings,
+  onToggleHidden,
+}: {
+  m: ModelItem;
+  hidden: boolean;
+  onOpenSettings: () => void;
+  onToggleHidden: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="p-5 space-y-4 text-sm">
+      <div>
+        <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_provider")}</div>
+        <div className="font-mono text-xs">{m.provider}/{m.id}</div>
+      </div>
+      {m.aliases && m.aliases.length > 0 && (
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.aliases")}</div>
+          <div className="flex flex-wrap gap-1">
+            {m.aliases.map((a) => (
+              <span key={a} className="px-2 py-0.5 rounded-md bg-main text-[10px] font-mono">{a}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_tier")}</div>
+          {m.tier ? (
+            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase ${tierClass(m.tier)}`}>
+              {t(`models.tier_${m.tier}`, { defaultValue: m.tier })}
+            </span>
+          ) : "—"}
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_context")}</div>
+          <span className="font-mono">{formatCtx(m.context_window)}</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
+          <span className="font-mono">${m.input_cost_per_m ?? 0} / M</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_output")}</div>
+          <span className="font-mono">${m.output_cost_per_m ?? 0} / M</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.max_output")}</div>
+          <span className="font-mono">{formatCtx(m.max_output_tokens)}</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.availability")}</div>
+          <span>{m.available ? <span className="text-success font-bold">●</span> : <span className="text-text-dim">○</span>} {m.available ? t("models.available") : t("models.no_key")}</span>
+        </div>
+      </div>
+      <div>
+        <div className="text-[10px] font-bold text-text-dim uppercase mb-1.5">{t("models.capabilities")}</div>
+        <div className="flex flex-wrap gap-2">
+          {([
+            ["tools", m.supports_tools, Wrench] as const,
+            ["vision", m.supports_vision, Eye] as const,
+            ["streaming", m.supports_streaming, Zap] as const,
+            ["thinking", m.supports_thinking, Brain] as const,
+          ]).map(([key, on, Icon]) => (
+            <span key={key} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold ${
+              on ? "border-brand/30 bg-brand/10 text-brand" : "border-border-subtle text-text-dim/40"
+            }`}>
+              <Icon className="w-3 h-3" />
+              {t(`models.col_${key}`)}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="flex gap-2 pt-2 border-t border-border-subtle/50">
+        <Button variant="primary" className="flex-1" onClick={onOpenSettings}>
+          <Settings className="w-4 h-4 mr-1.5" />
+          {t("models.settings_title")}
+        </Button>
+        <Button variant="secondary" onClick={onToggleHidden}>
+          {hidden ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+        </Button>
       </div>
     </div>
   );
@@ -330,6 +424,52 @@ export function ModelsPage() {
     }
   };
 
+  // Mirror detailModel into the global push-drawer slot. Two-way sync:
+  //   1. detailModel set → openDrawer with the body for that model
+  //   2. detailModel cleared → closeDrawer
+  //   3. drawer closed externally (Esc / close button) → clear detailModel
+  // The body re-renders on hiddenSet changes via the inline `hidden` prop —
+  // re-pushed each time hiddenSet flips.
+  const openDrawer = useDrawerStore((s) => s.openDrawer);
+  const closeDrawer = useDrawerStore((s) => s.closeDrawer);
+  const isDrawerOpen = useDrawerStore((s) => s.isOpen);
+  const detailHidden = detailModel ? hiddenSet.has(modelKey(detailModel)) : false;
+
+  useEffect(() => {
+    if (!detailModel) {
+      closeDrawer();
+      return;
+    }
+    openDrawer({
+      title: detailModel.display_name || detailModel.id,
+      size: "md",
+      body: (
+        <ModelDetailBody
+          m={detailModel}
+          hidden={detailHidden}
+          onOpenSettings={() => {
+            setSettingsModel(detailModel);
+            setDetailModel(null);
+          }}
+          onToggleHidden={() => {
+            toggleHidden(detailModel);
+            setDetailModel(null);
+          }}
+        />
+      ),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailModel, detailHidden]);
+
+  useEffect(() => {
+    if (!isDrawerOpen && detailModel) setDetailModel(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDrawerOpen]);
+
+  // Close drawer on unmount so a body referencing this page's local state
+  // never lingers in the global slot after navigating away.
+  useEffect(() => () => closeDrawer(), [closeDrawer]);
+
   const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
   return (
@@ -450,84 +590,9 @@ export function ModelsPage() {
         </div>
       )}
 
-      {/* Detail drawer (preview before going into Settings) */}
-      {detailModel && (
-        <Modal isOpen onClose={() => setDetailModel(null)} title={detailModel.display_name || detailModel.id} size="md" variant="panel-right">
-          <div className="p-5 space-y-4 text-sm">
-            <div>
-              <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_provider")}</div>
-              <div className="font-mono text-xs">{detailModel.provider}/{detailModel.id}</div>
-            </div>
-            {detailModel.aliases && detailModel.aliases.length > 0 && (
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.aliases")}</div>
-                <div className="flex flex-wrap gap-1">
-                  {detailModel.aliases.map(a => (
-                    <span key={a} className="px-2 py-0.5 rounded-md bg-main text-[10px] font-mono">{a}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_tier")}</div>
-                {detailModel.tier ? (
-                  <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase ${tierClass(detailModel.tier)}`}>
-                    {t(`models.tier_${detailModel.tier}`, { defaultValue: detailModel.tier })}
-                  </span>
-                ) : "—"}
-              </div>
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_context")}</div>
-                <span className="font-mono">{formatCtx(detailModel.context_window)}</span>
-              </div>
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
-                <span className="font-mono">${detailModel.input_cost_per_m ?? 0} / M</span>
-              </div>
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_output")}</div>
-                <span className="font-mono">${detailModel.output_cost_per_m ?? 0} / M</span>
-              </div>
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.max_output")}</div>
-                <span className="font-mono">{formatCtx(detailModel.max_output_tokens)}</span>
-              </div>
-              <div>
-                <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.availability")}</div>
-                <span>{detailModel.available ? <span className="text-success font-bold">●</span> : <span className="text-text-dim">○</span>} {detailModel.available ? t("models.available") : t("models.no_key")}</span>
-              </div>
-            </div>
-            <div>
-              <div className="text-[10px] font-bold text-text-dim uppercase mb-1.5">{t("models.capabilities")}</div>
-              <div className="flex flex-wrap gap-2">
-                {([
-                  ["tools", detailModel.supports_tools, Wrench] as const,
-                  ["vision", detailModel.supports_vision, Eye] as const,
-                  ["streaming", detailModel.supports_streaming, Zap] as const,
-                  ["thinking", detailModel.supports_thinking, Brain] as const,
-                ]).map(([key, on, Icon]) => (
-                  <span key={key} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold ${
-                    on ? "border-brand/30 bg-brand/10 text-brand" : "border-border-subtle text-text-dim/40"
-                  }`}>
-                    <Icon className="w-3 h-3" />
-                    {t(`models.col_${key}`)}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <div className="flex gap-2 pt-2 border-t border-border-subtle/50">
-              <Button variant="primary" className="flex-1" onClick={() => { setSettingsModel(detailModel); setDetailModel(null); }}>
-                <Settings className="w-4 h-4 mr-1.5" />
-                {t("models.settings_title")}
-              </Button>
-              <Button variant="secondary" onClick={() => { toggleHidden(detailModel); setDetailModel(null); }}>
-                {hiddenSet.has(modelKey(detailModel)) ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      )}
+      {/* Detail drawer rendered via the global PushDrawer slot — see the
+          openDrawer effect above. The drawer pushes the main content
+          instead of overlaying it (mirrors the left sidebar). */}
 
       {/* Add Model Modal */}
       <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg" variant="panel-right">
