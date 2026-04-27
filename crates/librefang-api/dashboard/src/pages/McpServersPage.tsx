@@ -1,6 +1,8 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
@@ -896,6 +898,8 @@ export function McpServersPage() {
         </button>
       </div>
 
+      <AnimatePresence mode="wait">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -1129,6 +1133,8 @@ export function McpServersPage() {
           )}
         </>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Add / Edit Modal */}
       <Modal

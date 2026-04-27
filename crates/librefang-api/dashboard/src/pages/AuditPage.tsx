@@ -59,6 +59,7 @@ import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
 import type { AuditQueryEntry } from "../api";
 import { useUIStore } from "../lib/store";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // `<input type="datetime-local">` produces "YYYY-MM-DDTHH:MM" with no
 // timezone. The server parses `from` / `to` as RFC-3339 (offset
@@ -1004,7 +1005,7 @@ export function AuditPage() {
                   <span className="text-text-dim/70">{group.rows.length}</span>
                 </div>
               </div>
-              <div className="space-y-2 stagger-children">
+              <StaggerList className="space-y-2">
                 {group.rows.map((e) => {
                   const variant = outcomeVariant(e.outcome);
                   const fullTimestamp = e.timestamp;
@@ -1150,7 +1151,7 @@ export function AuditPage() {
                     </div>
                   );
                 })}
-              </div>
+              </StaggerList>
             </section>
             );
           })}

@@ -108,110 +108,9 @@ body {
   --apple-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-@keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-
-/* Page entrance — fade + rise + deblur */
-@keyframes fade-in-up {
-  from {
-    opacity: 0;
-    filter: blur(4px);
-    transform: translate3d(0, 16px, 0);
-  }
-  to {
-    opacity: 1;
-    filter: blur(0);
-    transform: translate3d(0, 0, 0);
-  }
-}
-
-/* Modal entrance — scale spring + deblur */
-@keyframes fade-in-scale {
-  0% {
-    opacity: 0;
-    filter: blur(8px);
-    transform: scale3d(0.92, 0.92, 1);
-  }
-  100% {
-    opacity: 1;
-    filter: blur(0);
-    transform: scale3d(1, 1, 1);
-  }
-}
-
-@keyframes progress-fill {
-  from { width: 0; }
-}
-
-/* ── Applied classes ────────────────────────────── */
-
-.animate-fade-in-up {
-  animation: fade-in-up 0.6s var(--apple-spring);
-}
-
-.animate-fade-in-scale {
-  animation: fade-in-scale 0.5s var(--apple-bounce);
-}
-
-@keyframes slide-in-right {
-  from {
-    transform: translate3d(100%, 0, 0);
-    opacity: 0.6;
-  }
-  to {
-    transform: translate3d(0, 0, 0);
-    opacity: 1;
-  }
-}
-
-.animate-slide-in-right {
-  animation: slide-in-right 0.28s var(--apple-ease);
-}
-
-.animate-shimmer {
-  animation: shimmer 1.5s ease-in-out infinite;
-}
-
-/* Chat message entrance — lighter than page transition: 220ms, no blur. */
-@keyframes message-in {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 6px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
-}
-.animate-message-in {
-  animation: message-in 0.22s var(--apple-ease);
-}
-
-/* ── Staggered children (Apple cascade) ─────────── */
-.stagger-children > * {
-  opacity: 0;
-  animation: fade-in-up 0.5s var(--apple-spring) forwards;
-}
-.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
-.stagger-children > *:nth-child(2) { animation-delay: 40ms; }
-.stagger-children > *:nth-child(3) { animation-delay: 80ms; }
-.stagger-children > *:nth-child(4) { animation-delay: 120ms; }
-.stagger-children > *:nth-child(5) { animation-delay: 160ms; }
-.stagger-children > *:nth-child(6) { animation-delay: 200ms; }
-.stagger-children > *:nth-child(7) { animation-delay: 240ms; }
-.stagger-children > *:nth-child(8) { animation-delay: 280ms; }
-.stagger-children > *:nth-child(9) { animation-delay: 320ms; }
-.stagger-children > *:nth-child(10) { animation-delay: 360ms; }
-
-/* ── Mobile: skip stagger delay ────────────────── */
-@media (max-width: 639px) {
-  .stagger-children > * {
-    animation-delay: 0ms !important;
-    animation-duration: 0.3s;
-  }
-}
+/* Animation primitives moved to motion (`src/lib/motion.ts` + per-component
+   variants). Only static (non-animated) helpers remain in this file — keep
+   the easing CSS variables above so any inline transitions can reference them. */
 
 /* ── Card hover — Apple-style depth + glow ──────── */
 .card-glow {
@@ -234,11 +133,6 @@ body {
     0 2px 8px -2px rgba(0, 0, 0, 0.3);
 }
 
-/* ── Progress bar ───────────────────────────────── */
-.animate-progress {
-  animation: progress-fill 1.2s var(--apple-spring);
-}
-
 /* ── Smooth scrollbar ───────────────────────────── */
 .scrollbar-thin::-webkit-scrollbar { width: 5px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
@@ -251,14 +145,5 @@ body {
 .dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
 .dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
-/* ── Respect reduced motion ─────────────────────── */
-@media (prefers-reduced-motion: reduce) {
-  .animate-fade-in-up,
-  .animate-fade-in-scale,
-  .stagger-children > * {
-    animation: none !important;
-    opacity: 1 !important;
-    filter: none !important;
-    transform: none !important;
-  }
-}
+/* prefers-reduced-motion is handled by motion (`useReducedMotion`) on a
+   per-variant basis; no global override is needed here. */

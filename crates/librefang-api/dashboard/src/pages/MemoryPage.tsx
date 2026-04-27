@@ -18,6 +18,7 @@ import { Modal } from "../components/ui/Modal";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // Add Memory Dialog
 function AddMemoryDialog({ onClose }: { onClose: () => void }) {
@@ -139,7 +140,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   if (!stats) return null;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
+    <StaggerList className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {kpis.map((kpi, i) => (
         <Card key={i} hover padding="md">
           <div className="flex items-center justify-between">
@@ -149,7 +150,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
           <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
         </Card>
       ))}
-    </div>
+    </StaggerList>
   );
 }
 

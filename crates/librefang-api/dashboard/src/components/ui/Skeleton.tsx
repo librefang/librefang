@@ -1,8 +1,11 @@
+import { motion } from "motion/react";
+
 export function Skeleton({ className = "" }: { className?: string }) {
   return (
-    <div
+    <motion.div
       className={`rounded-lg bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%] ${className}`}
-      style={{ animation: "shimmer 1.5s ease-in-out infinite" }}
+      animate={{ backgroundPosition: ["200% 0", "-200% 0"] }}
+      transition={{ duration: 1.5, ease: "easeInOut", repeat: Infinity }}
     />
   );
 }

@@ -29,6 +29,7 @@ import {
   useUpdateTrigger,
   useDeleteTrigger,
 } from "../lib/mutations/schedules";
+import { StaggerList } from "../components/ui/StaggerList";
 
 const TRIGGER_PATTERN_PRESETS = [
   { label: "lifecycle (spawned + terminated)", value: '"lifecycle"' },
@@ -277,7 +278,7 @@ export function SchedulerPage() {
             title={t("scheduler.no_schedules")}
           />
         ) : (
-          <div className="space-y-2 stagger-children">
+          <StaggerList className="space-y-2">
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               const isEnabled = s.enabled !== false;
@@ -362,7 +363,7 @@ export function SchedulerPage() {
                 </div>
               );
             })}
-          </div>
+          </StaggerList>
         )}
       </div>
 
@@ -377,7 +378,7 @@ export function SchedulerPage() {
             title={t("common.no_data")}
           />
         ) : (
-          <div className="space-y-2 stagger-children">
+          <StaggerList className="space-y-2">
             {triggers.map((tr: TriggerItem) => {
               const isEnabled = tr.enabled !== false;
               const targetAgent = agentMap.get(tr.target_agent_id ?? "");
@@ -435,7 +436,7 @@ export function SchedulerPage() {
                 </div>
               );
             })}
-          </div>
+          </StaggerList>
         )}
       </div>
 

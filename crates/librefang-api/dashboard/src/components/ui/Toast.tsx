@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
 import { useUIStore } from "../../lib/store";
 import { CheckCircle, XCircle, AlertCircle, X } from "lucide-react";
+import { toastSlide } from "../../lib/motion";
 
 const TOAST_STYLES: Record<"success" | "error" | "info", string> = {
   success: "border-success/30 bg-success/10 text-success",
@@ -25,9 +27,11 @@ export function ToastContainer() {
       aria-live="polite"
       aria-atomic="false"
     >
-      {toasts.map((toast) => (
-        <ToastItem key={toast.id} id={toast.id} message={toast.message} type={toast.type} removeToast={removeToast} />
-      ))}
+      <AnimatePresence>
+        {toasts.map((toast) => (
+          <ToastItem key={toast.id} id={toast.id} message={toast.message} type={toast.type} removeToast={removeToast} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }
@@ -45,8 +49,13 @@ const ToastItem = memo(function ToastItem({ id, message, type, removeToast }: { 
   // Errors get role=alert (assertive) — they interrupt the current announcement.
   // Non-errors use role=status (polite) — they wait until the screen reader is idle.
   return (
-    <div
-      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg animate-in slide-in-from-right-5 ${TOAST_STYLES[type]}`}
+    <motion.div
+      layout
+      variants={toastSlide}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      className={`pointer-events-auto flex items-center gap-3 rounded-xl border px-4 py-3 shadow-lg ${TOAST_STYLES[type]}`}
       role={type === "error" ? "alert" : "status"}
     >
       {TOAST_ICONS[type]}
@@ -58,6 +67,6 @@ const ToastItem = memo(function ToastItem({ id, message, type, removeToast }: { 
       >
         <X className="h-3.5 w-3.5" />
       </button>
-    </div>
+    </motion.div>
   );
 });

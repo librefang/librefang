@@ -56,6 +56,7 @@ import { Modal } from "../components/ui/Modal";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // Single source of truth for the role enum the dashboard speaks to. Mirrors
 // `librefang_kernel::auth::UserRole` and `UserConfig::role` (lower-case).
@@ -234,10 +235,10 @@ export function UsersPage() {
 
       {/* List */}
       {usersQuery.isPending ? (
-        <div className="grid gap-4 md:grid-cols-2 stagger-children">
+        <StaggerList className="grid gap-4 md:grid-cols-2">
           <CardSkeleton />
           <CardSkeleton />
-        </div>
+        </StaggerList>
       ) : users.length === 0 ? (
         <EmptyState
           icon={<Users className="h-8 w-8" />}
@@ -248,7 +249,7 @@ export function UsersPage() {
           )}
         />
       ) : (
-        <div className="grid gap-3 md:grid-cols-2 stagger-children">
+        <StaggerList className="grid gap-3 md:grid-cols-2">
           {users.map(u => (
             <Card key={u.name} hover padding="md">
               <div className="flex items-start justify-between gap-3">
@@ -363,7 +364,7 @@ export function UsersPage() {
               </div>
             </Card>
           ))}
-        </div>
+        </StaggerList>
       )}
 
       {/* Create / edit modal */}

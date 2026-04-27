@@ -2,6 +2,8 @@ import { formatTime } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type AgentDetail,
   type PromptVersion,
@@ -71,6 +73,7 @@ import {
   useStartExperiment,
   useSuspendAgent,
 } from "../lib/mutations/agents";
+import { StaggerList } from "../components/ui/StaggerList";
 
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
@@ -750,9 +753,9 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))] stagger-children">
+        <StaggerList className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
           {coreAgents.map(agent => renderAgentCard(agent))}
-        </div>
+        </StaggerList>
       )}
       {/* Agent Detail Drawer. Right-side inspector pattern (Linear / Figma):
           the agents list stays interactive while the drawer is open, so
@@ -1740,6 +1743,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          <AnimatePresence mode="wait">
+          <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
           {activeTab === "versions" && (
             <div className="space-y-4">
               <div className="flex justify-end">
@@ -1924,6 +1929,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
             </div>
           )}
+          </motion.div>
+          </AnimatePresence>
         </div>
       </div>
     </div>

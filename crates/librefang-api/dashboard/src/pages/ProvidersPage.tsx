@@ -2,6 +2,8 @@ import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import { createRegistryContent } from "../api";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
@@ -308,7 +310,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+      <Card hover padding="sm" onClick={() => onViewDetails(p)} className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
         <div className="flex items-center gap-3 w-full sm:w-auto">
           <button
             onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
@@ -372,19 +374,19 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           {isConfigured ? (
             <>
               {!isDefault && (
-                <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />}>
+                <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onSetDefault(p.id); }} leftIcon={<Star className="w-3 h-3" />}>
                   <span className="hidden sm:inline">{t("providers.set_as_default")}</span>
                 </Button>
               )}
-              <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Pencil className="w-3 h-3" />}>
                 <span className="hidden sm:inline">{t("common.edit")}</span>
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onDelete(p); }} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
                 <span className="hidden sm:inline text-error">{p.is_custom ? t("common.delete") : t("providers.remove_key")}</span>
               </Button>
               <Button
                 variant="secondary" size="sm"
-                onClick={() => onTest(p.id)}
+                onClick={(e) => { e.stopPropagation(); onTest(p.id); }}
                 disabled={pendingId === p.id}
                 leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                 className="whitespace-nowrap"
@@ -393,11 +395,11 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Key className="w-3 h-3" />}>
+            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Key className="w-3 h-3" />}>
               <span className="hidden sm:inline">{t("providers.config")}</span>
             </Button>
           )}
-          <Button variant="ghost" size="sm" onClick={() => onViewDetails(p)}>
+          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onViewDetails(p); }}>
             <ChevronRight className="w-4 h-4" />
           </Button>
         </div>
@@ -407,7 +409,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   // Grid view
   return (
-    <Card hover padding="none" className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+    <Card hover padding="none" onClick={() => onViewDetails(p)} className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
       {isCli && (
         <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
           <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
@@ -533,7 +535,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
             </Badge>
           ) : isConfigured ? (
-            <button onClick={() => onSetDefault(p.id)} className="inline-flex items-center gap-1 text-[10px] font-bold text-brand/70 hover:text-brand cursor-pointer transition-colors">
+            <button onClick={(e) => { e.stopPropagation(); onSetDefault(p.id); }} className="inline-flex items-center gap-1 text-[10px] font-bold text-brand/70 hover:text-brand cursor-pointer transition-colors">
               <Star className="w-3 h-3" />{t("providers.set_as_default")}
             </button>
           ) : null}
@@ -543,15 +545,15 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
         <div className="flex gap-2 mt-auto">
           {isConfigured ? (
             <>
-              <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Pencil className="w-3 h-3" />}>
                 {t("common.edit")}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onDelete(p); }} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
                 {p.is_custom ? t("common.delete") : t("providers.remove_key")}
               </Button>
               <Button
                 variant="secondary" size="sm"
-                onClick={() => onTest(p.id)}
+                onClick={(e) => { e.stopPropagation(); onTest(p.id); }}
                 disabled={pendingId === p.id}
                 leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                 className="flex-1 whitespace-nowrap"
@@ -560,7 +562,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Key className="w-3 h-3" />} className="flex-1 whitespace-nowrap">
+            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Key className="w-3 h-3" />} className="flex-1 whitespace-nowrap">
               {t("providers.config")}
             </Button>
           )}
@@ -1278,6 +1280,8 @@ export function ProvidersPage() {
         )}
       </div>
 
+      <AnimatePresence mode="wait">
+      <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
@@ -1321,6 +1325,8 @@ export function ProvidersPage() {
           </div>
         </>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Details Modal */}
       {detailsProvider && (
