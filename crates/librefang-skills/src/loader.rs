@@ -42,10 +42,6 @@ const KERNEL_RESERVED_ENV: &[&str] = &[
     "TERM",
 ];
 
-fn name_matches(haystack: &str, needle: &str) -> bool {
-    haystack.eq_ignore_ascii_case(needle)
-}
-
 /// Validate that a resolved script path stays within the skill directory.
 /// Prevents path traversal attacks via `../` in entry names.
 fn validate_script_path(skill_dir: &Path, entry: &str) -> Result<std::path::PathBuf, SkillError> {
@@ -102,7 +98,10 @@ pub fn resolve_effective_passthrough(
     manifest_list
         .iter()
         .filter(|name| {
-            if FORBIDDEN_PASSTHROUGH.iter().any(|f| name_matches(f, name)) {
+            if FORBIDDEN_PASSTHROUGH
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(name))
+            {
                 warn!(
                     skill = skill_name,
                     var = %name,
@@ -111,7 +110,10 @@ pub fn resolve_effective_passthrough(
                 );
                 return false;
             }
-            if KERNEL_RESERVED_ENV.iter().any(|r| name_matches(r, name)) {
+            if KERNEL_RESERVED_ENV
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(name))
+            {
                 warn!(
                     skill = skill_name,
                     var = %name,
@@ -134,7 +136,7 @@ pub fn resolve_effective_passthrough(
             });
             if blocked_by_deny {
                 let allowed_by_override = overrides
-                    .map(|v| v.iter().any(|n| name_matches(n, name)))
+                    .map(|v| v.iter().any(|n| n.eq_ignore_ascii_case(name)))
                     .unwrap_or(false);
                 if !allowed_by_override {
                     warn!(
@@ -606,10 +608,10 @@ fn apply_env_passthrough(cmd: &mut tokio::process::Command, allowlist: &[String]
     for var_name in allowlist {
         if FORBIDDEN_PASSTHROUGH
             .iter()
-            .any(|f| name_matches(f, var_name))
+            .any(|f| f.eq_ignore_ascii_case(var_name))
             || KERNEL_RESERVED_ENV
                 .iter()
-                .any(|r| name_matches(r, var_name))
+                .any(|r| r.eq_ignore_ascii_case(var_name))
         {
             warn!(
                 var = %var_name,
@@ -1166,7 +1168,14 @@ echo '{"greeting": "hello from shell"}'
 
     #[tokio::test]
     #[cfg(unix)]
-    #[serial_test::serial(skill_env_passthrough)]
+    // Serialize against any other env-mutating test in the workspace, not
+    // just other env_passthrough tests. `std::env::set_var` is process-wide
+    // and (on Rust 2024 edition) `unsafe` because concurrent readers in
+    // other threads — including the tokio worker pool — can observe torn
+    // state. Using the conventional `env` key is a partial mitigation; the
+    // proper fix is to inject an env-getter into `apply_env_passthrough`
+    // so the test never touches process state. Tracked for the edition bump.
+    #[serial_test::serial(env)]
     async fn test_env_passthrough_allowlist_injects_var() {
         use crate::{
             SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
@@ -1182,8 +1191,9 @@ echo '{"greeting": "hello from shell"}'
         // or the host environment.
         let allowed_var = "LIBREFANG_TEST_PASSTHROUGH_ALLOWED";
         let blocked_var = "LIBREFANG_TEST_PASSTHROUGH_BLOCKED";
-        // SAFETY: tests in this module run serially-enough; the values
-        // are scoped to this test's subprocess.
+        // SAFETY: serialized via `serial_test::serial(env)` against the
+        // workspace-wide `env` key; values are scoped to this test's
+        // subprocess and removed before assertions run.
         std::env::set_var(allowed_var, "hello-from-host");
         std::env::set_var(blocked_var, "should-not-leak");
 
