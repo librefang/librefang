@@ -8,6 +8,7 @@
 - NVIDIA NIM
 - DeepInfra
 - Azure OpenAI
+- GitHub Models(Azure AI Inference)
 - Qwen (DashScope)
 - MiniMax
 - Qianfan(百度)
@@ -106,6 +107,36 @@
    export AZURE_OPENAI_API_KEY="..."
    export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
    ```
+
+---
+
+## GitHub Models(Azure AI Inference)
+
+| | |
+|---|---|
+| **显示名称** | Microsoft |
+| **Provider ID** | `microsoft`(别名 `github-models`) |
+| **驱动** | OpenAI 兼容 |
+| **环境变量** | `GITHUB_MODELS_TOKEN` |
+| **基础 URL** | `https://models.inference.ai.azure.com` |
+| **需要密钥** | 是 |
+| **免费额度** | 是(按 GitHub 套餐限速) |
+| **认证方式** | `Authorization: Bearer` 请求头 |
+
+**设置：**
+1. 登录 [github.com/marketplace/models](https://github.com/marketplace/models)
+2. 生成一个 fine-grained Personal Access Token(Models 端点不需要 repository scope)
+3. `export GITHUB_MODELS_TOKEN="ghp_..."`(同一把 PAT 也是 `github-copilot` 用的 `GITHUB_TOKEN`,但环境变量保持独立,这样配置一个产品不会顺带激活另一个)
+
+**最小 `config.toml`：**
+
+```toml
+[default_model]
+provider = "microsoft"
+model = "phi-4"
+```
+
+**说明:** 虽然 provider id 叫 `microsoft`,但实际是 GitHub Models / Azure AI Inference 端点,与 `azure-openai`(指向你自有 Azure OpenAI 部署,通过 `AZURE_OPENAI_ENDPOINT` 路由)以及 `github-copilot`(IDE 端的 Copilot 订阅)都不同。模型通过 catalog 加载,包含第三方托管模型如 `meta-llama-3-70b-instruct`、`mistral-large`、`phi-4` 等。
 
 ---
 

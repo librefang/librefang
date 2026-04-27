@@ -8,6 +8,7 @@ This page covers providers that route through a platform-specific gateway, enter
 - NVIDIA NIM
 - DeepInfra
 - Azure OpenAI
+- GitHub Models (Azure AI Inference)
 - Qwen (DashScope)
 - MiniMax
 - Qianfan (Baidu)
@@ -106,6 +107,36 @@ This page covers providers that route through a platform-specific gateway, enter
    export AZURE_OPENAI_API_KEY="..."
    export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
    ```
+
+---
+
+## GitHub Models (Azure AI Inference)
+
+| | |
+|---|---|
+| **Display Name** | Microsoft |
+| **Provider ID** | `microsoft` (alias: `github-models`) |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `GITHUB_MODELS_TOKEN` |
+| **Base URL** | `https://models.inference.ai.azure.com` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (rate-limited per GitHub plan) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Setup:**
+1. Sign in to [github.com/marketplace/models](https://github.com/marketplace/models)
+2. Generate a fine-grained Personal Access Token (no repository scopes are required for the Models endpoint)
+3. `export GITHUB_MODELS_TOKEN="ghp_..."` (the same PAT works as `GITHUB_TOKEN` for `github-copilot`, but the env vars are kept separate so configuring one product doesn't auto-activate the other)
+
+**Minimal `config.toml`:**
+
+```toml
+[default_model]
+provider = "microsoft"
+model = "phi-4"
+```
+
+**Notes:** Despite the `microsoft` provider id, this is the GitHub Models / Azure AI Inference endpoint, distinct from `azure-openai` (which addresses your own Azure OpenAI deployments via `AZURE_OPENAI_ENDPOINT`) and from `github-copilot` (which is the IDE-side Copilot subscription). Models are catalog-driven and include third-party hosts like `meta-llama-3-70b-instruct`, `mistral-large`, `phi-4`, etc.
 
 ---
 
