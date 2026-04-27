@@ -1659,6 +1659,7 @@ export function SkillsPage() {
         badge=""
         title={t("skills.title")}
         subtitle={t("skills.subtitle")}
+        helpText={t("skills.help")}
         isFetching={isAnyFetching}
         onRefresh={handleReload}
         actions={
