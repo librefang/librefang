@@ -214,7 +214,11 @@ impl AuxClient {
             skip_permissions: true,
             message_timeout_secs: self.kernel_config.default_model.message_timeout_secs,
             mcp_bridge: None,
-            proxy_url: self.kernel_config.provider_proxy_urls.get(provider).cloned(),
+            proxy_url: self
+                .kernel_config
+                .provider_proxy_urls
+                .get(provider)
+                .cloned(),
             request_timeout_secs: self
                 .kernel_config
                 .provider_request_timeout_secs
@@ -242,7 +246,10 @@ impl AuxClient {
 impl std::fmt::Debug for AuxClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuxClient")
-            .field("configured_tasks", &self.config.tasks.keys().collect::<Vec<_>>())
+            .field(
+                "configured_tasks",
+                &self.config.tasks.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -317,10 +324,7 @@ mod tests {
 
     #[async_trait]
     impl LlmDriverTrait for MarkerDriver {
-        async fn complete(
-            &self,
-            _req: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
             self.1.fetch_add(1, Ordering::SeqCst);
             Ok(CompletionResponse {
                 content: vec![ContentBlock::Text {
@@ -417,10 +421,19 @@ mod tests {
 
     #[test]
     fn alias_resolution_expands_known_aliases() {
-        assert_eq!(resolve_model_alias("anthropic", "sonnet"), "claude-3-5-sonnet-latest");
-        assert_eq!(resolve_model_alias("anthropic", "haiku"), "claude-3-5-haiku-latest");
+        assert_eq!(
+            resolve_model_alias("anthropic", "sonnet"),
+            "claude-3-5-sonnet-latest"
+        );
+        assert_eq!(
+            resolve_model_alias("anthropic", "haiku"),
+            "claude-3-5-haiku-latest"
+        );
         // Unknown aliases pass through unchanged.
-        assert_eq!(resolve_model_alias("anthropic", "claude-9001"), "claude-9001");
+        assert_eq!(
+            resolve_model_alias("anthropic", "claude-9001"),
+            "claude-9001"
+        );
         // Unknown provider passes through unchanged.
         assert_eq!(resolve_model_alias("nvidia", "nemotron"), "nemotron");
     }

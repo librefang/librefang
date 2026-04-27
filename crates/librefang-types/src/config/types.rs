@@ -988,7 +988,17 @@ pub struct FallbackProviderConfig {
 /// agent's provider list. See `librefang_runtime::aux_client` for the
 /// resolution algorithm and the published default chains.
 #[derive(
-    Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize, schemars::JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum AuxTask {
