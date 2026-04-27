@@ -1483,7 +1483,19 @@
     "system_health": "System Health",
     "per_agent": "Per Agent",
     "http_metrics": "HTTP Metrics",
-    "tokens_1h": "1h window"
+    "tokens_1h": "1h window",
+    "section_health": "Health",
+    "section_activity": "Activity",
+    "section_reliability": "Reliability",
+    "error_rate": "Error Rate",
+    "input_short": "in",
+    "output_short": "out",
+    "calls": "calls",
+    "tools": "tools",
+    "last_updated": "Updated",
+    "expand_raw": "Expand raw",
+    "collapse_raw": "Collapse",
+    "no_data_short": "No data"
   },
   "logs": {
     "title": "Logs",

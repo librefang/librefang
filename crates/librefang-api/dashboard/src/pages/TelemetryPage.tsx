@@ -1,6 +1,6 @@
 import { formatCompact } from "../lib/format";
 import { formatUptime } from "../lib/datetime";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useTelemetryMetrics } from "../lib/queries/telemetry";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -10,8 +10,9 @@ import { Badge } from "../components/ui/Badge";
 import { AnimatedNumber } from "../components/ui/AnimatedNumber";
 import { ErrorState } from "../components/ui/ErrorState";
 import {
-  Activity, BarChart3, Clock, Globe, TrendingUp, Zap, CheckCircle2,
-  ExternalLink, Cpu, DollarSign, Bot, Wrench, MessageSquare, AlertTriangle, RotateCcw, Users,
+  Activity, BarChart3, Clock, Globe, Zap, CheckCircle2,
+  ExternalLink, Cpu, DollarSign, Bot, Wrench, MessageSquare, AlertTriangle,
+  RotateCcw, Users, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
@@ -162,29 +163,107 @@ function parseMetrics(text: string): ParsedMetrics {
   };
 }
 
-// ── Component ────────────────────────────────────────────────────────
+// Roll up `(method, path, status)` rows into one row per `(method, path)`,
+// with the status counts collapsed into a per-class summary. Lets the
+// endpoints panel show one line per endpoint instead of one line per
+// (endpoint, status) tuple — much easier to scan when a single endpoint
+// has a mix of 2xx/4xx/5xx hits.
+interface EndpointRollup {
+  method: string;
+  path: string;
+  total: number;
+  ok: number;       // 2xx
+  redirect: number; // 3xx
+  client: number;   // 4xx
+  server: number;   // 5xx
+}
 
-function MetricCard({ label, icon, value, variant }: {
+function rollupEndpoints(rows: HttpMetric[]): EndpointRollup[] {
+  const map = new Map<string, EndpointRollup>();
+  for (const r of rows) {
+    const key = `${r.method} ${r.path}`;
+    let bucket = map.get(key);
+    if (!bucket) {
+      bucket = { method: r.method, path: r.path, total: 0, ok: 0, redirect: 0, client: 0, server: 0 };
+      map.set(key, bucket);
+    }
+    bucket.total += r.count;
+    const c = r.status.charAt(0);
+    if (c === "2") bucket.ok += r.count;
+    else if (c === "3") bucket.redirect += r.count;
+    else if (c === "4") bucket.client += r.count;
+    else if (c === "5") bucket.server += r.count;
+  }
+  return Array.from(map.values()).sort((a, b) => b.total - a.total);
+}
+
+// ── Small atoms ──────────────────────────────────────────────────────
+
+type MetricVariant = "success" | "brand" | "accent" | "warning" | "error";
+
+const VARIANT_BG: Record<MetricVariant, string> = {
+  success: "bg-success/10",
+  brand: "bg-brand/10",
+  accent: "bg-accent/10",
+  warning: "bg-warning/10",
+  error: "bg-error/10",
+};
+
+function MetricCard({ label, icon, value, variant, sub }: {
   label: string;
   icon: ReactNode;
   value: ReactNode;
-  variant: "success" | "brand" | "accent" | "warning" | "error";
+  variant: MetricVariant;
+  sub?: ReactNode;
 }) {
-  const bgClass = { success: "bg-success/10", brand: "bg-brand/10", accent: "bg-accent/10", warning: "bg-warning/10", error: "bg-error/10" }[variant];
   return (
     <Card hover padding="md">
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{label}</span>
-        <div className={`w-7 h-7 rounded-lg ${bgClass} flex items-center justify-center`}>{icon}</div>
+        <div className={`w-7 h-7 rounded-lg ${VARIANT_BG[variant]} flex items-center justify-center`}>{icon}</div>
       </div>
-      <div className="mt-1">{value}</div>
+      <div className="mt-1.5">{value}</div>
+      {sub && <div className="mt-1 text-[10px] font-medium text-text-dim/60">{sub}</div>}
     </Card>
   );
 }
 
+function SectionHeader({ icon, label, badge }: { icon: ReactNode; label: string; badge?: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 mt-2">
+      {icon}
+      <h2 className="text-sm font-black tracking-tight uppercase">{label}</h2>
+      {badge}
+    </div>
+  );
+}
+
+// Inline status distribution bar — width is proportional inside each
+// row so the eye can compare endpoint health without doing arithmetic.
+function StatusBar({ ok, redirect, client, server, total }: {
+  ok: number; redirect: number; client: number; server: number; total: number;
+}) {
+  if (total === 0) return null;
+  const pct = (n: number) => (n / total) * 100;
+  return (
+    <div
+      className="flex h-1.5 w-24 rounded-full overflow-hidden bg-border-subtle/40 shrink-0"
+      title={`${ok} OK · ${redirect} 3xx · ${client} 4xx · ${server} 5xx`}
+    >
+      {ok > 0 && <div style={{ width: `${pct(ok)}%` }} className="bg-success" />}
+      {redirect > 0 && <div style={{ width: `${pct(redirect)}%` }} className="bg-text-dim/40" />}
+      {client > 0 && <div style={{ width: `${pct(client)}%` }} className="bg-warning" />}
+      {server > 0 && <div style={{ width: `${pct(server)}%` }} className="bg-error" />}
+    </div>
+  );
+}
+
+// ── Component ────────────────────────────────────────────────────────
+
 export function TelemetryPage() {
   const { t } = useTranslation();
   const metricsQuery = useTelemetryMetrics();
+  const [rawExpanded, setRawExpanded] = useState(false);
 
   const parsed = useMemo(
     () =>
@@ -194,23 +273,43 @@ export function TelemetryPage() {
     [metricsQuery.data],
   );
 
-  const { totalRequests, totalTokens, totalInput, totalOutput, totalLlmCalls, totalToolCalls } = useMemo(() => ({
-    totalRequests: parsed.requests.reduce((sum, r) => sum + r.count, 0),
-    totalTokens: parsed.agents.reduce((sum, a) => sum + a.tokens, 0),
-    totalInput: parsed.agents.reduce((sum, a) => sum + a.inputTokens, 0),
-    totalOutput: parsed.agents.reduce((sum, a) => sum + a.outputTokens, 0),
-    totalLlmCalls: parsed.agents.reduce((sum, a) => sum + a.llmCalls, 0),
-    totalToolCalls: parsed.agents.reduce((sum, a) => sum + a.toolCalls, 0),
-  }), [parsed]);
+  const {
+    totalRequests, totalTokens, totalInput, totalOutput, totalLlmCalls, totalToolCalls,
+    errorCount,
+  } = useMemo(() => {
+    let totalRequests = 0;
+    let errorCount = 0;
+    for (const r of parsed.requests) {
+      totalRequests += r.count;
+      const c = r.status.charAt(0);
+      if (c === "4" || c === "5") errorCount += r.count;
+    }
+    return {
+      totalRequests,
+      errorCount,
+      totalTokens: parsed.agents.reduce((s, a) => s + a.tokens, 0),
+      totalInput: parsed.agents.reduce((s, a) => s + a.inputTokens, 0),
+      totalOutput: parsed.agents.reduce((s, a) => s + a.outputTokens, 0),
+      totalLlmCalls: parsed.agents.reduce((s, a) => s + a.llmCalls, 0),
+      totalToolCalls: parsed.agents.reduce((s, a) => s + a.toolCalls, 0),
+    };
+  }, [parsed]);
+
+  const errorRate = totalRequests > 0 ? (errorCount / totalRequests) * 100 : 0;
 
   const agentsByTokens = useMemo(
     () => [...parsed.agents].sort((a, b) => b.tokens - a.tokens),
     [parsed.agents],
   );
 
-  const requestsByCount = useMemo(
-    () => [...parsed.requests].sort((a, b) => b.count - a.count).slice(0, 10),
+  const endpointRollups = useMemo(
+    () => rollupEndpoints(parsed.requests).slice(0, 12),
     [parsed.requests],
+  );
+
+  const lastUpdated = useMemo(
+    () => (metricsQuery.dataUpdatedAt ? new Date(metricsQuery.dataUpdatedAt) : null),
+    [metricsQuery.dataUpdatedAt],
   );
 
   return (
@@ -223,6 +322,13 @@ export function TelemetryPage() {
         onRefresh={() => void metricsQuery.refetch()}
         icon={<Activity className="h-4 w-4" />}
         helpText={t("telemetry.help")}
+        actions={
+          lastUpdated ? (
+            <span className="text-[11px] font-medium text-text-dim/70">
+              {t("telemetry.last_updated")} {lastUpdated.toLocaleTimeString()}
+            </span>
+          ) : undefined
+        }
       />
 
       {metricsQuery.isLoading ? (
@@ -233,15 +339,27 @@ export function TelemetryPage() {
         <ErrorState onRetry={() => void metricsQuery.refetch()} />
       ) : (
         <>
-          {/* ── System Health ── */}
-          <div className="flex items-center gap-2 mt-2">
-            <Cpu className="h-4 w-4 text-brand" />
-            <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.system_health")}</h2>
-            {parsed.system.version ? (
-              <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge>
-            ) : null}
-          </div>
-          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 xl:grid-cols-8">
+          {/* ── Health ── */}
+          <SectionHeader
+            icon={<Cpu className="h-4 w-4 text-brand" />}
+            label={t("telemetry.section_health")}
+            badge={parsed.system.version ? <Badge variant="brand" className="ml-2">v{parsed.system.version}</Badge> : undefined}
+          />
+          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
+            <MetricCard
+              label={t("telemetry.status")}
+              icon={<CheckCircle2 className="w-3.5 h-3.5 text-success" />}
+              value={
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
+                  </span>
+                  <span className="text-sm font-bold text-success">{t("telemetry.collecting")}</span>
+                </div>
+              }
+              variant="success"
+            />
             <MetricCard
               label={t("telemetry.uptime")}
               icon={<Clock className="w-3.5 h-3.5 text-success" />}
@@ -260,16 +378,25 @@ export function TelemetryPage() {
               variant="brand"
             />
             <MetricCard
-              label={t("telemetry.active_sessions")}
-              icon={<Users className="w-3.5 h-3.5 text-accent" />}
-              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.activeSessions} /></span>}
-              variant="accent"
-            />
-            <MetricCard
               label={t("telemetry.cost_today")}
               icon={<DollarSign className="w-3.5 h-3.5 text-warning" />}
               value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.costToday} prefix="$" decimals={4} /></span>}
               variant="warning"
+            />
+          </StaggerList>
+
+          {/* ── Activity ── */}
+          <SectionHeader
+            icon={<Zap className="h-4 w-4 text-warning" />}
+            label={t("telemetry.section_activity")}
+            badge={<Badge variant="default" className="ml-2">{t("telemetry.tokens_1h")}</Badge>}
+          />
+          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
+            <MetricCard
+              label={t("telemetry.active_sessions")}
+              icon={<Users className="w-3.5 h-3.5 text-accent" />}
+              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.activeSessions} /></span>}
+              variant="accent"
             />
             <MetricCard
               label={t("telemetry.total_requests")}
@@ -278,141 +405,187 @@ export function TelemetryPage() {
               variant="brand"
             />
             <MetricCard
-              label={t("telemetry.panics")}
-              icon={<AlertTriangle className="w-3.5 h-3.5 text-error" />}
-              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.panics} /></span>}
-              variant="error"
-            />
-            <MetricCard
-              label={t("telemetry.restarts")}
-              icon={<RotateCcw className="w-3.5 h-3.5 text-warning" />}
-              value={<span className="text-xl font-black tracking-tight"><AnimatedNumber value={parsed.system.restarts} /></span>}
-              variant="warning"
-            />
-            <MetricCard
-              label={t("telemetry.status")}
-              icon={<CheckCircle2 className="w-3.5 h-3.5 text-success" />}
-              value={
-                <div className="flex items-center gap-2">
-                  <span className="relative flex h-2 w-2">
-                    <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
-                    <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
-                  </span>
-                  <Badge variant="success">{t("telemetry.collecting")}</Badge>
-                </div>
-              }
-              variant="success"
-            />
-          </StaggerList>
-
-          {/* ── LLM & Token Usage ── */}
-          <div className="flex items-center gap-2 mt-4">
-            <Zap className="h-4 w-4 text-warning" />
-            <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.llm_usage")}</h2>
-            <Badge variant="default" className="ml-2">{t("telemetry.tokens_1h")}</Badge>
-          </div>
-          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 lg:grid-cols-5">
-            <MetricCard
               label={t("telemetry.total_tokens")}
               icon={<BarChart3 className="w-3.5 h-3.5 text-brand" />}
-              value={<p className="text-2xl font-black tracking-tight text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
+              value={<p className="text-xl font-black tracking-tight text-brand" title={totalTokens.toLocaleString()}>{formatCompact(totalTokens)}</p>}
               variant="brand"
-            />
-            <MetricCard
-              label={t("telemetry.input_tokens")}
-              icon={<TrendingUp className="w-3.5 h-3.5 text-success" />}
-              value={<p className="text-2xl font-black tracking-tight text-success" title={totalInput.toLocaleString()}>{formatCompact(totalInput)}</p>}
-              variant="success"
-            />
-            <MetricCard
-              label={t("telemetry.output_tokens")}
-              icon={<TrendingUp className="w-3.5 h-3.5 text-warning" />}
-              value={<p className="text-2xl font-black tracking-tight text-warning" title={totalOutput.toLocaleString()}>{formatCompact(totalOutput)}</p>}
-              variant="warning"
+              sub={
+                <span className="font-mono">
+                  <span className="text-success">{formatCompact(totalInput)}</span>
+                  <span className="text-text-dim/50"> {t("telemetry.input_short")} · </span>
+                  <span className="text-warning">{formatCompact(totalOutput)}</span>
+                  <span className="text-text-dim/50"> {t("telemetry.output_short")}</span>
+                </span>
+              }
             />
             <MetricCard
               label={t("telemetry.llm_calls")}
               icon={<MessageSquare className="w-3.5 h-3.5 text-accent" />}
-              value={<p className="text-2xl font-black tracking-tight" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>}
+              value={<p className="text-xl font-black tracking-tight" title={totalLlmCalls.toLocaleString()}>{formatCompact(totalLlmCalls)}</p>}
               variant="accent"
-            />
-            <MetricCard
-              label={t("telemetry.tool_calls")}
-              icon={<Wrench className="w-3.5 h-3.5 text-brand" />}
-              value={<p className="text-2xl font-black tracking-tight" title={totalToolCalls.toLocaleString()}>{formatCompact(totalToolCalls)}</p>}
-              variant="brand"
+              sub={
+                <span className="font-mono">
+                  <Wrench className="inline w-3 h-3 mr-0.5 text-text-dim/60" />
+                  {formatCompact(totalToolCalls)} {t("telemetry.tools")}
+                </span>
+              }
             />
           </StaggerList>
 
-          {/* ── Per-Agent Table + HTTP Endpoints ── */}
-          <StaggerList className="grid gap-6 md:grid-cols-2">
+          {/* ── Reliability ── */}
+          <SectionHeader
+            icon={<AlertTriangle className="h-4 w-4 text-error" />}
+            label={t("telemetry.section_reliability")}
+          />
+          <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3">
+            <MetricCard
+              label={t("telemetry.panics")}
+              icon={<AlertTriangle className={`w-3.5 h-3.5 ${parsed.system.panics > 0 ? "text-error" : "text-text-dim/40"}`} />}
+              value={
+                <span className={`text-xl font-black tracking-tight ${parsed.system.panics > 0 ? "text-error" : ""}`}>
+                  <AnimatedNumber value={parsed.system.panics} />
+                </span>
+              }
+              variant={parsed.system.panics > 0 ? "error" : "success"}
+            />
+            <MetricCard
+              label={t("telemetry.restarts")}
+              icon={<RotateCcw className={`w-3.5 h-3.5 ${parsed.system.restarts > 0 ? "text-warning" : "text-text-dim/40"}`} />}
+              value={
+                <span className={`text-xl font-black tracking-tight ${parsed.system.restarts > 0 ? "text-warning" : ""}`}>
+                  <AnimatedNumber value={parsed.system.restarts} />
+                </span>
+              }
+              variant={parsed.system.restarts > 0 ? "warning" : "success"}
+            />
+            <MetricCard
+              label={t("telemetry.error_rate")}
+              icon={<AlertTriangle className={`w-3.5 h-3.5 ${errorRate > 1 ? "text-error" : "text-text-dim/40"}`} />}
+              value={
+                <p className={`text-xl font-black tracking-tight ${errorRate > 1 ? "text-error" : errorRate > 0 ? "text-warning" : ""}`}>
+                  {errorRate.toFixed(errorRate > 0 && errorRate < 0.01 ? 3 : 2)}%
+                </p>
+              }
+              variant={errorRate > 1 ? "error" : errorRate > 0 ? "warning" : "success"}
+              sub={totalRequests > 0 ? `${errorCount.toLocaleString()} / ${totalRequests.toLocaleString()}` : undefined}
+            />
+          </StaggerList>
+
+          {/* ── Per-Agent + HTTP Endpoints ── */}
+          <StaggerList className="grid gap-6 lg:grid-cols-2">
             {/* Per-Agent Token Usage */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Bot className="h-4 w-4 text-brand" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.per_agent")}</h2>
+                {agentsByTokens.length > 0 && <Badge variant="default" className="ml-auto">{agentsByTokens.length}</Badge>}
               </div>
-              {parsed.agents.length === 0 ? (
+              {agentsByTokens.length === 0 ? (
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
-                <div className="space-y-3">
-                  {agentsByTokens.map((a) => (
-                      <div key={a.agent} className="flex items-center gap-3">
-                        <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
-                        <Badge variant="default" className="font-mono text-xs">{a.provider}/{a.model}</Badge>
-                        <span className="text-sm font-black text-brand w-20 text-right" title={a.tokens.toLocaleString()}>{formatCompact(a.tokens)}<span className="text-xs font-normal text-text-dim"> tok</span></span>
+                <div className="space-y-4">
+                  {agentsByTokens.map((a) => {
+                    // Fall back to total if input/output histograms are
+                    // empty (older daemon, or pre-instrumentation traffic).
+                    const inOut = a.inputTokens + a.outputTokens;
+                    const inputPct = inOut > 0 ? (a.inputTokens / inOut) * 100 : 0;
+                    return (
+                      <div key={a.agent} className="space-y-1.5">
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm font-semibold flex-1 truncate">{a.agent}</span>
+                          {(a.provider || a.model) && (
+                            <Badge variant="default" className="font-mono text-[10px]">{a.provider}/{a.model}</Badge>
+                          )}
+                          <span className="text-sm font-black text-brand text-right tabular-nums" title={a.tokens.toLocaleString()}>
+                            {formatCompact(a.tokens)}
+                            <span className="text-[10px] font-normal text-text-dim ml-0.5">tok</span>
+                          </span>
+                        </div>
+                        {/* in/out split — green = input, amber = output */}
+                        {inOut > 0 && (
+                          <div
+                            className="flex h-1 w-full rounded-full overflow-hidden bg-border-subtle/30"
+                            title={`${a.inputTokens.toLocaleString()} in · ${a.outputTokens.toLocaleString()} out`}
+                          >
+                            <div style={{ width: `${inputPct}%` }} className="bg-success/60" />
+                            <div style={{ width: `${100 - inputPct}%` }} className="bg-warning/60" />
+                          </div>
+                        )}
+                        <div className="flex items-center gap-3 text-[10px] font-mono text-text-dim/70">
+                          <span><span className="text-success">{formatCompact(a.inputTokens)}</span> {t("telemetry.input_short")}</span>
+                          <span><span className="text-warning">{formatCompact(a.outputTokens)}</span> {t("telemetry.output_short")}</span>
+                          <span className="ml-auto">
+                            {formatCompact(a.llmCalls)} {t("telemetry.calls")} · {formatCompact(a.toolCalls)} {t("telemetry.tools")}
+                          </span>
+                        </div>
                       </div>
-                    ))}
+                    );
+                  })}
                 </div>
               )}
             </Card>
 
-            {/* Top HTTP Endpoints */}
+            {/* HTTP Endpoints — rolled up by (method, path) */}
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Globe className="h-4 w-4 text-brand" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.top_endpoints")}</h2>
+                {endpointRollups.length > 0 && <Badge variant="default" className="ml-auto">{endpointRollups.length}</Badge>}
               </div>
-              {parsed.requests.length === 0 ? (
+              {endpointRollups.length === 0 ? (
                 <p className="text-sm text-text-dim text-center py-8">{t("telemetry.no_data")}</p>
               ) : (
-                <div className="space-y-3">
-                  {requestsByCount.map((r) => (
-                      <div key={r.method + r.path + r.status} className="flex items-center gap-3">
-                        <Badge variant="default" className="font-mono text-xs w-16 justify-center">{r.method}</Badge>
-                        <span className="text-sm font-mono flex-1 truncate">{r.path}</span>
-                        <Badge variant={r.status.startsWith("2") ? "success" : r.status.startsWith("3") ? "default" : r.status.startsWith("4") ? "warning" : "error"} className="w-12 justify-center">
-                          {r.status}
-                        </Badge>
-                        <span className="text-sm font-black text-brand w-16 text-right" title={r.count.toLocaleString()}>{formatCompact(r.count)}</span>
-                      </div>
-                    ))}
+                <div className="space-y-2.5">
+                  {endpointRollups.map((r) => (
+                    <div key={r.method + r.path} className="flex items-center gap-3">
+                      <Badge variant="default" className="font-mono text-[10px] w-14 justify-center shrink-0">{r.method}</Badge>
+                      <span className="text-xs font-mono flex-1 truncate" title={r.path}>{r.path}</span>
+                      <StatusBar ok={r.ok} redirect={r.redirect} client={r.client} server={r.server} total={r.total} />
+                      <span className="text-sm font-black text-brand text-right tabular-nums w-14" title={r.total.toLocaleString()}>{formatCompact(r.total)}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </Card>
           </StaggerList>
 
-          {/* ── Raw Prometheus ── */}
+          {/* ── Raw Prometheus (collapsible) ── */}
           <Card padding="lg">
-            <div className="flex items-center justify-between mb-4">
+            <button
+              onClick={() => setRawExpanded(v => !v)}
+              className="w-full flex items-center justify-between"
+              aria-expanded={rawExpanded}
+            >
               <div className="flex items-center gap-2">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><ExternalLink className="h-4 w-4 text-brand" /></div>
                 <h2 className="text-sm font-black tracking-tight uppercase">{t("telemetry.prometheus_endpoint")}</h2>
               </div>
-              <a
-                href="/api/metrics"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-brand hover:underline"
-              >
-                {t("telemetry.view_raw")}
-              </a>
-            </div>
-            <pre className="text-xs font-mono bg-main rounded-lg p-4 overflow-auto max-h-64 text-text-dim">
-              {metricsQuery.data?.slice(0, 4000) || ""}
-            </pre>
-            {(metricsQuery.data?.length || 0) > 4000 && (
-              <span className="text-xs text-text-dim mt-2 block">...truncated</span>
+              <div className="flex items-center gap-3">
+                <a
+                  href="/api/metrics"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-xs text-brand hover:underline"
+                >
+                  {t("telemetry.view_raw")}
+                </a>
+                {rawExpanded ? (
+                  <ChevronUp className="h-4 w-4 text-text-dim" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-text-dim" />
+                )}
+              </div>
+            </button>
+            {rawExpanded && (
+              <>
+                <pre className="mt-4 text-xs font-mono bg-main rounded-lg p-4 overflow-auto max-h-96 text-text-dim">
+                  {metricsQuery.data?.slice(0, 8000) || ""}
+                </pre>
+                {(metricsQuery.data?.length || 0) > 8000 && (
+                  <span className="text-xs text-text-dim mt-2 block">...truncated</span>
+                )}
+              </>
             )}
           </Card>
         </>

@@ -2391,7 +2391,19 @@
     "system_health": "系统健康",
     "per_agent": "按 Agent",
     "http_metrics": "HTTP 指标",
-    "tokens_1h": "1小时窗口"
+    "tokens_1h": "1小时窗口",
+    "section_health": "健康",
+    "section_activity": "活动",
+    "section_reliability": "稳定性",
+    "error_rate": "错误率",
+    "input_short": "入",
+    "output_short": "出",
+    "calls": "次调用",
+    "tools": "次工具",
+    "last_updated": "更新于",
+    "expand_raw": "展开原始数据",
+    "collapse_raw": "折叠",
+    "no_data_short": "暂无数据"
   },
   "schema_form": {
     "select_option": "请选择...",
