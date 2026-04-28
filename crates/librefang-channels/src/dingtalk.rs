@@ -633,14 +633,17 @@ impl ChannelAdapter for DingTalkAdapter {
                         // Verify signature
                         if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
                             warn!("DingTalk: invalid signature");
-                            return axum::http::StatusCode::FORBIDDEN;
+                            return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
-                        // Check timestamp freshness (1 hour window)
+                        // Check timestamp freshness (1 hour window).
+                        // A stale timestamp is treated as a possible replay,
+                        // so we reject as unauthorized rather than forbidden —
+                        // matching the missing/invalid-signature path.
                         let now = Utc::now().timestamp_millis();
                         if (now - ts).unsigned_abs() > 3_600_000 {
                             warn!("DingTalk: stale timestamp");
-                            return axum::http::StatusCode::FORBIDDEN;
+                            return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
                         if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
@@ -911,7 +914,11 @@ mod tests {
         let ts: i64 = 1700000000000;
         let good_sig = DingTalkAdapter::compute_signature(secret, ts);
         // Different timestamp → signature mismatch
-        assert!(!DingTalkAdapter::verify_signature(secret, ts + 1, &good_sig));
+        assert!(!DingTalkAdapter::verify_signature(
+            secret,
+            ts + 1,
+            &good_sig
+        ));
     }
 
     #[test]

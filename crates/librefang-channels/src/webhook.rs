@@ -82,9 +82,8 @@ impl WebhookAdapter {
         callback_url: Option<String>,
     ) -> Result<Self, String> {
         if let Some(ref url) = callback_url {
-            crate::http_client::validate_url_for_fetch(url).map_err(|e| {
-                format!("WebhookAdapter: callback_url rejected by SSRF guard: {e}")
-            })?;
+            crate::http_client::validate_url_for_fetch(url)
+                .map_err(|e| format!("WebhookAdapter: callback_url rejected by SSRF guard: {e}"))?;
         }
         Ok(Self {
             secret: Zeroizing::new(secret),

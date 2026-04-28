@@ -2629,16 +2629,10 @@ pub async fn start_channel_bridge_with_config(
             let verify_token =
                 read_token(&ms_config.verify_token_env, "Messenger (verify)").unwrap_or_default();
             let app_secret =
-                read_token(&ms_config.app_secret_env, "Messenger (app_secret)")
-                    .unwrap_or_default();
+                read_token(&ms_config.app_secret_env, "Messenger (app_secret)").unwrap_or_default();
             let adapter = Arc::new(
-                MessengerAdapter::new(
-                    page_token,
-                    verify_token,
-                    app_secret,
-                    ms_config.webhook_port,
-                )
-                .with_account_id(ms_config.account_id.clone()),
+                MessengerAdapter::new(page_token, verify_token, app_secret, ms_config.webhook_port)
+                    .with_account_id(ms_config.account_id.clone()),
             );
             adapters.push((
                 adapter,
@@ -3147,7 +3141,11 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-webhook")]
     for wh_config in config.webhook.iter() {
         if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
-            match WebhookAdapter::new(secret, wh_config.listen_port, wh_config.callback_url.clone()) {
+            match WebhookAdapter::new(
+                secret,
+                wh_config.listen_port,
+                wh_config.callback_url.clone(),
+            ) {
                 Ok(wa) => {
                     let adapter = Arc::new(
                         wa.with_account_id(wh_config.account_id.clone())

@@ -22,9 +22,11 @@ use zeroize::Zeroizing;
 ///
 /// The `Authorization` header carries `HMAC <base64-digest>`.
 /// The expected digest is `Base64(HMAC-SHA256(security_token_bytes, raw_body))`.
-/// The security token is provided as a base64-encoded string in the Teams portal;
-/// the raw bytes are the HMAC key.
-fn verify_teams_signature(security_token_b64: &str, body: &[u8], auth_header: &str) -> bool {
+///
+/// `key_bytes` is the *decoded* security-token raw key — Teams provides the
+/// token base64-encoded in the portal, but `TeamsAdapter::new` decodes it
+/// once at construction so verify path stays hot-loop-cheap.
+fn verify_teams_signature(key_bytes: &[u8], body: &[u8], auth_header: &str) -> bool {
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -39,26 +41,14 @@ fn verify_teams_signature(security_token_b64: &str, body: &[u8], auth_header: &s
         return false;
     };
 
-    let Ok(key_bytes) = base64::engine::general_purpose::STANDARD.decode(security_token_b64) else {
-        warn!("Teams: invalid base64 in configured security_token");
-        return false;
-    };
-
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(&key_bytes) else {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(key_bytes) else {
         warn!("Teams: failed to create HMAC-SHA256 instance");
         return false;
     };
     mac.update(body);
     let result = mac.finalize().into_bytes();
 
-    if result.len() != claimed_bytes.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in result.iter().zip(claimed_bytes.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    crate::http_client::ct_eq(&result, &claimed_bytes)
 }
 
 /// OAuth2 token endpoint for Bot Framework.
@@ -81,10 +71,15 @@ pub struct TeamsAdapter {
     app_id: String,
     /// SECURITY: App password is zeroized on drop to prevent memory disclosure.
     app_password: Zeroizing<String>,
-    /// SECURITY: Outgoing webhook security token (base64-encoded bytes from Teams portal).
-    /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// If empty, verification is skipped with a warning (backwards compatibility).
-    security_token: Zeroizing<String>,
+    /// SECURITY: Decoded outgoing-webhook security-token raw bytes used as
+    /// the HMAC-SHA256 key for inbound webhook verification.
+    ///
+    /// `None` means no token configured (verification is skipped, with a
+    /// loud warning logged at construction). The base64 form from the
+    /// Teams portal is decoded once in `new()`; misconfigurations
+    /// (non-base64 input) collapse to `None` so the per-request hot path
+    /// stays branch-free.
+    security_token_key: Option<Zeroizing<Vec<u8>>>,
     /// Restrict inbound activities to specific Azure AD tenant IDs (empty = allow all).
     allowed_tenants: Vec<String>,
     /// HTTP client for outbound API calls.
@@ -111,10 +106,30 @@ impl TeamsAdapter {
         _webhook_port: u16,
         allowed_tenants: Vec<String>,
     ) -> Self {
+        use base64::Engine;
+        let security_token_key = if security_token.is_empty() {
+            warn!(
+                "Teams: no security_token configured — webhook signature \
+                 verification is DISABLED. Set security_token_env to harden \
+                 this endpoint."
+            );
+            None
+        } else {
+            match base64::engine::general_purpose::STANDARD.decode(&security_token) {
+                Ok(bytes) => Some(Zeroizing::new(bytes)),
+                Err(e) => {
+                    warn!(
+                        "Teams: configured security_token is not valid base64 \
+                         ({e}); webhook signature verification is DISABLED."
+                    );
+                    None
+                }
+            }
+        };
         Self {
             app_id,
             app_password: Zeroizing::new(app_password),
-            security_token: Zeroizing::new(security_token),
+            security_token_key,
             allowed_tenants,
             client: crate::http_client::new_client(),
             account_id: None,
@@ -347,7 +362,13 @@ impl ChannelAdapter for TeamsAdapter {
         let app_id = Arc::new(self.app_id.clone());
         let allowed_tenants = Arc::new(self.allowed_tenants.clone());
         let account_id = Arc::new(self.account_id.clone());
-        let security_token = Arc::new(self.security_token.clone());
+        // Clone the decoded HMAC key once for the route closure. `None`
+        // means "no token configured" — verification was already warned
+        // about at construction time, the request path stays silent.
+        let key: Option<Arc<Zeroizing<Vec<u8>>>> = self
+            .security_token_key
+            .as_ref()
+            .map(|k| Arc::new(k.clone()));
 
         let app = axum::Router::new().route(
             "/webhook",
@@ -356,32 +377,23 @@ impl ChannelAdapter for TeamsAdapter {
                 let tenants = Arc::clone(&allowed_tenants);
                 let tx = Arc::clone(&tx);
                 let account_id = Arc::clone(&account_id);
-                let security_token = Arc::clone(&security_token);
+                let key = key.clone();
                 move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let app_id = Arc::clone(&app_id);
                     let tenants = Arc::clone(&tenants);
                     let tx = Arc::clone(&tx);
                     let account_id = Arc::clone(&account_id);
-                    let security_token = Arc::clone(&security_token);
+                    let key = key.clone();
                     async move {
-                        // Verify HMAC-SHA256 signature if a security_token is configured.
-                        if security_token.is_empty() {
-                            warn!(
-                                "Teams: no security_token configured — \
-                                 webhook signature verification is DISABLED. \
-                                 Set security_token to harden this endpoint."
-                            );
-                        } else {
-                            let auth = headers
-                                .get("authorization")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            if auth.is_empty() {
-                                warn!("Teams: missing Authorization header — rejecting request");
-                                return axum::http::StatusCode::UNAUTHORIZED;
-                            }
-                            if !verify_teams_signature(&security_token, &body, auth) {
-                                warn!("Teams: invalid HMAC-SHA256 signature — rejecting request");
+                        if let Some(key) = key.as_ref() {
+                            let Some(auth) =
+                                headers.get("authorization").and_then(|v| v.to_str().ok())
+                            else {
+                                warn!("Teams: missing Authorization header");
+                                return axum::http::StatusCode::BAD_REQUEST;
+                            };
+                            if !verify_teams_signature(key, &body, auth) {
+                                warn!("Teams: invalid HMAC-SHA256 signature");
                                 return axum::http::StatusCode::UNAUTHORIZED;
                             }
                         }
@@ -391,9 +403,7 @@ impl ChannelAdapter for TeamsAdapter {
                             Err(_) => return axum::http::StatusCode::BAD_REQUEST,
                         };
 
-                        if let Some(mut msg) =
-                            parse_teams_activity(&json_body, &app_id, &tenants)
-                        {
+                        if let Some(mut msg) = parse_teams_activity(&json_body, &app_id, &tenants) {
                             // Inject account_id for multi-bot routing
                             if let Some(ref aid) = *account_id {
                                 msg.metadata
@@ -531,10 +541,7 @@ mod tests {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
-        // Build a known HMAC key (raw bytes), base64-encode it as the "security token".
-        let key_bytes = b"test-teams-key-bytes-16bytes!!xx";
-        let security_token_b64 =
-            base64::engine::general_purpose::STANDARD.encode(key_bytes);
+        let key_bytes: &[u8] = b"test-teams-key-bytes-16bytes!!xx";
 
         let body = b"teams webhook body";
 
@@ -544,20 +551,31 @@ mod tests {
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(result);
         let auth_header = format!("HMAC {sig_b64}");
 
-        assert!(verify_teams_signature(&security_token_b64, body, &auth_header));
+        assert!(verify_teams_signature(key_bytes, body, &auth_header));
     }
 
     #[test]
     fn test_verify_teams_signature_invalid() {
-        use base64::Engine;
-        let key_bytes = b"test-teams-key-bytes-16bytes!!xx";
-        let security_token_b64 =
-            base64::engine::general_purpose::STANDARD.encode(key_bytes);
-
+        let key_bytes: &[u8] = b"test-teams-key-bytes-16bytes!!xx";
         let body = b"teams webhook body";
-        assert!(!verify_teams_signature(&security_token_b64, body, "HMAC badsig=="));
-        assert!(!verify_teams_signature(&security_token_b64, body, "Bearer token"));
-        assert!(!verify_teams_signature(&security_token_b64, body, ""));
+        assert!(!verify_teams_signature(key_bytes, body, "HMAC badsig=="));
+        assert!(!verify_teams_signature(key_bytes, body, "Bearer token"));
+        assert!(!verify_teams_signature(key_bytes, body, ""));
+    }
+
+    /// Constructor must record the warning *and* leave verification disabled
+    /// (key set to `None`) when the operator misconfigures the env var with
+    /// non-base64 input. Otherwise the per-request path would silently fail.
+    #[test]
+    fn test_teams_invalid_base64_token_disables_verification() {
+        let adapter = TeamsAdapter::new(
+            "app".into(),
+            "pw".into(),
+            "this is not base64!!!".into(),
+            3978,
+            vec![],
+        );
+        assert!(adapter.security_token_key.is_none());
     }
 
     #[test]

@@ -42,14 +42,7 @@ fn verify_hub_signature(app_secret: &[u8], body: &[u8], signature_header: &str) 
     mac.update(body);
     let result = mac.finalize().into_bytes();
 
-    if result.len() != expected_bytes.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in result.iter().zip(expected_bytes.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    crate::http_client::ct_eq(&result, &expected_bytes)
 }
 
 /// Facebook Graph API base URL for sending messages.
@@ -95,6 +88,13 @@ impl MessengerAdapter {
         app_secret: String,
         _webhook_port: u16,
     ) -> Self {
+        if app_secret.is_empty() {
+            warn!(
+                "Messenger: no app_secret configured — webhook signature \
+                 verification is DISABLED. Set app_secret_env to harden \
+                 this endpoint."
+            );
+        }
         Self {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
@@ -246,24 +246,18 @@ impl MessengerAdapter {
                     let account_id = Arc::clone(&account_id);
                     async move {
                         // Verify X-Hub-Signature (HMAC-SHA1 with app_secret).
-                        if app_secret.is_empty() {
-                            warn!(
-                                "Messenger: no app_secret configured — \
-                                 webhook signature verification is DISABLED. \
-                                 Set app_secret to harden this endpoint."
-                            );
-                        } else {
-                            let sig = headers
-                                .get("x-hub-signature")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            if sig.is_empty() {
-                                warn!("Messenger: missing X-Hub-Signature header — rejecting request");
-                                return axum::http::StatusCode::FORBIDDEN;
-                            }
+                        // The "no app_secret configured" warning was logged
+                        // once at construction time — request path stays quiet.
+                        if !app_secret.is_empty() {
+                            let Some(sig) =
+                                headers.get("x-hub-signature").and_then(|v| v.to_str().ok())
+                            else {
+                                warn!("Messenger: missing X-Hub-Signature header");
+                                return axum::http::StatusCode::BAD_REQUEST;
+                            };
                             if !verify_hub_signature(app_secret.as_bytes(), &body, sig) {
-                                warn!("Messenger: invalid X-Hub-Signature — rejecting request");
-                                return axum::http::StatusCode::FORBIDDEN;
+                                warn!("Messenger: invalid X-Hub-Signature");
+                                return axum::http::StatusCode::UNAUTHORIZED;
                             }
                         }
 

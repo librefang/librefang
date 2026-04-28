@@ -36,14 +36,7 @@ fn verify_viber_signature(auth_token: &[u8], body: &[u8], signature_hex: &str) -
     mac.update(body);
     let result = mac.finalize().into_bytes();
 
-    if result.len() != claimed.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in result.iter().zip(claimed.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    crate::http_client::ct_eq(&result, &claimed)
 }
 
 /// Viber set webhook endpoint.
@@ -373,17 +366,16 @@ impl ChannelAdapter for ViberAdapter {
                     let account_id = Arc::clone(&account_id);
                     async move {
                         // Verify X-Viber-Content-Signature (HMAC-SHA256 with auth_token).
-                        let sig = headers
+                        let Some(sig) = headers
                             .get("x-viber-content-signature")
                             .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
-                        if sig.is_empty() {
-                            warn!("Viber: missing X-Viber-Content-Signature header — rejecting request");
-                            return axum::http::StatusCode::FORBIDDEN;
-                        }
+                        else {
+                            warn!("Viber: missing X-Viber-Content-Signature header");
+                            return axum::http::StatusCode::BAD_REQUEST;
+                        };
                         if !verify_viber_signature(auth_token.as_bytes(), &body, sig) {
-                            warn!("Viber: invalid X-Viber-Content-Signature — rejecting request");
-                            return axum::http::StatusCode::FORBIDDEN;
+                            warn!("Viber: invalid X-Viber-Content-Signature");
+                            return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
                         let json_body: serde_json::Value = match serde_json::from_slice(&body) {
