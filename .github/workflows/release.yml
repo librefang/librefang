@@ -469,7 +469,9 @@ jobs:
         with:
           key: cli-aarch64-linux-android-${{ github.ref_name }}
       - name: Build CLI (Android aarch64)
-        run: cross build --release --target aarch64-linux-android --bin librefang
+        # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
+        # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
+        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
       - name: Package
         run: |
           cd target/aarch64-linux-android/release
