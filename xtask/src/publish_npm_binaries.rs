@@ -122,6 +122,53 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
+/// Download and verify the .sha256 checksum file for an asset.
+///
+/// Downloads `{asset_url}.sha256`, parses the expected hash, then computes
+/// sha256 of the already-downloaded `asset_path` and compares. Returns an
+/// error if the download fails or the hashes do not match.
+///
+/// Note: the `.sha256` sidecar lives in the same GitHub Release as the
+/// binary, so this guards against transport corruption / partial downloads,
+/// not against an attacker who has write access to the release assets.
+fn verify_asset_sha256(
+    repo: &str,
+    tag: &str,
+    asset_name: &str,
+    asset_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sha_url = format!(
+        "https://github.com/{}/releases/download/{}/{}.sha256",
+        repo, tag, asset_name
+    );
+    let tmp_sha = asset_path.with_extension("sha256");
+    download_asset(&sha_url, &tmp_sha)?;
+
+    let sha_content = fs::read_to_string(&tmp_sha)?;
+    let expected = sha_content
+        .split_whitespace()
+        .next()
+        .ok_or("empty .sha256 file")?
+        .to_ascii_lowercase();
+
+    let data = fs::read(asset_path)?;
+    let actual = sha256_hex(&data);
+    fs::remove_file(&tmp_sha).ok();
+
+    if actual != expected {
+        return Err(
+            format!("SHA256 mismatch for {asset_name}: expected {expected}, got {actual}").into(),
+        );
+    }
+    println!("  ✓ SHA256 verified: {expected}");
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
+}
+
 pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let work = std::env::temp_dir().join(format!("xtask-npm-{}", std::process::id()));
@@ -166,6 +213,9 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
 
         if !args.dry_run {
             download_asset(&url, &asset_path)?;
+
+            // Verify SHA256 against the .sha256 file uploaded alongside the release asset
+            verify_asset_sha256(&args.repo, &args.tag, &asset, &asset_path)?;
 
             // Extract
             if target.ext == "tar.gz" {
