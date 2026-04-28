@@ -714,45 +714,15 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let header_auth = api_token.map(&matches_any);
 
-<<<<<<< HEAD
     // SECURITY: ?token= query-string auth is deliberately NOT checked here.
     // Query parameters are written to server access logs, retained in browser
     // history, and forwarded in HTTP Referer headers to third parties. Tokens
     // must only arrive via Authorization: Bearer or X-API-Key headers, or via
     // the session cookie. WebSocket upgrades are the sole exception (browsers
     // cannot set custom headers on WebSocket connections); they authenticate
-    // via crate::ws::ws_auth_token, which never passes through this middleware.
-=======
-    // SECURITY: ?token= query parameter is ONLY accepted for WebSocket upgrade
-    // requests and SSE streaming endpoints where browsers cannot send custom
-    // headers. For all other REST routes the token must come from an
-    // Authorization: Bearer or X-API-Key header — query params appear in
-    // access logs, Referer headers, and browser history, making them easy to
-    // accidentally leak.
-    //
-    // Allowed path prefixes:
-    //   /api/agents/{id}/ws           — WebSocket upgrade (can't set headers)
-    //   /ws/                          — any future top-level WS endpoint
-    //   /api/agents/{id}/sessions/*/stream — SSE session attach
-    //   /api/agents/{id}/message/stream   — SSE message stream
-    //   /api/logs/stream              — SSE log tail
-    //
-    // Percent-decode (but NOT form-urlencoded) so literal `+` characters in
-    // base64-derived tokens are preserved instead of being turned into spaces.
-    // See issue #962 (ported from openfang).
-    let is_ws_or_sse_path =
-        path.ends_with("/ws") || path.starts_with("/ws/") || path.ends_with("/stream");
-
-    let query_token_decoded = if is_ws_or_sse_path {
-        request
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-            .map(crate::percent_decode)
-    } else {
-        None
-    };
->>>>>>> b9c55db9 (fix(api): channel body limit, remove ?token= from non-WS routes, implement PUT agents, deduplicate operationIds)
+    // via crate::ws::ws_auth_token, which uses Authorization: Bearer or the
+    // Sec-WebSocket-Protocol bearer.<token> sub-protocol (#3963), never the
+    // query string — and never passes through this middleware.
 
     // Accept if header auth matches a static API key or legacy token
     if header_auth == Some(true) {

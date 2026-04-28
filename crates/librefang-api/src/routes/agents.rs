@@ -3681,64 +3681,36 @@ pub async fn update_agent(
         }
     };
 
-<<<<<<< HEAD
-    drop(t);
-
-    match state.kernel.update_manifest(agent_id, manifest) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "agent_id": id,
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-=======
-    // Apply the new manifest to the in-memory registry (preserves runtime-only
-    // fields like workspace path and tags).
-    if let Err(e) = state
-        .kernel
-        .agent_registry()
-        .replace_manifest(agent_id, manifest)
-    {
+    // `update_manifest` already runs the same replace_manifest +
+    // memory.save_agent + persist_manifest_to_disk sequence the
+    // earlier draft of this handler did inline (kernel/mod.rs ~9131),
+    // plus capability re-grant, quota update, and prompt-cache flush.
+    // Use the kernel API instead of duplicating the steps here.
+    if let Err(e) = state.kernel.update_manifest(agent_id, manifest) {
+        let msg = e.to_string();
+        drop(t);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(
-                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-            ),
+            Json(serde_json::json!({"error": msg})),
         );
     }
 
-    // Persist updated entry to SQLite so it survives a restart.
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
-            tracing::warn!("Failed to persist agent manifest update: {e}");
-        }
-    }
-
-    // Write updated manifest to agent.toml on disk so the file matches the
-    // in-memory state and doesn't override changes on next boot.
-    state.kernel.persist_manifest_to_disk(agent_id);
-
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "agent_id": entry.id.to_string(),
-                "name": entry.name,
-            })),
-        )
+    // Resolve the post-update entry so the response carries the agent name
+    // alongside the id (the contract documented in PR #3927 / #3824).
+    let response = if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        Json(serde_json::json!({
+            "status": "ok",
+            "agent_id": entry.id.to_string(),
+            "name": entry.name,
+        }))
     } else {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": t.t("api-error-agent-vanished")})),
-        )
->>>>>>> b9c55db9 (fix(api): channel body limit, remove ?token= from non-WS routes, implement PUT agents, deduplicate operationIds)
-    }
+        Json(serde_json::json!({
+            "status": "ok",
+            "agent_id": id,
+        }))
+    };
+    drop(t);
+    (StatusCode::OK, response)
 }
 
 #[utoipa::path(
