@@ -14999,14 +14999,14 @@ async fn cron_script_wake_gate(
             Ok(mut child) => {
                 // Cap stdout at MAX_OUTPUT bytes.
                 let mut stdout_buf = Vec::with_capacity(MAX_OUTPUT.min(4096));
-                if let Some(mut stdout) = child.stdout.take() {
+                if let Some(stdout) = child.stdout.take() {
                     let _ = stdout
                         .take(MAX_OUTPUT as u64)
                         .read_to_end(&mut stdout_buf)
                         .await;
                 }
                 // Drain stderr (up to the same cap) to avoid blocking the child.
-                if let Some(mut stderr) = child.stderr.take() {
+                if let Some(stderr) = child.stderr.take() {
                     let mut _discard = Vec::new();
                     let _ = stderr
                         .take(MAX_OUTPUT as u64)
