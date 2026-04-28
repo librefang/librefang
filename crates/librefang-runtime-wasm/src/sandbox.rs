@@ -505,7 +505,22 @@ impl WasmSandbox {
 
                     match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
                         Ok(bytes) => {
-                            let raw = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            // Use lossy decode rather than `from_utf8 +
+                            // unwrap_or("<invalid utf8>")`: when the
+                            // MAX_LOG_BYTES boundary lands inside a
+                            // multi-byte UTF-8 sequence (likely on any
+                            // 4 KiB cap with non-ASCII text — Chinese,
+                            // Japanese, emoji), strict from_utf8 fails
+                            // and the entire 4 KiB payload is replaced
+                            // by the literal "<invalid utf8>" sentinel,
+                            // discarding all content.  Cow<str> from
+                            // from_utf8_lossy preserves valid prefixes
+                            // and replaces only the broken trailing
+                            // bytes with U+FFFD — what the original
+                            // pre-#3923 implementation did and what
+                            // operators expect from a "log truncated"
+                            // path.
+                            let raw = String::from_utf8_lossy(&bytes);
 
                             // Sanitize newlines to prevent log injection of
                             // fake structured log lines.
