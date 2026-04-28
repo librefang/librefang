@@ -12031,7 +12031,19 @@ system_prompt = "You are a helpful assistant."
                                 // {"wakeAgent": false} in the last non-empty output line.
                                 // Only fires when the script exits successfully.
                                 if let Some(script_path) = pre_check_script {
-                                    if !cron_script_wake_gate(&job_name, script_path).await {
+                                    // Resolve the agent workspace so cron_script_wake_gate
+                                    // can restrict the child's cwd to the agent's own directory.
+                                    let agent_ws = kernel
+                                        .registry
+                                        .get(agent_id)
+                                        .and_then(|e| e.manifest.workspace.clone());
+                                    if !cron_script_wake_gate(
+                                        &job_name,
+                                        script_path,
+                                        agent_ws.as_deref(),
+                                    )
+                                    .await
+                                    {
                                         tracing::info!(
                                             job = %job_name,
                                             "cron: script gate wakeAgent=false, skipping agent"
@@ -14927,45 +14939,119 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
 /// - Find the last non-empty stdout line and try to parse it as JSON.
 /// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
 /// - Everything else (non-JSON, missing key, null, 0, "") → return true.
-async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+///
+/// # Security hardening
+///
+/// `pre_check_script` used to inherit the full daemon environment, allowing
+/// it to read API keys and other secrets from env vars.  It also had no
+/// working-directory restriction and no stdout size limit.
+///
+/// This implementation now:
+/// * Clears the inherited environment with `env_clear()` so daemon secrets
+///   are not leaked to the child process.
+/// * Passes only `PATH` and `HOME` so the script can still locate standard
+///   binaries without receiving application-layer credentials.
+/// * Sets `current_dir` to the agent workspace when one is available,
+///   otherwise falls back to a system temp directory.
+/// * Caps stdout (and stderr) at 64 KiB to prevent a misbehaving script
+///   from filling daemon memory.
+async fn cron_script_wake_gate(
+    job_name: &str,
+    script_path: &str,
+    agent_workspace: Option<&std::path::Path>,
+) -> bool {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
     use tokio::process::Command;
+
+    /// Maximum bytes we read from stdout before truncating.
+    const MAX_OUTPUT: usize = 64 * 1024; // 64 KiB
+
+    // Resolve a safe working directory for the child process.
+    // Preference order: agent workspace → system temp → current dir.
+    let cwd = agent_workspace
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+
+    // Build the command with a stripped-down environment.
+    // `env_clear` prevents all inherited daemon env vars (API keys, secrets,
+    // socket paths, etc.) from reaching the child.  We selectively restore
+    // the two vars that most scripts need to function correctly.
+    let mut cmd = Command::new(script_path);
+    cmd.env_clear();
+    if let Ok(path_val) = std::env::var("PATH") {
+        cmd.env("PATH", path_val);
+    }
+    if let Ok(home_val) = std::env::var("HOME") {
+        cmd.env("HOME", home_val);
+    }
+    cmd.current_dir(&cwd);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
 
     // Hard cap: pre-check scripts must complete within 30 s.
     // A hung script would otherwise block the cron dispatcher indefinitely.
-    let run = async { Command::new(script_path).output().await };
-
-    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
-        Err(_elapsed) => {
-            tracing::warn!(
-                job = %job_name,
-                script = %script_path,
-                "cron: pre-check script timed out after 30s, waking agent"
-            );
-            return true;
+    let run = async {
+        let child = cmd.spawn();
+        match child {
+            Err(e) => Err(e),
+            Ok(mut child) => {
+                // Cap stdout at MAX_OUTPUT bytes.
+                let mut stdout_buf = Vec::with_capacity(MAX_OUTPUT.min(4096));
+                if let Some(mut stdout) = child.stdout.take() {
+                    let _ = stdout
+                        .take(MAX_OUTPUT as u64)
+                        .read_to_end(&mut stdout_buf)
+                        .await;
+                }
+                // Drain stderr (up to the same cap) to avoid blocking the child.
+                if let Some(mut stderr) = child.stderr.take() {
+                    let mut _discard = Vec::new();
+                    let _ = stderr
+                        .take(MAX_OUTPUT as u64)
+                        .read_to_end(&mut _discard)
+                        .await;
+                }
+                let status = child.wait().await?;
+                Ok((status, stdout_buf))
+            }
         }
-        Ok(Err(e)) => {
-            tracing::warn!(
-                job = %job_name,
-                script = %script_path,
-                error = %e,
-                "cron: pre-check script failed to launch, waking agent"
-            );
-            return true;
-        }
-        Ok(Ok(o)) => o,
     };
 
-    if !output.status.success() {
+    let (status, raw_stdout) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    job = %job_name,
+                    script = %script_path,
+                    "cron: pre-check script timed out after 30s, waking agent"
+                );
+                return true;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    job = %job_name,
+                    script = %script_path,
+                    error = %e,
+                    "cron: pre-check script failed to launch, waking agent"
+                );
+                return true;
+            }
+            Ok(Ok(pair)) => pair,
+        };
+
+    if !status.success() {
         tracing::warn!(
             job = %job_name,
             script = %script_path,
-            code = ?output.status.code(),
+            code = ?status.code(),
             "cron: pre-check script exited non-zero, waking agent"
         );
         return true;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&raw_stdout);
     parse_wake_gate(&stdout)
 }
 
