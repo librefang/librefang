@@ -143,9 +143,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     } else if force_local {
         // force_local is only meaningful on desktop — on mobile always use connection screen
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        { StartupMode::Local }
+        {
+            StartupMode::Local
+        }
         #[cfg(any(target_os = "ios", target_os = "android"))]
-        { StartupMode::ConnectionScreen }
+        {
+            StartupMode::ConnectionScreen
+        }
     } else if let Some(url) = std::env::var("LIBREFANG_SERVER_URL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -303,9 +307,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     }
 
     // `generate_handler!` does not support cfg attributes inside the macro, so we
-    // build two separate lists and select the right one at compile time.
+    // build two separate handler closures and attach the correct one at compile
+    // time. The macro produces a closure whose runtime type parameter is inferred
+    // from `builder`, so we call `.invoke_handler(...)` directly inside each cfg
+    // branch — binding the result to a `let` first leaves rustc unable to infer
+    // the runtime type and triggers E0282.
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    let invoke_handler = tauri::generate_handler![
+    let builder = builder.invoke_handler(tauri::generate_handler![
         commands::get_port,
         commands::get_status,
         commands::get_agent_count,
@@ -321,9 +329,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         connection::test_connection,
         connection::connect_remote,
         connection::start_local,
-    ];
+    ]);
     #[cfg(any(target_os = "ios", target_os = "android"))]
-    let invoke_handler = tauri::generate_handler![
+    let builder = builder.invoke_handler(tauri::generate_handler![
         commands::get_port,
         commands::get_status,
         commands::get_agent_count,
@@ -334,10 +342,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         commands::uninstall_app,
         connection::test_connection,
         connection::connect_remote,
-    ];
+    ]);
 
     builder
-        .invoke_handler(invoke_handler)
         .setup(move |app| {
             if show_connection_screen {
                 let _window = WebviewWindowBuilder::new(
