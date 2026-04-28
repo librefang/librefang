@@ -533,11 +533,18 @@ fn is_blocked_env_var(name: &str) -> bool {
         .any(|sub| has_word_boundary_substring(&upper, sub))
 }
 
-/// `true` iff `needle` appears in `haystack` with a non-alphanumeric
-/// boundary on at least one side.  Boundary = string edge or any char
-/// that is not ASCII letter / digit (env-var convention separates words
-/// with `_`, but covering all non-alphanumerics defends against odd
-/// names like `MY-API-KEY` or `KEY.PRIVATE`).
+/// `true` iff `needle` appears in `haystack` as its own word —
+/// i.e. with a non-alphanumeric boundary (string edge or any char that
+/// is not an ASCII letter / digit) on **both** sides.  Env-var
+/// convention separates words with `_`; `-` / `.` are also covered for
+/// odd names like `MY-API-KEY` or `KEY.PRIVATE`.
+///
+/// Both-sides matters: a single-side rule would still flag
+/// `KEYBOARD_LAYOUT` (left edge = start-of-string is a boundary, but
+/// right edge = `'B'` is alphanumeric, so it isn't actually a `KEY`
+/// word).  Real secret names always have a boundary on the side
+/// closest to the credential token: `OPENAI_API_KEY`, `MY_PASSWORD`,
+/// `FOO_TOKEN`, `KEY_FOO` all satisfy both-sides.
 fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
     let bytes = haystack.as_bytes();
     let n = needle.len();
@@ -547,7 +554,7 @@ fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
         let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
         let end = idx + n;
         let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if before_ok || after_ok {
+        if before_ok && after_ok {
             return true;
         }
         // Advance past this occurrence to find any later one with a
