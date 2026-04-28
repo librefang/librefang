@@ -765,9 +765,13 @@ async fn handle_code_exchange(
         if !id_token.is_empty() && !provider.jwks_uri.is_empty() {
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
                 Ok(c) => {
-                    // Verify nonce matches the one from our state token.
-                    if let Some(ref token_nonce) = c.nonce {
-                        if token_nonce != &state_payload.nonce {
+                    // Verify nonce claim against the nonce we sent in the auth request.
+                    // Two failure cases must both be rejected:
+                    //   1. Nonce claim present but doesn't match (replay / token swap).
+                    //   2. Nonce claim absent even though we sent a nonce (provider
+                    //      non-compliance that could be used to bypass nonce binding).
+                    match c.nonce {
+                        Some(ref token_nonce) if token_nonce != &state_payload.nonce => {
                             warn!("Nonce mismatch in ID token");
                             return (
                                 StatusCode::BAD_REQUEST,
@@ -775,6 +779,21 @@ async fn handle_code_exchange(
                             )
                                 .into_response();
                         }
+                        None => {
+                            // We always send a nonce; a well-behaved provider must echo it.
+                            warn!(
+                                "ID token is missing the nonce claim — \
+                                 rejecting to prevent nonce-bypass attack"
+                            );
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": "ID token missing required nonce claim"
+                                })),
+                            )
+                                .into_response();
+                        }
+                        Some(_) => {} // nonce present and matches — OK
                     }
                     Some(c)
                 }

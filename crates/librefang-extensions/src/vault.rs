@@ -698,20 +698,91 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     }
 }
 
-/// Generate a machine-specific fingerprint for keyring key wrapping.
+/// Return a stable, unpredictable 32-byte machine secret used as the input
+/// to the Argon2id wrapping-key derivation for the file-based keyring fallback.
+///
+/// # Security design
+/// The old implementation derived this value from `username + hostname`, which
+/// is predictable to any local user and therefore provided no meaningful
+/// protection against a local attacker reading the `.keyring` file.
+///
+/// This version stores a randomly-generated 32-byte value in a 0600-permissioned
+/// file on first call. Subsequent calls read the same value so the wrapping key
+/// is stable across restarts while still being unguessable.
+///
+/// If the file cannot be created (e.g. a read-only filesystem), we fall back to
+/// the predictable username+hostname derivation and emit a warning — the same
+/// degraded security as before, but only as a last resort.
 #[cfg(not(test))]
 fn machine_fingerprint() -> Vec<u8> {
     use sha2::Digest;
-    let mut hasher = Sha256::new();
-    // Mix in username + hostname for basic machine binding
-    if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
-        hasher.update(user.as_bytes());
+
+    let fingerprint_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("librefang")
+        .join(".machine-id");
+
+    // Try to read an existing random machine-id.
+    if let Ok(bytes) = std::fs::read(&fingerprint_path) {
+        if bytes.len() == 32 {
+            return bytes;
+        }
+        // Length mismatch — stale or corrupt file; regenerate below.
+        warn!(
+            "Unexpected machine-id file length ({} bytes) at {:?} — regenerating",
+            bytes.len(),
+            fingerprint_path
+        );
     }
-    if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
-        hasher.update(host.as_bytes());
+
+    // Generate a fresh random 32-byte value.
+    let mut random_id = [0u8; 32];
+    OsRng.fill_bytes(&mut random_id);
+
+    // Persist with restrictive permissions so other local users cannot read it.
+    if let Some(parent) = fingerprint_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    hasher.update(b"librefang-vault-v1");
-    hasher.finalize().to_vec()
+    match std::fs::write(&fingerprint_path, &random_id) {
+        Ok(()) => {
+            // Restrict to owner-read/write only on Unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &fingerprint_path,
+                    std::fs::Permissions::from_mode(0o600),
+                );
+            }
+            warn!(
+                "OS keyring unavailable — generated random machine-id for keyring fallback at {:?}. \
+                 This file must not be deleted; losing it makes the vault unrecoverable.",
+                fingerprint_path
+            );
+        }
+        Err(e) => {
+            // Cannot persist — fall back to the predictable derivation with a
+            // strong warning. This is the same security level as the old code.
+            warn!(
+                "Could not persist machine-id for keyring fallback ({e}): \
+                 falling back to predictable username+hostname derivation. \
+                 Set LIBREFANG_VAULT_KEY for a secure alternative."
+            );
+            let mut hasher = Sha256::new();
+            if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
+                hasher.update(user.as_bytes());
+            }
+            if let Ok(host) =
+                std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME"))
+            {
+                hasher.update(host.as_bytes());
+            }
+            hasher.update(b"librefang-vault-v1");
+            return hasher.finalize().to_vec();
+        }
+    }
+
+    random_id.to_vec()
 }
 
 /// Derive a 256-bit wrapping key from a machine fingerprint + salt using Argon2id.

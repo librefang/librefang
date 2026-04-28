@@ -612,9 +612,19 @@ pub fn run() -> InitResult {
             .draw(|f| draw(f, f.area(), &mut state))
             .expect("draw failed");
 
-        // Check for background key-test result
+        // Check for background key-test result.
+        // The API key is written to disk HERE — after validation — not on the
+        // initial Enter press (fixes #3629: write-before-validate).
         if state.key_test == KeyTestState::Testing {
             if let Ok(ok) = test_rx.try_recv() {
+                // Persist the key now that we have a test result. We write for
+                // both Ok (verified) and Warn (unverified but user confirmed)
+                // so the daemon can pick it up either way.
+                if let Some(p) = state.provider() {
+                    if !p.env_var.is_empty() {
+                        let _ = dotenv::save_env_key(p.env_var, &state.api_key_input);
+                    }
+                }
                 state.key_test = if ok {
                     KeyTestState::Ok
                 } else {
@@ -802,9 +812,11 @@ pub fn run() -> InitResult {
                                 if !state.api_key_input.is_empty()
                                     && state.key_test == KeyTestState::Idle =>
                             {
-                                if let Some(p) = state.provider() {
-                                    let _ = dotenv::save_env_key(p.env_var, &state.api_key_input);
-                                }
+                                // Validate the API key with the provider BEFORE writing it to
+                                // disk. The dotenv write happens only after the test result
+                                // arrives (see the test_rx polling block above). This prevents
+                                // a partially-written .env file if the wizard is cancelled
+                                // while the test is in flight (fixes #3629).
                                 state.key_test = KeyTestState::Testing;
                                 let provider_name = state
                                     .provider()
