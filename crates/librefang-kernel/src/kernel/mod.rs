@@ -12534,6 +12534,12 @@ system_prompt = "You are a helpful assistant."
                                         Ok(Ok(result)) => {
                                             tracing::info!(job = %job_name, "Cron job completed successfully");
                                             kernel_job.cron_scheduler.record_success(job_id);
+                                            // Persist last_run before delivery
+                                            // so a slow/failed channel push
+                                            // can't strand last_run on disk.
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                             // Deliver response to configured channel (skip NO_REPLY/silent)
                                             if !result.silent {
                                                 cron_deliver_response(
@@ -12561,6 +12567,9 @@ system_prompt = "You are a helpful assistant."
                                             kernel_job
                                                 .cron_scheduler
                                                 .record_failure(job_id, &err_msg);
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                         }
                                         Err(_) => {
                                             tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
@@ -12568,15 +12577,10 @@ system_prompt = "You are a helpful assistant."
                                                 job_id,
                                                 &format!("timed out after {timeout_s}s"),
                                             );
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                         }
-                                    }
-                                    // Persist last_run/next_run set by the
-                                    // record_* call above. The outer for-loop
-                                    // persist only saw the pre-advanced
-                                    // next_run because spawn returned
-                                    // immediately, leaving last_run stale.
-                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
-                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                     }
                                 }); // end tokio::spawn for AgentTurn
                             }
