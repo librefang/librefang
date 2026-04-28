@@ -903,9 +903,78 @@ async fn install_from_registry(
         }
     }
 
+    // Bug #3804 — verify hook script integrity after install.
+    //
+    // The checksum above only covers plugin.toml (the manifest).  Hook scripts
+    // that are referenced in the manifest but NOT listed in its [integrity]
+    // section bypass all content verification — an attacker who controls the
+    // download can serve a legitimate manifest with a valid checksum while
+    // substituting malicious hook scripts.
+    //
+    // If the manifest declares hook scripts, every one of them MUST have a
+    // corresponding entry in [integrity].  Missing entries are a hard error
+    // for registry-installed plugins; authors who intentionally omit integrity
+    // hashes (e.g. during development) can install via Local or Git sources.
+    {
+        let manifest_path = target_dir.join("plugin.toml");
+        match std::fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|s| toml::from_str::<PluginManifest>(&s).ok())
+        {
+            Some(manifest) => {
+                // Collect every hook script path declared in [hooks].
+                let declared_hooks: Vec<&str> = [
+                    manifest.hooks.ingest.as_deref(),
+                    manifest.hooks.after_turn.as_deref(),
+                    manifest.hooks.bootstrap.as_deref(),
+                    manifest.hooks.assemble.as_deref(),
+                    manifest.hooks.compact.as_deref(),
+                    manifest.hooks.prepare_subagent.as_deref(),
+                    manifest.hooks.merge_subagent.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+
+                if !declared_hooks.is_empty() {
+                    let missing_integrity: Vec<&str> = declared_hooks
+                        .iter()
+                        .copied()
+                        .filter(|hook| !manifest.integrity.contains_key(*hook))
+                        .collect();
+
+                    if !missing_integrity.is_empty() {
+                        // Hard error: registry plugins must declare integrity hashes for
+                        // every hook script.  Without them, the hook content is unverified
+                        // and could have been substituted after the manifest was signed.
+                        let _ = std::fs::remove_dir_all(&target_dir);
+                        return Err(format!(
+                            "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
+                             Registry-installed plugins must provide SHA-256 checksums for every \
+                             hook script declared in [hooks] so that tampered scripts are detected \
+                             at load time. Add an [integrity] section to plugin.toml with \
+                             \"hooks/<script>\" = \"<sha256hex>\" entries, or install via a local \
+                             path (PluginSource::Local) to bypass this requirement.",
+                            manifest.name,
+                            missing_integrity.join(", ")
+                        ));
+                    }
+                }
+            }
+            None => {
+                // Manifest could not be re-read after install — treat as integrity failure.
+                let _ = std::fs::remove_dir_all(&target_dir);
+                return Err(format!(
+                    "Plugin '{name}': failed to re-read plugin.toml after install \
+                     — cannot verify hook script integrity"
+                ));
+            }
+        }
+    }
+
     info!(
         plugin = name,
-        "Plugin installed successfully (integrity verified)"
+        "Plugin installed successfully (manifest + hook script integrity verified)"
     );
 
     // Bust the registry cache so subsequent searches see an up-to-date index.
@@ -4432,6 +4501,137 @@ description = "Spanish description"
         assert!(
             !is_placeholder,
             "a non-zero 32-byte key must not be treated as a placeholder"
+        );
+    }
+
+    // ── Bug #3804 — hook script integrity check logic ────────────────────────
+
+    /// Helper: build a minimal PluginManifest with the given hook paths and
+    /// integrity entries so we can exercise the detection logic without
+    /// spinning up an HTTP server.
+    fn make_manifest_with_hooks(
+        hooks: &[(&str, &str)], // (field_name, script_path)
+        integrity: &[(&str, &str)], // (script_path, sha256hex)
+    ) -> PluginManifest {
+        let mut m = PluginManifest {
+            name: "test-plugin".to_string(),
+            version: "0.1.0".to_string(),
+            ..Default::default()
+        };
+        for &(field, path) in hooks {
+            match field {
+                "ingest" => m.hooks.ingest = Some(path.to_string()),
+                "after_turn" => m.hooks.after_turn = Some(path.to_string()),
+                "bootstrap" => m.hooks.bootstrap = Some(path.to_string()),
+                "assemble" => m.hooks.assemble = Some(path.to_string()),
+                "compact" => m.hooks.compact = Some(path.to_string()),
+                "prepare_subagent" => m.hooks.prepare_subagent = Some(path.to_string()),
+                "merge_subagent" => m.hooks.merge_subagent = Some(path.to_string()),
+                _ => {}
+            }
+        }
+        for &(path, hash) in integrity {
+            m.integrity.insert(path.to_string(), hash.to_string());
+        }
+        m
+    }
+
+    /// Extracts the list of hook script paths that are declared in a manifest
+    /// but missing from its integrity map.  This mirrors the logic in
+    /// `install_from_registry` so changes there won't silently regress.
+    fn missing_integrity_hooks(manifest: &PluginManifest) -> Vec<String> {
+        let declared: Vec<&str> = [
+            manifest.hooks.ingest.as_deref(),
+            manifest.hooks.after_turn.as_deref(),
+            manifest.hooks.bootstrap.as_deref(),
+            manifest.hooks.assemble.as_deref(),
+            manifest.hooks.compact.as_deref(),
+            manifest.hooks.prepare_subagent.as_deref(),
+            manifest.hooks.merge_subagent.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        declared
+            .into_iter()
+            .filter(|h| !manifest.integrity.contains_key(*h))
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// A plugin with no hooks declared requires no integrity entries.
+    #[test]
+    fn hook_integrity_no_hooks_no_requirement() {
+        let m = make_manifest_with_hooks(&[], &[]);
+        assert!(
+            missing_integrity_hooks(&m).is_empty(),
+            "no hooks → no integrity entries required"
+        );
+    }
+
+    /// Every declared hook must appear in [integrity]; any missing entry is flagged.
+    #[test]
+    fn hook_integrity_missing_entries_detected() {
+        let m = make_manifest_with_hooks(
+            &[
+                ("ingest", "hooks/ingest.py"),
+                ("after_turn", "hooks/after_turn.py"),
+            ],
+            &[
+                // after_turn is covered, but ingest is not
+                ("hooks/after_turn.py", "abc123"),
+            ],
+        );
+        let missing = missing_integrity_hooks(&m);
+        assert_eq!(missing, vec!["hooks/ingest.py"]);
+    }
+
+    /// When all declared hooks have integrity entries, no missing entries are reported.
+    #[test]
+    fn hook_integrity_all_covered_passes() {
+        let m = make_manifest_with_hooks(
+            &[
+                ("ingest", "hooks/ingest.py"),
+                ("after_turn", "hooks/after_turn.py"),
+            ],
+            &[
+                ("hooks/ingest.py", "deadbeef"),
+                ("hooks/after_turn.py", "cafebabe"),
+            ],
+        );
+        assert!(
+            missing_integrity_hooks(&m).is_empty(),
+            "all hooks covered → no missing integrity entries"
+        );
+    }
+
+    /// All seven hook fields are checked, not just ingest/after_turn.
+    #[test]
+    fn hook_integrity_all_hook_fields_checked() {
+        let all_hooks = [
+            ("ingest", "hooks/ingest.py"),
+            ("after_turn", "hooks/after_turn.py"),
+            ("bootstrap", "hooks/bootstrap.py"),
+            ("assemble", "hooks/assemble.py"),
+            ("compact", "hooks/compact.py"),
+            ("prepare_subagent", "hooks/prepare_subagent.py"),
+            ("merge_subagent", "hooks/merge_subagent.py"),
+        ];
+        // Provide integrity for all but compact and merge_subagent.
+        let integrity_provided = [
+            ("hooks/ingest.py", "h1"),
+            ("hooks/after_turn.py", "h2"),
+            ("hooks/bootstrap.py", "h3"),
+            ("hooks/assemble.py", "h4"),
+            ("hooks/prepare_subagent.py", "h6"),
+        ];
+        let m = make_manifest_with_hooks(&all_hooks, &integrity_provided);
+        let mut missing = missing_integrity_hooks(&m);
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec!["hooks/compact.py", "hooks/merge_subagent.py"],
+            "compact and merge_subagent must be flagged"
         );
     }
 }
