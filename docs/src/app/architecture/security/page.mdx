@@ -832,6 +832,16 @@ timing side-channel attacks.
 | **Message size limit** | `MAX_MESSAGE_SIZE = 16 MB` prevents memory DoS |
 | **Protocol version check** | `PROTOCOL_VERSION` mismatch returns `WireError::VersionMismatch` |
 
+### 9.5 Wire Confidentiality
+
+OFP frames are **plaintext** on the wire. The HMAC framing above proves
+*who* the peer is and detects tampering or replay, but does **not** encrypt
+the payload. Confidentiality is delegated to the deployment layer rather
+than re-implemented inside `librefang-wire`. See
+[OFP Wire Encryption](/architecture/ofp-wire) for the deployment recipe
+(WireGuard / Tailscale / SSH tunnel / service-mesh mTLS), the threat model
+that HMAC already covers, and the conditions under which we'd revisit.
+
 ---
 
 ## 10. Security Headers

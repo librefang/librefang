@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-utils/schema.json",
+  "identifier": "mobile",
+  "description": "Mobile (iOS / Android) permissions for the LibreFang app — desktop-only plugins (shell, global-shortcut, autostart, updater) are not bundled on mobile.",
+  "windows": ["main"],
+  "platforms": ["iOS", "android"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "dialog:default"
+  ]
+}

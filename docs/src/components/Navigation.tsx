@@ -353,6 +353,7 @@ const zhNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "系统架构", href: withPrefix("/zh/architecture") },
 			{ title: "安全", href: withPrefix("/zh/architecture/security") },
+			{ title: "OFP 链路加密", href: withPrefix("/zh/architecture/ofp-wire") },
 		],
 	},
 	{
@@ -451,6 +452,7 @@ export const enNavigation: Array<NavGroup> = [
 		links: [
 			{ title: "Architecture", href: withPrefix("/architecture") },
 			{ title: "Security", href: withPrefix("/architecture/security") },
+			{ title: "OFP Wire Encryption", href: withPrefix("/architecture/ofp-wire") },
 		],
 	},
 	{
