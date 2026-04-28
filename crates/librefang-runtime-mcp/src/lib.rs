@@ -983,9 +983,9 @@ impl McpConnection {
         extra_env: &[String],
         roots: Vec<String>,
     ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
-        use std::process::Stdio;
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use rmcp::ServiceExt;
+        use std::process::Stdio;
         use tokio::io::AsyncBufReadExt;
 
         // Validate command path (no path traversal)
@@ -1048,10 +1048,8 @@ impl McpConnection {
         // prevents templates from silently reading arbitrary daemon secrets
         // like ANTHROPIC_API_KEY that happen to be set in the environment
         // but were never declared in the MCP server config. (#3823)
-        let mut expand_allowlist: std::collections::HashSet<String> = SAFE_ENV_VARS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut expand_allowlist: std::collections::HashSet<String> =
+            SAFE_ENV_VARS.iter().map(|s| s.to_string()).collect();
         for entry in extra_env {
             // Extract just the variable name (before '=' for KEY=VALUE, or the
             // whole entry for legacy plain-name format).
@@ -1512,7 +1510,8 @@ impl McpConnection {
 
         // Guard against malicious MCP servers returning unbounded response bodies
         // (e.g. gigabytes of garbage) that would OOM the daemon. (#3801)
-        let body = read_response_bytes_capped(response).await
+        let body = read_response_bytes_capped(response)
+            .await
             .map_err(|e| format!("Failed to read SSE response: {e}"))?;
 
         let rpc_response: JsonRpcResponse = serde_json::from_slice(&body)
@@ -3852,17 +3851,18 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            // Drain the HTTP request before writing the response; on Windows
+            // tearing the socket down before reading aborts the connection
+            // (WSAECONNABORTED) and reqwest sees an Io error.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
                 .await
                 .unwrap();
         });
         let client = reqwest::Client::new();
-        let resp = client
-            .get(format!("http://{addr}"))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(format!("http://{addr}")).send().await.unwrap();
         let body = read_response_bytes_capped(resp).await.unwrap();
         assert_eq!(body.as_slice(), b"hello");
         server.await.unwrap();
@@ -3876,17 +3876,13 @@ mod tests {
         let cap = MAX_RESPONSE_BYTES + 1;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {cap}\r\n\r\n"
-            );
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {cap}\r\n\r\n");
             stream.write_all(header.as_bytes()).await.unwrap();
         });
         let client = reqwest::Client::new();
-        let resp = client
-            .get(format!("http://{addr}"))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(format!("http://{addr}")).send().await.unwrap();
         let err = read_response_bytes_capped(resp).await.unwrap_err();
         assert!(
             err.contains("cap") || err.contains("Content-Length"),
