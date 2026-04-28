@@ -767,6 +767,9 @@ fn load_sessions(
 }
 
 /// Persist active sessions to disk so they survive daemon restarts.
+///
+/// SECURITY: The file is written with owner-only permissions (0600) so that
+/// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
@@ -776,6 +779,10 @@ fn save_sessions(
         Ok(content) => {
             if let Err(e) = std::fs::write(&path, content) {
                 tracing::warn!("Failed to persist sessions: {e}");
+            } else {
+                // Restrict to owner-read/write only so bearer tokens are not
+                // world-readable on multi-user systems.
+                restrict_permissions(&path);
             }
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),

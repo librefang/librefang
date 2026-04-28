@@ -371,6 +371,26 @@ pub async fn agent_ws(
         }
     }
 
+    // SECURITY: Validate the Origin header to prevent cross-site WebSocket
+    // hijacking (#3731). validate_ws_origin is defined in this module but was
+    // previously never called from the upgrade handler. Non-browser clients
+    // (curl, native apps) omit Origin and are allowed through unconditionally.
+    {
+        let cfg = state.kernel.config_ref();
+        let listen_port = cfg
+            .api_listen
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|a| a.port());
+        let allow_remote = std::env::var("LIBREFANG_ALLOW_NO_AUTH")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false);
+        if let Err(reason) = validate_ws_origin(&headers, listen_port, &cfg.cors_origin, allow_remote) {
+            warn!(reason = %reason, "WebSocket upgrade rejected: Origin validation failed");
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
     // SECURITY: Enforce per-IP WebSocket connection limit
     let ip = addr.ip();
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
