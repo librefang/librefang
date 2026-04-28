@@ -606,11 +606,7 @@ impl ClawHubClient {
                 info!(slug, "SHA256 checksum verified OK");
             }
             None => {
-                warn!(
-                    slug,
-                    "ClawHub did not provide expected_sha256 for skill {} — install unverified",
-                    slug
-                );
+                warn!(slug, "ClawHub did not provide expected_sha256 — install unverified");
             }
         }
 
