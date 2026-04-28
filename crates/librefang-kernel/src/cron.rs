@@ -79,6 +79,10 @@ pub struct CronScheduler {
     home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
+    /// Serializes `persist()` writes so concurrent callers (cron loop, API
+    /// routes, spawned cron tasks) don't corrupt the tmp file by interleaving
+    /// `O_TRUNC`/write/rename on the same path.
+    persist_lock: std::sync::Mutex<()>,
 }
 
 impl CronScheduler {
@@ -93,6 +97,7 @@ impl CronScheduler {
             persist_path: home_dir.join("data").join("cron_jobs.json"),
             home_dir: home_dir.to_path_buf(),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -124,7 +129,11 @@ impl CronScheduler {
     }
 
     /// Persist all jobs to disk via atomic write (write to `.tmp`, then rename).
+    ///
+    /// Serialized through `persist_lock` so concurrent callers can't both
+    /// `O_TRUNC` the same `.tmp` path and produce a torn file before rename.
     pub fn persist(&self) -> LibreFangResult<()> {
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let metas: Vec<JobMeta> = self.jobs.iter().map(|r| r.value().clone()).collect();
         let data = serde_json::to_string_pretty(&metas)
             .map_err(|e| LibreFangError::Internal(format!("Failed to serialize cron jobs: {e}")))?;

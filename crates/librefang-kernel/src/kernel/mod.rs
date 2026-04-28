@@ -12570,6 +12570,14 @@ system_prompt = "You are a helpful assistant."
                                             );
                                         }
                                     }
+                                    // Persist last_run/next_run set by the
+                                    // record_* call above. The outer for-loop
+                                    // persist only saw the pre-advanced
+                                    // next_run because spawn returned
+                                    // immediately, leaving last_run stale.
+                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                    }
                                 }); // end tokio::spawn for AgentTurn
                             }
                             librefang_types::scheduler::CronAction::Workflow {
