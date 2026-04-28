@@ -5,6 +5,7 @@ use librefang_runtime::agent_loop::AgentLoopResult;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use ratatui::crossterm::event::{self, Event as CtEvent, KeyEvent, KeyEventKind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -49,6 +50,10 @@ pub enum AppEvent {
     Key(KeyEvent),
     /// Periodic tick for animations (spinners, etc.).
     Tick,
+    /// Terminal was resized to the given (width, height).
+    Resize(u16, u16),
+    /// Bracketed-paste text received from the terminal.
+    Paste(String),
     /// A streaming event from the LLM (daemon SSE or kernel mpsc).
     Stream(StreamEvent),
     /// The streaming agent loop finished.
@@ -237,6 +242,8 @@ pub fn spawn_event_thread(
                         CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                             poll_tx.send(AppEvent::Key(key))
                         }
+                        CtEvent::Resize(w, h) => poll_tx.send(AppEvent::Resize(w, h)),
+                        CtEvent::Paste(text) => poll_tx.send(AppEvent::Paste(text)),
                         _ => Ok(()),
                     };
                     if sent.is_err() {
@@ -253,6 +260,30 @@ pub fn spawn_event_thread(
     });
 
     (tx, rx)
+}
+
+// ── Stream cancellation ─────────────────────────────────────────────────────
+
+/// A cancellation token for a background SSE/in-process stream thread.
+///
+/// Setting the flag to `true` causes the thread to stop reading and exit on
+/// its next iteration. Dropping the token without cancelling is a no-op.
+#[derive(Clone)]
+pub struct StreamCancelToken(Arc<AtomicBool>);
+
+impl StreamCancelToken {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Signal the stream thread to stop.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 // ── Original spawn functions ────────────────────────────────────────────────
@@ -302,12 +333,17 @@ pub fn spawn_kernel_boot(config: Option<std::path::PathBuf>, tx: mpsc::Sender<Ap
 }
 
 /// Spawn a background thread for in-process streaming.
+///
+/// Returns a [`StreamCancelToken`] that the caller can use to abort the stream
+/// when the user navigates away or starts a new chat session.
 pub fn spawn_inprocess_stream(
     kernel: Arc<LibreFangKernel>,
     agent_id: AgentId,
     message: String,
     tx: mpsc::Sender<AppEvent>,
-) {
+) -> StreamCancelToken {
+    let token = StreamCancelToken::new();
+    let cancel = token.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -325,9 +361,15 @@ pub fn spawn_inprocess_stream(
             Ok((mut rx, handle)) => {
                 rt.block_on(async {
                     while let Some(ev) = rx.recv().await {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
                         if tx.send(AppEvent::Stream(ev)).is_err() {
                             return;
                         }
+                    }
+                    if cancel.is_cancelled() {
+                        return;
                     }
                     let result = handle
                         .await
@@ -341,16 +383,22 @@ pub fn spawn_inprocess_stream(
             }
         }
     });
+    token
 }
 
 /// Spawn a background thread for daemon SSE streaming.
+///
+/// Returns a [`StreamCancelToken`] that the caller can use to abort the stream
+/// when the user navigates away or starts a new chat session.
 pub fn spawn_daemon_stream(
     base_url: String,
     agent_id: String,
     message: String,
     api_key: Option<String>,
     tx: mpsc::Sender<AppEvent>,
-) {
+) -> StreamCancelToken {
+    let token = StreamCancelToken::new();
+    let cancel = token.clone();
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Read};
 
@@ -392,6 +440,9 @@ pub fn spawn_daemon_stream(
 
         let reader = BufReader::new(RespReader(resp));
         for line in reader.lines() {
+            if cancel.is_cancelled() {
+                return;
+            }
             let line = match line {
                 Ok(l) => l,
                 Err(_) => break,
@@ -471,6 +522,7 @@ pub fn spawn_daemon_stream(
             owner_notice: None,
         })));
     });
+    token
 }
 
 /// Blocking fallback for daemon chat (non-streaming).
