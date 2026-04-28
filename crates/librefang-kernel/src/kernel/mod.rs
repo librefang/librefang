@@ -4541,8 +4541,13 @@ system_prompt = "You are a helpful assistant."
                 tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
+                    // Date only — omitting the clock time keeps the system prompt
+                    // stable across the ~1 440 turns in a day so LLM providers
+                    // (Anthropic, OpenAI) can cache it.  A per-minute timestamp
+                    // invalidates the prompt cache every 60 s, doubling effective
+                    // token cost (issue #3700).
                     chrono::Local::now()
-                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
@@ -4776,6 +4781,18 @@ system_prompt = "You are a helpful assistant."
                 .clone()
         };
         let _guard = lock.lock().await;
+
+        // Pre-call global budget gate (issue #3616): best-effort check before
+        // dispatching to the LLM so parallel triggers cannot all slip past the
+        // post-call check simultaneously.  Not perfectly atomic — a concurrent
+        // call may have consumed the remaining budget between this read and the
+        // actual LLM round-trip — but it eliminates the common over-spend case
+        // where many triggers fire at the same instant.
+        // (The per-agent quota check is covered by `check_quota_and_reserve`
+        // below — no need to duplicate `check_quota` here.)
+        if let Err(e) = self.metering.check_global_budget(&self.budget_config()) {
+            return Err(KernelError::LibreFang(e));
+        }
 
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
@@ -5883,8 +5900,13 @@ system_prompt = "You are a helpful assistant."
                 tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
+                    // Date only — omitting the clock time keeps the system prompt
+                    // stable across the ~1 440 turns in a day so LLM providers
+                    // (Anthropic, OpenAI) can cache it.  A per-minute timestamp
+                    // invalidates the prompt cache every 60 s, doubling effective
+                    // token cost (issue #3700).
                     chrono::Local::now()
-                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
@@ -7423,8 +7445,13 @@ system_prompt = "You are a helpful assistant."
                 tools_md: ws_meta.as_ref().and_then(|m| m.tools_md.clone()),
                 peer_agents,
                 current_date: Some(
+                    // Date only — omitting the clock time keeps the system prompt
+                    // stable across the ~1 440 turns in a day so LLM providers
+                    // (Anthropic, OpenAI) can cache it.  A per-minute timestamp
+                    // invalidates the prompt cache every 60 s, doubling effective
+                    // token cost (issue #3700).
                     chrono::Local::now()
-                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .format("%A, %B %d, %Y (%Y-%m-%d %Z)")
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),

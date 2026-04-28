@@ -2236,13 +2236,25 @@ impl ChannelAdapter for TelegramAdapter {
             let chunks = split_to_utf16_chunks(&formatted, TELEGRAM_MESSAGE_LIMIT);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
-                let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;
+                if let Err(e) = self.api_edit_message(chat_id, msg_id, &formatted).await {
+                    warn!("Telegram: failed to edit streamed message (msg_id={msg_id}): {e}");
+                }
             } else {
                 // Response exceeds limit — edit the first chunk in place,
                 // then send remaining chunks as new messages.
-                let _ = self.api_edit_message(chat_id, msg_id, chunks[0]).await;
+                // Errors are logged (not silently dropped) so operators know
+                // when partial delivery occurs (issue #3664).
+                if let Err(e) = self.api_edit_message(chat_id, msg_id, chunks[0]).await {
+                    warn!("Telegram: failed to edit first chunk (msg_id={msg_id}): {e}");
+                }
                 for chunk in &chunks[1..] {
-                    let _ = self.api_send_message(chat_id, chunk, tid).await;
+                    if let Err(e) = self.api_send_message(chat_id, chunk, tid).await {
+                        warn!("Telegram: failed to send continuation chunk: {e}");
+                        // Stop sending further chunks — partial delivery is
+                        // preferable to sending out-of-order fragments after
+                        // a gap caused by a rate-limit or API error.
+                        break;
+                    }
                 }
             }
         } else if !full_text.is_empty() {

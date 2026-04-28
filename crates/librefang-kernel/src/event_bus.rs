@@ -29,7 +29,11 @@ pub struct EventBus {
 impl EventBus {
     /// Create a new event bus.
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(1024);
+        // 4 096-event capacity for the global broadcast channel (up from 1 024).
+        // Burst-publishing scenarios (e.g. mass trigger evaluation) can spike far
+        // above 1 024 events between scheduler ticks, causing RecvError::Lagged
+        // and silently dropping trigger-driving events (issue #3630).
+        let (sender, _) = broadcast::channel(4096);
         Self {
             sender,
             agent_channels: DashMap::new(),
@@ -106,9 +110,17 @@ impl EventBus {
     }
 
     /// Subscribe to events for a specific agent.
+    ///
+    /// **Lagged handling**: callers must match `RecvError::Lagged(n)` and log a
+    /// warning, then `continue` — the skipped events are already lost but future
+    /// events can still be received.  Exiting on `Lagged` turns a transient
+    /// slow-consumer condition into a permanent trigger miss (issue #3630).
     pub fn subscribe_agent(&self, agent_id: AgentId) -> broadcast::Receiver<Event> {
         let entry = self.agent_channels.entry(agent_id).or_insert_with(|| {
-            let (tx, _) = broadcast::channel(256);
+            // 2 048-event buffer per agent (up from 256).  Trigger-driving events
+            // are published in bursts; a deeper queue keeps slow consumers from
+            // lagging and silently missing events (issue #3630).
+            let (tx, _) = broadcast::channel(2048);
             tx
         });
         entry.subscribe()

@@ -2768,6 +2768,17 @@ async fn tool_agent_send(
         .as_str()
         .ok_or("Missing 'message' parameter")?;
 
+    // Self-send guard: sending a message to oneself would attempt to acquire
+    // `agent_msg_locks[id]` while that lock is already held by the current
+    // turn, causing an unrecoverable deadlock (issue #3613).
+    if let Some(caller) = caller_agent_id {
+        if caller == agent_id {
+            return Err(
+                "agent_send: an agent cannot send a message to itself".to_string(),
+            );
+        }
+    }
+
     // Taint check: refuse to pass obvious credential payloads across
     // the agent boundary. `tool_agent_send` is the entry point for
     // both in-process delegation *and* external A2A peers, so an LLM
