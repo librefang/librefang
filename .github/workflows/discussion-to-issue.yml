@@ -36,7 +36,7 @@ jobs:
         github.event.discussion.category.name == 'Q&A'
       )
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Create issue from discussion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,7 +61,7 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'
       )
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Create issue from discussion
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Backfill existing discussions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

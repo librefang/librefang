@@ -22,7 +22,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Corepack must be enabled BEFORE setup-node: setup-node's
       # `cache: pnpm` feature runs `pnpm --version` to compute the cache
@@ -33,7 +33,7 @@ jobs:
       - name: Enable corepack
         run: corepack enable
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@1d0ff469b4a3d2c20e03e3b6cb4b1f99be72946e # v4.2.0
         with:
           node-version-file: "web/.nvmrc"
           cache: "pnpm"

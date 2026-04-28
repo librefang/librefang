@@ -15,13 +15,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Well-known public key for the official LibreFang plugin registry.
+/// Env var: set to a base64-encoded Ed25519 public key (32 bytes) to enable
+/// Ed25519 signature verification for the plugin registry index and archives.
 ///
-/// This is an Ed25519 public key (32 bytes, base64url-encoded).
-/// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
-/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely.
-const OFFICIAL_REGISTRY_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-// ^ placeholder — real key would be the registry operator's public key
+/// Configure via:
+///   - `LIBREFANG_REGISTRY_PUBKEY=<base64-ed25519-pubkey>` env var, OR
+///   - `plugin_registry_public_key` field in config.toml (agent layer reads it
+///     and injects it into the env before calling plugin manager functions).
+///
+/// When not configured: plugins are installed without Ed25519 verification
+/// (a `warn!` is emitted). When configured and invalid: installation is aborted.
+///
+/// To generate a key pair:
+///   openssl genpkey -algorithm ed25519 -out signing.key
+///   openssl pkey -in signing.key -pubout -outform DER | tail -c 32 | base64
 
 /// Verify an Ed25519 signature over registry index JSON bytes.
 ///
@@ -244,31 +251,40 @@ pub async fn fetch_verified_index(
         warn!("Registry signature verification disabled via LIBREFANG_REGISTRY_VERIFY=0");
     } else {
         // Resolve which public key to use.
-        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
-            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
-
-        // Only verify if the key is not the all-zero placeholder.
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(pubkey.trim())
-            .unwrap_or_default();
-        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
-
-        if !is_placeholder {
-            // Try to fetch the signature file.
-            match client.get(&sig_url).send().await {
-                Ok(sig_resp) if sig_resp.status().is_success() => {
-                    let sig_text = sig_resp
-                        .text()
-                        .await
-                        .map_err(|e| format!("Failed to read signature: {e}"))?;
-                    verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
-                    info!(registry, "Registry index signature verified OK");
-                }
-                _ => {
-                    warn!(
-                        registry,
-                        "No index.json.sig found — registry index not signature-verified"
-                    );
+        // If not configured, warn and skip — never silently accept with an all-zero key.
+        match std::env::var("LIBREFANG_REGISTRY_PUBKEY") {
+            Err(_) => {
+                warn!(
+                    registry,
+                    "No LIBREFANG_REGISTRY_PUBKEY configured — \
+                    plugin registry index is installed without Ed25519 signature verification. \
+                    Set LIBREFANG_REGISTRY_PUBKEY to a base64-encoded Ed25519 public key to enable verification."
+                );
+            }
+            Ok(pubkey) if pubkey.trim().is_empty() => {
+                warn!(
+                    registry,
+                    "LIBREFANG_REGISTRY_PUBKEY is set but empty — \
+                    plugin registry index is installed without Ed25519 signature verification."
+                );
+            }
+            Ok(pubkey) => {
+                // Try to fetch the signature file.
+                match client.get(&sig_url).send().await {
+                    Ok(sig_resp) if sig_resp.status().is_success() => {
+                        let sig_text = sig_resp
+                            .text()
+                            .await
+                            .map_err(|e| format!("Failed to read signature: {e}"))?;
+                        verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
+                        info!(registry, "Registry index signature verified OK");
+                    }
+                    _ => {
+                        warn!(
+                            registry,
+                            "No index.json.sig found — registry index not signature-verified"
+                        );
+                    }
                 }
             }
         }
@@ -849,18 +865,70 @@ async fn install_from_registry(
         }
     }
 
+    // --- Bug #3804: Verify hook script checksums from manifest [integrity] table ---
+    // Load the manifest from disk (it was written during the archive extraction above).
+    // If the [integrity] table is populated, every declared hook script is verified
+    // against its SHA-256; a mismatch is fatal.  An absent [integrity] table emits a
+    // warning so operators know the publisher did not sign hook scripts.
+    match load_plugin_manifest_raw(&target_dir) {
+        Ok(manifest) => {
+            if manifest.integrity.is_empty() {
+                warn!(
+                    plugin = name,
+                    "plugin.toml has no [integrity] table — hook script checksums not verified"
+                );
+            } else {
+                for (rel_path, expected_hex) in &manifest.integrity {
+                    let hook_path = target_dir.join(rel_path);
+                    match std::fs::read(&hook_path) {
+                        Ok(hook_bytes) => {
+                            let actual_hex = sha256_hex(&hook_bytes);
+                            if actual_hex != *expected_hex {
+                                let _ = std::fs::remove_dir_all(&target_dir);
+                                return Err(format!(
+                                    "Hook script integrity check failed for '{rel_path}': \
+                                     expected {expected_hex}, got {actual_hex}"
+                                ));
+                            }
+                            debug!(plugin = name, path = %rel_path, "Hook script checksum OK");
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&target_dir);
+                            return Err(format!(
+                                "Cannot read hook script '{rel_path}' for integrity check: {e}"
+                            ));
+                        }
+                    }
+                }
+                info!(plugin = name, "All hook script checksums verified OK");
+            }
+        }
+        Err(e) => {
+            warn!(plugin = name, "Could not load manifest for hook checksum verification: {e}");
+        }
+    }
+
     // Verify Ed25519 archive signature (optional — absent sig is OK, wrong sig is fatal).
+    // Only attempt verification when a real public key is configured.
     let archive_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
     } else {
-        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
-            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
-        if let Err(e) =
-            verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
-        {
-            let _ = std::fs::remove_dir_all(&target_dir);
-            return Err(e);
+        match std::env::var("LIBREFANG_REGISTRY_PUBKEY") {
+            Ok(pubkey) if !pubkey.trim().is_empty() => {
+                if let Err(e) =
+                    verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
+                {
+                    let _ = std::fs::remove_dir_all(&target_dir);
+                    return Err(e);
+                }
+            }
+            _ => {
+                debug!(
+                    plugin = name,
+                    "No LIBREFANG_REGISTRY_PUBKEY configured — skipping Ed25519 archive signature check"
+                );
+            }
         }
     }
 
