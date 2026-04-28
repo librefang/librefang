@@ -1501,6 +1501,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
         });
         (state, tmp)
     }

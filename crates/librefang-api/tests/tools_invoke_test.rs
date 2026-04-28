@@ -77,6 +77,7 @@ async fn build_harness(tool_invoke: ToolInvokeConfig) -> Harness {
         user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
