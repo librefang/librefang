@@ -12888,6 +12888,8 @@ system_prompt = "You are a helpful assistant."
             node_id: node_id.clone(),
             node_name: node_name.clone(),
             shared_secret: cfg.network.shared_secret.clone(),
+            max_messages_per_peer_per_minute: cfg.network.max_messages_per_peer_per_minute,
+            max_llm_tokens_per_peer_per_hour: cfg.network.max_llm_tokens_per_peer_per_hour,
         };
 
         let registry = PeerRegistry::new();

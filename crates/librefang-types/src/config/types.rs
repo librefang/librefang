@@ -2956,22 +2956,27 @@ pub struct KernelConfig {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
-    /// No checking — all messages pass through (default).
-    #[default]
+    /// No checking — all messages pass through. Set `mode = "off"` in
+    /// `[sanitize]` to opt out of prompt-injection detection.
     Off,
     /// Log a warning but allow the message through.
     Warn,
-    /// Reject the message and send an error to the user.
+    /// Reject the message and send an error to the user (default).
+    #[default]
     Block,
 }
 
 /// Configuration for channel input sanitization / prompt-injection detection.
 ///
+/// The sanitizer is **enabled by default** (mode = "block"). To opt out set
+/// `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:
+///
 /// ```toml
 /// [sanitize]
-/// mode = "warn"           # off | warn | block
+/// mode = "block"          # off | warn | block  (default: block)
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
+/// # disable_input_sanitizer = true  # emergency opt-out
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -2982,14 +2987,20 @@ pub struct SanitizeConfig {
     pub max_message_length: usize,
     /// Additional regex patterns that should trigger a block/warn.
     pub custom_block_patterns: Vec<String>,
+    /// Emergency opt-out: set to `true` to disable all input sanitization.
+    /// Not recommended for production — prefer `mode = "warn"` for monitoring
+    /// without blocking, or `mode = "off"` for a softer disable.
+    #[serde(default)]
+    pub disable_input_sanitizer: bool,
 }
 
 impl Default for SanitizeConfig {
     fn default() -> Self {
         Self {
-            mode: SanitizeMode::Off,
+            mode: SanitizeMode::Block,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 }
@@ -3899,6 +3910,11 @@ impl Default for BudgetConfig {
 
 fn default_max_cron_jobs() -> usize {
     500
+}
+
+/// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
+fn default_workflow_stale_timeout_minutes() -> u64 {
+    60
 }
 
 /// Default tool execution timeout in seconds (120s).
@@ -5133,6 +5149,26 @@ pub struct NetworkConfig {
     pub max_peers: u32,
     /// Pre-shared secret for OFP HMAC authentication (required when network is enabled).
     pub shared_secret: String,
+    /// SECURITY (#3876): Maximum number of  requests a single OFP
+    /// peer may send per minute before being rate-limited.
+    ///
+    /// Each peer connection is tracked independently. Excess messages are
+    /// rejected with a 429 error response; a  is emitted with the
+    /// peer ID and current rate so operators can investigate abuse.
+    ///
+    /// Set to  to disable per-peer message rate limiting (not recommended
+    /// for production federations). Default: 60.
+    pub max_messages_per_peer_per_minute: u32,
+    /// SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.
+    ///
+    /// When set, the node tracks how many tokens each peer's 
+    /// requests have consumed in the current hour window. If a peer exceeds
+    /// this budget the request is rejected with a 429 error.
+    ///
+    ///  means no per-peer token cap (default). Set to a value like
+    ///  to bound the LLM spend a single federated peer can force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_llm_tokens_per_peer_per_hour: Option<u64>,
 }
 
 impl Default for NetworkConfig {
@@ -5143,6 +5179,8 @@ impl Default for NetworkConfig {
             mdns_enabled: true,
             max_peers: 50,
             shared_secret: String::new(),
+            max_messages_per_peer_per_minute: 60,
+            max_llm_tokens_per_peer_per_hour: None,
         }
     }
 }
@@ -5163,6 +5201,8 @@ impl std::fmt::Debug for NetworkConfig {
                     "<redacted>"
                 },
             )
+            .field("max_messages_per_peer_per_minute", &self.max_messages_per_peer_per_minute)
+            .field("max_llm_tokens_per_peer_per_hour", &self.max_llm_tokens_per_peer_per_hour)
             .finish()
     }
 }

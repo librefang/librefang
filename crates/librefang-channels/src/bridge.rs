@@ -816,20 +816,34 @@ fn flush_debounced(
 
             // --- Input sanitization (prompt injection detection) ---
             if !sanitizer.is_off() {
-                let text_to_check: Option<&str> = match &merged_msg.content {
-                    ChannelContent::Text(t) => Some(t.as_str()),
-                    ChannelContent::Image { caption, .. } => caption.as_deref(),
-                    ChannelContent::Voice { caption, .. } => caption.as_deref(),
-                    ChannelContent::Video { caption, .. } => caption.as_deref(),
+                // Command-type messages are checked by reconstructing their text
+                // so that slash-command args cannot carry prompt-injection payloads.
+                let text_to_check: Option<String> = match &merged_msg.content {
+                    ChannelContent::Text(t) => Some(t.clone()),
+                    ChannelContent::Command { name, args } => {
+                        if args.is_empty() {
+                            Some(format!("/{name}"))
+                        } else {
+                            Some(format!("/{name} {}", args.join(" ")))
+                        }
+                    }
+                    ChannelContent::Image { caption, .. } => caption.clone(),
+                    ChannelContent::Voice { caption, .. } => caption.clone(),
+                    ChannelContent::Video { caption, .. } => caption.clone(),
                     _ => None,
                 };
-                if let Some(text) = text_to_check {
+                let message_type = match &merged_msg.content {
+                    ChannelContent::Command { .. } => "Command",
+                    _ => "User",
+                };
+                if let Some(ref text) = text_to_check {
                     match sanitizer.check(text) {
                         SanitizeResult::Clean => {}
                         SanitizeResult::Warned(reason) => {
                             warn!(
                                 channel = ct_str,
                                 user = %merged_msg.sender.display_name,
+                                message_type = message_type,
                                 reason = reason.as_str(),
                                 "Suspicious channel input (warn mode, allowing through)"
                             );
@@ -837,9 +851,11 @@ fn flush_debounced(
                         SanitizeResult::Blocked(reason) => {
                             warn!(
                                 channel = ct_str,
-                                user = %merged_msg.sender.display_name,
+                                source = %merged_msg.sender.display_name,
+                                message_type = message_type,
                                 reason = reason.as_str(),
-                                "Blocked channel input (prompt injection detected)"
+                                "Input sanitizer blocked potential prompt injection in {message_type} message from {}"
+                                , merged_msg.sender.display_name,
                             );
                             let _ = adapter
                                 .send(
@@ -2252,20 +2268,34 @@ async fn dispatch_message(
 
     // --- Input sanitization (prompt injection detection) ---
     if !sanitizer.is_off() {
-        let text_to_check: Option<&str> = match &message.content {
-            ChannelContent::Text(t) => Some(t.as_str()),
-            ChannelContent::Image { caption, .. } => caption.as_deref(),
-            ChannelContent::Voice { caption, .. } => caption.as_deref(),
-            ChannelContent::Video { caption, .. } => caption.as_deref(),
+        // Command-type messages are checked by reconstructing their text
+        // so that slash-command args cannot carry prompt-injection payloads.
+        let text_to_check: Option<String> = match &message.content {
+            ChannelContent::Text(t) => Some(t.clone()),
+            ChannelContent::Command { name, args } => {
+                if args.is_empty() {
+                    Some(format!("/{name}"))
+                } else {
+                    Some(format!("/{name} {}", args.join(" ")))
+                }
+            }
+            ChannelContent::Image { caption, .. } => caption.clone(),
+            ChannelContent::Voice { caption, .. } => caption.clone(),
+            ChannelContent::Video { caption, .. } => caption.clone(),
             _ => None,
         };
-        if let Some(text) = text_to_check {
+        let message_type = match &message.content {
+            ChannelContent::Command { .. } => "Command",
+            _ => "User",
+        };
+        if let Some(ref text) = text_to_check {
             match sanitizer.check(text) {
                 SanitizeResult::Clean => {}
                 SanitizeResult::Warned(reason) => {
                     warn!(
                         channel = ct_str,
                         user = %message.sender.display_name,
+                        message_type = message_type,
                         reason = reason.as_str(),
                         "Suspicious channel input (warn mode, allowing through)"
                     );
@@ -2273,9 +2303,11 @@ async fn dispatch_message(
                 SanitizeResult::Blocked(reason) => {
                     warn!(
                         channel = ct_str,
-                        user = %message.sender.display_name,
+                        source = %message.sender.display_name,
+                        message_type = message_type,
                         reason = reason.as_str(),
-                        "Blocked channel input (prompt injection detected)"
+                        "Input sanitizer blocked potential prompt injection in {message_type} message from {}"
+                        , message.sender.display_name,
                     );
                     let _ = adapter
                         .send(
