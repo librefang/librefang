@@ -680,7 +680,10 @@ mod tests {
         let value = "sk-should-not-reach-child";
         std::env::set_var(&key, value);
 
-        let state = test_state(vec![Capability::ShellExec("*".to_string())]);
+        // Use the explicit absolute path so the capability check passes even
+        // with the new separator-aware glob — `*` does not cross `/` so we
+        // grant the exact command we are about to run.
+        let state = test_state(vec![Capability::ShellExec("/usr/bin/env".to_string())]);
         let result = host_shell_exec(
             &state,
             &json!({
@@ -694,7 +697,7 @@ mod tests {
 
         let ok = result
             .get("ok")
-            .expect("shell_exec should succeed with ShellExec(*) capability");
+            .expect("shell_exec should succeed with matching ShellExec capability");
         let stdout = ok
             .get("stdout")
             .and_then(|s| s.as_str())
