@@ -44,7 +44,7 @@ fn sanitize_channel_error(err: &str) -> String {
 /// tool-call JSON that leaked through the bridge.  Only start-of-text
 /// patterns are reliable at arbitrary lengths; substring checks produce
 /// false positives on long explanatory text that *mentions* tool calls.
-const MAX_HEURISTIC_LEN: usize = 2000;
+pub(crate) const MAX_HEURISTIC_LEN: usize = 2000;
 
 /// Some providers emit tool calls as plain text (recovered by
 /// `agent_loop::recover_text_tool_calls`). These should not be
