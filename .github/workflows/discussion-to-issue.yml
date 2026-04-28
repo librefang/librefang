@@ -41,13 +41,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-        run: |
-          bash .github/scripts/discussion-to-issue.sh \
-            "${{ github.event.discussion.number }}" \
-            "${{ github.event.discussion.title }}" \
-            "${{ github.event.discussion.html_url }}" \
-            "${{ github.event.discussion.user.login }}" \
-            "${{ github.event.discussion.category.name }}"
+          DISC_NUMBER: ${{ github.event.discussion.number }}
+          DISC_TITLE: ${{ github.event.discussion.title }}
+          DISC_URL: ${{ github.event.discussion.html_url }}
+          DISC_AUTHOR: ${{ github.event.discussion.user.login }}
+          DISC_CATEGORY: ${{ github.event.discussion.category.name }}
+        run: bash .github/scripts/discussion-to-issue.sh
 
   # ── Manual /to-issue command from maintainers ────────────────────
   manual-promote:
@@ -67,13 +66,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           MANUAL: 'true'
-        run: |
-          bash .github/scripts/discussion-to-issue.sh \
-            "${{ github.event.discussion.number }}" \
-            "${{ github.event.discussion.title }}" \
-            "${{ github.event.discussion.html_url }}" \
-            "${{ github.event.discussion.user.login }}" \
-            "${{ github.event.discussion.category.name }}"
+          DISC_NUMBER: ${{ github.event.discussion.number }}
+          DISC_TITLE: ${{ github.event.discussion.title }}
+          DISC_URL: ${{ github.event.discussion.html_url }}
+          DISC_AUTHOR: ${{ github.event.discussion.user.login }}
+          DISC_CATEGORY: ${{ github.event.discussion.category.name }}
+        run: bash .github/scripts/discussion-to-issue.sh
 
   # ── Backfill: scheduled + manual ─────────────────────────────────
   backfill:
@@ -100,7 +98,7 @@ jobs:
             echo "=== Scanning category: ${CAT} ==="
 
             gh api "repos/${REPO}/discussions" --paginate --jq \
-              ".[] | select(.category.name == \"${CAT}\") | @base64" \
+              --arg cat "$CAT" '.[] | select(.category.name == $cat) | @base64' \
             | while IFS= read -r row; do
                 decoded=$(printf '%s' "$row" | base64 -d)
                 num=$(printf '%s' "$decoded" | jq -r '.number')
@@ -108,8 +106,9 @@ jobs:
                 url=$(printf '%s' "$decoded" | jq -r '.html_url')
                 author=$(printf '%s' "$decoded" | jq -r '.user.login')
 
-                bash .github/scripts/discussion-to-issue.sh \
-                  "$num" "$title" "$url" "$author" "$CAT" \
+                DISC_NUMBER="$num" DISC_TITLE="$title" DISC_URL="$url" \
+                  DISC_AUTHOR="$author" DISC_CATEGORY="$CAT" \
+                  bash .github/scripts/discussion-to-issue.sh \
                   || echo "  (skipped or failed)"
 
                 sleep 2
