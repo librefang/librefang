@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
@@ -20,6 +21,7 @@ function QRCanvas({ uri }: { uri: string }) {
 }
 
 function CountdownBadge({ expiresAt }: { expiresAt: string }) {
+  const { t } = useTranslation();
   const [secs, setSecs] = useState(() =>
     Math.max(0, Math.round((new Date(expiresAt).getTime() - Date.now()) / 1000)),
   );
@@ -35,18 +37,28 @@ function CountdownBadge({ expiresAt }: { expiresAt: string }) {
       className={`flex items-center gap-1.5 text-sm font-mono ${expired ? "text-error" : "text-text-dim"}`}
     >
       <Clock className="w-4 h-4" />
-      {expired ? "Expired" : `${mins}:${String(s).padStart(2, "0")}`}
+      {expired ? t("mobile_pairing.expired_label") : `${mins}:${String(s).padStart(2, "0")}`}
     </span>
   );
 }
 
 export function MobilePairingPage() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const { data: req, error, isLoading, refetch } = usePairingRequest(true);
   const { data: devices = [] } = usePairedDevices();
   const removeDevice = useRemovePairedDevice();
 
   const expired = req ? new Date(req.expires_at).getTime() < Date.now() : false;
+  // Translator-supplied markup only (`<strong>`); no user input is interpolated
+  // into these strings, so dangerouslySetInnerHTML is safe here.
+  const subtitleHtml = { __html: t("mobile_pairing.subtitle") };
+  const disabledBodyHtml = {
+    __html: t("mobile_pairing.error_disabled_body").replace(
+      "<link>",
+      '<a href="/dashboard/config/security" class="text-brand underline">',
+    ).replace("</link>", "</a>"),
+  };
 
   const refresh = () => {
     qc.removeQueries({ queryKey: pairingKeys.request() });
@@ -59,22 +71,18 @@ export function MobilePairingPage() {
       <div className="max-w-xl mx-auto px-4 py-12 text-center space-y-3">
         <Smartphone className="w-10 h-10 mx-auto text-text-dim" />
         <p className="font-semibold">
-          {isDisabled ? "Device pairing is disabled" : "Failed to generate pairing code"}
+          {isDisabled
+            ? t("mobile_pairing.error_disabled_title")
+            : t("mobile_pairing.error_generic_title")}
         </p>
         {isDisabled ? (
-          <p className="text-sm text-text-dim">
-            Enable pairing in{" "}
-            <a href="/dashboard/config/security" className="text-brand underline">
-              Config → Security
-            </a>{" "}
-            (<code className="text-xs">pairing.enabled = true</code>).
-          </p>
+          <p className="text-sm text-text-dim" dangerouslySetInnerHTML={disabledBodyHtml} />
         ) : (
           <button
             onClick={refresh}
             className="rounded-xl bg-brand px-4 py-2 text-sm text-white font-medium"
           >
-            Try again
+            {t("mobile_pairing.btn_try_again")}
           </button>
         )}
       </div>
@@ -87,12 +95,9 @@ export function MobilePairingPage() {
       <div className="space-y-1">
         <h1 className="text-xl font-bold flex items-center gap-2">
           <Smartphone className="w-6 h-6 text-brand" />
-          Mobile Pairing
+          {t("mobile_pairing.title")}
         </h1>
-        <p className="text-sm text-text-dim">
-          Open the LibreFang mobile app and tap <strong>Scan QR</strong> to connect to this
-          daemon.
-        </p>
+        <p className="text-sm text-text-dim" dangerouslySetInnerHTML={subtitleHtml} />
       </div>
 
       {/* QR Card */}
@@ -113,11 +118,11 @@ export function MobilePairingPage() {
                 className="flex items-center gap-1.5 text-sm text-brand hover:underline"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
-                Refresh
+                {t("mobile_pairing.refresh")}
               </button>
             </div>
             {expired && (
-              <p className="text-sm text-error">QR code expired — refresh to get a new one.</p>
+              <p className="text-sm text-error">{t("mobile_pairing.expired_message")}</p>
             )}
           </>
         ) : null}
@@ -127,16 +132,18 @@ export function MobilePairingPage() {
       {devices.length > 0 && (
         <div className="space-y-3">
           <h2 className="text-sm font-bold uppercase tracking-wider text-text-dim">
-            Paired Devices
+            {t("mobile_pairing.paired_devices_heading")}
           </h2>
           {removeDevice.isError && (
             <div className="flex items-center gap-2 rounded-lg border border-error/20 bg-error/5 p-2.5 text-sm text-error">
               <AlertCircle className="w-4 h-4 shrink-0" />
               <span>
-                Failed to remove device:{" "}
-                {removeDevice.error instanceof Error
-                  ? removeDevice.error.message
-                  : "unknown error"}
+                {t("mobile_pairing.remove_failed", {
+                  reason:
+                    removeDevice.error instanceof Error
+                      ? removeDevice.error.message
+                      : t("mobile_pairing.remove_unknown_error"),
+                })}
               </span>
             </div>
           )}
@@ -151,7 +158,10 @@ export function MobilePairingPage() {
                   <div>
                     <p className="text-sm font-medium">{d.display_name}</p>
                     <p className="text-xs text-text-dim">
-                      {d.platform} · paired {new Date(d.paired_at).toLocaleDateString()}
+                      {t("mobile_pairing.paired_at", {
+                        platform: d.platform,
+                        date: new Date(d.paired_at).toLocaleDateString(),
+                      })}
                     </p>
                   </div>
                 </div>
@@ -159,7 +169,7 @@ export function MobilePairingPage() {
                   onClick={() => removeDevice.mutate(d.device_id)}
                   disabled={removeDevice.isPending}
                   className="rounded-lg p-1.5 text-text-dim hover:text-error transition-colors"
-                  title="Remove device"
+                  title={t("mobile_pairing.remove_title")}
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>

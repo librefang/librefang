@@ -762,12 +762,13 @@ fn migrate_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 24: Add `api_key_hash` column to `paired_devices`.
 ///
-/// Each pairing now mints its own bearer token (Argon2-hashed at rest)
-/// instead of handing the daemon's master `api_key` back to the mobile
-/// device. Existing rows from before this migration get an empty hash —
-/// those devices must re-pair to obtain a token; until they do, the
-/// auth middleware will simply not find a match for any bearer they
-/// present.
+/// Each pairing now mints its own bearer token (hashed at rest — current
+/// format is unsalted SHA-256 prefixed `$sha256$`, see
+/// `password_hash::hash_device_token`; verification dispatches by prefix
+/// so any legacy Argon2 hashes from earlier PR revisions also verify).
+/// Existing rows from before this migration get an empty hash — those
+/// devices must re-pair to obtain a token; until they do, the auth
+/// middleware will simply not find a match for any bearer they present.
 fn migrate_v24(conn: &Connection) -> Result<(), rusqlite::Error> {
     if !column_exists(conn, "paired_devices", "api_key_hash") {
         conn.execute(

@@ -21,10 +21,13 @@ pub struct PairedDevice {
     pub last_seen: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing)]
     pub push_token: Option<String>,
-    /// Argon2 hash of this device's bearer token. The plaintext is
+    /// Hash of this device's bearer token (SHA-256, prefixed `$sha256$`
+    /// — see `password_hash::hash_device_token`). The plaintext is
     /// returned to the device exactly once during `complete_pairing`
-    /// and never stored — comparison happens via `verify_password`.
-    /// Skipped in serialization so it cannot leak through API responses.
+    /// and never stored — comparison happens via `verify_password`,
+    /// which dispatches by prefix so legacy Argon2 hashes from earlier
+    /// PR revisions still verify. Skipped in serialization so it
+    /// cannot leak through API responses.
     #[serde(skip_serializing, default)]
     pub api_key_hash: String,
 }

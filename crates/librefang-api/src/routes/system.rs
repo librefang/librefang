@@ -3032,14 +3032,11 @@ pub async fn pairing_complete(
         let bytes: [u8; 32] = rand::random();
         hex::encode(bytes)
     };
-    let api_key_hash = match crate::password_hash::hash_password(&plaintext_key) {
-        Ok(h) => h,
-        Err(e) => {
-            return ApiErrorResponse::internal(format!("hash failed: {e}"))
-                .into_json_tuple()
-                .into_response();
-        }
-    };
+    // Device bearers are 256-bit CSPRNG outputs — high enough entropy that
+    // the Argon2 KDF cost is dead weight on every mobile request. Use a
+    // plain SHA-256 hash; `verify_password` recognises the `$sha256$`
+    // prefix and dispatches to the cheap path.
+    let api_key_hash = crate::password_hash::hash_device_token(&plaintext_key);
 
     let device_id = uuid::Uuid::new_v4().to_string();
     let device_info = librefang_kernel::pairing::PairedDevice {
@@ -5343,5 +5340,123 @@ mod event_webhook_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn configured_url_takes_precedence_over_host_header() {
+        let h = headers(&[("x-forwarded-proto", "https")]);
+        let resolved =
+            resolve_pairing_base_url(Some("https://configured.example.com"), &h, "host.local")
+                .unwrap();
+        assert_eq!(resolved, "https://configured.example.com");
+    }
+
+    #[test]
+    fn configured_url_must_have_scheme() {
+        let h = HeaderMap::new();
+        let err =
+            resolve_pairing_base_url(Some("librefang.example.com"), &h, "host.local").unwrap_err();
+        assert!(err.contains("must start with http://"), "got: {err}");
+    }
+
+    #[test]
+    fn configured_url_rejects_non_http_scheme() {
+        let h = HeaderMap::new();
+        let err =
+            resolve_pairing_base_url(Some("ftp://nope.example.com"), &h, "host.local").unwrap_err();
+        assert!(err.contains("must start with"), "got: {err}");
+    }
+
+    #[test]
+    fn configured_url_trailing_slash_trimmed() {
+        let h = HeaderMap::new();
+        let resolved = resolve_pairing_base_url(Some("https://x.example.com/"), &h, "").unwrap();
+        assert_eq!(resolved, "https://x.example.com");
+    }
+
+    #[test]
+    fn empty_configured_falls_back_to_host_with_default_scheme() {
+        let h = HeaderMap::new();
+        let resolved = resolve_pairing_base_url(Some(""), &h, "host.local:4545").unwrap();
+        assert_eq!(resolved, "http://host.local:4545");
+    }
+
+    #[test]
+    fn host_fallback_honors_x_forwarded_proto_https() {
+        let h = headers(&[("x-forwarded-proto", "https")]);
+        let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
+        assert_eq!(resolved, "https://host.local");
+    }
+
+    #[test]
+    fn host_fallback_handles_multi_value_x_forwarded_proto() {
+        // Some proxies append values: take the first.
+        let h = headers(&[("x-forwarded-proto", "https, http")]);
+        let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
+        assert_eq!(resolved, "https://host.local");
+    }
+
+    #[test]
+    fn host_fallback_blank_x_forwarded_proto_does_not_yield_double_colon() {
+        // Header present but empty must NOT produce "://host".
+        let h = headers(&[("x-forwarded-proto", "")]);
+        let resolved = resolve_pairing_base_url(None, &h, "host.local").unwrap();
+        assert_eq!(resolved, "http://host.local");
+    }
+
+    #[test]
+    fn missing_host_and_configured_returns_err() {
+        let h = HeaderMap::new();
+        let err = resolve_pairing_base_url(None, &h, "").unwrap_err();
+        assert!(err.contains("missing Host header"), "got: {err}");
+    }
+
+    #[test]
+    fn pairing_complete_request_rejects_missing_token() {
+        let json = serde_json::json!({"display_name": "x", "platform": "ios"});
+        let parsed: Result<PairingCompleteRequest, _> = serde_json::from_value(json);
+        assert!(parsed.is_err(), "missing token should fail to deserialize");
+    }
+
+    #[test]
+    fn pairing_complete_request_defaults_unknown() {
+        let json = serde_json::json!({"token": "abc"});
+        let parsed: PairingCompleteRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.token, "abc");
+        assert_eq!(parsed.display_name, "unknown");
+        assert_eq!(parsed.platform, "unknown");
+        assert!(parsed.push_token.is_none());
+    }
+
+    #[test]
+    fn pairing_complete_request_accepts_full_payload() {
+        let json = serde_json::json!({
+            "token": "tok",
+            "display_name": "My iPhone",
+            "platform": "ios",
+            "push_token": "fcm-xyz",
+        });
+        let parsed: PairingCompleteRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.token, "tok");
+        assert_eq!(parsed.display_name, "My iPhone");
+        assert_eq!(parsed.platform, "ios");
+        assert_eq!(parsed.push_token.as_deref(), Some("fcm-xyz"));
     }
 }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useQueryClient } from "@tanstack/react-query";
 import { WifiOff, RefreshCw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -12,6 +13,7 @@ import { runtimeKeys } from "../lib/queries/keys";
  * banner — daemon status now drives daemon-status UI, nothing else.
  */
 export function OfflineBanner() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const { isError, isFetching, refetch } = useHealthDetail();
   const [retrying, setRetrying] = useState(false);
@@ -41,14 +43,14 @@ export function OfflineBanner() {
           className="fixed top-0 inset-x-0 z-[60] flex items-center justify-center gap-3 px-4 py-2 bg-error/90 text-white text-sm font-medium backdrop-blur-sm"
         >
           <WifiOff className="w-4 h-4 shrink-0" />
-          <span>Daemon unreachable</span>
+          <span>{t("offline_banner.label")}</span>
           <button
             onClick={retry}
             disabled={retrying || isFetching}
             className="ml-2 flex items-center gap-1.5 rounded-lg border border-white/30 px-2.5 py-1 text-xs hover:bg-white/10 transition-colors disabled:opacity-50"
           >
             <RefreshCw className={`w-3 h-3 ${retrying || isFetching ? "animate-spin" : ""}`} />
-            Retry
+            {t("offline_banner.retry")}
           </button>
         </motion.div>
       )}

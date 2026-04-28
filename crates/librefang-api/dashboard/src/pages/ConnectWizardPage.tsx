@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
 import { useConnectManual, useConnectViaQr } from "../lib/mutations/connection";
@@ -19,11 +20,11 @@ function navigateToDashboard(baseUrl: string) {
   }
 }
 
-function defaultDisplayName(): string {
+function uaDisplayName(fallback: string): string {
   if (/Android/.test(navigator.userAgent)) return "Android device";
   if (/iPad/.test(navigator.userAgent)) return "iPad";
   if (/iPhone|iPod/.test(navigator.userAgent)) return "iPhone";
-  return "LibreFang Mobile";
+  return fallback;
 }
 
 function devicePlatform(): string {
@@ -67,11 +68,13 @@ function decodeQrPayload(raw: string): PairingPayload {
 }
 
 export function ConnectWizardPage() {
+  const { t } = useTranslation();
+  const fallbackName = t("connect_wizard.device_name_default");
   const [tab, setTab] = useState<Tab>("manual");
   const [step, setStep] = useState<Step>("idle");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [displayName, setDisplayName] = useState(defaultDisplayName());
+  const [displayName, setDisplayName] = useState(() => uaDisplayName(fallbackName));
   const [errorMsg, setErrorMsg] = useState("");
 
   const connectManual = useConnectManual();
@@ -109,7 +112,7 @@ export function ConnectWizardPage() {
     if (!url || !key) return;
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
       setStep("error");
-      setErrorMsg("URL must start with http:// or https://");
+      setErrorMsg(t("connect_wizard.error_url_scheme"));
       return;
     }
     setStep("connecting");
@@ -123,7 +126,7 @@ export function ConnectWizardPage() {
         },
         onError: (err: unknown) => {
           setStep("error");
-          setErrorMsg(err instanceof Error ? err.message : "Connection failed");
+          setErrorMsg(err instanceof Error ? err.message : t("connect_wizard.error_default_connect"));
         },
       },
     );
@@ -146,7 +149,7 @@ export function ConnectWizardPage() {
         {
           baseUrl: pairingUrl,
           token: payload.token,
-          displayName: displayName.trim() || defaultDisplayName(),
+          displayName: displayName.trim() || uaDisplayName(fallbackName),
           platform: devicePlatform(),
         },
         {
@@ -156,13 +159,13 @@ export function ConnectWizardPage() {
           },
           onError: (err: unknown) => {
             setStep("error");
-            setErrorMsg(err instanceof Error ? err.message : "Pairing failed");
+            setErrorMsg(err instanceof Error ? err.message : t("connect_wizard.error_default_pairing"));
           },
         },
       );
     } catch (err: unknown) {
       setStep("error");
-      setErrorMsg(err instanceof Error ? err.message : "Pairing failed");
+      setErrorMsg(err instanceof Error ? err.message : t("connect_wizard.error_default_pairing"));
     }
   }
 
@@ -175,13 +178,18 @@ export function ConnectWizardPage() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-main gap-4 px-6">
         <CheckCircle className="w-14 h-14 text-success" />
-        <p className="text-xl font-bold">Connected!</p>
-        <p className="text-sm text-text-dim">Opening dashboard…</p>
+        <p className="text-xl font-bold">{t("connect_wizard.done_title")}</p>
+        <p className="text-sm text-text-dim">{t("connect_wizard.done_subtitle")}</p>
       </div>
     );
   }
 
   const busy = step === "scanning" || step === "connecting";
+  // i18next supports embedded HTML when interpolation.escapeValue=false (set
+  // in lib/i18n.ts). The localised string includes <strong> for emphasis;
+  // we render it via dangerouslySetInnerHTML on a span that contains no
+  // user input — translator-supplied markup only.
+  const qrCardBodyHtml = { __html: t("connect_wizard.qr_card_body") };
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-main px-6 py-12">
@@ -191,10 +199,8 @@ export function ConnectWizardPage() {
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-brand/10 ring-2 ring-brand/20">
             <Wifi className="h-7 w-7 text-brand" />
           </div>
-          <h1 className="text-2xl font-black tracking-tight">Connect to Daemon</h1>
-          <p className="text-sm text-text-dim">
-            Enter your daemon URL and API key, or scan a pairing QR code.
-          </p>
+          <h1 className="text-2xl font-black tracking-tight">{t("connect_wizard.title")}</h1>
+          <p className="text-sm text-text-dim">{t("connect_wizard.subtitle")}</p>
         </div>
 
         {/* Tab switcher */}
@@ -208,7 +214,7 @@ export function ConnectWizardPage() {
                 : "text-text-dim hover:text-brand disabled:opacity-50"
             }`}
           >
-            Manual
+            {t("connect_wizard.tab_manual")}
           </button>
           <button
             onClick={() => { setTab("qr"); reset(); }}
@@ -219,7 +225,7 @@ export function ConnectWizardPage() {
                 : "text-text-dim hover:text-brand disabled:opacity-50"
             }`}
           >
-            Scan QR
+            {t("connect_wizard.tab_qr")}
           </button>
         </div>
 
@@ -228,7 +234,7 @@ export function ConnectWizardPage() {
           <div className="space-y-4">
             <div className="space-y-1.5">
               <label htmlFor="daemon-url" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
-                Daemon URL
+                {t("connect_wizard.field_url")}
               </label>
               <input
                 id="daemon-url"
@@ -246,7 +252,7 @@ export function ConnectWizardPage() {
             </div>
             <div className="space-y-1.5">
               <label htmlFor="api-key" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
-                API Key
+                {t("connect_wizard.field_api_key")}
               </label>
               <input
                 id="api-key"
@@ -266,11 +272,11 @@ export function ConnectWizardPage() {
               {step === "connecting" ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Connecting…
+                  {t("connect_wizard.btn_connecting")}
                 </>
               ) : (
                 <>
-                  Connect
+                  {t("connect_wizard.btn_connect")}
                   <Wifi className="w-4 h-4" />
                 </>
               )}
@@ -280,28 +286,25 @@ export function ConnectWizardPage() {
           <div className="space-y-4">
             <div className="space-y-1.5">
               <label htmlFor="device-name" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
-                Device name
+                {t("connect_wizard.field_device_name")}
               </label>
               <input
                 id="device-name"
                 type="text"
-                placeholder="My iPhone"
+                placeholder={t("connect_wizard.device_name_placeholder")}
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 disabled={busy}
                 className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40 disabled:opacity-50"
               />
-              <p className="text-xs text-text-dim">
-                Shown on the desktop so you can revoke this device later.
-              </p>
+              <p className="text-xs text-text-dim">{t("connect_wizard.device_name_help")}</p>
             </div>
             <div className="rounded-2xl border border-border-subtle bg-surface p-6 text-center space-y-3">
               <QrCode className="w-10 h-10 mx-auto text-text-dim" />
               <div className="text-sm text-text-dim space-y-1">
-                <p className="font-medium">Open the desktop dashboard</p>
+                <p className="font-medium">{t("connect_wizard.qr_card_title")}</p>
                 <p>
-                  Go to <span className="font-semibold text-brand">Settings → Mobile Pairing</span>
-                  {" "}and tap <strong>Scan QR</strong> below.
+                  <span dangerouslySetInnerHTML={qrCardBodyHtml} />
                 </p>
               </div>
             </div>
@@ -313,17 +316,17 @@ export function ConnectWizardPage() {
               {step === "scanning" ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Scanning…
+                  {t("connect_wizard.btn_scanning")}
                 </>
               ) : step === "connecting" ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  Pairing…
+                  {t("connect_wizard.btn_pairing")}
                 </>
               ) : (
                 <>
                   <QrCode className="w-4 h-4" />
-                  Scan QR Code
+                  {t("connect_wizard.btn_scan")}
                 </>
               )}
             </button>
@@ -335,7 +338,7 @@ export function ConnectWizardPage() {
           <div className="rounded-xl border border-error/20 bg-error/5 p-4 space-y-2">
             <div className="flex items-center gap-2 text-error">
               <AlertCircle className="w-4 h-4 shrink-0" />
-              <p className="text-sm font-semibold">Connection failed</p>
+              <p className="text-sm font-semibold">{t("connect_wizard.error_title")}</p>
             </div>
             <p className="text-xs text-text-dim">{errorMsg}</p>
             <button
@@ -343,7 +346,7 @@ export function ConnectWizardPage() {
               className="flex items-center gap-1.5 text-xs text-brand hover:underline"
             >
               <RefreshCw className="w-3 h-3" />
-              Try again
+              {t("connect_wizard.btn_try_again")}
             </button>
           </div>
         )}
