@@ -2938,6 +2938,7 @@ impl LibreFangKernel {
         let workflow_home_dir = config.home_dir.clone();
         let oauth_home_dir = config.home_dir.clone();
         let checkpoint_base_dir = config.home_dir.clone();
+        let a2a_db_path = config.data_dir.join("a2a_tasks.db");
         // Resolve the audit anchor path from `[audit].anchor_path`. When
         // unset, the default is `data_dir/audit.anchor` — good enough to
         // catch most casual tampering since it sits next to the SQLite
@@ -3011,7 +3012,10 @@ impl LibreFangKernel {
                 oauth_home_dir,
             )),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
-            a2a_task_store: librefang_runtime::a2a::A2aTaskStore::default(),
+            a2a_task_store: librefang_runtime::a2a::A2aTaskStore::with_persistence(
+                1000,
+                &a2a_db_path,
+            ),
             a2a_external_agents: std::sync::Mutex::new(Vec::new()),
             web_ctx,
             browser_ctx,
@@ -3714,6 +3718,21 @@ system_prompt = "You are a helpful assistant."
                     warn!("Failed to load persisted workflow runs: {e}");
                 }
                 _ => {}
+            }
+
+            // Recover any runs left in Running/Pending state by a prior crash.
+            // `recover_stale_running_runs` is a synchronous DashMap walk — no
+            // need for `block_in_place` (the runs map is no longer behind a
+            // tokio RwLock as of #3969).
+            let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
+            if stale_timeout_mins > 0 {
+                let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
+                let recovered = kernel.workflows.recover_stale_running_runs(stale_timeout);
+                if recovered > 0 {
+                    info!(
+                        "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"
+                    );
+                }
             }
         }
 

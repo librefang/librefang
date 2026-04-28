@@ -535,6 +535,7 @@ _No notable changes._
 ### Changed
 
 - Default `api_listen` flipped from `0.0.0.0:4545` to `127.0.0.1:4545` (loopback-only). New installs are local-only by default; set `api_listen = "0.0.0.0:4545"` to expose on LAN/remote. Affects `librefang init`, the dashboard's init endpoint, and `librefang.toml.example`. `librefang start` with an explicit `--config <path>` that doesn't exist now prints a clear `librefang init` hint instead of failing obscurely. (#2766)
+- **iOS minimum supported version raised from 14.0 to 16.0.** Required by the Tauri 2 mobile toolchain that the new mobile CI builds against. Devices on iOS 14 or 15 (iPhone 6s, original iPhone SE, iPad Air 2 and similar) will no longer be able to install the LibreFang mobile app once mobile bundles ship. Affects only the iOS app — the desktop and Android builds are unchanged. (#3970)
 
 ### Security
 
