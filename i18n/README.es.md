@@ -109,7 +109,7 @@ Crea el tuyo: define un `HAND.toml` + prompt de sistema + `SKILL.md`. [Guía](ht
 
 24 crates de Rust + xtask, diseño de kernel modular.
 
-```
+```bash
 librefang-kernel            Orquestación, workflows, medición, RBAC, planificador, presupuesto
 librefang-runtime           Bucle de agente, 3 drivers LLM, 53 herramientas, sandbox WASM, MCP, A2A
 librefang-api               140+ endpoints REST/WS/SSE, API compatible con OpenAI, dashboard
@@ -136,7 +136,6 @@ librefang-runtime-oauth     Flujos OAuth (ChatGPT, GitHub Copilot) para los driv
 librefang-kernel-metering   Medición de costos y aplicación de cuotas para el kernel de LibreFang
 xtask                       Automatización de build
 ```
-
 > **OFP wire es plaintext-by-design.** Autenticación mutua HMAC-SHA256 + HMAC
 > por mensaje + protección contra repetición nonce cubren a los atacantes *activos*, pero los contenidos de los frames
 > no están encriptados. Para cross-network federation, ejecute OFP detrás de un overlay
@@ -145,7 +144,7 @@ xtask                       Automatización de build
 
 ## Características Principales
 
-**57 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky y 44 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
+**57 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 44 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
 
 **28 Proveedores LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama y 20 más. Enrutamiento inteligente, fallback automático, seguimiento de costos. [Detalles](https://docs.librefang.ai/configuration/providers)
 
