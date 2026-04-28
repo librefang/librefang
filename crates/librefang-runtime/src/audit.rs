@@ -13,7 +13,7 @@ use librefang_types::config::AuditRetentionConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Hard cap on the number of audit entries kept in memory.
@@ -195,6 +195,15 @@ pub struct AuditLog {
     /// genesis sentinel, that `prev_hash` IS the anchor (it points at
     /// the dropped predecessor). No new schema column required.
     chain_anchor: Mutex<Option<String>>,
+    /// Sequence numbers whose SQLite persistence failed.  The post-merge
+    /// audit of #3957 caught that the cap-trim drained these entries
+    /// silently — they were in memory but never on disk, and the trim
+    /// code assumed everything below the cap had already been
+    /// `INSERT`-ed by the caller above.  We now track which seqs missed
+    /// the DB write so the trim can leave them in memory.  See
+    /// `record_with_context` (records misses) and the trim block
+    /// (skips them when choosing which prefix to drop).
+    non_persisted_seqs: Mutex<HashSet<u64>>,
 }
 
 /// Per-trim summary returned by [`AuditLog::trim`].
@@ -241,6 +250,7 @@ impl AuditLog {
             db: None,
             anchor_path: None,
             chain_anchor: Mutex::new(None),
+            non_persisted_seqs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -453,6 +463,7 @@ impl AuditLog {
             db: Some(conn),
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
+            non_persisted_seqs: Mutex::new(HashSet::new()),
         };
 
         // Verify chain integrity on load
@@ -547,9 +558,10 @@ impl AuditLog {
         // Persist to database if available. Schema v22 added the
         // `user_id` / `channel` columns; old NULL rows keep working
         // because the hash function omits absent fields.
+        let mut persisted_to_db = self.db.is_none();
         if let Some(ref db) = self.db {
             if let Ok(conn) = db.lock() {
-                let _ = conn.execute(
+                match conn.execute(
                     "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
                         entry.seq as i64,
@@ -563,26 +575,94 @@ impl AuditLog {
                         &entry.prev_hash,
                         &entry.hash,
                     ],
+                ) {
+                    Ok(_) => persisted_to_db = true,
+                    Err(e) => {
+                        // Pre-#3957 the trim block silently dropped these
+                        // entries off the front of the buffer; they were
+                        // never on disk, so the audit chain lost rows.
+                        // Track the seq so the trim can leave it in place
+                        // until the operator notices and fixes the DB.
+                        tracing::error!(
+                            seq = entry.seq,
+                            error = %e,
+                            "Audit DB INSERT failed — entry held in memory only; \
+                             trim will preserve it.  Investigate disk space / \
+                             permissions and run `librefang security verify`."
+                        );
+                    }
+                }
+            } else {
+                tracing::error!(
+                    seq = entry.seq,
+                    "Audit DB mutex poisoned — entry held in memory only"
                 );
             }
+        }
+        if !persisted_to_db {
+            self.non_persisted_seqs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(entry.seq);
         }
 
         entries.push(entry);
         *tip = hash.clone();
 
         // Hard cap: if the in-memory buffer grew beyond MAX_AUDIT_ENTRIES,
-        // drain the oldest prefix so memory stays bounded. Entries are
-        // already persisted to SQLite above, so no forensic data is lost.
-        // We update chain_anchor to the last drained entry's hash so
-        // verify_integrity() stays sound across the implicit trim.
+        // drain the oldest entries that *are* known persisted on disk.
+        // Entries whose SQLite write failed (tracked in
+        // `non_persisted_seqs`) are skipped — dropping them would lose
+        // forensic data that exists nowhere else.  Once the DB recovers
+        // and their next-tick re-record succeeds, they roll out of
+        // `non_persisted_seqs` and become eligible for trim again.
         if entries.len() > MAX_AUDIT_ENTRIES {
             let overflow = entries.len() - MAX_AUDIT_ENTRIES;
-            let new_anchor = entries[overflow - 1].hash.clone();
-            {
-                let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
-                *anchor = Some(new_anchor);
+            let dirty = self
+                .non_persisted_seqs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+
+            // Find the indices of persisted entries up to the overflow
+            // count, scanning from the front (oldest).
+            let mut to_drop: Vec<usize> = Vec::with_capacity(overflow);
+            for (idx, e) in entries.iter().enumerate() {
+                if to_drop.len() >= overflow {
+                    break;
+                }
+                if !dirty.contains(&e.seq) {
+                    to_drop.push(idx);
+                }
             }
-            entries.drain(..overflow);
+            drop(dirty);
+
+            if to_drop.is_empty() {
+                // Every in-memory entry is non-persisted.  Don't drop
+                // anything — let the buffer grow.  The error log on
+                // each failed INSERT above is the operator's signal to
+                // intervene before this becomes an OOM.
+                tracing::warn!(
+                    cap = MAX_AUDIT_ENTRIES,
+                    in_memory = entries.len(),
+                    "Audit cap reached but every in-memory entry is unpersisted; \
+                     refusing to trim to avoid forensic loss"
+                );
+            } else {
+                // Anchor at the hash of the most recently dropped entry
+                // so verify_integrity() stays sound across the trim.
+                let last_idx = *to_drop.last().expect("checked non-empty");
+                let new_anchor = entries[last_idx].hash.clone();
+                {
+                    let mut anchor =
+                        self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                    *anchor = Some(new_anchor);
+                }
+                // Drop indices in descending order so we don't shift the
+                // remaining ones.
+                for idx in to_drop.into_iter().rev() {
+                    entries.remove(idx);
+                }
+            }
         }
 
         // Advance the external anchor so a later DB rewrite is detectable.
