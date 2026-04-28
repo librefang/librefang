@@ -790,6 +790,32 @@ impl DeliveryTracker {
 
 mod workspace_setup;
 use workspace_setup::*;
+
+/// Spawn a fire-and-forget tokio task that logs panics instead of silently
+/// swallowing them (#3740).
+///
+/// `tokio::spawn` drops panics when the returned `JoinHandle` is not awaited.
+/// This wrapper catches any panic from the inner future and logs it at `error`
+/// level so it surfaces in traces and structured logs.
+fn spawn_logged(
+    tag: &'static str,
+    fut: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    use futures::FutureExt as _;
+    tokio::spawn(async move {
+        if let Err(e) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "(non-string panic payload)".to_string()
+            };
+            tracing::error!(tag, "spawned task panicked: {msg}");
+        }
+    })
+}
+
 // ── Public Facade Getters ────────────────────────────────────────────
 // These provide a stable API surface for external crates (librefang-api,
 // librefang-desktop) to access kernel internals. When all external call
@@ -6460,7 +6486,8 @@ system_prompt = "You are a helpful assistant."
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
                             let sid = session.id;
-                            tokio::spawn(async move {
+                            // #3740: spawn_logged so compaction panics surface in logs.
+                            spawn_logged("post_loop_compaction", async move {
                                 info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
@@ -6552,6 +6579,19 @@ system_prompt = "You are a helpful assistant."
         // (auto_memorize, dream) which has its own join handle and doesn't
         // need external cancellation via the registry.
         if !is_fork {
+            // #3739: abort any previous task before replacing it so we don't
+            // orphan an in-flight LLM call by dropping its abort handle.
+            if let Some((_, old_task)) = self
+                .running_tasks
+                .remove(&(agent_id, effective_session_id))
+            {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    session_id = %effective_session_id,
+                    "aborting previous running task before starting new one"
+                );
+                old_task.abort.abort();
+            }
             self.running_tasks.insert(
                 (agent_id, effective_session_id),
                 RunningTask {
@@ -11329,7 +11369,8 @@ system_prompt = "You are a helpful assistant."
             }
 
             if !dispatches.is_empty() {
-                tokio::spawn(async move {
+                // #3740: spawn_logged so panics in dispatch surface in logs.
+                spawn_logged("trigger_dispatch", async move {
                     // Execute trigger dispatches sequentially to preserve
                     // the order in which the trigger engine evaluated them.
                     // Each dispatch still acquires its semaphore permits
@@ -12347,7 +12388,8 @@ system_prompt = "You are a helpful assistant."
         // Start extension health monitor background task
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            // #3740: spawn_logged so panics in the health loop surface in logs.
+            spawn_logged("mcp_health_loop", async move {
                 kernel.run_mcp_health_loop().await;
             });
         }
@@ -12360,7 +12402,8 @@ system_prompt = "You are a helpful assistant."
         // Cron scheduler tick loop — fires due jobs every 15 seconds
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            // #3740: spawn_logged so panics in the cron loop surface in logs.
+            spawn_logged("cron_scheduler", async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
                 // Use Skip to avoid burst-firing after a long job blocks the loop.
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
