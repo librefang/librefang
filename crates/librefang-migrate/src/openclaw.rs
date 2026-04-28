@@ -1254,9 +1254,7 @@ fn migrate_from_json5(
 
     // #3797 — Reject configs that declare a schema version we don't support.
     match root.version {
-        None => warn!(
-            "openclaw.json has no version field — assuming compatible format"
-        ),
+        None => warn!("openclaw.json has no version field — assuming compatible format"),
         Some(v) if SUPPORTED_OPENCLAW_VERSIONS.contains(&v) => {}
         Some(v) => return Err(MigrateError::UnsupportedVersion(v)),
     }
