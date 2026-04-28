@@ -14,6 +14,7 @@ pub(crate) mod http_client;
 pub mod message_journal;
 pub mod message_truncator;
 pub mod rate_limiter;
+pub mod roster;
 pub mod router;
 pub mod sanitizer;
 pub mod sidecar;

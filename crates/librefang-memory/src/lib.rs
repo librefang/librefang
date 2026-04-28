@@ -24,6 +24,7 @@ pub mod namespace_acl;
 pub mod proactive;
 pub mod prompt;
 pub mod provider;
+pub mod roster_store;
 pub mod semantic;
 pub mod session;
 pub mod structured;

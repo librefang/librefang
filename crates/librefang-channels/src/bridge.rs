@@ -9,7 +9,7 @@ use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
-    ChannelUser, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
+    ChannelUser, GroupMember, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -239,6 +239,24 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Returns `None` if the agent has no per-agent overrides configured.
     async fn agent_channel_overrides(&self, _agent_id: AgentId) -> Option<ChannelOverrides> {
         None
+    }
+
+    /// Return the aliases configured for an agent (from agent.toml `aliases` field).
+    /// Used to build trigger patterns and enrich the reply-intent classifier.
+    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Persist a group roster member to the kernel's persistent storage.
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     /// Lightweight LLM classification: should the bot reply to this group message?
@@ -1457,6 +1475,19 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
+/// Convert agent aliases (plain names) into case-insensitive word-boundary
+/// regex patterns suitable for `group_trigger_patterns`.
+///
+/// Each alias `"foo"` becomes `(?i)\bfoo\b`. Special regex characters in
+/// the alias are escaped so user-supplied names are safe.
+pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
+    aliases
+        .iter()
+        .filter(|a| !a.is_empty())
+        .map(|a| format!(r"(?i)\b{}\b", regex::escape(a)))
+        .collect()
+}
+
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1746,6 +1777,17 @@ fn should_process_group_message(
     }
 }
 
+/// Extract structured `GroupMember` entries from the inbound message metadata.
+/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`)
+/// populate this; the bridge persists them to the roster store for later queries.
+fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
+    message
+        .metadata
+        .get("group_members")
+        .and_then(|v| serde_json::from_value::<Vec<GroupMember>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// Read `group_participants` from the inbound message metadata payload
 /// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
 /// channel doesn't supply a roster — the addressee guard then becomes a no-op
@@ -1827,6 +1869,18 @@ fn build_sender_context(
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
         group_participants: extract_group_participants(message),
+        // Bot identity metadata for group context enrichment.
+        bot_username: message
+            .metadata
+            .get("bot_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        sender_username: message
+            .metadata
+            .get("sender_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        group_members: extract_group_members(message),
         // Channel bridges land in per-channel sessions (the default); only
         // the dashboard WS opts into canonical storage.
         use_canonical_session: false,
@@ -5219,6 +5273,36 @@ mod tests {
                 "telegram", &overrides, &message
             ));
         });
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_basic() {
+        let aliases = vec!["Rodelo".to_string(), "bot".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 2);
+        assert!(patterns[0].contains("Rodelo"));
+        assert!(patterns[1].contains("bot"));
+        // Each should be a valid regex
+        for p in &patterns {
+            assert!(regex::Regex::new(p).is_ok(), "Invalid regex: {p}");
+        }
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_escapes_special() {
+        let aliases = vec!["c++".to_string(), "a.b".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        // Special chars should be escaped so they match literally
+        for p in &patterns {
+            assert!(regex::Regex::new(p).is_ok(), "Invalid regex: {p}");
+        }
+    }
+
+    #[test]
+    fn test_aliases_to_trigger_patterns_empty_filtered() {
+        let aliases = vec!["".to_string(), "valid".to_string()];
+        let patterns = aliases_to_trigger_patterns(&aliases);
+        assert_eq!(patterns.len(), 1);
     }
 
     #[test]

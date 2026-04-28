@@ -17854,6 +17854,50 @@ impl KernelHandle for LibreFangKernel {
         librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
     }
 
+    fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username);
+        Ok(())
+    }
+
+    fn roster_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let members = self.memory.roster().members(channel, chat_id);
+        Ok(members
+            .into_iter()
+            .map(|(user_id, display_name, username)| {
+                serde_json::json!({
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": username,
+                })
+            })
+            .collect())
+    }
+
+    fn roster_remove_member(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .remove_member(channel, chat_id, user_id);
+        Ok(())
+    }
+
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
         self.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,

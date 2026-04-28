@@ -856,6 +856,41 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(agent_id)
     }
 
+    async fn get_agent_aliases(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .map(|entry| {
+                // Collect aliases from channel_overrides.group_trigger_patterns
+                // which serve as the agent's known names/aliases in group chats.
+                entry
+                    .manifest
+                    .channel_overrides
+                    .as_ref()
+                    .map(|ov| ov.group_trigger_patterns.clone())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.kernel.memory_substrate().roster().upsert(
+            channel,
+            chat_id,
+            user_id,
+            display_name,
+            username,
+        );
+        Ok(())
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();
