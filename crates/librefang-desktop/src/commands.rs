@@ -2,9 +2,11 @@
 
 use crate::{KernelState, PortState};
 use librefang_kernel::config::librefang_home;
-use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tracing::info;
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+use tauri_plugin_autostart::ManagerExt;
 
 /// Get the port the embedded server is listening on.
 #[tauri::command]
