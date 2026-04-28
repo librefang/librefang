@@ -11399,8 +11399,22 @@ system_prompt = "You are a helpful assistant."
             }
 
             if !dispatches.is_empty() {
-                // #3740: spawn_logged so panics in dispatch surface in logs.
-                spawn_logged("trigger_dispatch", async move {
+                // CRITICAL: tokio task-locals do NOT propagate across
+                // tokio::spawn.  Without re-establishing the
+                // PUBLISH_EVENT_DEPTH scope inside the spawned task,
+                // every send_message_full -> publish_event chain
+                // started from a triggered dispatch would observe an
+                // unscoped depth, fall into the "top-level scope"
+                // branch, and reset depth=0 — the exact path that
+                // breaks circular trigger detection across the spawn
+                // boundary (audit of #3929 / #3780).  Capture the
+                // parent depth here on the caller's task and rebuild
+                // the scope inside the spawn so trigger chains
+                // accumulate correctly.
+                let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                let task = PUBLISH_EVENT_DEPTH.scope(
+                    std::cell::Cell::new(parent_depth),
+                    async move {
                     // Execute trigger dispatches sequentially to preserve
                     // the order in which the trigger engine evaluated them.
                     // Each dispatch still acquires its semaphore permits
@@ -11452,7 +11466,9 @@ system_prompt = "You are a helpful assistant."
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     }
-                });
+                    },
+                );
+                spawn_logged("trigger_dispatch", task);
             }
         }
 
