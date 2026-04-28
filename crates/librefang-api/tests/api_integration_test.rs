@@ -118,6 +118,7 @@ async fn start_test_server_with_provider(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(librefang_api::rate_limiter::AuthLoginLimiter::new(0)),
     });
 
     let app = Router::new()
@@ -1635,6 +1636,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(librefang_api::rate_limiter::AuthLoginLimiter::new(0)),
     });
 
     let api_key_state = middleware::AuthState {
@@ -2808,6 +2810,7 @@ async fn start_test_server_with_rbac_users(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(librefang_api::rate_limiter::AuthLoginLimiter::new(0)),
     });
 
     let api_key_state = middleware::AuthState {
@@ -3111,6 +3114,7 @@ async fn start_test_server_with_full_user_configs(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(librefang_api::rate_limiter::AuthLoginLimiter::new(0)),
     });
 
     let api_key_state = middleware::AuthState {

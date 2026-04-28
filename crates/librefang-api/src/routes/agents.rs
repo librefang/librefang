@@ -6303,6 +6303,8 @@ mod monitoring_tests {
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new(0)),
+            pending_a2a_agents: dashmap::DashMap::new(),
         });
         (state, tmp)
     }
