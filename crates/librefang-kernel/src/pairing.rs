@@ -394,6 +394,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         let result = mgr.complete_pairing("invalid-token", device);
         assert!(result.is_err());
@@ -412,6 +413,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
 
         let result = mgr.complete_pairing(&req.token, device);
@@ -438,6 +440,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req1.token, d1).unwrap();
 
@@ -450,6 +453,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         let result = mgr.complete_pairing(&req2.token, d2);
         assert!(result.is_err());
@@ -467,6 +471,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req.token, device).unwrap();
 
@@ -486,6 +491,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req.token, device).unwrap();
 
