@@ -56,14 +56,12 @@ impl ConsolidationEngine {
         // process each tenant in isolation.
         let agent_ids: Vec<String> = {
             let mut stmt = conn
-                .prepare(
-                    "SELECT DISTINCT agent_id FROM memories WHERE deleted = 0",
-                )
+                .prepare("SELECT DISTINCT agent_id FROM memories WHERE deleted = 0")
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            stmt.query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?
-                .filter_map(|r| r.ok())
-                .collect()
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            rows.filter_map(|r| r.ok()).collect()
         };
 
         'agents: for agent_id in &agent_ids {
