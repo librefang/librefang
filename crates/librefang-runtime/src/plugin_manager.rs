@@ -4510,7 +4510,7 @@ description = "Spanish description"
     /// integrity entries so we can exercise the detection logic without
     /// spinning up an HTTP server.
     fn make_manifest_with_hooks(
-        hooks: &[(&str, &str)], // (field_name, script_path)
+        hooks: &[(&str, &str)],     // (field_name, script_path)
         integrity: &[(&str, &str)], // (script_path, sha256hex)
     ) -> PluginManifest {
         let mut m = PluginManifest {
