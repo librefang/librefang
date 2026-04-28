@@ -1,28 +1,22 @@
 name: Docker Build
 
-# Catches Dockerfile / runtime breakage on PR before it reaches the
+# Catches Dockerfile / runtime breakage on main before it reaches the
 # release pipeline. Past incidents — #3058 (logs dir) and #3259 (missing
 # libdbus, blocked the entire v2026.4.27-beta6 image release) — both
 # slipped through because the docker job in release.yml only fires on
-# tag push, not on PRs.
+# tag push.
 #
 # Build-only validation isn't enough: #3259 would still pass a pure
 # `docker build` if we only fixed the builder stage and forgot the
 # runtime SO. So we also boot the image and probe /api/health to catch
 # missing runtime libs / entrypoint regressions.
+#
+# Runs on push-to-main only — running on every PR push burned runner
+# minutes on builds gated by Cargo.lock / pnpm-lock churn that isn't
+# authoritative until merge. Trigger manually with workflow_dispatch
+# when a PR explicitly needs a pre-merge docker check.
 on:
   push:
-    branches: [main]
-    paths:
-      - 'Dockerfile'
-      - 'deploy/docker-entrypoint.sh'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - 'crates/librefang-api/dashboard/package.json'
-      - 'crates/librefang-api/dashboard/pnpm-lock.yaml'
-      - '.github/workflows/docker-build.yml'
-  pull_request:
     branches: [main]
     paths:
       - 'Dockerfile'
