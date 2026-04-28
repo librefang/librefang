@@ -35,7 +35,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
@@ -434,7 +434,7 @@ function MarketplaceDetailModal({
 }) {
   const isPending = pendingId === skill.slug;
   return (
-    <Modal isOpen onClose={onClose} title={skill.name} size="md" variant="panel-right">
+    <DrawerPanel isOpen onClose={onClose} title={skill.name} size="md">
       <div className="p-5 space-y-4">
         <div className="p-4 rounded-xl bg-surface-2">
           <p className="text-sm text-text-dim leading-relaxed">{skill.description}</p>
@@ -504,7 +504,7 @@ function MarketplaceDetailModal({
           </Button>
         )}
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -623,12 +623,11 @@ function CreateSkillModal({
   };
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={isOpen}
       onClose={onClose}
       title={t("skills.evo_create_title", { defaultValue: "Create Skill" })}
       size="xl"
-      variant="panel-right"
     >
       <div className="space-y-4 p-1">
         <div>
@@ -709,7 +708,7 @@ function CreateSkillModal({
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -1032,7 +1031,7 @@ function SupportingFileViewer({
       )}
       {error && (
         <p className="text-xs text-error">
-          {error instanceof Error ? error.message : "Failed to load file"}
+          {error instanceof Error ? error.message : t("skills.evo_load_failed")}
         </p>
       )}
       {data && (
@@ -1100,7 +1099,7 @@ function SkillDetailModal({
       addToast(successMsg, "success");
       setPane("none");
     } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : "Action failed", "error");
+      addToast(e instanceof Error ? e.message : t("skills.evo_action_failed"), "error");
     } finally {
       setBusy(false);
     }
@@ -1161,7 +1160,7 @@ function SkillDetailModal({
         );
         onClose();
       } catch (e: unknown) {
-        addToast(e instanceof Error ? e.message : "Delete failed", "error");
+        addToast(e instanceof Error ? e.message : t("skills.evo_delete_failed"), "error");
       } finally {
         setBusy(false);
       }
@@ -1169,12 +1168,11 @@ function SkillDetailModal({
   };
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={isOpen}
       onClose={onClose}
       title={detail?.name ?? skillName ?? ""}
       size="xl"
-      variant="drawer-right"
     >
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
@@ -1448,7 +1446,7 @@ function SkillDetailModal({
           {t("skills.evo_not_found", { defaultValue: "Skill not found" })}
         </p>
       )}
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -1466,6 +1464,7 @@ export function SkillsPage() {
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
   const [detailsSource, setDetailsSource] = useState<MarketplaceSource>("clawhub");
+  const [detailsFangHub, setDetailsFangHub] = useState<FangHubSkill | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
   const [targetHand, setTargetHand] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -1633,7 +1632,7 @@ export function SkillsPage() {
         "success",
       );
     } catch (e: unknown) {
-      addToast(e instanceof Error ? e.message : "Reload failed", "error");
+      addToast(e instanceof Error ? e.message : t("skills.reload_failed"), "error");
     }
     void skillsQuery.refetch();
     void clawhubQuery.refetch();
@@ -1660,6 +1659,7 @@ export function SkillsPage() {
         badge=""
         title={t("skills.title")}
         subtitle={t("skills.subtitle")}
+        helpText={t("skills.help")}
         isFetching={isAnyFetching}
         onRefresh={handleReload}
         actions={
@@ -1873,6 +1873,7 @@ export function SkillsPage() {
                     isInstalled={skill.is_installed}
                     installPending={installingId === skill.name}
                     onInstall={() => handleInstall(skill.name, "fanghub")}
+                    onViewDetail={() => setDetailsFangHub(skill)}
                     t={t}
                   />
                 ))
@@ -1950,6 +1951,65 @@ export function SkillsPage() {
         onClose={() => setDetailSkillName(null)}
         t={t}
       />
+
+      {/* FangHub skill detail */}
+      <DrawerPanel
+        isOpen={!!detailsFangHub}
+        onClose={() => setDetailsFangHub(null)}
+        title={detailsFangHub?.name ?? ""}
+        size="md"
+      >
+        {detailsFangHub && (
+          <div className="p-5 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 text-brand">
+                <Zap className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-black tracking-tight truncate">{detailsFangHub.name}</h2>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{detailsFangHub.version}</span>
+                </div>
+                {detailsFangHub.author && (
+                  <p className="text-[11px] text-text-dim/70 mt-0.5">{detailsFangHub.author}</p>
+                )}
+              </div>
+            </div>
+
+            <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">
+              {detailsFangHub.description}
+            </p>
+
+            {detailsFangHub.tags && detailsFangHub.tags.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {detailsFangHub.tags.map((tag) => (
+                  <span key={tag} className="px-2 py-1 rounded-lg text-xs font-bold bg-brand/10 text-brand">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {detailsFangHub.is_installed ? (
+              <Button variant="secondary" className="w-full" disabled leftIcon={<CheckCircle2 className="w-4 h-4" />}>
+                {t("skills.installed")}
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                className="w-full"
+                disabled={installingId === detailsFangHub.name}
+                onClick={() => {
+                  if (detailsFangHub) handleInstall(detailsFangHub.name, "fanghub");
+                }}
+                leftIcon={installingId === detailsFangHub.name ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+              >
+                {installingId === detailsFangHub.name ? t("skills.installing") : t("skills.install")}
+              </Button>
+            )}
+          </div>
+        )}
+      </DrawerPanel>
     </div>
   );
 }

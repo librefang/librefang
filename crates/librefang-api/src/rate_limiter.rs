@@ -3,17 +3,26 @@
 //! Each API operation has a token cost (e.g., health=1, spawn=50, message=30).
 //! The GCRA algorithm allows 500 tokens per minute per IP address.
 //!
-//! Non-API paths (dashboard SPA assets, locale JSON, favicon, logo, root) are
-//! exempt from rate limiting — a single dashboard page load fans out to dozens
-//! of static-asset requests, and accounting them at the default fallback cost
-//! drains the budget before the page finishes rendering. See
-//! [`is_rate_limit_exempt`].
+//! Two bypass paths:
+//!
+//! - Path-based: non-API paths (dashboard SPA assets, locale JSON, favicon,
+//!   logo, root) are exempt — a single dashboard page load fans out to
+//!   dozens of static-asset requests and the default fallback cost drains
+//!   the budget before the page finishes rendering. See
+//!   [`is_rate_limit_exempt`].
+//! - IP-based: direct loopback callers (127.0.0.0/8 and ::1, with no
+//!   forwarding headers in the request) bypass the limiter, since they're
+//!   local processes (dashboard SPA, librefang CLI, cron) calling their
+//!   own daemon. The forwarding-header guard means a same-host reverse
+//!   proxy that injects `X-Forwarded-For` / `X-Real-IP` does NOT trigger
+//!   the bypass — proxied traffic still falls through to the limiter.
+//!   See [`gcra_rate_limit`].
 
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode};
+use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::middleware::Next;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -40,6 +49,17 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("GET", "/api/status") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/version") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/tools") => NonZeroU32::new(1).unwrap(),
+        // High-frequency dashboard reads. The dashboard SPA polls these
+        // every few seconds (TanStack Query refetchOnFocus + interval
+        // refetch), and they're aggregating reads — not per-record
+        // queries — so the work is constant-cost regardless of fleet
+        // size. Pricing them at the fallback of 5 tokens drained the
+        // 500-token/min budget in seconds and made the dashboard 429
+        // out as soon as a couple of tabs were open. See #3416.
+        ("GET", "/api/dashboard/snapshot") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/approvals/count") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/providers") => NonZeroU32::new(1).unwrap(),
+        ("GET", "/api/media/providers") => NonZeroU32::new(1).unwrap(),
         ("GET", "/api/agents") => NonZeroU32::new(2).unwrap(),
         ("GET", "/api/skills") => NonZeroU32::new(2).unwrap(),
         ("GET", "/api/peers") => NonZeroU32::new(2).unwrap(),
@@ -48,6 +68,14 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("GET", p) if p.starts_with("/api/audit") => NonZeroU32::new(5).unwrap(),
         ("GET", p) if p.starts_with("/api/marketplace") => NonZeroU32::new(10).unwrap(),
         ("POST", "/api/agents") => NonZeroU32::new(50).unwrap(),
+        // Mobile pairing redemption: public (in `is_public` allowlist) and
+        // mints a per-device bearer on success. Token entropy already
+        // makes blind brute-force infeasible, but a 50-token charge caps
+        // attempts at ~10/min per IP so a misbehaving / leaked client
+        // can't hammer the endpoint either. The matching `/request`
+        // endpoint stays on the default cost — it requires auth, so
+        // abuse is bounded by the caller's existing role.
+        ("POST", "/api/pairing/complete") => NonZeroU32::new(50).unwrap(),
         ("POST", p) if p.contains("/message") => NonZeroU32::new(30).unwrap(),
         ("POST", p) if p.contains("/run") => NonZeroU32::new(100).unwrap(),
         // Local registry installs are filesystem copies plus a hot-reload.
@@ -59,6 +87,18 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("PUT", p) if p.contains("/update") => NonZeroU32::new(10).unwrap(),
         _ => NonZeroU32::new(5).unwrap(),
     }
+}
+
+/// Detect a forwarding header injected by an upstream reverse proxy.
+///
+/// Used by [`gcra_rate_limit`] to disqualify the loopback bypass: if a
+/// proxy is in front, the loopback peer represents arbitrary public
+/// callers, not a trusted local process. Returns `true` for any of
+/// `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` (RFC 7239).
+fn has_forwarding_header(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-forwarded-for")
+        || headers.contains_key("x-real-ip")
+        || headers.contains_key("forwarded")
 }
 
 pub type KeyedRateLimiter = RateLimiter<IpAddr, DashMapStateStore<IpAddr>, DefaultClock>;
@@ -95,11 +135,41 @@ pub async fn gcra_rate_limit(
         return next.run(request).await;
     }
 
+    // Fall back to the unspecified address (`0.0.0.0`) when ConnectInfo
+    // is missing rather than to loopback. With the loopback bypass below,
+    // a missing extension would otherwise silently disable rate limiting
+    // for every request; an unspecified address still enters the limiter
+    // and just shares one bucket across mis-wired callers — annoying,
+    // but visible.
     let ip = request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+
+    // Loopback (127.0.0.0/8 + ::1) bypasses the limiter. The dashboard
+    // SPA, the librefang CLI, and any other process on the same host
+    // talking to its own daemon all surface as loopback, and there's no
+    // hostile-burst threat model from a peer that already has local
+    // process privileges. Without this, a single dashboard tab refresh
+    // (snapshot + approvals/count + providers + media/providers + …,
+    // re-fetched on focus + interval) drained the 500-token/min budget
+    // in seconds and 429'd the whole UI. See #3416.
+    //
+    // Reverse-proxy guard: if the request carries `X-Forwarded-For`,
+    // `X-Real-IP`, or RFC 7239 `Forwarded`, the loopback peer is almost
+    // certainly a same-host proxy (nginx / caddy / traefik) forwarding
+    // traffic from arbitrary public clients. Bypassing in that case
+    // would silently disable rate limiting for the whole internet. We
+    // don't trust those headers to identify the *real* client (no
+    // config-pinned trusted-proxy list yet), but their mere presence is
+    // enough to disqualify the bypass — the limiter still runs against
+    // the proxy's loopback IP, which makes proxied traffic share one
+    // bucket. Less granular than per-real-IP metering, but strictly
+    // safer than wide-open.
+    if ip.is_loopback() && !has_forwarding_header(request.headers()) {
+        return next.run(request).await;
+    }
 
     let method = request.method().as_str().to_string();
     let cost = operation_cost(&method, &path);
@@ -227,6 +297,27 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(state, gcra_rate_limit))
     }
 
+    /// Build a request that carries an explicit `ConnectInfo` so the
+    /// middleware sees the IP we want it to see. Without this, requests
+    /// fall back to the unspecified-address default (`0.0.0.0`) and the
+    /// loopback bypass added in #3416 doesn't trigger.
+    fn request_from(uri: &str, ip: IpAddr) -> Request<Body> {
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((ip, 12345))));
+        req
+    }
+
+    /// Same as [`request_from`] but also stamps `X-Forwarded-For` so
+    /// the loopback bypass treats the peer as a same-host reverse
+    /// proxy instead of a trusted local process.
+    fn request_from_proxied(uri: &str, ip: IpAddr, xff_value: &str) -> Request<Body> {
+        let mut req = request_from(uri, ip);
+        req.headers_mut()
+            .insert("x-forwarded-for", xff_value.parse().unwrap());
+        req
+    }
+
     /// Regression for the production 429 storm on `dash.librefang.ai`:
     /// a cold dashboard load fans out to ~20 static-asset requests, and
     /// the default fallback cost of 5 tokens drained the 500-token/min
@@ -257,12 +348,116 @@ mod tests {
 
     /// Paired with the dashboard test above: the limiter *must* still
     /// bite on metered paths, otherwise the exempt list would be a
-    /// blanket disable in disguise.
+    /// blanket disable in disguise. Uses an RFC 5737 documentation IP
+    /// (198.51.100.1) so the loopback bypass doesn't short-circuit it.
     #[tokio::test]
     async fn metered_api_burst_still_rate_limits() {
         let app = router_with_limiter(1);
+        let public_ip: IpAddr = "198.51.100.1".parse().unwrap();
         let mut saw_429 = false;
         for _ in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(request_from("/api/health", public_ip))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "metered /api/health burst must eventually hit 429 under a 1-token/min quota"
+        );
+    }
+
+    /// Regression for #3416. With the limiter actually enforcing (after
+    /// the `NotUntil` arm fix), a single dashboard tab on the same host
+    /// drained the budget in seconds because every poll surfaces as
+    /// 127.0.0.1. Loopback callers are local processes — there is no
+    /// hostile-burst threat model — so they bypass the limiter outright.
+    #[tokio::test]
+    async fn loopback_v4_burst_bypasses_rate_limit() {
+        let app = router_with_limiter(1); // intentionally starved
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        for i in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(request_from("/api/health", loopback))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback request #{i} must bypass the limiter, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    /// IPv6 loopback (`::1`) is the same trust boundary as `127.0.0.1`
+    /// — both surface for processes on the same host. Test the v6 case
+    /// explicitly so a future refactor can't silently regress it.
+    #[tokio::test]
+    async fn loopback_v6_burst_bypasses_rate_limit() {
+        let app = router_with_limiter(1);
+        let loopback: IpAddr = "::1".parse().unwrap();
+        for i in 0..30 {
+            let resp = app
+                .clone()
+                .oneshot(request_from("/api/health", loopback))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback v6 request #{i} must bypass the limiter, got {:?}",
+                resp.status()
+            );
+        }
+    }
+
+    /// Reverse-proxy guard: a loopback peer carrying `X-Forwarded-For`
+    /// must NOT trigger the bypass. The peer is a same-host proxy
+    /// fronting arbitrary public clients, not a trusted local process,
+    /// so the limiter must still bite.
+    #[tokio::test]
+    async fn loopback_with_xff_does_not_bypass() {
+        let app = router_with_limiter(1);
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut saw_429 = false;
+        for _ in 0..20 {
+            let resp = app
+                .clone()
+                .oneshot(request_from_proxied(
+                    "/api/health",
+                    loopback,
+                    "203.0.113.42",
+                ))
+                .await
+                .unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "loopback peer with X-Forwarded-For must still be rate-limited (proxy scenario)"
+        );
+    }
+
+    /// Missing `ConnectInfo` (mis-wired middleware order) must NOT
+    /// silently fail open through the loopback bypass. The fallback
+    /// is `0.0.0.0`, which is non-loopback, so every such request
+    /// enters the limiter and shares one bucket.
+    #[tokio::test]
+    async fn missing_connect_info_does_not_bypass() {
+        let app = router_with_limiter(1);
+        let mut saw_429 = false;
+        for _ in 0..20 {
+            // No ConnectInfo extension — simulates a mis-configured stack.
             let resp = app
                 .clone()
                 .oneshot(
@@ -280,8 +475,22 @@ mod tests {
         }
         assert!(
             saw_429,
-            "metered /api/health burst must eventually hit 429 under a 1-token/min quota"
+            "missing ConnectInfo must fall back to a non-loopback address and stay metered"
         );
+    }
+
+    #[test]
+    fn test_has_forwarding_header_detects_common_variants() {
+        let mut h = HeaderMap::new();
+        assert!(!has_forwarding_header(&h));
+        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
+        let mut h = HeaderMap::new();
+        h.insert("x-real-ip", "1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
+        let mut h = HeaderMap::new();
+        h.insert("forwarded", "for=1.2.3.4".parse().unwrap());
+        assert!(has_forwarding_header(&h));
     }
 
     #[test]
@@ -290,6 +499,7 @@ mod tests {
         assert_eq!(operation_cost("GET", "/api/tools").get(), 1);
         assert_eq!(operation_cost("POST", "/api/agents/1/message").get(), 30);
         assert_eq!(operation_cost("POST", "/api/agents").get(), 50);
+        assert_eq!(operation_cost("POST", "/api/pairing/complete").get(), 50);
         assert_eq!(operation_cost("POST", "/api/workflows/1/run").get(), 100);
         assert_eq!(operation_cost("GET", "/api/agents/1/session").get(), 5);
         assert_eq!(operation_cost("GET", "/api/skills").get(), 2);
@@ -297,5 +507,11 @@ mod tests {
         assert_eq!(operation_cost("GET", "/api/audit/recent").get(), 5);
         assert_eq!(operation_cost("POST", "/api/skills/install").get(), 10);
         assert_eq!(operation_cost("POST", "/api/migrate").get(), 100);
+        // Dashboard high-frequency reads — kept at cost=1 so a polling
+        // tab can't drain the budget. See #3416.
+        assert_eq!(operation_cost("GET", "/api/dashboard/snapshot").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/approvals/count").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/providers").get(), 1);
+        assert_eq!(operation_cost("GET", "/api/media/providers").get(), 1);
     }
 }

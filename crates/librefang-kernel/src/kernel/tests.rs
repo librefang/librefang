@@ -4470,3 +4470,196 @@ fn approval_display_escapes_quote_in_agent_name() {
 
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// #3326 — BeforePromptBuild section-provider hook integration tests
+// ---------------------------------------------------------------------------
+
+/// Records the `HookContext.data` payloads it observes and contributes a
+/// fixed `DynamicSection`. Used to verify that `send_message_ephemeral`
+/// fires the hook with the correct call_site and user_message before the
+/// prompt is built. See #3326.
+struct RecordingPromptProvider {
+    last_data: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    last_agent_id: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl RecordingPromptProvider {
+    fn new() -> Self {
+        Self {
+            last_data: Arc::new(std::sync::Mutex::new(None)),
+            last_agent_id: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+impl librefang_runtime::hooks::HookHandler for RecordingPromptProvider {
+    fn on_event(&self, _ctx: &librefang_runtime::hooks::HookContext) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn provide_prompt_section(
+        &self,
+        ctx: &librefang_runtime::hooks::HookContext,
+    ) -> Result<Option<librefang_runtime::hooks::DynamicSection>, String> {
+        *self.last_data.lock().unwrap() = Some(ctx.data.clone());
+        *self.last_agent_id.lock().unwrap() = Some(ctx.agent_id.to_string());
+        Ok(Some(librefang_runtime::hooks::DynamicSection {
+            provider: "test-recorder".to_string(),
+            heading: "Test Recorder".to_string(),
+            body: "recorded body".to_string(),
+        }))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn before_prompt_build_hook_fires_for_ephemeral_with_call_site_and_user_message() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "hook-target");
+
+    let recorder = Arc::new(RecordingPromptProvider::new());
+    kernel.hook_registry().register(
+        librefang_types::agent::HookEvent::BeforePromptBuild,
+        recorder.clone(),
+    );
+
+    // The ephemeral path will fail at `resolve_driver` because the test
+    // manifest has no real provider — but the hook fires *before* the driver
+    // is resolved. Both Ok and Err are acceptable here; we only care that
+    // the recorder captured the hook payload.
+    let _ = kernel
+        .send_message_ephemeral(agent_id, "hello from the test")
+        .await;
+
+    let data = recorder
+        .last_data
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("provide_prompt_section must have been called");
+
+    assert_eq!(
+        data["call_site"],
+        serde_json::Value::String("ephemeral".to_string())
+    );
+    assert_eq!(
+        data["user_message"],
+        serde_json::Value::String("hello from the test".to_string()),
+    );
+    assert_eq!(
+        data["phase"],
+        serde_json::Value::String("build".to_string())
+    );
+    assert_eq!(data["is_subagent"], serde_json::Value::Bool(false));
+
+    let recorded_id = recorder
+        .last_agent_id
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("agent_id should be recorded");
+    assert_eq!(recorded_id, agent_id.0.to_string());
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn before_prompt_build_hook_unregistered_event_does_not_fire_provider() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "hook-target");
+
+    let recorder = Arc::new(RecordingPromptProvider::new());
+    // Register on a *different* event — provider must not fire for ephemeral.
+    kernel.hook_registry().register(
+        librefang_types::agent::HookEvent::AgentLoopEnd,
+        recorder.clone(),
+    );
+
+    let _ = kernel.send_message_ephemeral(agent_id, "hello").await;
+
+    assert!(
+        recorder.last_data.lock().unwrap().is_none(),
+        "provide_prompt_section must not fire for handlers registered on a different event"
+    );
+
+    kernel.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Issue #3298 — deterministic prompt ordering for LLM-bound registries.
+//
+// `render_mcp_summary` is the boundary where the MCP server registry crosses
+// into the system prompt. Before #3298 it used a `HashMap<String, Vec<String>>`
+// which iterates non-deterministically, producing byte-different prompts for
+// the same logical input on every process and silently invalidating provider
+// prompt caches. The two tests below pin the contract: the rendered string
+// MUST be byte-identical regardless of input ordering.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_summary_is_byte_identical_across_input_orders() {
+    // Same set of MCP tools, two different insertion orders.
+    let configured = vec![
+        "filesystem".to_string(),
+        "github".to_string(),
+        "weather".to_string(),
+    ];
+
+    let order_a = vec![
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_filesystem_list_directory".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_github_search".to_string(),
+        "mcp_weather_forecast".to_string(),
+    ];
+
+    let order_b = vec![
+        // Reverse order, plus servers interleaved differently.
+        "mcp_weather_forecast".to_string(),
+        "mcp_github_search".to_string(),
+        "mcp_filesystem_read_file".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_filesystem_list_directory".to_string(),
+    ];
+
+    let allowlist: Vec<String> = Vec::new();
+    let summary_a = super::render_mcp_summary(&order_a, &configured, &allowlist);
+    let summary_b = super::render_mcp_summary(&order_b, &configured, &allowlist);
+
+    assert_eq!(
+        summary_a, summary_b,
+        "MCP summary must be byte-identical across input orderings (#3298)"
+    );
+
+    // Sanity-check that the summary is non-trivial and mentions every server
+    // in lexicographic order — `filesystem` before `github` before `weather`.
+    let fs_pos = summary_a.find("- filesystem:").expect("filesystem listed");
+    let gh_pos = summary_a.find("- github:").expect("github listed");
+    let wx_pos = summary_a.find("- weather:").expect("weather listed");
+    assert!(fs_pos < gh_pos && gh_pos < wx_pos);
+}
+
+#[test]
+fn mcp_summary_inner_tool_list_is_sorted() {
+    let configured = vec!["github".to_string()];
+
+    // Connect-order Vec puts `search` before `create_issue` — render must
+    // still emit them alphabetically.
+    let tools = vec![
+        "mcp_github_search".to_string(),
+        "mcp_github_create_issue".to_string(),
+        "mcp_github_close_pr".to_string(),
+    ];
+
+    let allowlist: Vec<String> = Vec::new();
+    let summary = super::render_mcp_summary(&tools, &configured, &allowlist);
+
+    // The inner list joined with ", " must appear in alphabetical order.
+    let close_pos = summary.find("close_pr").expect("tool listed");
+    let create_pos = summary.find("create_issue").expect("tool listed");
+    let search_pos = summary.find("search").expect("tool listed");
+    assert!(
+        close_pos < create_pos && create_pos < search_pos,
+        "Inner tool list must be sorted; got: {summary}"
+    );
+}

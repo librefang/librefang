@@ -1,7 +1,9 @@
 import React, { useEffect, useRef } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { fadeInScale, APPLE_EASE } from "../../lib/motion";
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -57,26 +59,34 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
     return () => window.removeEventListener("keydown", handleKey);
   }, [isOpen, tone]);
 
-  if (!isOpen) return null;
-
   const isDestructive = tone === "destructive";
   const confirmBtnClass = isDestructive
     ? "bg-error text-white hover:bg-error/90 shadow-lg shadow-error/20"
     : "bg-primary text-white hover:bg-primary/90 shadow-lg shadow-brand/20";
 
   return (
-    <div
-      className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4"
-      onClick={onClose}
-    >
-      <div
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-0 sm:p-4"
+          onClick={onClose}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.18, ease: APPLE_EASE }}
+        >
+      <motion.div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-message"
-        className="relative w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl animate-fade-in-scale"
+        className="relative w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        variants={fadeInScale}
+        initial="initial"
+        animate="animate"
+        exit="exit"
       >
         <button
           onClick={onClose}
@@ -117,7 +127,9 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
             {confirmLabel ?? t("common.confirm", { defaultValue: "Confirm" })}
           </button>
         </div>
-      </div>
-    </div>
+      </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 });

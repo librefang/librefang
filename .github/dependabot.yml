@@ -15,3 +15,43 @@ updates:
     open-pull-requests-limit: 3
     labels:
       - "ci"
+
+  # Dashboard (React/pnpm)
+  - package-ecosystem: "npm"
+    directory: "/crates/librefang-api/dashboard"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # CLI npm wrapper package
+  - package-ecosystem: "npm"
+    directory: "/packages/cli-npm"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    ignore:
+      # @librefang/cli-* versions in package.json are "0.0.0" placeholders
+      # replaced by CI at publish time, not real dependencies.
+      - dependency-name: "@librefang/cli-*"
+
+  # JavaScript SDK
+  - package-ecosystem: "npm"
+    directory: "/sdk/javascript"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # Python SDK
+  - package-ecosystem: "pip"
+    directory: "/sdk/python"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"

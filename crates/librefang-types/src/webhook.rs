@@ -225,7 +225,7 @@ mod tests {
             agent: Some("devops-lead".to_string()),
             deliver: true,
             channel: Some("slack-ops".to_string()),
-            model: Some("claude-sonnet-4-20250514".to_string()),
+            model: Some("sonnet".to_string()),
             timeout_secs: 300,
         };
         assert!(p.validate().is_ok());

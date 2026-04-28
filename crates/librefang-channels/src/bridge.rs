@@ -773,6 +773,7 @@ fn flush_debounced(
     sanitizer: &Arc<InputSanitizer>,
     semaphore: &Arc<tokio::sync::Semaphore>,
     journal: &Option<crate::message_journal::MessageJournal>,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let (merged_msg, blocks) = debouncer.drain(key, buffers)?;
 
@@ -783,6 +784,7 @@ fn flush_debounced(
     let sanitizer = Arc::clone(sanitizer);
     let journal = journal.clone();
     let sem = semaphore.clone();
+    let thread_ownership = Arc::clone(thread_ownership);
 
     let join_handle = tokio::spawn(async move {
         let _permit = match sem.acquire().await {
@@ -877,6 +879,7 @@ fn flush_debounced(
                 output_format,
                 overrides.as_ref(),
                 journal.as_ref(),
+                &thread_ownership,
             )
             .await;
         } else {
@@ -888,6 +891,7 @@ fn flush_debounced(
                 &rate_limiter,
                 &sanitizer,
                 journal.as_ref(),
+                &thread_ownership,
             )
             .await;
         }
@@ -909,6 +913,9 @@ pub struct BridgeManager {
     webhook_routes: Vec<(String, axum::Router)>,
     /// Optional message journal for crash recovery.
     journal: Option<crate::message_journal::MessageJournal>,
+    /// Single-process thread-ownership claims. Suppresses multi-agent
+    /// duplicate replies in shared group threads (#3334).
+    thread_ownership: Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 }
 
 impl BridgeManager {
@@ -926,6 +933,7 @@ impl BridgeManager {
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
+            thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
         }
     }
 
@@ -947,6 +955,7 @@ impl BridgeManager {
             adapters: Vec::new(),
             webhook_routes: Vec::new(),
             journal: None,
+            thread_ownership: Arc::new(crate::thread_ownership::ThreadOwnershipRegistry::new()),
         }
     }
 
@@ -1039,6 +1048,7 @@ impl BridgeManager {
         let sanitizer = self.sanitizer.clone();
         let adapter_clone = adapter.clone();
         let journal = self.journal.clone();
+        let thread_ownership = Arc::clone(&self.thread_ownership);
         let mut shutdown = self.shutdown_rx.clone();
 
         let ct_str = channel_type_str(&adapter.channel_type()).to_string();
@@ -1074,6 +1084,7 @@ impl BridgeManager {
                                     let sanitizer = sanitizer.clone();
                                     let journal = journal.clone();
                                     let sem = semaphore.clone();
+                                    let thread_ownership = Arc::clone(&thread_ownership);
                                     tokio::spawn(async move {
                                         let _permit = match sem.acquire().await {
                                             Ok(p) => p,
@@ -1087,6 +1098,7 @@ impl BridgeManager {
                                             &rate_limiter,
                                             &sanitizer,
                                             journal.as_ref(),
+                                            &thread_ownership,
                                         ).await;
                                     });
                                 }
@@ -1145,7 +1157,7 @@ impl BridgeManager {
                                     let keys: Vec<String> = buffers.keys().cloned().collect();
                                     let mut handles = Vec::new();
                                     for key in keys {
-                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal) {
+                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership) {
                                             handles.push(handle);
                                         }
                                     }
@@ -1167,14 +1179,14 @@ impl BridgeManager {
                             debouncer.on_typing(&sender_key, event.is_typing, &mut buffers);
                         }
                         Some(key) = flush_rx.recv() => {
-                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal);
+                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership);
                         }
                         _ = shutdown.changed() => {
                             if *shutdown.borrow() {
                                 let keys: Vec<String> = buffers.keys().cloned().collect();
                                 let mut handles = Vec::new();
                                 for key in keys {
-                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal) {
+                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore, &journal, &thread_ownership) {
                                         handles.push(handle);
                                     }
                                 }
@@ -2176,6 +2188,7 @@ async fn resolve_or_fallback(
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
 /// Input sanitization runs early — before any command parsing or agent dispatch.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_message(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
@@ -2184,6 +2197,7 @@ async fn dispatch_message(
     rate_limiter: &ChannelRateLimiter,
     sanitizer: &InputSanitizer,
     journal: Option<&crate::message_journal::MessageJournal>,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) {
     let ct_str = channel_type_str(&message.channel);
 
@@ -2495,6 +2509,7 @@ async fn dispatch_message(
                 output_format,
                 overrides.as_ref(),
                 journal,
+                thread_ownership,
             )
             .await;
             return;
@@ -2527,6 +2542,7 @@ async fn dispatch_message(
                 output_format,
                 overrides.as_ref(),
                 journal,
+                thread_ownership,
             )
             .await;
             return;
@@ -2578,6 +2594,7 @@ async fn dispatch_message(
                 output_format,
                 overrides.as_ref(),
                 journal,
+                thread_ownership,
             )
             .await;
             return;
@@ -2637,6 +2654,7 @@ async fn dispatch_message(
                 output_format,
                 overrides.as_ref(),
                 journal,
+                thread_ownership,
             )
             .await;
             return;
@@ -2692,6 +2710,7 @@ async fn dispatch_message(
                 output_format,
                 overrides.as_ref(),
                 journal,
+                thread_ownership,
             )
             .await;
             return;
@@ -3143,6 +3162,40 @@ async fn dispatch_message(
             return;
         }
     };
+
+    // Thread-ownership gate (#3334). Only meaningful for group threads with
+    // a platform thread id; DMs and untreaded channels bypass entirely.
+    // An explicit @-mention re-claims the thread for the new agent.
+    if message.is_group
+        && overrides
+            .as_ref()
+            .map(|o| o.thread_ownership_enabled)
+            .unwrap_or(true)
+    {
+        if let Some(thread_str) = message.thread_id.as_deref() {
+            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
+                let was_mentioned = message
+                    .metadata
+                    .get("was_mentioned")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match thread_ownership.decide(key, agent_id, was_mentioned) {
+                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
+                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
+                        debug!(
+                            channel = ct_str,
+                            thread_id = thread_str,
+                            candidate = %agent_id,
+                            holder = %holder,
+                            "thread_ownership: suppressing dispatch — another agent owns this thread"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC: authorize the user before forwarding to agent
@@ -4149,6 +4202,7 @@ async fn dispatch_with_blocks(
     output_format: OutputFormat,
     overrides: Option<&ChannelOverrides>,
     journal: Option<&crate::message_journal::MessageJournal>,
+    thread_ownership: &Arc<crate::thread_ownership::ThreadOwnershipRegistry>,
 ) {
     let agent_id = match resolve_or_fallback(message, handle, router).await {
         Some(id) => id,
@@ -4165,6 +4219,39 @@ async fn dispatch_with_blocks(
             return;
         }
     };
+
+    // Thread-ownership gate (#3334). Mirrors the text-path check in
+    // `dispatch_message`. Multimodal messages may not include a
+    // platform-level @-mention marker; treat absence as "no override".
+    if message.is_group
+        && overrides
+            .map(|o| o.thread_ownership_enabled)
+            .unwrap_or(true)
+    {
+        if let Some(thread_str) = message.thread_id.as_deref() {
+            if let Some(key) = crate::thread_ownership::ThreadKey::new(ct_str, thread_str) {
+                let was_mentioned = message
+                    .metadata
+                    .get("was_mentioned")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match thread_ownership.decide(key, agent_id, was_mentioned) {
+                    crate::thread_ownership::DispatchDecision::Allow { .. } => {}
+                    crate::thread_ownership::DispatchDecision::Suppress { holder } => {
+                        debug!(
+                            channel = ct_str,
+                            thread_id = thread_str,
+                            candidate = %agent_id,
+                            holder = %holder,
+                            "thread_ownership: suppressing block dispatch — another agent owns this thread"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     let channel_key = channel_type_str(&message.channel).to_string();
 
     // RBAC check
@@ -4714,6 +4801,157 @@ mod tests {
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
         }
+    }
+
+    /// Helper: replicate the metadata read + key build the bridge does, then
+    /// ask the registry. Exercises the same logic `dispatch_message` runs
+    /// without standing up the full channel handle / adapter mocks.
+    fn bridge_thread_ownership_decision(
+        registry: &crate::thread_ownership::ThreadOwnershipRegistry,
+        message: &ChannelMessage,
+        ct_str: &str,
+        candidate: AgentId,
+        thread_ownership_enabled: bool,
+    ) -> Option<crate::thread_ownership::DispatchDecision> {
+        if !message.is_group || !thread_ownership_enabled {
+            return None;
+        }
+        let thread_str = message.thread_id.as_deref()?;
+        let key = crate::thread_ownership::ThreadKey::new(ct_str, thread_str)?;
+        let was_mentioned = message
+            .metadata
+            .get("was_mentioned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Some(registry.decide(key, candidate, was_mentioned))
+    }
+
+    fn group_thread_message(thread: &str, was_mentioned: bool) -> ChannelMessage {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "was_mentioned".to_string(),
+            serde_json::json!(was_mentioned),
+        );
+        ChannelMessage {
+            channel: ChannelType::Slack,
+            platform_message_id: "1".into(),
+            sender: ChannelUser {
+                platform_id: "u1".into(),
+                display_name: "user".into(),
+                librefang_user: None,
+            },
+            content: ChannelContent::Text("hi".into()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: Some(thread.into()),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn dm_messages_bypass_thread_ownership_check() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let mut msg = group_thread_message("T1", false);
+        msg.is_group = false; // DM
+        let alice = AgentId::new();
+        assert!(
+            bridge_thread_ownership_decision(&registry, &msg, "slack", alice, true).is_none(),
+            "DM messages must skip the ownership check entirely"
+        );
+    }
+
+    #[test]
+    fn group_message_without_thread_id_bypasses_check() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let mut msg = group_thread_message("T1", false);
+        msg.thread_id = None; // group but untreaded
+        let alice = AgentId::new();
+        assert!(
+            bridge_thread_ownership_decision(&registry, &msg, "slack", alice, true).is_none(),
+            "Untreaded group messages must skip the registry"
+        );
+    }
+
+    #[test]
+    fn group_thread_first_dispatch_allows_and_claims() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let msg = group_thread_message("T1", false);
+        let alice = AgentId::new();
+        let decision =
+            bridge_thread_ownership_decision(&registry, &msg, "slack", alice, true).unwrap();
+        match decision {
+            crate::thread_ownership::DispatchDecision::Allow { agent_id } => {
+                assert_eq!(agent_id, alice);
+            }
+            other => panic!("expected Allow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn group_thread_second_agent_no_mention_is_suppressed() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let msg = group_thread_message("T1", false);
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let _ = bridge_thread_ownership_decision(&registry, &msg, "slack", alice, true);
+        let decision =
+            bridge_thread_ownership_decision(&registry, &msg, "slack", bob, true).unwrap();
+        assert!(matches!(
+            decision,
+            crate::thread_ownership::DispatchDecision::Suppress { .. }
+        ));
+    }
+
+    #[test]
+    fn group_thread_at_mention_lets_second_agent_take_over() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        let _ = bridge_thread_ownership_decision(
+            &registry,
+            &group_thread_message("T1", false),
+            "slack",
+            alice,
+            true,
+        );
+        let mention_msg = group_thread_message("T1", true);
+        let decision =
+            bridge_thread_ownership_decision(&registry, &mention_msg, "slack", bob, true).unwrap();
+        match decision {
+            crate::thread_ownership::DispatchDecision::Allow { agent_id } => {
+                assert_eq!(agent_id, bob, "@-mention must re-claim for the new agent");
+            }
+            other => panic!("expected Allow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn channel_override_thread_ownership_disabled_bypasses_check() {
+        let registry = crate::thread_ownership::ThreadOwnershipRegistry::new();
+        let alice = AgentId::new();
+        let bob = AgentId::new();
+        // First call with the feature enabled claims for alice.
+        let _ = bridge_thread_ownership_decision(
+            &registry,
+            &group_thread_message("T1", false),
+            "slack",
+            alice,
+            true,
+        );
+        // Now bob arrives with the per-channel feature disabled — the bridge
+        // skips the registry entirely.
+        let decision = bridge_thread_ownership_decision(
+            &registry,
+            &group_thread_message("T1", false),
+            "slack",
+            bob,
+            false,
+        );
+        assert!(
+            decision.is_none(),
+            "thread_ownership_enabled = false must bypass the registry"
+        );
     }
 
     #[test]

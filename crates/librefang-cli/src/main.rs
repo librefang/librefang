@@ -5600,19 +5600,51 @@ fn cmd_doctor(json: bool, repair: bool) {
     if !json {
         println!("\n  LLM Providers:");
     }
-    let provider_keys = [
-        ("GROQ_API_KEY", "Groq", "groq"),
-        ("OPENROUTER_API_KEY", "OpenRouter", "openrouter"),
-        ("ANTHROPIC_API_KEY", "Anthropic", "anthropic"),
-        ("OPENAI_API_KEY", "OpenAI", "openai"),
-        ("DEEPSEEK_API_KEY", "DeepSeek", "deepseek"),
-        ("GEMINI_API_KEY", "Gemini", "gemini"),
-        ("GOOGLE_API_KEY", "Google", "google"),
-        ("TOGETHER_API_KEY", "Together", "together"),
-        ("MISTRAL_API_KEY", "Mistral", "mistral"),
-        ("FIREWORKS_API_KEY", "Fireworks", "fireworks"),
-        ("BYTEPLUS_API_KEY", "BytePlus", "byteplus"),
-    ];
+    // Pretty display names for known provider IDs. Anything not listed
+    // here falls back to a Title-Case derivation of the raw provider id
+    // (e.g. `xiaomi` → `Xiaomi`). Adding a new provider to
+    // `PROVIDER_REGISTRY` automatically picks up the fallback so the
+    // check loop never silently misses a key — only the cosmetic name
+    // needs editing here, not the list of providers checked.
+    fn display_name(provider_id: &str) -> String {
+        match provider_id {
+            "openai" => "OpenAI".to_string(),
+            "openrouter" => "OpenRouter".to_string(),
+            "deepseek" => "DeepSeek".to_string(),
+            "deepinfra" => "DeepInfra".to_string(),
+            "byteplus" => "BytePlus".to_string(),
+            "azure-openai" => "Azure OpenAI".to_string(),
+            "github-copilot" => "GitHub Copilot".to_string(),
+            "huggingface" => "Hugging Face".to_string(),
+            "openai-codex" => "OpenAI Codex".to_string(),
+            "claude-code" => "Claude Code".to_string(),
+            "vertex-ai" => "Vertex AI".to_string(),
+            "nvidia-nim" => "NVIDIA NIM".to_string(),
+            "z.ai" | "zai" => "Z.ai".to_string(),
+            "kimi-coding" | "kimi_coding" => "Kimi Coding".to_string(),
+            "alibaba-coding-plan" => "Alibaba Coding Plan".to_string(),
+            other => {
+                // Title-case fallback for unlisted providers so `xiaomi` →
+                // `Xiaomi` instead of leaking the raw lowercase id.
+                let mut chars = other.chars();
+                match chars.next() {
+                    Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        }
+    }
+
+    // Drive doctor off PROVIDER_REGISTRY so adding a provider to the
+    // driver layer never requires a parallel edit here. `GOOGLE_API_KEY`
+    // (gemini's alt env) and similar aliases come through automatically.
+    // This subsumes the previous hardcoded array (including the byteplus
+    // entry from #3274 — now provided automatically by the registry).
+    let provider_specs = librefang_runtime::drivers::cloud_provider_key_specs();
+    let provider_keys: Vec<(&str, String, &str)> = provider_specs
+        .iter()
+        .map(|(env_var, provider_id)| (*env_var, display_name(provider_id), *provider_id))
+        .collect();
 
     let mut any_key_set = false;
     for (env_var, name, provider_id) in &provider_keys {

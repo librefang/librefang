@@ -2,6 +2,8 @@ import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import { createRegistryContent } from "../api";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
@@ -17,6 +19,7 @@ import { Badge, type BadgeVariant } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
@@ -134,7 +137,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
         <select
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
-          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
         >
           <option value="">{t("providers.auto_select_model")}</option>
           {models.map(m => (
@@ -147,7 +150,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
           value={selectedModel}
           onChange={e => setSelectedModel(e.target.value)}
           placeholder={t("providers.model_name_placeholder")}
-          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20"
+          className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20"
         />
       )}
       <Button
@@ -308,16 +311,16 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
+      <Card hover padding="sm" onClick={() => onViewDetails(p)} className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
         <div className="flex items-center gap-3 w-full sm:w-auto">
           <button
             onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
-            className="shrink-0 text-text-dim hover:text-primary transition-colors"
+            className="shrink-0 text-text-dim hover:text-brand transition-colors"
           >
-            {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
+            {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
           </button>
 
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
             {getProviderIcon(p.id)}
           </div>
 
@@ -372,19 +375,19 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           {isConfigured ? (
             <>
               {!isDefault && (
-                <Button variant="ghost" size="sm" onClick={() => onSetDefault(p.id)} leftIcon={<Star className="w-3 h-3" />}>
+                <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onSetDefault(p.id); }} leftIcon={<Star className="w-3 h-3" />}>
                   <span className="hidden sm:inline">{t("providers.set_as_default")}</span>
                 </Button>
               )}
-              <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Pencil className="w-3 h-3" />}>
                 <span className="hidden sm:inline">{t("common.edit")}</span>
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onDelete(p); }} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
                 <span className="hidden sm:inline text-error">{p.is_custom ? t("common.delete") : t("providers.remove_key")}</span>
               </Button>
               <Button
                 variant="secondary" size="sm"
-                onClick={() => onTest(p.id)}
+                onClick={(e) => { e.stopPropagation(); onTest(p.id); }}
                 disabled={pendingId === p.id}
                 leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                 className="whitespace-nowrap"
@@ -393,11 +396,11 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Key className="w-3 h-3" />}>
+            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Key className="w-3 h-3" />}>
               <span className="hidden sm:inline">{t("providers.config")}</span>
             </Button>
           )}
-          <Button variant="ghost" size="sm" onClick={() => onViewDetails(p)}>
+          <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onViewDetails(p); }}>
             <ChevronRight className="w-4 h-4" />
           </Button>
         </div>
@@ -407,7 +410,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
 
   // Grid view
   return (
-    <Card hover padding="none" className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-primary" : ""}`}>
+    <Card hover padding="none" onClick={() => onViewDetails(p)} className={`relative flex flex-col overflow-hidden group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
       {isCli && (
         <div className="absolute top-1.5 left-0 z-10 overflow-hidden w-20 h-20 pointer-events-none">
           <div className="absolute top-[12px] left-[-18px] w-[90px] text-center text-[9px] font-black uppercase tracking-wider text-text-dim bg-surface/80 border-y border-border-subtle rotate-[-45deg] py-px">
@@ -422,15 +425,15 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
           <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
-              className="shrink-0 text-text-dim hover:text-primary transition-colors"
+              className="shrink-0 text-text-dim hover:text-brand transition-colors"
             >
-              {isSelected ? <CheckSquare className="w-5 h-5 text-primary" /> : <Square className="w-5 h-5" />}
+              {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
             </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-primary/20"}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${isConfigured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
               {getProviderIcon(p.id)}
             </div>
             <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-primary"}`}>{p.display_name || p.id}</h2>
+              <h2 className={`text-base font-black truncate transition-colors ${isConfigured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{p.display_name || p.id}</h2>
               <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{p.id}</p>
             </div>
           </div>
@@ -447,7 +450,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
             <div className="flex items-center gap-1.5 mb-1">
-              <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-primary"}`} />
+              <Zap className={`w-3 h-3 ${isConfigured ? "text-success" : "text-brand"}`} />
               <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("providers.models")}</p>
             </div>
             <p className="text-xl font-black text-text-main">{p.model_count ?? 0}</p>
@@ -533,7 +536,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               <Star className="w-3 h-3 mr-1 inline" />{t("providers.is_default")}
             </Badge>
           ) : isConfigured ? (
-            <button onClick={() => onSetDefault(p.id)} className="inline-flex items-center gap-1 text-[10px] font-bold text-primary/70 hover:text-primary cursor-pointer transition-colors">
+            <button onClick={(e) => { e.stopPropagation(); onSetDefault(p.id); }} className="inline-flex items-center gap-1 text-[10px] font-bold text-brand/70 hover:text-brand cursor-pointer transition-colors">
               <Star className="w-3 h-3" />{t("providers.set_as_default")}
             </button>
           ) : null}
@@ -543,15 +546,15 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
         <div className="flex gap-2 mt-auto">
           {isConfigured ? (
             <>
-              <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Pencil className="w-3 h-3" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Pencil className="w-3 h-3" />}>
                 {t("common.edit")}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDelete(p)} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
+              <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onDelete(p); }} leftIcon={<Trash2 className="w-3 h-3 text-error" />}>
                 {p.is_custom ? t("common.delete") : t("providers.remove_key")}
               </Button>
               <Button
                 variant="secondary" size="sm"
-                onClick={() => onTest(p.id)}
+                onClick={(e) => { e.stopPropagation(); onTest(p.id); }}
                 disabled={pendingId === p.id}
                 leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                 className="flex-1 whitespace-nowrap"
@@ -560,7 +563,7 @@ function ProviderCard({ provider: p, isSelected, isDefault, pendingId, viewMode,
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" onClick={() => onConfigure(p)} leftIcon={<Key className="w-3 h-3" />} className="flex-1 whitespace-nowrap">
+            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); onConfigure(p); }} leftIcon={<Key className="w-3 h-3" />} className="flex-1 whitespace-nowrap">
               {t("providers.config")}
             </Button>
           )}
@@ -586,11 +589,11 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   const models = modelsQuery.data?.models ?? [];
 
   return (
-    <Modal isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg" variant="drawer-right">
+    <DrawerPanel isOpen onClose={onClose} title={provider.display_name || provider.id} size="lg">
       <div className="p-6 space-y-4">
         {/* Header info */}
         <div className="flex items-center gap-3">
-          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${isConfigured ? "bg-success/10 border border-success/20" : "bg-primary/10 border border-primary/20"}`}>
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
             {getProviderIcon(provider.id)}
           </div>
           <div className="flex-1">
@@ -697,7 +700,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -881,7 +884,7 @@ function CreateProviderWizard({
             <button key={i} className="flex items-center gap-1 flex-1 group"
               onClick={() => { if (i < step) setStep(i); }} disabled={i > step}>
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors ${
-                i < step ? "bg-success text-white cursor-pointer" : i === step ? "bg-primary text-white" : "bg-main text-text-dim"
+                i < step ? "bg-success text-white cursor-pointer" : i === step ? "bg-brand text-white" : "bg-main text-text-dim"
               }`}>
                 {i < step ? <Check className="w-3 h-3" /> : i + 1}
               </div>
@@ -941,7 +944,7 @@ function CreateProviderWizard({
               <label className="flex items-center gap-3 cursor-pointer">
                 <button type="button" role="checkbox" aria-checked={keyRequired}
                   onClick={() => { setKeyRequired(!keyRequired); setDerivedOverridden(true); }}
-                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ${keyRequired ? "bg-primary" : "bg-main border border-border-subtle"}`}>
+                  className={`relative w-10 h-5 rounded-full transition-colors duration-200 shrink-0 ${keyRequired ? "bg-brand" : "bg-main border border-border-subtle"}`}>
                   <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${keyRequired ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
                 <span className="text-xs font-bold text-text-main">{t("providers.wizard_key_required_label")}</span>
@@ -982,7 +985,7 @@ function CreateProviderWizard({
               </div>
             ))}
             <button type="button" onClick={() => setModels(prev => [...prev, { ...EMPTY_MODEL }])}
-              className="w-full py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-primary hover:border-primary transition-colors flex items-center justify-center gap-1.5">
+              className="w-full py-2 rounded-xl border border-dashed border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:border-brand transition-colors flex items-center justify-center gap-1.5">
               <Plus className="w-3.5 h-3.5" />
               {t("schema_form.add_item")}
             </button>
@@ -1259,10 +1262,10 @@ export function ProvidersPage() {
             <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>{configuredCount}</span>
           </button>
           <button onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-primary shadow-sm" : "text-text-dim hover:text-text-main"}`}>
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"}`}>
             <XCircle className="w-4 h-4" />
             {t("providers.unconfigured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-primary/20 text-primary" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>{unconfiguredCount}</span>
           </button>
         </div>
 
@@ -1278,6 +1281,8 @@ export function ProvidersPage() {
         )}
       </div>
 
+      <AnimatePresence mode="wait">
+      <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
@@ -1293,7 +1298,7 @@ export function ProvidersPage() {
         <>
           <div className="flex items-center gap-2">
             <button onClick={handleSelectAll} className="flex items-center gap-2 text-xs font-bold text-text-dim hover:text-text-main transition-colors">
-              {allSelected ? <CheckSquare className="w-4 h-4 text-primary" /> : <Square className="w-4 h-4" />}
+              {allSelected ? <CheckSquare className="w-4 h-4 text-brand" /> : <Square className="w-4 h-4" />}
               {t("providers.select_all")}
             </button>
             {(search || filterStatus !== "all") && (
@@ -1321,6 +1326,8 @@ export function ProvidersPage() {
           </div>
         </>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Details Modal */}
       {detailsProvider && (
@@ -1334,11 +1341,11 @@ export function ProvidersPage() {
       )}
 
       {/* Config Modal */}
-      <Modal isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={!!config.provider} onClose={config.close} title={t("providers.configure_provider")} size="md">
         {config.provider && (
           <div className="p-5 space-y-4">
             <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
-              <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
                 {getProviderIcon(config.provider.id)}
               </div>
               <div>
@@ -1355,7 +1362,7 @@ export function ProvidersPage() {
                 <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
                 <input type="password" value={config.keyInput} onChange={e => config.setKeyInput(e.target.value)}
                   placeholder={config.hasStoredKey ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
-                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               </div>
             )}
 
@@ -1363,7 +1370,7 @@ export function ProvidersPage() {
               <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input type="text" value={config.urlInput} onChange={e => config.setUrlInput(e.target.value)}
                 placeholder="https://api.example.com/v1"
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
               <p className="mt-1 text-[10px] text-text-dim/60 leading-snug">
                 {t("providers.base_url_hint", {
                   defaultValue:
@@ -1376,7 +1383,7 @@ export function ProvidersPage() {
               <label className="text-[10px] font-bold text-text-dim uppercase">{t("providers.proxy_url")} <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
               <input type="text" value={config.proxyInput} onChange={e => config.setProxyInput(e.target.value)}
                 placeholder={t("providers.proxy_url_placeholder")}
-                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-primary focus:ring-1 focus:ring-primary/20" />
+                className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
             </div>
 
             {config.error && (
@@ -1421,7 +1428,7 @@ export function ProvidersPage() {
             )}
           </div>
         )}
-      </Modal>
+      </DrawerPanel>
 
       {/* Delete Confirmation Modal */}
       <Modal isOpen={!!deleteConfirmProvider} onClose={() => setDeleteConfirmProvider(null)}
@@ -1454,7 +1461,7 @@ export function ProvidersPage() {
       </Modal>
 
       {/* Create Provider Wizard */}
-      <Modal isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton variant="panel-right">
+      <DrawerPanel isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
         <CreateProviderWizard
           onSubmit={async (values) => {
             await createRegistryContent("provider", values);
@@ -1464,7 +1471,7 @@ export function ProvidersPage() {
           }}
           onCancel={() => setShowCreateForm(false)}
         />
-      </Modal>
+      </DrawerPanel>
     </div>
   );
 }

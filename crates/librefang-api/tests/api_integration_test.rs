@@ -510,7 +510,7 @@ async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
               { id: "main", name: "Main Agent" }
             ],
             defaults: {
-              model: "anthropic/claude-sonnet-4-20250514"
+              model: "anthropic/some-model"
             }
           }
         }"#,

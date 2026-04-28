@@ -14,6 +14,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { StaggerList } from "../components/ui/StaggerList";
 
 export function SessionsPage() {
   const { t } = useTranslation();
@@ -125,13 +126,13 @@ export function SessionsPage() {
           description={t("sessions.empty_desc")}
         />
       ) : (
-        <div className="space-y-2 stagger-children">
+        <StaggerList className="space-y-2">
           {sessions.map(s => {
             const agent = agentMap.get(s.agent_id || "");
             return (
               <div key={s.session_id}
-                className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
-                  s.active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-primary/30 hover:-translate-y-0.5"
+                className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow ${
+                  s.active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30 hover:-translate-y-0.5"
                 }`}>
                 {/* Agent avatar */}
                 <div className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl flex items-center justify-center text-base sm:text-lg font-bold shrink-0 ${
@@ -162,7 +163,7 @@ export function SessionsPage() {
                           value={labelValue}
                           onChange={e => setLabelValue(e.target.value)}
                           onKeyDown={e => { if (e.key === "Enter") saveLabel(s.session_id, labelValue, s.agent_id ?? undefined); if (e.key === "Escape") setEditingLabelId(null); }}
-                          className="px-1.5 py-0.5 rounded border border-primary bg-main text-[10px] w-24 outline-none"
+                          className="px-1.5 py-0.5 rounded border border-brand bg-main text-[10px] w-24 outline-none"
                           placeholder={t("sessions.label_placeholder", { defaultValue: "Label..." })}
                         />
                         <button onClick={() => saveLabel(s.session_id, labelValue, s.agent_id ?? undefined)} className="text-success"><Check className="w-3 h-3" /></button>
@@ -171,11 +172,11 @@ export function SessionsPage() {
                     ) : (
                       <button
                         onClick={e => { e.stopPropagation(); setEditingLabelId(s.session_id); setLabelValue(s.label || ""); }}
-                        className="flex items-center gap-0.5 hover:text-primary transition-colors"
+                        className="flex items-center gap-0.5 hover:text-brand transition-colors"
                         title={t("sessions.set_label", { defaultValue: "Set label" })}
                       >
                         <Tag className="w-3 h-3" />
-                        {s.label ? <span className="text-primary font-bold">{s.label}</span> : <span className="italic">{t("sessions.no_label", { defaultValue: "add label" })}</span>}
+                        {s.label ? <span className="text-brand font-bold">{s.label}</span> : <span className="italic">{t("sessions.no_label", { defaultValue: "add label" })}</span>}
                       </button>
                     )}
                   </div>
@@ -203,7 +204,7 @@ export function SessionsPage() {
               </div>
             );
           })}
-        </div>
+        </StaggerList>
       )}
     </div>
   );

@@ -86,6 +86,12 @@ impl DeviceBackend for SurrealDeviceStore {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
+                    let api_key_hash = row
+                        .get("api_key_hash")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
                     Some(serde_json::json!({
                         "device_id": device_id,
                         "display_name": display_name,
@@ -93,12 +99,14 @@ impl DeviceBackend for SurrealDeviceStore {
                         "paired_at": paired_at,
                         "last_seen": last_seen,
                         "push_token": push_token,
+                        "api_key_hash": api_key_hash,
                     }))
                 })
                 .collect())
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn save_paired_device(
         &self,
         device_id: &str,
@@ -107,6 +115,7 @@ impl DeviceBackend for SurrealDeviceStore {
         paired_at: &str,
         last_seen: &str,
         push_token: Option<&str>,
+        api_key_hash: &str,
     ) -> LibreFangResult<()> {
         let row = serde_json::json!({
             "device_id": device_id,
@@ -115,6 +124,7 @@ impl DeviceBackend for SurrealDeviceStore {
             "paired_at": paired_at,
             "last_seen": last_seen,
             "push_token": push_token,
+            "api_key_hash": api_key_hash,
         });
         // Use device_id as record ID for idempotent upserts
         let safe_id = device_id.replace([':', '/'], "_");

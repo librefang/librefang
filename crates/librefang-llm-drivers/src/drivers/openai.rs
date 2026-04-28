@@ -121,6 +121,44 @@ impl OpenAIDriver {
         self.base_url.contains("moonshot")
     }
 
+    /// Stable provider tag used by [`crate::shared_rate_guard`].
+    ///
+    /// Derived from the host of `base_url` so that `api.openai.com`,
+    /// `api.groq.com`, `nous-portal.example` each get their own lockout
+    /// file. Falls back to `"openai-compat"` when the URL cannot be parsed.
+    fn shared_guard_provider(&self) -> &'static str {
+        // We map known hosts to short stable strings. Unknown hosts fall
+        // back to "openai-compat" — they still get isolated by key-id-hash
+        // even when the provider tag collides.
+        let url = self.base_url.to_ascii_lowercase();
+        if url.contains("openai.com") {
+            "openai"
+        } else if url.contains("groq.com") {
+            "groq"
+        } else if url.contains("openrouter") {
+            "openrouter"
+        } else if url.contains("nous") {
+            "nous"
+        } else if url.contains("moonshot") {
+            "moonshot"
+        } else if url.contains("deepseek") {
+            "deepseek"
+        } else if url.contains("dashscope") {
+            "dashscope"
+        } else if url.contains("byteplus") {
+            "byteplus"
+        } else if url.contains("azure") {
+            "azure-openai"
+        } else {
+            "openai-compat"
+        }
+    }
+
+    /// 16-hex key identifier for [`crate::shared_rate_guard`].
+    fn shared_guard_key_id(&self) -> String {
+        crate::shared_rate_guard::key_id_hash(self.api_key.as_str())
+    }
+
     /// Upload a file to Moonshot's `/v1/files` endpoint and return the file ID.
     async fn upload_file_to_moonshot(
         &self,
@@ -858,6 +896,12 @@ impl LlmDriver for OpenAIDriver {
         }
         let mut oai_request = self.build_request(&request)?;
 
+        // Cross-process / cross-restart rate-limit guard. A previously
+        // recorded 429 short-circuits before any HTTP work.
+        let guard_provider = self.shared_guard_provider();
+        let guard_key_id = self.shared_guard_key_id();
+        crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "OpenAI")?;
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = match &self.url_query {
@@ -904,14 +948,16 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
+                // Persist the lockout (honors RPH > RPM > retry-after >
+                // 5min default precedence) and reuse the parsed
+                // retry-after for the in-process backoff.
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
+                    guard_provider,
+                    &guard_key_id,
+                    resp.headers(),
+                    &format!("HTTP 429 from {}", self.base_url),
+                );
                 if attempt < max_retries {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO);
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,
@@ -1236,6 +1282,15 @@ impl LlmDriver for OpenAIDriver {
         oai_request.stream = true;
         oai_request.stream_options = Some(serde_json::json!({"include_usage": true}));
 
+        // Cross-process / cross-restart rate-limit guard (streaming path).
+        let guard_provider = self.shared_guard_provider();
+        let guard_key_id = self.shared_guard_key_id();
+        crate::shared_rate_guard::pre_request_check(
+            guard_provider,
+            &guard_key_id,
+            "OpenAI streaming",
+        )?;
+
         // Retry loop for the initial HTTP request
         let max_retries = 3;
         for attempt in 0..=max_retries {
@@ -1283,14 +1338,13 @@ impl LlmDriver for OpenAIDriver {
 
             let status = resp.status().as_u16();
             if status == 429 {
+                let retry_after = crate::shared_rate_guard::record_429_from_headers(
+                    guard_provider,
+                    &guard_key_id,
+                    resp.headers(),
+                    &format!("HTTP 429 (stream) from {}", self.base_url),
+                );
                 if attempt < max_retries {
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO);
                     let delay = standard_retry_delay(attempt + 1, retry_after);
                     warn!(
                         status,
@@ -2324,7 +2378,7 @@ mod tests {
         assert!(!rejects_temperature("gpt-4o-mini"));
         assert!(!rejects_temperature("gpt-5"));
         assert!(!rejects_temperature("gpt-5-2025-06-01"));
-        assert!(!rejects_temperature("claude-sonnet-4-20250514"));
+        assert!(!rejects_temperature("plain-model-placeholder"));
         assert!(!rejects_temperature("llama-3.3-70b-versatile"));
         assert!(!rejects_temperature("deepseek-chat"));
     }

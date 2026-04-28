@@ -11,6 +11,7 @@ schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-uar-spec = { path = "../librefang-uar-spec" }
 librefang-runtime = { path = "../librefang-runtime" }
+librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-memory = { path = "../librefang-memory" }
 librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-wire = { path = "../librefang-wire" }
@@ -53,6 +54,8 @@ jsonwebtoken = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 argon2 = "0.5"
+hex = { workspace = true }
+rand = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { version = "5", features = ["axum_extras"] }
 include_dir = "0.7"
@@ -139,6 +142,22 @@ channel-wecom = ["librefang-channels/channel-wecom"]
 all-channels = [
     "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
     "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
+    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
+    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
+    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
+    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
+    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+]
+
+# All channels except email — used for Android targets where rustls-connector's
+# rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
+all-channels-no-email = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-webhook", "channel-whatsapp", "channel-signal",
     "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
     "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
     "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",

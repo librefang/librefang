@@ -23,12 +23,18 @@ export function Card({
   children,
   ...props
 }: CardProps) {
+  // `hover` controls the visual hover effect (border tint + shadow lift).
+  // The pointer cursor is gated on actual clickability so we don't
+  // mislead users into clicking cards that have nothing wired up
+  // (e.g. FangHub skill cards in browse view, plain stat cards).
+  const isClickable = typeof props.onClick === "function";
   return (
     <div
       className={`
         rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm
         ${paddingStyles[padding]}
-        ${hover ? "hover:border-primary/30 hover:shadow-md cursor-pointer transition-shadow" : ""}
+        ${hover ? "hover:border-brand/30 hover:shadow-md transition-shadow" : ""}
+        ${isClickable ? "cursor-pointer" : ""}
         ${glow ? "card-glow" : ""}
         ${className}
       `}

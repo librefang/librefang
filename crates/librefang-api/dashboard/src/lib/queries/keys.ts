@@ -388,3 +388,9 @@ export const storageKeys = {
   config: () => [...storageKeys.all, "config"] as const,
   status: () => [...storageKeys.all, "status"] as const,
 };
+
+export const pairingKeys = {
+  all: ["pairing"] as const,
+  request: () => [...pairingKeys.all, "request"] as const,
+  devices: () => [...pairingKeys.all, "devices"] as const,
+};

@@ -219,6 +219,28 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
         .collect()
 }
 
+/// Wrap each persisted paired-device api key as an `ApiUserAuth` so the
+/// auth middleware can verify mobile bearers against the same in-memory
+/// table it uses for config-defined users. `device:{id}` namespacing keeps
+/// device entries distinguishable from regular users — `pairing_remove_device`
+/// also keys on this prefix when revoking access.
+pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+    kernel
+        .pairing_ref()
+        .device_api_keys()
+        .into_iter()
+        .map(|(device_id, api_key_hash)| {
+            let name = format!("device:{device_id}");
+            middleware::ApiUserAuth {
+                user_id: librefang_types::agent::UserId::from_name(&name),
+                role: librefang_kernel::auth::UserRole::User,
+                api_key_hash,
+                name,
+            }
+        })
+        .collect()
+}
+
 /// Returns `true` if the request arrived over TLS, either directly or through
 /// a reverse proxy / tunnel that sets `X-Forwarded-Proto: https` (ngrok,
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
@@ -812,9 +834,11 @@ pub async fn build_router(
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(configured_user_api_keys(
-        kernel.as_ref(),
-    )));
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
+        let mut keys = configured_user_api_keys(kernel.as_ref());
+        keys.extend(paired_device_user_keys(kernel.as_ref()));
+        keys
+    }));
 
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
@@ -1105,13 +1129,77 @@ pub async fn run_daemon(
     kernel.set_self_handle();
     kernel.start_background_agents().await;
 
+    // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
+    // ONLY when the operator has opted in via `telemetry.auto_start_observability_stack`.
+    // Default is off because spinning four containers on every `librefang
+    // start` is a strong implicit side effect; users who only want OTel export
+    // to an existing collector should keep this off and just configure
+    // `otlp_endpoint`. Issue #3136.
+    //
+    // Done before OTLP exporter init so the exporter gate can observe the
+    // actual startup outcome — if `auto_start = true` but Docker is missing
+    // or a port conflict kills compose, we must NOT init the exporter at the
+    // default localhost:4317, otherwise the BatchSpanProcessor spams
+    // ConnectionRefused on every export interval (issue #3136 follow-up).
+    let mut observability_guard: Option<ObservabilityHandle> = if kernel
+        .config_ref()
+        .telemetry
+        .enabled
+        && kernel.config_ref().telemetry.auto_start_observability_stack
+    {
+        let project = derive_compose_project_name(kernel.home_dir());
+        match start_observability_stack(kernel.home_dir(), &project) {
+            Ok(ObservabilityStartup::Started) => {
+                info!(
+                    "Observability stack started ({project}: OTLP :4317/:4318, Tempo :3200, Prometheus :9090, Grafana :3000)"
+                );
+                Some(ObservabilityHandle::new(
+                    kernel.home_dir().to_path_buf(),
+                    project,
+                ))
+            }
+            Ok(ObservabilityStartup::DockerUnavailable) => {
+                info!("Docker not available, skipping observability stack");
+                None
+            }
+            Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
+                tracing::warn!(
+                    "Observability stack failed to start (likely a port conflict on 3000/3200/4317/9090 or an existing stack): {}",
+                    stderr.trim()
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start observability stack: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Initialize OpenTelemetry OTLP tracing when telemetry feature is compiled
-    // in and the config has `telemetry.enabled = true`.
+    // in and the config has `telemetry.enabled = true`. Skip the exporter when
+    // no collector is reachable: explicit empty endpoint, or default localhost
+    // endpoint without a running bundled stack (auto_start off, OR auto_start
+    // on but startup failed above).
     #[cfg(feature = "telemetry")]
     {
         let cfg = kernel.config_ref();
         if cfg.telemetry.enabled {
-            if let Err(e) = crate::telemetry::init_otel_tracing(
+            let stack_running = observability_guard.is_some();
+            if cfg.telemetry.otlp_export_disabled(stack_running) {
+                tracing::info!(
+                    otlp_endpoint = %cfg.telemetry.otlp_endpoint,
+                    auto_start_observability_stack =
+                        cfg.telemetry.auto_start_observability_stack,
+                    stack_running,
+                    "Telemetry OTLP exporter skipped: no collector reachable. \
+                     Set telemetry.auto_start_observability_stack = true (and \
+                     ensure Docker is available) or override \
+                     telemetry.otlp_endpoint to point at a running collector."
+                );
+            } else if let Err(e) = crate::telemetry::init_otel_tracing(
                 &cfg.telemetry.otlp_endpoint,
                 &cfg.telemetry.service_name,
                 cfg.telemetry.sample_rate,
@@ -1241,49 +1329,6 @@ pub async fn run_daemon(
     info!("LibreFang API server listening on http://{addr}");
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
-
-    // Auto-start observability stack (OTLP collector + Prometheus + Grafana)
-    // ONLY when the operator has opted in via `telemetry.auto_start_observability_stack`.
-    // Default is off because spinning four containers on every `librefang
-    // start` is a strong implicit side effect; users who only want OTel export
-    // to an existing collector should keep this off and just configure
-    // `otlp_endpoint`. Issue #3136.
-    let mut observability_guard: Option<ObservabilityHandle> = if kernel
-        .config_ref()
-        .telemetry
-        .enabled
-        && kernel.config_ref().telemetry.auto_start_observability_stack
-    {
-        let project = derive_compose_project_name(kernel.home_dir());
-        match start_observability_stack(kernel.home_dir(), &project) {
-            Ok(ObservabilityStartup::Started) => {
-                info!(
-                    "Observability stack started ({project}: OTLP :4317/:4318, Tempo :3200, Prometheus :9090, Grafana :3000)"
-                );
-                Some(ObservabilityHandle::new(
-                    kernel.home_dir().to_path_buf(),
-                    project,
-                ))
-            }
-            Ok(ObservabilityStartup::DockerUnavailable) => {
-                info!("Docker not available, skipping observability stack");
-                None
-            }
-            Ok(ObservabilityStartup::ComposeFailed { stderr }) => {
-                tracing::warn!(
-                    "Observability stack failed to start (likely a port conflict on 3000/3200/4317/9090 or an existing stack): {}",
-                    stderr.trim()
-                );
-                None
-            }
-            Err(e) => {
-                tracing::warn!("Failed to start observability stack: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {

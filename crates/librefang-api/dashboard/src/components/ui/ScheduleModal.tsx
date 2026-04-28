@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
-import { Modal } from "./Modal";
+import { DrawerPanel } from "./DrawerPanel";
 
 type ScheduleType = "interval_min" | "interval_hour" | "daily" | "weekday" | "weekly" | "monthly" | "custom";
 
@@ -193,7 +193,7 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
   );
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} variant="panel-right" size="xl" hideCloseButton>
+    <DrawerPanel isOpen={isOpen} onClose={onClose} size="xl" hideCloseButton>
       {/* Header — kept inline so the optional subtitle line renders below
           the title; Modal's built-in title bar only takes a string. */}
       <div className="p-5 pb-3 border-b border-border-subtle">
@@ -313,6 +313,6 @@ export function ScheduleModal({ isOpen, title, subtitle, initialCron, initialTz,
           <Button variant="primary" className="flex-1" onClick={() => onSave(previewCron, timezone)} disabled={!cronValid}>{t("common.save")}</Button>
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
         </div>
-    </Modal>
+    </DrawerPanel>
   );
 }

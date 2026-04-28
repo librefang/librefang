@@ -17,6 +17,7 @@ pub mod rate_limiter;
 pub mod router;
 pub mod sanitizer;
 pub mod sidecar;
+pub mod thread_ownership;
 pub mod types;
 
 pub use message_truncator::{

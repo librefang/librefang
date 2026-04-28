@@ -38,10 +38,10 @@ fn read_workspace_version(root: &Path) -> String {
 
 pub fn run(args: DockerArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
-    let dockerfile = root.join("deploy/Dockerfile");
+    let dockerfile = root.join("Dockerfile");
 
     if !dockerfile.exists() {
-        return Err("deploy/Dockerfile not found".into());
+        return Err("Dockerfile not found".into());
     }
 
     if Command::new("docker").arg("--version").output().is_err() {
@@ -54,13 +54,13 @@ pub fn run(args: DockerArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("Building Docker image...");
     println!("  Image:    {}", image_tag);
     println!("  Platform: {}", args.platform);
-    println!("  Dockerfile: deploy/Dockerfile");
+    println!("  Dockerfile: ./Dockerfile");
     println!();
 
     let mut build_args = vec![
         "build".to_string(),
         "-f".to_string(),
-        "deploy/Dockerfile".to_string(),
+        "Dockerfile".to_string(),
         "-t".to_string(),
         image_tag.clone(),
         "--platform".to_string(),

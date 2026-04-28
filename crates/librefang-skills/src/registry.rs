@@ -354,19 +354,35 @@ impl SkillRegistry {
     }
 
     /// Get all tool definitions from all enabled skills.
+    ///
+    /// Output is ordered first by skill name, then by tool index within a
+    /// skill. Determinism is load-bearing: this list flows into the
+    /// agent-facing tool definitions sent to the LLM, and any reorder
+    /// across processes (HashMap iteration was non-deterministic) would
+    /// invalidate provider prompt caches even when the set of tools did
+    /// not change. See issue #3298.
     pub fn all_tool_definitions(&self) -> Vec<SkillToolDef> {
-        self.skills
-            .values()
-            .filter(|s| s.enabled)
+        let mut enabled: Vec<&InstalledSkill> =
+            self.skills.values().filter(|s| s.enabled).collect();
+        enabled.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+        enabled
+            .into_iter()
             .flat_map(|s| s.manifest.tools.provided.iter().cloned())
             .collect()
     }
 
     /// Get tool definitions only from the named skills.
+    ///
+    /// See [`all_tool_definitions`] for the ordering contract.
     pub fn tool_definitions_for_skills(&self, names: &[String]) -> Vec<SkillToolDef> {
-        self.skills
+        let mut matching: Vec<&InstalledSkill> = self
+            .skills
             .values()
             .filter(|s| s.enabled && names.contains(&s.manifest.skill.name))
+            .collect();
+        matching.sort_by(|a, b| a.manifest.skill.name.cmp(&b.manifest.skill.name));
+        matching
+            .into_iter()
             .flat_map(|s| s.manifest.tools.provided.iter().cloned())
             .collect()
     }
@@ -811,6 +827,120 @@ input_schema = {{ type = "object" }}
 
         registry.remove("removable").unwrap();
         assert_eq!(registry.count(), 0);
+    }
+
+    // Issue #3298 — deterministic ordering for LLM-bound registries.
+    //
+    // `all_tool_definitions` and `tool_definitions_for_skills` flow into the
+    // tool list sent to the LLM and into the system-prompt tools section.
+    // Before the fix they iterated `self.skills.values()` directly — a
+    // HashMap whose order varies across processes — silently invalidating
+    // provider prompt caches. The two tests below pin byte-identical output
+    // regardless of insertion order.
+
+    fn install_with_tool(registry: &mut SkillRegistry, skill_name: &str, tool_name: &str) {
+        let path = std::path::PathBuf::from(format!("/tmp/fake-{skill_name}"));
+        let installed = crate::InstalledSkill {
+            manifest: crate::SkillManifest {
+                skill: crate::SkillMeta {
+                    name: skill_name.into(),
+                    version: "0.1.0".into(),
+                    description: String::new(),
+                    author: String::new(),
+                    license: String::new(),
+                    tags: vec![],
+                },
+                runtime: Default::default(),
+                tools: crate::SkillTools {
+                    provided: vec![crate::SkillToolDef {
+                        name: tool_name.into(),
+                        description: String::new(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    }],
+                },
+                requirements: Default::default(),
+                prompt_context: None,
+                source: None,
+                config: Default::default(),
+                config_vars: Vec::new(),
+                env_passthrough: Vec::new(),
+            },
+            path,
+            enabled: true,
+        };
+        registry.skills.insert(skill_name.to_string(), installed);
+    }
+
+    #[test]
+    fn all_tool_definitions_is_deterministic_across_insertion_orders() {
+        let dir_a = TempDir::new().unwrap();
+        let mut reg_a = SkillRegistry::new(dir_a.path().to_path_buf());
+        install_with_tool(&mut reg_a, "alpha", "alpha_tool");
+        install_with_tool(&mut reg_a, "beta", "beta_tool");
+        install_with_tool(&mut reg_a, "gamma", "gamma_tool");
+
+        let dir_b = TempDir::new().unwrap();
+        let mut reg_b = SkillRegistry::new(dir_b.path().to_path_buf());
+        // Reverse insertion order — final iteration order MUST match.
+        install_with_tool(&mut reg_b, "gamma", "gamma_tool");
+        install_with_tool(&mut reg_b, "alpha", "alpha_tool");
+        install_with_tool(&mut reg_b, "beta", "beta_tool");
+
+        let tools_a: Vec<String> = reg_a
+            .all_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let tools_b: Vec<String> = reg_b
+            .all_tool_definitions()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(
+            tools_a, tools_b,
+            "all_tool_definitions must yield byte-identical output across insertion orders (#3298)"
+        );
+        // And the order must be sorted by skill name.
+        assert_eq!(
+            tools_a,
+            vec![
+                "alpha_tool".to_string(),
+                "beta_tool".to_string(),
+                "gamma_tool".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn tool_definitions_for_skills_is_deterministic_across_insertion_orders() {
+        let dir_a = TempDir::new().unwrap();
+        let mut reg_a = SkillRegistry::new(dir_a.path().to_path_buf());
+        install_with_tool(&mut reg_a, "alpha", "alpha_tool");
+        install_with_tool(&mut reg_a, "beta", "beta_tool");
+        install_with_tool(&mut reg_a, "gamma", "gamma_tool");
+
+        let dir_b = TempDir::new().unwrap();
+        let mut reg_b = SkillRegistry::new(dir_b.path().to_path_buf());
+        install_with_tool(&mut reg_b, "gamma", "gamma_tool");
+        install_with_tool(&mut reg_b, "alpha", "alpha_tool");
+        install_with_tool(&mut reg_b, "beta", "beta_tool");
+
+        let names = vec!["alpha".to_string(), "gamma".to_string()];
+        let tools_a: Vec<String> = reg_a
+            .tool_definitions_for_skills(&names)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let tools_b: Vec<String> = reg_b
+            .tool_definitions_for_skills(&names)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(tools_a, tools_b);
+        assert_eq!(
+            tools_a,
+            vec!["alpha_tool".to_string(), "gamma_tool".to_string()]
+        );
     }
 
     #[test]

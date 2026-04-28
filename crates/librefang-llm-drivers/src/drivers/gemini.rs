@@ -795,6 +795,11 @@ impl LlmDriver for GeminiDriver {
             }),
         };
 
+        // Cross-process rate-limit guard.
+        let guard_provider = "gemini";
+        let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
+        crate::shared_rate_guard::pre_request_check(guard_provider, &guard_key_id, "Gemini")?;
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = format!(
@@ -822,6 +827,17 @@ impl LlmDriver for GeminiDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 503 {
+                // 503 (model overloaded) is a server-capacity issue, not
+                // an account-level rate limit — don't persist a key-wide
+                // lockout for it.
+                if status == 429 {
+                    crate::shared_rate_guard::record_429_from_headers(
+                        guard_provider,
+                        &guard_key_id,
+                        resp.headers(),
+                        "Gemini HTTP 429",
+                    );
+                }
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
                     warn!(status, retry_ms, "Rate limited/overloaded, retrying");
@@ -886,6 +902,15 @@ impl LlmDriver for GeminiDriver {
             }),
         };
 
+        // Cross-process rate-limit guard (streaming path).
+        let guard_provider = "gemini";
+        let guard_key_id = crate::shared_rate_guard::key_id_hash(self.api_key.as_str());
+        crate::shared_rate_guard::pre_request_check(
+            guard_provider,
+            &guard_key_id,
+            "Gemini streaming",
+        )?;
+
         let max_retries = 3;
         for attempt in 0..=max_retries {
             let url = format!(
@@ -913,6 +938,17 @@ impl LlmDriver for GeminiDriver {
             let status = resp.status().as_u16();
 
             if status == 429 || status == 503 {
+                // 503 (model overloaded) is a server-capacity issue, not
+                // an account-level rate limit — don't persist a key-wide
+                // lockout for it.
+                if status == 429 {
+                    crate::shared_rate_guard::record_429_from_headers(
+                        guard_provider,
+                        &guard_key_id,
+                        resp.headers(),
+                        "Gemini HTTP 429 (stream)",
+                    );
+                }
                 if attempt < max_retries {
                     let retry_ms = (attempt + 1) as u64 * 2000;
                     warn!(

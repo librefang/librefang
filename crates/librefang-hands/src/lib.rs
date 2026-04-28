@@ -1412,7 +1412,7 @@ description = "Plans research tasks"
 
 [agents.planner.model]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+model = "some-anthropic-model"
 max_tokens = 8192
 temperature = 0.5
 system_prompt = "You plan research."
@@ -1717,7 +1717,7 @@ module = "builtin:chat"
 
 [model]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+model = "some-anthropic-model"
 max_tokens = 4096
 temperature = 0.7
 system_prompt = "You are a writer."
@@ -1755,7 +1755,7 @@ metrics = []
         assert_eq!(writer.manifest.name, "writer-base");
         // Provider and model come from base.
         assert_eq!(writer.manifest.model.provider, "anthropic");
-        assert_eq!(writer.manifest.model.model, "claude-sonnet-4-20250514");
+        assert_eq!(writer.manifest.model.model, "some-anthropic-model");
         assert_eq!(writer.manifest.model.max_tokens, 4096);
         // System prompt is overridden by the hand.
         assert_eq!(
@@ -1778,7 +1778,7 @@ description = "Generic chat agent"
 
 [model]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+model = "some-anthropic-model"
 max_tokens = 4096
 temperature = 0.7
 system_prompt = "You are a helpful assistant."

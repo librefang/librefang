@@ -71,14 +71,16 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'chore/bump-version-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Extract tag from PR body and create
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          TAG=$(echo "${{ github.event.pull_request.body }}" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
+          TAG=$(printf '%s' "$PR_BODY" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
           if [ -z "$TAG" ]; then
             echo "No release-tag marker found, skipping"
             exit 0
@@ -105,7 +107,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.channel != 'current'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           # PAT (not GITHUB_TOKEN) is required so the PR is opened by a
@@ -114,8 +116,7 @@ jobs:
           # `create_release` uses HOMEBREW_TAP_TOKEN.
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Configure git
         run: |
           git config user.name "GitHub Actions"
@@ -142,7 +143,7 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
@@ -249,7 +250,7 @@ jobs:
       && endsWith(github.ref, '-lts')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
@@ -303,11 +304,11 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
         with:
           version: 10
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
       - name: Install dependencies
@@ -317,7 +318,7 @@ jobs:
         working-directory: crates/librefang-api/dashboard
         run: pnpm run build
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -342,15 +343,15 @@ jobs:
           - target: aarch64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
@@ -398,20 +399,23 @@ jobs:
             use_cross: true
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+        # libdbus-1-dev is required by libdbus-sys, pulled in transitively
+        # by the keyring crate's secret-service backend on glibc Linux
+        # (see crates/librefang-extensions/Cargo.toml target gate).
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
@@ -452,19 +456,21 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-aarch64-linux-android-${{ github.ref_name }}
       - name: Build CLI (Android aarch64)
-        run: cross build --release --target aarch64-linux-android --bin librefang
+        # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
+        # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
+        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
       - name: Package
         run: |
           cd target/aarch64-linux-android/release
@@ -501,17 +507,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      - uses: Swatinem/rust-cache@v2
+        # libdbus-1-dev is required by libdbus-sys, pulled in transitively
+        # by the keyring crate's secret-service backend on glibc Linux.
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
@@ -553,17 +561,17 @@ jobs:
           - target: aarch64-unknown-linux-musl
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Install cross
         run: cargo install cross --locked
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build static CLI
@@ -613,15 +621,15 @@ jobs:
           - target: aarch64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
@@ -663,15 +671,15 @@ jobs:
           - target: x86_64-apple-darwin
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
@@ -716,15 +724,15 @@ jobs:
           - target: x86_64-pc-windows-msvc
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
@@ -760,9 +768,8 @@ jobs:
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -785,9 +792,8 @@ jobs:
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
@@ -811,7 +817,7 @@ jobs:
     needs: [cli_mac, cli_linux]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1124,10 +1130,15 @@ jobs:
 
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v6
-
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
+        # libdbus-1-dev is required by libdbus-sys, pulled in transitively
+        # by the keyring crate's secret-service backend on glibc Linux
+        # (librefang-desktop -> librefang-extensions). webkit2gtk has
+        # historically pulled libdbus-1-dev as a transitive system dep,
+        # but make it explicit so the build doesn't break the day apt
+        # changes its package metadata.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -1135,21 +1146,22 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libdbus-1-dev \
             patchelf
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.platform.rust_target }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
         with:
           version: 10
 
@@ -1238,7 +1250,7 @@ jobs:
 
       - name: Build and bundle Tauri desktop app
         if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -1254,7 +1266,7 @@ jobs:
 
       - name: Build and bundle Tauri desktop app (signed macOS)
         if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -1281,7 +1293,7 @@ jobs:
     needs: [desktop]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1524,15 +1536,15 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
       - name: Extract version & platform slug
         id: meta
         run: |
@@ -1541,10 +1553,10 @@ jobs:
           echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
       - name: Build and push (single-arch digest)
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7
         with:
           context: .
-          file: deploy/Dockerfile
+          file: Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
           tags: ghcr.io/librefang/librefang
@@ -1557,7 +1569,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "${{ runner.temp }}/digests/${digest#sha256:}"
       - name: Upload digest
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: docker-digest-${{ steps.meta.outputs.slug }}
           path: ${{ runner.temp }}/digests/*
@@ -1573,19 +1585,19 @@ jobs:
     needs: [docker]
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4
       - name: Extract version
         id: version
         run: |
           echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
       - name: Download digests
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: docker-digest-*
@@ -1612,8 +1624,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [docker-manifest]
     steps:
-      - uses: actions/checkout@v6
-      - uses: superfly/flyctl-actions/setup-flyctl@v1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
       - name: Deploy
         run: flyctl deploy --remote-only --config deploy/fly/fly.toml
         env:
@@ -1652,9 +1664,8 @@ jobs:
       run:
         working-directory: sdk/javascript
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -1683,7 +1694,7 @@ jobs:
             elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
             fi
-            npm publish --access public $NPM_TAG
+            npm publish --access public --ignore-scripts $NPM_TAG
           fi
           echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
@@ -1699,7 +1710,7 @@ jobs:
           elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
             GPR_TAG="--tag lts"
           fi
-          npm publish --access public $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+          npm publish --access public --ignore-scripts $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
 
   sdk_cli_npm:
     name: SDK / CLI npm (@librefang/cli)
@@ -1712,9 +1723,8 @@ jobs:
       run:
         working-directory: packages/cli-npm
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -1738,7 +1748,7 @@ jobs:
             if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
               NPM_TAG="--tag next"
             fi
-            npm publish --access public $NPM_TAG
+            npm publish --access public --ignore-scripts $NPM_TAG
           fi
           echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
@@ -1749,13 +1759,15 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # OIDC trusted publishing to PyPI
+      contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     defaults:
       run:
         working-directory: sdk/python
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
@@ -1775,10 +1787,11 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # OIDC trusted publishing — configure at:
+        # pypi.org/manage/project/librefang-sdk/settings/publishing
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: sdk/python/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
       - name: Output publish link
@@ -1797,10 +1810,8 @@ jobs:
       run:
         working-directory: sdk/rust
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Sync version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
@@ -1833,8 +1844,7 @@ jobs:
     needs: [create_release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Create Go module tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

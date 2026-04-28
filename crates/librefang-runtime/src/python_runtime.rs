@@ -24,6 +24,14 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
+use crate::stderr_log::trim_for_log;
+
+/// `tracing` target for per-line Python tool stderr (issue #3256). Filter
+/// in operator logs via `RUST_LOG=python_stderr=info`. Stable wire-format
+/// — changing this string breaks downstream log filters and is pinned by
+/// the `python_stderr_target_is_stable` unit test.
+pub const PYTHON_STDERR_TARGET: &str = "python_stderr";
+
 /// Error type for Python runtime operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PythonError {
@@ -302,6 +310,23 @@ async fn run_python_with_stdin(
             match stderr_reader.read_line(&mut stderr_line).await {
                 Ok(0) => break,
                 Ok(_) => {
+                    // Stream each non-empty line to tracing as it arrives so
+                    // operators can monitor long-running Python tools live
+                    // (#3256). The full line stays in `stderr_text` either way
+                    // — the post-exit `debug!` summary below is independent.
+                    //
+                    // Reminder for tool authors: Python block-buffers
+                    // stdout/stderr by default — pass `flush=True` to
+                    // `print()` or run with `python -u` for line-buffered
+                    // output to actually see progress in real time.
+                    if let Some(trimmed) = trim_for_log(&stderr_line) {
+                        tracing::info!(
+                            target: PYTHON_STDERR_TARGET,
+                            agent_id = %agent_id,
+                            script = %script_path,
+                            "{trimmed}"
+                        );
+                    }
                     stderr_text.push_str(&stderr_line);
                 }
                 Err(_) => break,
@@ -386,6 +411,14 @@ pub fn is_python_module(module: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn python_stderr_target_is_stable() {
+        // Operator log filters and journalctl pipelines key off this
+        // string. Changing it is a breaking change — bump the docs and
+        // CHANGELOG together if you ever do.
+        assert_eq!(PYTHON_STDERR_TARGET, "python_stderr");
+    }
 
     #[test]
     fn test_parse_python_module() {

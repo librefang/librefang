@@ -15,6 +15,7 @@ import {
   Mail, Phone, Link2, Wifi, Globe, ChevronRight, Search, X,
   ArrowsUpFromLine, Users
 } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // Channel icons
 const channelIcons: Record<string, React.ReactNode> = {
@@ -214,7 +215,7 @@ export function CommsPage() {
       {activeTab === "channels" && (
         <>
           {/* Stats Grid */}
-          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
+          <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {[
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-primary", bg: "bg-primary/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
@@ -229,7 +230,7 @@ export function CommsPage() {
                 <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
               </Card>
             ))}
-          </div>
+          </StaggerList>
 
           {/* Health Checks */}
           <Card padding="lg">
