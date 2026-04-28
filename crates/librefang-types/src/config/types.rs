@@ -5541,6 +5541,14 @@ pub struct SignalConfig {
     /// Poll interval in seconds for checking new messages (default: 2).
     #[serde(default = "default_signal_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// Optional API key sent as `Authorization: Bearer <api_key>` on every request.
+    /// If absent, requests are sent without an Authorization header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.
+    /// Defaults to `false`; set to `true` only when signal-cli runs on localhost.
+    #[serde(default)]
+    pub allow_local: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -5555,6 +5563,8 @@ impl Default for SignalConfig {
             account_id: None,
             default_agent: None,
             poll_interval_secs: default_signal_poll_interval_secs(),
+            api_key: None,
+            allow_local: false,
             overrides: ChannelOverrides::default(),
         }
     }

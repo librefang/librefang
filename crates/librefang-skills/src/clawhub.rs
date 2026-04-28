@@ -184,6 +184,10 @@ pub struct ClawHubSkillDetail {
     /// Moderation status (null when clean).
     #[serde(default)]
     pub moderation: Option<serde_json::Value>,
+    /// Expected SHA256 hex digest of the skill archive, provided by the registry.
+    /// When present the installer validates the download before extraction.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 // -- Sort enum -------------------------------------------------------------
@@ -508,7 +512,8 @@ impl ClawHubClient {
     /// Install a skill from ClawHub into the target directory.
     ///
     /// Security pipeline:
-    /// 1. Download skill zip and compute SHA256
+    /// 0. Fetch skill detail (to obtain `expected_sha256` when the registry provides it)
+    /// 1. Download skill zip and compute SHA256; validate against expected when present
     /// 2. Detect format (SKILL.md vs package.json)
     /// 3. Convert to LibreFang manifest
     /// 4. Run manifest security scan
@@ -521,6 +526,17 @@ impl ClawHubClient {
         target_dir: &Path,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
+
+        // Step 0: Fetch skill detail to get expected_sha256 (best-effort —
+        // if the registry does not provide it we still install with a warning).
+        let expected_sha256: Option<String> = match self.get_skill(slug).await {
+            Ok(detail) => detail.expected_sha256,
+            Err(e) => {
+                warn!(slug, error = %e, "Could not fetch ClawHub skill detail; proceeding without checksum verification");
+                None
+            }
+        };
+
         // Use /api/v1/download?slug=... endpoint
         let url = format!("{}/download?slug={}", self.base_url, urlencoded(slug));
 
@@ -534,18 +550,37 @@ impl ClawHubClient {
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
 
-        self.install_from_bytes(slug, target_dir, &bytes).await
+        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref()).await
     }
 
     /// Install a skill from raw bytes (zip or SKILL.md).
     ///
     /// Shared extraction + security scan logic used by both ClawHub download
-    /// and Skillhub COS download paths.
+    /// and Skillhub COS download paths.  No checksum validation is performed
+    /// because the Skillhub COS path does not provide an expected hash; use
+    /// `install_with_expected_sha256` when a hash is available.
     pub async fn install_from_bytes(
         &self,
         slug: &str,
         target_dir: &Path,
         bytes: &[u8],
+    ) -> Result<ClawHubInstallResult, SkillError> {
+        self.install_with_expected_sha256(slug, target_dir, bytes, None).await
+    }
+
+    /// Install a skill from raw bytes with optional SHA256 checksum validation.
+    ///
+    /// When `expected_sha256` is `Some`, the computed digest of `bytes` is
+    /// compared against it before extraction.  A mismatch deletes any partially
+    /// written files and returns a `SkillError::SecurityBlocked` error.
+    /// When `expected_sha256` is `None`, a `warn!` is emitted and installation
+    /// continues (backward-compatible behaviour).
+    async fn install_with_expected_sha256(
+        &self,
+        slug: &str,
+        target_dir: &Path,
+        bytes: &[u8],
+        expected_sha256: Option<&str>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
 
@@ -556,6 +591,28 @@ impl ClawHubClient {
             hex::encode(hasher.finalize())
         };
         info!(slug, sha256 = %sha256, "Downloaded skill");
+
+        // Step 1a: Validate checksum against registry-supplied expected hash
+        // BEFORE creating any directories so we fail fast on supply-chain
+        // tampering (issue #3827).
+        match expected_sha256 {
+            Some(expected) => {
+                let expected_lower = expected.to_lowercase();
+                if sha256 != expected_lower {
+                    return Err(SkillError::SecurityBlocked(format!(
+                        "Skill {slug} hash mismatch: expected {expected_lower}, got {sha256}"
+                    )));
+                }
+                info!(slug, "SHA256 checksum verified OK");
+            }
+            None => {
+                warn!(
+                    slug,
+                    "ClawHub did not provide expected_sha256 for skill {} — install unverified",
+                    slug
+                );
+            }
+        }
 
         // Install into a temporary directory first, then atomically rename to
         // the final skill directory.  This prevents partial installs from being

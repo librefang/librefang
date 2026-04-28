@@ -9,6 +9,7 @@ use base64::Engine as _;
 use chrono::Utc;
 use futures::Stream;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,13 +18,96 @@ use tracing::{debug, info, warn};
 
 // Poll interval is now configurable via SignalConfig.
 
+// ---------------------------------------------------------------------------
+// SSRF guard
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the address is in a range that should be blocked by
+/// default (loopback, link-local, RFC-1918 private, and IPv6 ULA/link-local).
+fn is_private_or_loopback(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()                                           // 127.0.0.0/8
+                || v4.is_link_local()                                  // 169.254.0.0/16
+                || v4.is_private()                                     // 10/8, 172.16/12, 192.168/16
+                || v4.is_broadcast()                                   // 255.255.255.255
+                || v4.is_unspecified()                                 // 0.0.0.0
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 CGNAT
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()        // ::1
+                || v6.is_unspecified()   // ::
+                // fc00::/7  (ULA — unique local)
+                || (v6.octets()[0] & 0xFE) == 0xFC
+                // fe80::/10 (link-local)
+                || (v6.octets()[0] == 0xFE && (v6.octets()[1] & 0xC0) == 0x80)
+        }
+    }
+}
+
+/// Validate the `api_url` for SSRF safety.
+///
+/// Rules:
+/// - Scheme must be `http` or `https`.
+/// - Hostname must resolve to a non-private address unless `allow_local` is
+///   set.  We perform a blocking DNS lookup here; for a config-time check the
+///   latency is acceptable.
+///
+/// Returns `Ok(())` on success, `Err(message)` on violation.
+fn validate_api_url(api_url: &str, allow_local: bool) -> Result<(), String> {
+    let url = url::Url::parse(api_url)
+        .map_err(|e| format!("Signal api_url is not a valid URL: {e}"))?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(format!(
+                "Signal api_url scheme '{other}' is not allowed; use http or https"
+            ));
+        }
+    }
+
+    if allow_local {
+        // Operator has explicitly acknowledged local addresses.
+        return Ok(());
+    }
+
+    // Resolve the hostname and reject private/loopback addresses.
+    let host = url
+        .host_str()
+        .ok_or_else(|| "Signal api_url has no host".to_string())?;
+
+    let port = url.port_or_known_default().unwrap_or(80);
+
+    // std::net::ToSocketAddrs performs a synchronous DNS resolution.
+    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+        .map_err(|e| format!("Signal api_url DNS resolution failed for '{host}': {e}"))?;
+
+    for addr in addrs {
+        if is_private_or_loopback(addr.ip()) {
+            return Err(format!(
+                "Signal api_url '{}' resolves to a private/loopback address ({}). \
+                 Set `allow_local = true` in [channels.signal] if this is intentional.",
+                api_url,
+                addr.ip()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
+
 /// Signal adapter via signal-cli REST API.
 pub struct SignalAdapter {
     /// URL of signal-cli REST API (e.g., "http://localhost:8080").
     api_url: String,
     /// Registered phone number.
     phone_number: String,
-    /// HTTP client.
+    /// HTTP client (has connect + total timeouts pre-configured).
     client: reqwest::Client,
     /// Allowed phone numbers (empty = allow all).
     allowed_users: Vec<String>,
@@ -31,6 +115,8 @@ pub struct SignalAdapter {
     account_id: Option<String>,
     /// Poll interval for checking new messages.
     poll_interval: Duration,
+    /// Optional Bearer token for the signal-cli REST API.
+    api_key: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -38,19 +124,57 @@ pub struct SignalAdapter {
 
 impl SignalAdapter {
     /// Create a new Signal adapter.
-    pub fn new(api_url: String, phone_number: String, allowed_users: Vec<String>) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if `api_url` fails SSRF validation (scheme not http/https,
+    /// or resolves to a private/loopback address without `allow_local = true`).
+    pub fn new(
+        api_url: String,
+        phone_number: String,
+        allowed_users: Vec<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_options(api_url, phone_number, allowed_users, None, false)
+    }
+
+    /// Create a new Signal adapter with security options.
+    ///
+    /// * `api_key`    – if `Some`, sent as `Authorization: Bearer <key>` on every request.
+    /// * `allow_local` – when `true`, SSRF validation skips the private-IP check.
+    ///
+    /// # Errors
+    /// Returns an error if `api_url` fails SSRF validation.
+    pub fn with_options(
+        api_url: String,
+        phone_number: String,
+        allowed_users: Vec<String>,
+        api_key: Option<String>,
+        allow_local: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        validate_api_url(&api_url, allow_local)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        let client = crate::http_client::client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("Failed to build HTTP client for Signal adapter: {e}").into()
+            })?;
+
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        Self {
+        Ok(Self {
             api_url,
             phone_number,
-            client: crate::http_client::new_client(),
+            client,
             allowed_users,
             account_id: None,
             poll_interval: Duration::from_secs(2),
+            api_key,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
-        }
+        })
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
@@ -61,6 +185,19 @@ impl SignalAdapter {
     pub fn with_poll_interval(mut self, poll_interval_secs: u64) -> Self {
         self.poll_interval = Duration::from_secs(poll_interval_secs);
         self
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    /// Attach the `Authorization: Bearer` header when an API key is configured.
+    fn auth_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref key) = self.api_key {
+            builder.bearer_auth(key)
+        } else {
+            builder
+        }
     }
 
     /// Send a message via signal-cli REST API.
@@ -95,7 +232,8 @@ impl SignalAdapter {
             body["base64_attachments"] = serde_json::Value::Array(attachments.to_vec());
         }
 
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let req = self.auth_request(self.client.post(&url)).json(&body);
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -111,7 +249,8 @@ impl SignalAdapter {
         &self,
         url: &str,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let resp = self.client.get(url).send().await?;
+        let req = self.auth_request(self.client.get(url));
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(format!("Failed to download attachment ({status}): {url}").into());
@@ -135,7 +274,8 @@ impl SignalAdapter {
     ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/v1/receive/{}", self.api_url, self.phone_number);
 
-        let resp = self.client.get(&url).send().await?;
+        let req = self.auth_request(self.client.get(&url));
+        let resp = req.send().await?;
 
         if !resp.status().is_success() {
             return Ok(vec![]);
@@ -175,6 +315,7 @@ impl ChannelAdapter for SignalAdapter {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
         let poll_interval = self.poll_interval;
+        let api_key = self.api_key.clone();
 
         info!(
             "Starting Signal adapter (polling {} every {:?})",
@@ -193,7 +334,11 @@ impl ChannelAdapter for SignalAdapter {
 
                 // Poll for new messages
                 let url = format!("{}/v1/receive/{}", api_url, phone_number);
-                let resp = match client.get(&url).send().await {
+                let mut req = client.get(&url);
+                if let Some(ref key) = api_key {
+                    req = req.bearer_auth(key);
+                }
+                let resp = match req.send().await {
                     Ok(r) => r,
                     Err(e) => {
                         debug!("Signal poll error: {e}");
@@ -585,23 +730,76 @@ mod tests {
 
     #[test]
     fn test_signal_adapter_creation() {
-        let adapter = SignalAdapter::new(
+        // localhost is allowed when allow_local = true
+        let adapter = SignalAdapter::with_options(
             "http://localhost:8080".to_string(),
             "+1234567890".to_string(),
             vec![],
-        );
+            None,
+            true,
+        )
+        .expect("should build with allow_local=true");
         assert_eq!(adapter.name(), "signal");
         assert_eq!(adapter.channel_type(), ChannelType::Signal);
     }
 
     #[test]
     fn test_signal_allowed_check() {
-        let adapter = SignalAdapter::new(
+        let adapter = SignalAdapter::with_options(
             "http://localhost:8080".to_string(),
             "+1234567890".to_string(),
             vec!["+9876543210".to_string()],
-        );
+            None,
+            true,
+        )
+        .expect("should build");
         assert!(adapter.is_allowed("+9876543210"));
         assert!(!adapter.is_allowed("+1111111111"));
+    }
+
+    #[test]
+    fn test_ssrf_rejects_loopback_without_allow_local() {
+        // 127.0.0.1 is loopback — must be rejected unless allow_local is set.
+        let err = validate_api_url("http://127.0.0.1:8080", false);
+        assert!(err.is_err(), "loopback must be rejected");
+    }
+
+    #[test]
+    fn test_ssrf_allows_loopback_with_allow_local() {
+        let ok = validate_api_url("http://127.0.0.1:8080", true);
+        assert!(ok.is_ok(), "loopback must be allowed when allow_local=true");
+    }
+
+    #[test]
+    fn test_ssrf_rejects_bad_scheme() {
+        let err = validate_api_url("ftp://example.com/api", false);
+        assert!(err.is_err(), "ftp scheme must be rejected");
+    }
+
+    #[test]
+    fn test_ssrf_rejects_file_scheme() {
+        let err = validate_api_url("file:///etc/passwd", false);
+        assert!(err.is_err(), "file scheme must be rejected");
+    }
+
+    #[test]
+    fn test_ssrf_rejects_private_ipv4() {
+        // RFC-1918 addresses must be blocked.
+        assert!(validate_api_url("http://192.168.1.1/api", false).is_err());
+        assert!(validate_api_url("http://10.0.0.1/api", false).is_err());
+        assert!(validate_api_url("http://172.16.0.1/api", false).is_err());
+    }
+
+    #[test]
+    fn test_is_private_or_loopback() {
+        use std::net::Ipv4Addr;
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))));
+        // Public addresses must NOT be blocked.
+        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
     }
 }
