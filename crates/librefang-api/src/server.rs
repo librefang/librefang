@@ -341,13 +341,28 @@ async fn dashboard_login(
                         }))
                         .into_response();
                     }
+                    // Replay-prevention check (#3359): reject a code already used
+                    // in the last 60 seconds.
+                    if state.kernel.approvals().is_totp_code_used(totp_code) {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::response::Json(serde_json::json!({
+                                "ok": false,
+                                "error": "TOTP code has already been used. Wait for the next 30-second window.",
+                            })),
+                        )
+                            .into_response();
+                    }
                     // Verify TOTP code
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
                     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret, totp_code, &issuer,
                     ) {
-                        Ok(true) => { /* TOTP valid, proceed to session creation */ }
+                        Ok(true) => {
+                            // Mark code as used so it cannot be replayed.
+                            state.kernel.approvals().record_totp_code_used(totp_code);
+                        }
                         Ok(false) => {
                             return (
                                 axum::http::StatusCode::UNAUTHORIZED,
@@ -948,20 +963,27 @@ pub async fn build_router(
     // address with no authentication configured. The middleware enforces
     // fail-closed for non-loopback traffic; this warning makes the
     // operator-facing posture explicit at boot.
+    //
+    // The default bind address is 127.0.0.1:4545 (loopback-only). Operators
+    // who change api_listen to 0.0.0.0 or a public IP without configuring auth
+    // get a security warning here (#3572).
     let bind_is_loopback = listen_addr.ip().is_loopback();
     if !any_auth && !bind_is_loopback {
         if allow_no_auth {
-            tracing::warn!(
-                "LIBREFANG_ALLOW_NO_AUTH=1 is set. Running WITHOUT authentication on {}. \
-                 Anyone reachable at this address can read/write agents, channels, and keys.",
+            // LIBREFANG_ALLOW_NO_AUTH=1 means the operator knowingly accepted
+            // the risk. Use error! so the message stands out in logs regardless
+            // of the configured log level.
+            tracing::error!(
+                "SECURITY WARNING: librefang is listening on {} with no authentication. \
+                 Set api_key in config.toml or use 127.0.0.1:4545 for local-only access. \
+                 (LIBREFANG_ALLOW_NO_AUTH=1 — operator accepted risk; running open.)",
                 listen_addr
             );
         } else {
             tracing::warn!(
-                "No api_key configured and server is bound to {} (non-loopback). \
-                 Non-loopback requests will be rejected with 401. \
-                 Set api_key in config.toml, bind to 127.0.0.1, \
-                 or set LIBREFANG_ALLOW_NO_AUTH=1 to explicitly run open.",
+                "SECURITY WARNING: librefang is listening on {} with no authentication. \
+                 Set api_key in config.toml or use 127.0.0.1:4545 for local-only access. \
+                 Non-loopback requests will be rejected with 401 until an api_key is set.",
                 listen_addr
             );
         }

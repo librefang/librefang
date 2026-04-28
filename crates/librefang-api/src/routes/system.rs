@@ -1805,12 +1805,26 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
+                    // Replay-prevention check (#3359): reject a code that was
+                    // already used within the last 60 seconds (two TOTP windows).
+                    if state.kernel.approvals().is_totp_code_used(code) {
+                        state.kernel.approvals().record_totp_failure("api_admin");
+                        return ApiErrorResponse::bad_request(
+                            "TOTP code has already been used. Wait for the next 30-second window.",
+                        )
+                        .into_json_tuple()
+                        .into_response();
+                    }
                     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret,
                         code,
                         &totp_issuer,
                     ) {
-                        Ok(true) => true,
+                        Ok(true) => {
+                            // Mark this code as used to prevent replay within the window.
+                            state.kernel.approvals().record_totp_code_used(code);
+                            true
+                        }
                         Ok(false) => {
                             state.kernel.approvals().record_totp_failure("api_admin");
                             return ApiErrorResponse::bad_request("Invalid TOTP code")
@@ -2424,15 +2438,26 @@ pub async fn totp_setup(
                         None => false,
                     }
                 } else {
-                    // TOTP code
+                    // TOTP code — check replay before verifying (#3359).
+                    if state.kernel.approvals().is_totp_code_used(code) {
+                        state.kernel.approvals().record_totp_failure("api_admin");
+                        return ApiErrorResponse::bad_request(
+                            "TOTP code has already been used. Wait for the next 30-second window.",
+                        )
+                        .into_json_tuple();
+                    }
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
-                            librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                            let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                                 &secret,
                                 code,
                                 &totp_issuer,
                             )
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                            if ok {
+                                state.kernel.approvals().record_totp_code_used(code);
+                            }
+                            ok
                         }
                         None => false,
                     }
@@ -2516,12 +2541,21 @@ pub async fn totp_confirm(
         }
     };
 
+    // Replay-prevention check (#3359): reject a code already used in the last 60 s.
+    if state.kernel.approvals().is_totp_code_used(&body.code) {
+        state.kernel.approvals().record_totp_failure("api_admin");
+        return ApiErrorResponse::bad_request(
+            "TOTP code has already been used. Wait for the next 30-second window.",
+        )
+        .into_json_tuple();
+    }
     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
         &secret,
         &body.code,
         &totp_issuer,
     ) {
         Ok(true) => {
+            state.kernel.approvals().record_totp_code_used(&body.code);
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
             }

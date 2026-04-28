@@ -129,20 +129,21 @@ pub fn ws_query_param(uri: &Uri, key: &str) -> Option<String> {
     })
 }
 
-pub fn ws_auth_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+/// Extract the auth token from a WebSocket upgrade request.
+///
+/// SECURITY (#3610): Only `Authorization: Bearer <token>` header is accepted.
+/// The `?token=` query-parameter form has been removed because query strings
+/// appear verbatim in proxy access logs, browser history, and server logs,
+/// leaking the credential. Clients must use the `Authorization` header during
+/// the HTTP upgrade handshake (before the WebSocket connection is established).
+///
+/// The `uri` parameter is kept for API compatibility but is no longer consulted.
+pub fn ws_auth_token(headers: &HeaderMap, _uri: &Uri) -> Option<String> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(ToOwned::to_owned)
-        .or_else(|| {
-            // Use plain percent-decoding (NOT form-urlencoded) so literal `+`
-            // characters in base64-derived tokens are preserved instead of
-            // being turned into spaces. See issue #962 (ported from openfang).
-            uri.query()
-                .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-                .map(crate::percent_decode)
-        })
 }
 
 /// Validates the WebSocket `Origin` header against allowed origins.
@@ -297,9 +298,9 @@ pub fn detect_connection_locality(addr: &SocketAddr, headers: &HeaderMap) -> Con
 
 /// GET /api/agents/:id/ws — Upgrade to WebSocket for real-time chat.
 ///
-/// SECURITY: Authenticates via Bearer token in Authorization header
-/// or `?token=` query parameter (for browser WebSocket clients that
-/// cannot set custom headers).
+/// SECURITY: Authenticates via `Authorization: Bearer <token>` header only.
+/// The `?token=` query-parameter form has been removed (#3610) because query
+/// strings appear in proxy access logs and browser history, leaking the token.
 pub async fn agent_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
@@ -1882,9 +1883,13 @@ mod tests {
         assert_eq!(ws_query_param(&uri, "cols").as_deref(), Some("120"));
     }
 
+    /// SECURITY (#3610): `ws_auth_token` only accepts `Authorization: Bearer`.
+    /// Providing a token via `?token=` in the query string MUST be rejected
+    /// (returns `None`) so that credentials are not logged in proxy access logs.
     #[test]
-    fn test_ws_auth_token_prefers_bearer_header() {
-        let uri: Uri = "/api/terminal/ws?token=query-token".parse().unwrap();
+    fn test_ws_auth_token_header_only() {
+        // Bearer header is accepted.
+        let uri: Uri = "/api/terminal/ws".parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer header-token".parse().unwrap());
         assert_eq!(
@@ -1893,29 +1898,17 @@ mod tests {
         );
     }
 
-    /// Issue #962 (ported from openfang): WS auth tokens often contain
-    /// base64 chars (`+`, `/`, `=`). The query-param branch must percent-decode
-    /// (so `%2B` -> `+`) but must NOT apply form-urlencoded semantics
-    /// (which would turn a literal `+` into a space).
     #[test]
-    fn test_ws_auth_token_percent_decodes_base64_chars() {
-        // Percent-encoded base64 token round-trips losslessly.
-        let uri: Uri = "/ws?token=abc%2Bdef%2Fghi%3D".parse().unwrap();
-        assert_eq!(
-            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
-            Some("abc+def/ghi=")
-        );
+    fn test_ws_auth_token_query_param_rejected() {
+        // ?token= in query string must NOT be extracted (security fix #3610).
+        let uri: Uri = "/api/terminal/ws?token=query-token".parse().unwrap();
+        assert_eq!(ws_auth_token(&HeaderMap::new(), &uri), None);
     }
 
     #[test]
-    fn test_ws_auth_token_preserves_literal_plus() {
-        // Literal `+` (not %20 / not space) MUST be preserved as `+`,
-        // not turned into a space the way x-www-form-urlencoded would.
-        let uri: Uri = "/ws?token=abc+def/ghi=".parse().unwrap();
-        assert_eq!(
-            ws_auth_token(&HeaderMap::new(), &uri).as_deref(),
-            Some("abc+def/ghi=")
-        );
+    fn test_ws_auth_token_no_token_returns_none() {
+        let uri: Uri = "/api/terminal/ws".parse().unwrap();
+        assert_eq!(ws_auth_token(&HeaderMap::new(), &uri), None);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 24;
+const SCHEMA_VERSION: u32 = 25;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -105,6 +105,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 24 {
         migrate_v24(conn)?;
+    }
+
+    if current_version < 25 {
+        migrate_v25(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -784,6 +788,29 @@ fn migrate_v24(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 25: Add `totp_used_codes` table for TOTP replay prevention.
+///
+/// Stores SHA-256 hashes of recently-used TOTP codes so that a code cannot be
+/// reused within the same 30-second window (or the adjacent window). Entries
+/// older than 120 seconds are pruned on every successful verification.
+fn migrate_v25(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS totp_used_codes (
+            code_hash  TEXT    NOT NULL,  -- SHA-256 hex of the raw 6-digit code
+            used_at    INTEGER NOT NULL,  -- Unix timestamp (seconds)
+            PRIMARY KEY (code_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_totp_used_codes_used_at
+            ON totp_used_codes(used_at);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (25, datetime('now'), 'Add totp_used_codes table for TOTP replay prevention')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -982,6 +1009,45 @@ mod tests {
         run_migrations(&conn).unwrap();
         assert!(column_exists(&conn, "usage_events", "user_id"));
         assert!(column_exists(&conn, "usage_events", "channel"));
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_v24_creates_totp_used_codes() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Table must exist
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"totp_used_codes".to_string()));
+
+        // Can insert and look up a code hash
+        conn.execute(
+            "INSERT INTO totp_used_codes (code_hash, used_at) VALUES (?1, ?2)",
+            rusqlite::params!["abcdef1234", 1000_i64],
+        )
+        .unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM totp_used_codes WHERE code_hash = 'abcdef1234'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_migrate_v24_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
     }
 }
