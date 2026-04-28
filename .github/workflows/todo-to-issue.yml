@@ -11,8 +11,8 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: alstr/todo-to-issue-action@v5
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: alstr/todo-to-issue-action@64aca8fda7023259aada83ba44ad988c4c443657 # v5
         with:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LABEL: "good first issue,help wanted"
