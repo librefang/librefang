@@ -1772,7 +1772,9 @@ pub async fn approve_request(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
                                         tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
                                     }
                                     true
@@ -2417,7 +2419,9 @@ pub async fn totp_setup(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
                                         tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
                                     }
                                     true
@@ -2607,7 +2611,9 @@ pub async fn totp_revoke(
                 ) {
                     Ok((true, updated)) => {
                         if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
-                            tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                            tracing::warn!(
+                                "Failed to persist updated TOTP recovery codes after use: {e}"
+                            );
                         }
                         true
                     }
