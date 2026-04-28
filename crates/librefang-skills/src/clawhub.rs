@@ -608,7 +608,10 @@ impl ClawHubClient {
                 info!(slug, "SHA256 checksum verified OK");
             }
             None => {
-                warn!(slug, "ClawHub did not provide expected_sha256 — install unverified");
+                warn!(
+                    slug,
+                    "ClawHub did not provide expected_sha256 — install unverified"
+                );
             }
         }
 
@@ -616,11 +619,7 @@ impl ClawHubClient {
         // the final skill directory.  This prevents partial installs from being
         // loaded on the next daemon start if extraction is interrupted.
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
-        let tmp_dir = target_dir.join(format!(
-            ".installing-{}-{}",
-            slug,
-            std::process::id()
-        ));
+        let tmp_dir = target_dir.join(format!(".installing-{}-{}", slug, std::process::id()));
         // Clean up any leftover temp dir from a previous crashed install.
         if tmp_dir.exists() {
             let _ = std::fs::remove_dir_all(&tmp_dir);

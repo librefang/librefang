@@ -402,8 +402,7 @@ pub fn spawn_daemon_stream(
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Read};
 
-        let client =
-            make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
 
         let url = format!("{base_url}/api/agents/{agent_id}/message/stream");
         let resp = client
@@ -532,8 +531,7 @@ fn daemon_fallback(
     message: &str,
     api_key: Option<&str>,
 ) -> Result<AgentLoopResult, String> {
-    let client =
-        make_daemon_client_with_timeout(api_key, Duration::from_secs(120));
+    let client = make_daemon_client_with_timeout(api_key, Duration::from_secs(120));
 
     let resp = client
         .post(format!("{base_url}/api/agents/{agent_id}/message"))
@@ -585,8 +583,7 @@ pub fn spawn_daemon_agent(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let client =
-            make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
 
         let resp = client
             .post(format!("{base_url}/api/agents"))
@@ -819,7 +816,8 @@ pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/channels/{channel}/test"))
@@ -939,7 +937,8 @@ pub fn spawn_run_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
                 .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
@@ -977,7 +976,8 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/workflows"))
@@ -1050,7 +1050,8 @@ pub fn spawn_create_trigger(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/triggers"))
@@ -1390,7 +1391,9 @@ fn make_daemon_client_with_timeout(
         }
         builder = builder.default_headers(headers);
     }
-    builder.build().unwrap_or_else(|_| crate::http_client::new_client())
+    builder
+        .build()
+        .unwrap_or_else(|_| crate::http_client::new_client())
 }
 
 /// Fetch sessions list.
@@ -2149,7 +2152,8 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(15));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(15));
             let start = std::time::Instant::now();
             match client
                 .post(format!("{base_url}/api/providers/{name}/test"))

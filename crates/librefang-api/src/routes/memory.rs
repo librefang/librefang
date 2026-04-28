@@ -149,9 +149,7 @@ fn default_user_id() -> String {
 /// semantically correct codes for `InvalidInput` (400), `AgentNotFound` /
 /// `SessionNotFound` (404), `CapabilityDenied` (403), and `QuotaExceeded` (429)
 /// so callers can distinguish between client errors and server errors.
-fn internal_error(
-    e: impl std::fmt::Display,
-) -> (StatusCode, Json<serde_json::Value>) {
+fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     map_memory_error(e.to_string())
 }
 
@@ -161,9 +159,7 @@ fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
     // providing correct HTTP semantics.
     let status = if msg.starts_with("Invalid input:") {
         StatusCode::BAD_REQUEST
-    } else if msg.starts_with("Agent not found:")
-        || msg.starts_with("Session not found:")
-    {
+    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
         StatusCode::NOT_FOUND
     } else if msg.starts_with("Capability denied:") {
         StatusCode::FORBIDDEN
@@ -174,10 +170,7 @@ fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::INTERNAL_SERVER_ERROR
     };
 
-    (
-        status,
-        Json(serde_json::json!({ "error": msg })),
-    )
+    (status, Json(serde_json::json!({ "error": msg })))
 }
 
 /// Build a [`MemoryNamespaceGuard`] for the current request from the

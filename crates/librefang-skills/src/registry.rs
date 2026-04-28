@@ -152,7 +152,10 @@ impl SkillRegistry {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                         if name.starts_with(".installing-") {
                             if let Err(e) = std::fs::remove_dir_all(&path) {
-                                warn!("Failed to clean up stale install dir {}: {e}", path.display());
+                                warn!(
+                                    "Failed to clean up stale install dir {}: {e}",
+                                    path.display()
+                                );
                             } else {
                                 warn!("Removed stale install directory: {}", path.display());
                             }

@@ -241,7 +241,8 @@ impl SessionStore {
             }
         }
 
-        tx.commit().map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 

@@ -471,7 +471,9 @@ async fn execute_node(
     let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
-            return Err(SkillError::ExecutionFailed(format!("Wait for Node.js: {e}")));
+            return Err(SkillError::ExecutionFailed(format!(
+                "Wait for Node.js: {e}"
+            )));
         }
         Err(_) => {
             // wait_with_output() consumed `child`; the future is dropped here

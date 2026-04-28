@@ -343,10 +343,7 @@ pub async fn auth_rate_limit_layer(
         return Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header("content-type", "application/json")
-            .header(
-                "retry-after",
-                AUTH_RATE_LIMIT_RETRY_AFTER_SECS.to_string(),
-            )
+            .header("retry-after", AUTH_RATE_LIMIT_RETRY_AFTER_SECS.to_string())
             .body(Body::from(
                 serde_json::json!({
                     "error": "Too many login attempts. Please wait before trying again."

@@ -1541,8 +1541,10 @@ pub async fn send_message(
             };
             let t = ErrorTranslator::new(l);
             ApiErrorResponse {
-                error: t
-                    .t_args("api-error-message-delivery-failed", &[("reason", &e.to_string())]),
+                error: t.t_args(
+                    "api-error-message-delivery-failed",
+                    &[("reason", &e.to_string())],
+                ),
                 code: Some(code.to_string()),
                 r#type: Some(code.to_string()),
                 details: None,

@@ -5156,7 +5156,7 @@ pub struct NetworkConfig {
     pub max_messages_per_peer_per_minute: u32,
     /// SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.
     ///
-    /// When set, the node tracks how many tokens each peer's 
+    /// When set, the node tracks how many tokens each peer's
     /// requests have consumed in the current hour window. If a peer exceeds
     /// this budget the request is rejected with a 429 error.
     ///
@@ -5196,8 +5196,14 @@ impl std::fmt::Debug for NetworkConfig {
                     "<redacted>"
                 },
             )
-            .field("max_messages_per_peer_per_minute", &self.max_messages_per_peer_per_minute)
-            .field("max_llm_tokens_per_peer_per_hour", &self.max_llm_tokens_per_peer_per_hour)
+            .field(
+                "max_messages_per_peer_per_minute",
+                &self.max_messages_per_peer_per_minute,
+            )
+            .field(
+                "max_llm_tokens_per_peer_per_hour",
+                &self.max_llm_tokens_per_peer_per_hour,
+            )
             .finish()
     }
 }

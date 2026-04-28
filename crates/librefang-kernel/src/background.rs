@@ -210,7 +210,13 @@ impl BackgroundExecutor {
                     }
                 });
 
-                self.tasks.insert(agent_id, AgentTaskEntry { outer: handle, watchers: watcher_handles });
+                self.tasks.insert(
+                    agent_id,
+                    AgentTaskEntry {
+                        outer: handle,
+                        watchers: watcher_handles,
+                    },
+                );
             }
             ScheduleMode::Periodic { cron } => {
                 let interval_secs = parse_cron_to_secs(cron);
@@ -307,7 +313,13 @@ impl BackgroundExecutor {
                     }
                 });
 
-                self.tasks.insert(agent_id, AgentTaskEntry { outer: handle, watchers: watcher_handles });
+                self.tasks.insert(
+                    agent_id,
+                    AgentTaskEntry {
+                        outer: handle,
+                        watchers: watcher_handles,
+                    },
+                );
             }
             ScheduleMode::Proactive { .. } => {
                 // Proactive agents rely on triggers, not a dedicated loop.

@@ -610,8 +610,7 @@ impl ChannelAdapter for DingTalkAdapter {
                 let tx = Arc::clone(&tx);
                 let secret = Arc::clone(&secret);
                 let account_id = Arc::clone(&account_id);
-                move |headers: axum::http::HeaderMap,
-                      body: axum::body::Bytes| {
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
                     let secret = Arc::clone(&secret);
                     let account_id = Arc::clone(&account_id);
@@ -874,7 +873,9 @@ mod tests {
         let timestamp: i64 = 1700000000000;
         let body = b"webhook-body";
         let sig = DingTalkAdapter::compute_signature(secret, timestamp, body);
-        assert!(DingTalkAdapter::verify_signature(secret, timestamp, body, &sig));
+        assert!(DingTalkAdapter::verify_signature(
+            secret, timestamp, body, &sig
+        ));
         assert!(!DingTalkAdapter::verify_signature(
             secret, timestamp, body, "bad-sig"
         ));
