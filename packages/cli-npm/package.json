@@ -22,7 +22,7 @@
     "@librefang/cli-linux-x64-musl": "0.0.0",
     "@librefang/cli-linux-arm64-musl": "0.0.0",
     "@librefang/cli-darwin-x64": "0.0.0",
-    "@librefang/cli-darwin-arm64": "0.0.0",
+    "@librefang/cli-darwin-arm64": "2026.3.2201",
     "@librefang/cli-win32-x64": "0.0.0",
     "@librefang/cli-win32-arm64": "0.0.0"
   }
