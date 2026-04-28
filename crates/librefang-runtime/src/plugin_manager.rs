@@ -19,9 +19,16 @@ use tracing::{debug, info, warn};
 ///
 /// This is an Ed25519 public key (32 bytes, base64url-encoded).
 /// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
-/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely.
+/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely (development only).
+///
+/// # Security note
+/// The placeholder value below (all-zero bytes once decoded) is intentionally
+/// detected at runtime. Any install attempt while this placeholder is in effect
+/// is rejected with a hard error — no plugin is accepted without a real key.
+/// To configure a real key, set the `LIBREFANG_REGISTRY_PUBKEY` environment
+/// variable to the base64-encoded 32-byte Ed25519 public key of your registry.
 const OFFICIAL_REGISTRY_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-// ^ placeholder — real key would be the registry operator's public key
+// ^ all-zero placeholder — triggers hard error at runtime (see is_placeholder check)
 
 /// Verify an Ed25519 signature over registry index JSON bytes.
 ///
@@ -247,29 +254,41 @@ pub async fn fetch_verified_index(
         let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
             .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
 
-        // Only verify if the key is not the all-zero placeholder.
+        // Detect the all-zero placeholder key.  A placeholder means no real
+        // registry key has been configured, so we REFUSE rather than silently
+        // skip — accepting an unverified index would let a compromised or
+        // man-in-the-middle registry serve arbitrary plugin lists.
         let key_bytes = base64::engine::general_purpose::STANDARD
             .decode(pubkey.trim())
             .unwrap_or_default();
         let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
 
-        if !is_placeholder {
-            // Try to fetch the signature file.
-            match client.get(&sig_url).send().await {
-                Ok(sig_resp) if sig_resp.status().is_success() => {
-                    let sig_text = sig_resp
-                        .text()
-                        .await
-                        .map_err(|e| format!("Failed to read signature: {e}"))?;
-                    verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
-                    info!(registry, "Registry index signature verified OK");
-                }
-                _ => {
-                    warn!(
-                        registry,
-                        "No index.json.sig found — registry index not signature-verified"
-                    );
-                }
+        if is_placeholder {
+            return Err(
+                "Plugin registry public key is not configured — refusing to fetch registry \
+                 index without signature verification. \
+                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
+                 your registry, or set LIBREFANG_REGISTRY_VERIFY=0 to disable verification \
+                 (development use only)."
+                    .to_string(),
+            );
+        }
+
+        // Key is present and non-placeholder — try to verify the signature.
+        match client.get(&sig_url).send().await {
+            Ok(sig_resp) if sig_resp.status().is_success() => {
+                let sig_text = sig_resp
+                    .text()
+                    .await
+                    .map_err(|e| format!("Failed to read signature: {e}"))?;
+                verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
+                info!(registry, "Registry index signature verified OK");
+            }
+            _ => {
+                warn!(
+                    registry,
+                    "No index.json.sig found — registry index not signature-verified"
+                );
             }
         }
     }
@@ -849,13 +868,33 @@ async fn install_from_registry(
         }
     }
 
-    // Verify Ed25519 archive signature (optional — absent sig is OK, wrong sig is fatal).
+    // Verify Ed25519 archive signature.
+    // A placeholder (all-zero) public key means no real key is configured —
+    // refuse installation rather than silently skip.  An attacker who knows the
+    // key is all-zero bytes can trivially craft valid signatures, so accepting
+    // plugins while the placeholder is active is equivalent to no verification.
     let archive_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
     } else {
+        use base64::Engine as _;
         let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
             .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(pubkey.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        if is_placeholder {
+            let _ = std::fs::remove_dir_all(&target_dir);
+            return Err(
+                "Plugin registry public key is not configured — refusing to install plugin \
+                 without signature verification. \
+                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
+                 your registry, or set LIBREFANG_ARCHIVE_VERIFY=0 to disable verification \
+                 (development use only)."
+                    .to_string(),
+            );
+        }
         if let Err(e) =
             verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
         {
@@ -4336,6 +4375,63 @@ description = "Spanish description"
         assert_eq!(
             i18n["es"].description.as_deref(),
             Some("Spanish description")
+        );
+    }
+
+    // ── Bug #3799 — placeholder public key must be refused, not silently skipped ──
+
+    /// Decoding the built-in `OFFICIAL_REGISTRY_PUBKEY_B64` constant must
+    /// produce an all-zero 32-byte slice.  If someone replaces the placeholder
+    /// with a real key this test will fail, signalling that the is_placeholder
+    /// gate should also be re-evaluated.
+    #[test]
+    fn official_registry_pubkey_is_placeholder_all_zeros() {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
+            .expect("OFFICIAL_REGISTRY_PUBKEY_B64 must be valid base64");
+        assert_eq!(
+            bytes.len(),
+            32,
+            "placeholder key must decode to exactly 32 bytes"
+        );
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "placeholder key must be all zeros"
+        );
+    }
+
+    /// The is_placeholder detection used in fetch_verified_index and
+    /// install_from_registry must flag the built-in constant as a placeholder.
+    #[test]
+    fn is_placeholder_detects_built_in_constant() {
+        use base64::Engine as _;
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        assert!(
+            is_placeholder,
+            "the built-in registry pubkey must be detected as a placeholder \
+             so installs fail loudly instead of silently skipping verification"
+        );
+    }
+
+    /// A non-zero 32-byte key must NOT be treated as a placeholder.
+    #[test]
+    fn is_placeholder_passes_real_key() {
+        use base64::Engine as _;
+        // Synthesise a fake non-zero key (not a real Ed25519 key — just for the
+        // placeholder-detection logic which only checks bytes, not curve validity).
+        let real_key = [0xABu8; 32];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(real_key);
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .unwrap_or_default();
+        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
+        assert!(
+            !is_placeholder,
+            "a non-zero 32-byte key must not be treated as a placeholder"
         );
     }
 }
