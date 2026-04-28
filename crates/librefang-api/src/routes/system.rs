@@ -1835,7 +1835,12 @@ pub async fn approve_request(
                     match state.kernel.vault_redeem_recovery_code(code) {
                         Ok(true) => true,
                         Ok(false) => {
-                            if state.kernel.approvals().record_totp_failure("api_admin").is_err() {
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_failure("api_admin")
+                                .is_err()
+                            {
                                 return ApiErrorResponse::internal(
                                     "Failed to persist TOTP failure counter",
                                 )
@@ -1885,7 +1890,12 @@ pub async fn approve_request(
                         }
                         Ok(false) => {
                             // Fail-secure: reject even if counter persist fails (#3372).
-                            if state.kernel.approvals().record_totp_failure("api_admin").is_err() {
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_failure("api_admin")
+                                .is_err()
+                            {
                                 return ApiErrorResponse::internal(
                                     "Failed to persist TOTP failure counter",
                                 )
@@ -2521,7 +2531,12 @@ pub async fn totp_setup(
                 };
                 if !verified {
                     // Fail-secure: reject even if counter persist fails (#3372).
-                    if state.kernel.approvals().record_totp_failure("api_admin").is_err() {
+                    if state
+                        .kernel
+                        .approvals()
+                        .record_totp_failure("api_admin")
+                        .is_err()
+                    {
                         return ApiErrorResponse::internal(
                             "Failed to persist TOTP failure counter",
                         )
@@ -2649,7 +2664,12 @@ pub async fn totp_confirm(
         }
         Ok(false) => {
             // Fail-secure: reject even if counter persist fails (#3372).
-            if state.kernel.approvals().record_totp_failure("api_admin").is_err() {
+            if state
+                .kernel
+                .approvals()
+                .record_totp_failure("api_admin")
+                .is_err()
+            {
                 return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
                     .into_json_tuple();
             }
@@ -2739,7 +2759,12 @@ pub async fn totp_revoke(
 
     if !verified {
         // Fail-secure: reject even if counter persist fails (#3372).
-        if state.kernel.approvals().record_totp_failure("api_admin").is_err() {
+        if state
+            .kernel
+            .approvals()
+            .record_totp_failure("api_admin")
+            .is_err()
+        {
             return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
                 .into_json_tuple();
         }

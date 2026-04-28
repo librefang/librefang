@@ -1422,10 +1422,11 @@ impl LibreFangKernel {
             Ok((true, updated)) => {
                 // #3633: if the vault write fails, treat the attempt as failed
                 // rather than granting access with a still-valid code.
-                self.vault_set("totp_recovery_codes", &updated).map_err(|e| {
-                    warn!("vault_set failed when consuming recovery code: {e}");
-                    "Internal error persisting recovery code consumption".to_string()
-                })?;
+                self.vault_set("totp_recovery_codes", &updated)
+                    .map_err(|e| {
+                        warn!("vault_set failed when consuming recovery code: {e}");
+                        "Internal error persisting recovery code consumption".to_string()
+                    })?;
                 Ok(true)
             }
             Ok((false, _)) => Ok(false),

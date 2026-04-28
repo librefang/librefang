@@ -1472,7 +1472,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                             true
                                         }
                                         Ok((false, _)) => {
-                                            self.kernel.approvals().record_totp_failure(sender_id);
+                                            let _ = self
+                                                .kernel
+                                                .approvals()
+                                                .record_totp_failure(sender_id);
                                             return "Invalid recovery code.".into();
                                         }
                                         Err(e) => return format!("Recovery code error: {e}"),
@@ -1495,7 +1498,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             ) {
                                 Ok(true) => true,
                                 Ok(false) => {
-                                    self.kernel.approvals().record_totp_failure(sender_id);
+                                    let _ = self
+                                        .kernel
+                                        .approvals()
+                                        .record_totp_failure(sender_id);
                                     return "Invalid TOTP code.".into();
                                 }
                                 Err(e) => return format!("TOTP error: {e}"),

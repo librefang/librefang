@@ -969,7 +969,10 @@ impl ApprovalManager {
             return Ok(());
         };
         let Ok(conn) = db.lock() else {
-            warn!(sender_id, "TOTP lockout DB unavailable; rejecting attempt fail-secure");
+            warn!(
+                sender_id,
+                "TOTP lockout DB unavailable; rejecting attempt fail-secure"
+            );
             return Err(());
         };
         let result = conn.execute(
@@ -2365,7 +2368,7 @@ mod tests {
 
         // Record failures up to threshold
         for _ in 0..5 {
-            mgr.record_totp_failure("user1");
+            let _ = mgr.record_totp_failure("user1");
         }
         assert!(mgr.is_totp_locked_out("user1"));
 
