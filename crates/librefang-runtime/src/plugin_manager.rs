@@ -882,7 +882,10 @@ async fn install_from_registry(
             }
         }
         Err(e) => {
-            warn!(plugin = name, "Could not load manifest for hook checksum verification: {e}");
+            warn!(
+                plugin = name,
+                "Could not load manifest for hook checksum verification: {e}"
+            );
         }
     }
 

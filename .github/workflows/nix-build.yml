@@ -43,17 +43,16 @@ jobs:
           - librefang-cli
           - librefang-desktop
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Install Nix
-        uses: cachix/install-nix-action@526bbe688ef5cba464b9e39f5f5b9c35c16e7ce9 # v31.4.0
+        uses: cachix/install-nix-action@ab739621df7a23f52766f9ccc97f38da6b7af14f # v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = true
 
       - name: Cache /nix/store
-        uses: nix-community/cache-nix-action@135667ec418502fa5a3598af6fb9eb733a374cbf # v7.0.0
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
         with:
           primary-key: nix-${{ runner.os }}-${{ matrix.package }}-${{ hashFiles('flake.lock', 'Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-${{ matrix.package }}-

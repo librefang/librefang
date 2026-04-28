@@ -31,7 +31,7 @@ jobs:
     if: github.event_name == 'pull_request_target' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Label conflicting PRs
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const LABEL = 'has-conflicts';
@@ -121,7 +121,7 @@ jobs:
     if: github.event_name == 'check_suite' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Label PRs with failed CI
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const LABEL = 'ci-failed';
@@ -246,7 +246,7 @@ jobs:
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Classify PR size
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const SIZE_LABELS = ['size/XS', 'size/S', 'size/M', 'size/L', 'size/XL'];
@@ -302,7 +302,7 @@ jobs:
     if: github.event_name == 'pull_request_target'
     steps:
       - name: Label docs/CI-only PRs
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const LABEL = 'no-rust-required';
@@ -348,7 +348,7 @@ jobs:
     if: github.event_name == 'pull_request_review' || (github.event_name == 'pull_request_target' && github.event.action == 'synchronize')
     steps:
       - name: Sync review labels
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const READY = 'ready-for-review';
