@@ -2154,10 +2154,7 @@ const MAX_MCP_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 /// blocked. This prevents arbitrary daemon secrets (API keys, etc.) from
 /// leaking into the child process's argv where they would be visible in
 /// `/proc/<pid>/cmdline` and system process listings.
-fn expand_env_vars_restricted(
-    input: &str,
-    allowed: &std::collections::HashSet<String>,
-) -> String {
+fn expand_env_vars_restricted(input: &str, allowed: &std::collections::HashSet<String>) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
