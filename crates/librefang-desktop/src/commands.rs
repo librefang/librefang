@@ -13,7 +13,7 @@ use tauri_plugin_autostart::ManagerExt;
 pub fn get_port(port: tauri::State<'_, PortState>) -> Result<u16, String> {
     port.0
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .ok_or_else(|| "No local server running".to_string())
 }
 
@@ -26,9 +26,9 @@ pub fn get_status(
     let p = port
         .0
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .ok_or_else(|| "No local server running".to_string())?;
-    let guard = kernel_state.0.read().unwrap();
+    let guard = kernel_state.0.read().unwrap_or_else(|e| e.into_inner());
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
@@ -46,7 +46,7 @@ pub fn get_status(
 /// Get the number of registered agents.
 #[tauri::command]
 pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> Result<usize, String> {
-    let guard = kernel_state.0.read().unwrap();
+    let guard = kernel_state.0.read().unwrap_or_else(|e| e.into_inner());
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
@@ -91,7 +91,7 @@ pub fn import_agent_toml(
     let dest = agent_dir.join("agent.toml");
     std::fs::write(&dest, &content).map_err(|e| format!("Failed to write manifest: {e}"))?;
 
-    let guard = kernel_state.0.read().unwrap();
+    let guard = kernel_state.0.read().unwrap_or_else(|e| e.into_inner());
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;
@@ -139,7 +139,7 @@ pub fn import_skill_file(
     let dest = skills_dir.join(&file_name);
     std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy skill file: {e}"))?;
 
-    let guard = kernel_state.0.read().unwrap();
+    let guard = kernel_state.0.read().unwrap_or_else(|e| e.into_inner());
     let inner = guard
         .as_ref()
         .ok_or_else(|| "No local server running".to_string())?;

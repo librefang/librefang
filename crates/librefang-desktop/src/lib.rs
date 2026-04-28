@@ -405,7 +405,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             // For local direct-boot mode, start event forwarding for notifications
             if !is_remote && !show_connection_screen {
                 if let Some(ks) = app.try_state::<KernelState>() {
-                    let guard = ks.0.read().unwrap();
+                    let guard = ks.0.read().unwrap_or_else(|e| e.into_inner());
                     if let Some(ref inner) = *guard {
                         let app_handle = app.handle().clone();
                         let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
