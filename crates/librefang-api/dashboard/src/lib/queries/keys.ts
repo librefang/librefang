@@ -382,3 +382,9 @@ export const terminalKeys = {
   health: () => [...terminalKeys.all, "health"] as const,
   windows: () => [...terminalKeys.all, "windows"] as const,
 };
+
+export const pairingKeys = {
+  all: ["pairing"] as const,
+  request: () => [...pairingKeys.all, "request"] as const,
+  devices: () => [...pairingKeys.all, "devices"] as const,
+};

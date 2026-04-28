@@ -4064,6 +4064,7 @@ dependencies = [
  "flate2",
  "futures",
  "governor",
+ "hex",
  "hmac",
  "http-body-util",
  "include_dir",
@@ -4086,6 +4087,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "portable-pty",
+ "rand 0.10.0",
  "reqwest 0.13.2",
  "rustix",
  "schemars 0.8.22",
@@ -4211,6 +4213,7 @@ version = "2026.4.28-beta7"
 dependencies = [
  "axum",
  "clap",
+ "keyring",
  "librefang-api",
  "librefang-extensions",
  "librefang-kernel",
