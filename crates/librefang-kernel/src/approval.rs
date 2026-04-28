@@ -894,12 +894,9 @@ impl ApprovalManager {
     /// four 8-character groups separated by hyphens for readability:
     /// `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`.
     pub fn generate_recovery_codes() -> Vec<String> {
-        use rand::RngCore;
-        let mut rng = rand::rng();
         (0..8)
             .map(|_| {
-                let mut bytes = [0u8; 16];
-                rng.fill_bytes(&mut bytes);
+                let bytes: [u8; 16] = rand::random();
                 let hex = hex::encode(bytes).to_uppercase();
                 // Split into four groups of 8 characters.
                 format!(

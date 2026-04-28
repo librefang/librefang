@@ -1805,11 +1805,11 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
-                    match state
-                        .kernel
-                        .approvals()
-                        .check_and_record_totp(&secret, code, &totp_issuer)
-                    {
+                    match state.kernel.approvals().check_and_record_totp(
+                        &secret,
+                        code,
+                        &totp_issuer,
+                    ) {
                         Ok(true) => true,
                         Ok(false) => {
                             state.kernel.approvals().record_totp_failure("api_admin");
