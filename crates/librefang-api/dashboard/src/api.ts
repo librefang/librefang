@@ -3850,3 +3850,48 @@ export async function getEffectivePermissions(
     `/api/authz/effective/${encodeURIComponent(name)}`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Device pairing
+// ---------------------------------------------------------------------------
+
+export interface PairingRequestResult {
+  token: string;
+  qr_uri: string;
+  expires_at: string;
+}
+
+export interface PairedDevice {
+  device_id: string;
+  display_name: string;
+  platform: string;
+  paired_at: string;
+}
+
+export interface PairingCompleteResult {
+  device_id: string;
+  api_key: string;
+  display_name: string;
+  platform: string;
+  paired_at: string;
+}
+
+export async function createPairingRequest(): Promise<PairingRequestResult> {
+  return post<PairingRequestResult>("/api/pairing/request", {});
+}
+
+export async function completePairing(body: {
+  token: string;
+  display_name: string;
+  platform: string;
+}): Promise<PairingCompleteResult> {
+  return post<PairingCompleteResult>("/api/pairing/complete", body);
+}
+
+export async function listPairedDevices(): Promise<PairedDevice[]> {
+  return get<PairedDevice[]>("/api/pairing/devices");
+}
+
+export async function removePairedDevice(deviceId: string): Promise<void> {
+  return del<void>(`/api/pairing/devices/${encodeURIComponent(deviceId)}`);
+}

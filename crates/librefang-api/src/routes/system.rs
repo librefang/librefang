@@ -2868,6 +2868,7 @@ pub async fn remove_binding(
 pub async fn pairing_request(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    axum::extract::Host(host): axum::extract::Host,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
@@ -2877,7 +2878,22 @@ pub async fn pairing_request(
     }
     match state.kernel.pairing_ref().create_pairing_request() {
         Ok(req) => {
-            let qr_uri = format!("librefang://pair?token={}", req.token);
+            // Encode QR payload as base64 JSON so base_url (with "://") doesn't
+            // need percent-encoding inside the outer librefang:// URI.
+            let base_url = if host.is_empty() {
+                String::new()
+            } else {
+                format!("http://{host}")
+            };
+            let payload = serde_json::json!({
+                "v": 1,
+                "base_url": base_url,
+                "token": req.token,
+                "expires_at": req.expires_at.to_rfc3339(),
+            });
+            let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(payload.to_string());
+            let qr_uri = format!("librefang://pair?payload={payload_b64}");
             Json(serde_json::json!({
                 "token": req.token,
                 "qr_uri": qr_uri,
@@ -2925,6 +2941,7 @@ pub async fn pairing_complete(
         last_seen: chrono::Utc::now(),
         push_token,
     };
+    let api_key = state.kernel.config_ref().api_key.clone();
     match state
         .kernel
         .pairing_ref()
@@ -2932,14 +2949,23 @@ pub async fn pairing_complete(
     {
         Ok(device) => Json(serde_json::json!({
             "device_id": device.device_id,
+            // Return the daemon api_key so the mobile app can authenticate
+            // subsequent requests. The token is single-use so this is safe.
+            "api_key": api_key,
             "display_name": device.display_name,
             "platform": device.platform,
             "paired_at": device.paired_at.to_rfc3339(),
         }))
         .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e)
-            .into_json_tuple()
-            .into_response(),
+        Err(e) => {
+            // Return 410 Gone for used/expired tokens to let the client
+            // distinguish "token consumed" from a generic 400 input error.
+            (
+                axum::http::StatusCode::GONE,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     }
 }
 

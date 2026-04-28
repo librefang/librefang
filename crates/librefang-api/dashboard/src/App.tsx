@@ -48,6 +48,7 @@ import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
+import { OfflineBanner } from "./components/OfflineBanner";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -836,6 +837,7 @@ export function App() {
         </main>
       </div>
 
+      <OfflineBanner />
       <PushDrawer />
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
