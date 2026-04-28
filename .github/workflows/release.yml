@@ -1631,8 +1631,11 @@ jobs:
           # Override CFBundleVersion via the iOS Info.plist that
           # `cargo tauri ios init` just generated. PlistBuddy is the
           # supported macOS toolchain path; xcrun plutil would also work
-          # but is more verbose for in-place edits.
-          PLIST=$(find gen/apple -name 'Info.plist' -path '*_iOS*' | head -1)
+          # but is more verbose for in-place edits. Exclude Tests /
+          # UITests targets — only the main app's plist drives what
+          # ships to TestFlight.
+          PLIST=$(find gen/apple -name 'Info.plist' -path '*_iOS*' \
+            ! -path '*Tests*' ! -path '*UITests*' | head -1)
           if [ -z "$PLIST" ] || [ ! -f "$PLIST" ]; then
             echo "::error::Could not locate generated iOS Info.plist under gen/apple/*_iOS"
             find gen/apple -name 'Info.plist' || true
