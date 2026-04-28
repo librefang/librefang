@@ -1094,24 +1094,34 @@ pub async fn build_router(
     // These bypass auth/rate-limit layers since external platforms (Feishu,
     // Teams, etc.) handle their own signature verification.
     // The router is dynamic (behind RwLock) so hot-reload can swap routes.
+    //
+    // SECURITY: Apply a per-route body-size cap *before* merging so that
+    // webhook handlers are not exempt from the global RequestBodyLimitLayer
+    // (which was applied above to `app`). Tower layers wrap the router they
+    // are attached to; a layer added to `app` after `.nest()` would not
+    // cover the nested router. 1 MiB is generous for any webhook payload
+    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks.
+    const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
     let channel_webhook_state = state.webhook_router.clone();
-    let channel_routes = Router::new().fallback(move |req: axum::extract::Request| {
-        let wr = channel_webhook_state.clone();
-        async move {
-            use tower::ServiceExt;
-            let guard = wr.read().await;
-            let router: Arc<axum::Router> = Arc::clone(&guard);
-            drop(guard);
-            // Unwrap the Arc — if we hold the only reference we avoid a clone,
-            // otherwise Router::clone is needed (only during hot-reload overlap).
-            Arc::try_unwrap(router)
-                .unwrap_or_else(|arc| (*arc).clone())
-                .into_service()
-                .oneshot(req)
-                .await
-                .unwrap_or_else(|e: std::convert::Infallible| match e {})
-        }
-    });
+    let channel_routes = Router::new()
+        .fallback(move |req: axum::extract::Request| {
+            let wr = channel_webhook_state.clone();
+            async move {
+                use tower::ServiceExt;
+                let guard = wr.read().await;
+                let router: Arc<axum::Router> = Arc::clone(&guard);
+                drop(guard);
+                // Unwrap the Arc — if we hold the only reference we avoid a clone,
+                // otherwise Router::clone is needed (only during hot-reload overlap).
+                Arc::try_unwrap(router)
+                    .unwrap_or_else(|arc| (*arc).clone())
+                    .into_service()
+                    .oneshot(req)
+                    .await
+                    .unwrap_or_else(|e: std::convert::Infallible| match e {})
+            }
+        })
+        .layer(RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT));
     let app = app.nest("/channels", channel_routes);
 
     let app = app.with_state(state.clone());
