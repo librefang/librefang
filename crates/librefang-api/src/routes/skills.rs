@@ -2182,7 +2182,10 @@ pub async fn install_hand_deps(
         // metacharacters that are never needed in legitimate package-manager
         // install strings (semicolons, pipes, backticks, redirects, etc.).
         if final_cmd.contains(|c: char| {
-            matches!(c, ';' | '|' | '&' | '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '\n' | '\r')
+            matches!(
+                c,
+                ';' | '|' | '&' | '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '\n' | '\r'
+            )
         }) {
             results.push(serde_json::json!({
                 "key": req.key,
