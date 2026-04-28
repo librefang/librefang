@@ -664,6 +664,10 @@ pub async fn auth_callback(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &code, &state_payload).await
 }
 
@@ -696,7 +700,42 @@ pub async fn auth_callback_post(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &body.code, &state_payload).await
+}
+
+/// Atomically reject + consume an OAuth state nonce.
+///
+/// #3944 verified that the nonce in the id_token matched the one we
+/// signed into `state`, but never marked the nonce as redeemed.  A
+/// callback URL captured from browser history, Referer, or proxy logs
+/// could be replayed against the daemon repeatedly until the IdP
+/// rejected the authorization code.  This helper enforces single-use
+/// at the daemon by checking + recording the nonce as consumed before
+/// the code exchange runs.  Subsequent requests with the same `state`
+/// are rejected with HTTP 400.
+///
+/// The nonce is consumed eagerly (before code exchange).  Failed
+/// downstream verification (token-endpoint reject, JWT signature fail)
+/// still leaves the nonce marked used — the legitimate user must
+/// restart the auth flow if anything goes wrong, which is exactly the
+/// fail-closed shape we want for credential flows.
+fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Response> {
+    if state.kernel.approvals().is_oauth_nonce_used(nonce) {
+        warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "OAuth callback already redeemed; please restart the sign-in flow"
+            })),
+        )
+            .into_response());
+    }
+    state.kernel.approvals().record_oauth_nonce_used(nonce);
+    Ok(())
 }
 
 /// Shared code exchange logic for both GET and POST callback handlers.

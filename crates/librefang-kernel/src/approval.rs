@@ -1190,6 +1190,70 @@ impl ApprovalManager {
         );
     }
 
+    /// SHA-256 hex of an OIDC state nonce.  We only persist the hash so
+    /// the raw nonce never sits in the audit DB on disk.
+    fn oauth_nonce_hash(nonce: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(nonce.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Check whether an OIDC state nonce has already been redeemed.
+    ///
+    /// #3944 added the nonce-equality check to the OAuth callback but the
+    /// nonce was reconstructed from the HMAC-signed `state` parameter on
+    /// every request, never consumed — so the same callback URL captured
+    /// from browser history, Referer, or proxy logs could be replayed
+    /// against the daemon repeatedly until the IdP rejected the
+    /// authorization code.  Persist consumed nonces (hashed) here so the
+    /// daemon refuses the second redemption itself.  Returns `false` when
+    /// no audit DB is wired (test harness) so the existing tests are
+    /// unaffected.
+    pub fn is_oauth_nonce_used(&self, nonce: &str) -> bool {
+        let Some(db) = &self.audit_db else { return false };
+        let Ok(conn) = db.lock() else { return false };
+        let hash = Self::oauth_nonce_hash(nonce);
+        // OAuth flow lifetime is typically 5–15 min; matching the state
+        // signing window at 1 hour is generous and never lets the lookup
+        // miss a still-active flow.
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let window_start = now_unix - 3600;
+        conn.query_row(
+            "SELECT COUNT(*) FROM oauth_used_nonces WHERE nonce_hash = ?1 AND used_at >= ?2",
+            rusqlite::params![hash, window_start],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
+    /// Record a redeemed OIDC nonce.  Prunes entries older than 1 hour
+    /// to keep the table small without trimming inside the typical
+    /// OAuth-flow window.
+    pub fn record_oauth_nonce_used(&self, nonce: &str) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let hash = Self::oauth_nonce_hash(nonce);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let _ = conn.execute(
+            "INSERT INTO oauth_used_nonces (nonce_hash, used_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(nonce_hash) DO UPDATE SET used_at = excluded.used_at",
+            rusqlite::params![hash, now_unix],
+        );
+        let prune_before = now_unix - 3600;
+        let _ = conn.execute(
+            "DELETE FROM oauth_used_nonces WHERE used_at < ?1",
+            rusqlite::params![prune_before],
+        );
+    }
+
     /// Write an audit entry to the persistent database.
     fn audit_log_write(&self, entry: &ApprovalAuditEntry) {
         let Some(db) = &self.audit_db else { return };
