@@ -228,10 +228,28 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
         return glob_matches_path(pattern, value);
     }
 
-    // No path separator in pattern: use the original wildcard logic so tool
-    // names ("file_*"), hostname globs ("*.openai.com:443"), memory scope
-    // patterns, etc. keep working exactly as before.
+    // SECURITY: hostname-style patterns (`*.example.com`) must use the
+    // dot-separator-aware matcher, otherwise the legacy `value.ends_with(suffix)`
+    // path lets a value like `evil.com?host=good.example.com` match
+    // `*.example.com` (it ends with `.example.com`). That bypass was caught by
+    // the original #3902 host-mode check; this branch restores it.
+    if pattern.contains('.') && value.contains('.') {
+        return glob_matches_with_separator(pattern, value, '.');
+    }
+
+    // No separator in pattern: use the original wildcard logic so tool
+    // names ("file_*"), memory scope patterns, etc. keep working exactly
+    // as before.
     glob_matches_simple(pattern, value)
+}
+
+/// Generic separator-aware matcher: split both sides on `sep` and match
+/// segment-by-segment. A single `*` segment matches one segment; `**` matches
+/// across segments. Used by both the path and hostname matchers.
+fn glob_matches_with_separator(pattern: &str, value: &str, sep: char) -> bool {
+    let pat_segs: Vec<&str> = pattern.split(sep).collect();
+    let val_segs: Vec<&str> = value.split(sep).collect();
+    glob_match_segments(&pat_segs, &val_segs)
 }
 
 /// Original (legacy) single-wildcard matching used when the pattern has no `/`.
@@ -605,5 +623,27 @@ mod tests {
             &Capability::FileRead("/data/*".to_string()),
             &Capability::FileRead("/data/../../etc/passwd".to_string()),
         ));
+    }
+
+    /// Regression: hostname-style patterns must NOT use the legacy
+    /// `value.ends_with(suffix)` path, because that lets a value with the
+    /// pattern's suffix anywhere in it match (SSRF amplifier).
+    ///
+    /// `*.example.com` should match `api.example.com` but NOT
+    /// `evil.com?host=good.example.com` (which ends with `.example.com`).
+    /// This was the original #3902 protection that #3925 inadvertently
+    /// regressed.
+    #[test]
+    fn test_glob_host_separator_blocks_endswith_smuggling() {
+        assert!(glob_matches("*.example.com", "api.example.com"));
+        assert!(glob_matches("*.openai.com:443", "api.openai.com:443"));
+        // The smuggle: value ends with ".example.com" but `evil.com?...` is
+        // NOT the legitimate first-segment match. Must be rejected.
+        assert!(!glob_matches(
+            "*.example.com",
+            "evil.com?host=good.example.com"
+        ));
+        // Two-segment value cannot match three-segment pattern.
+        assert!(!glob_matches("*.example.com", "evil.com"));
     }
 }
