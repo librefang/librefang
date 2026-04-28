@@ -9,9 +9,13 @@
 
 mod commands;
 mod connection;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod server;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod shortcuts;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod tray;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod updater;
 
 use librefang_extensions::dotenv;
@@ -48,6 +52,8 @@ pub struct RemoteMode(pub std::sync::RwLock<bool>);
 /// Managed state: holds the `ServerHandle` for shutdown when running in local mode.
 /// Wrapped in a `Mutex<Option<_>>` so it can be filled after app setup (from the
 /// `start_local` command) and taken on app exit.
+/// Desktop-only: mobile is a thin client with no embedded server.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub struct ServerHandleHolder(pub std::sync::Mutex<Option<server::ServerHandle>>);
 
 /// Forward critical kernel events as native OS notifications.
@@ -105,7 +111,8 @@ pub async fn forward_kernel_events(
 enum StartupMode {
     /// Connect directly to a remote server URL (skip connection screen).
     Remote(String),
-    /// Boot a local server (skip connection screen).
+    /// Boot a local server (skip connection screen) — desktop only.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     Local,
     /// Show the connection screen and let the user decide.
     ConnectionScreen,
@@ -134,7 +141,11 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     let mode = if let Some(ref url) = server_url {
         StartupMode::Remote(url.trim_end_matches('/').to_string())
     } else if force_local {
-        StartupMode::Local
+        // force_local is only meaningful on desktop — on mobile always use connection screen
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        { StartupMode::Local }
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        { StartupMode::ConnectionScreen }
     } else if let Some(url) = std::env::var("LIBREFANG_SERVER_URL")
         .ok()
         .filter(|s| !s.is_empty())
@@ -145,6 +156,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             "remote" if pref.server_url.is_some() => {
                 StartupMode::Remote(pref.server_url.unwrap().trim_end_matches('/').to_string())
             }
+            #[cfg(not(any(target_os = "ios", target_os = "android")))]
             "local" => StartupMode::Local,
             _ => StartupMode::ConnectionScreen,
         }
@@ -153,6 +165,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     };
 
     // For direct modes (remote or forced local), resolve URL + optional server handle now.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let (initial_url, server_handle, is_remote) = match &mode {
         StartupMode::Remote(url) => {
             if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -174,6 +187,20 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         }
     };
 
+    // On mobile, we are always in remote or connection-screen mode — no local server.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let (initial_url, is_remote) = match &mode {
+        StartupMode::Remote(url) => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                eprintln!("Server URL must use http:// or https://, got: {url}");
+                std::process::exit(1);
+            }
+            info!("Remote mode: connecting to {url}");
+            (url.clone(), true)
+        }
+        StartupMode::ConnectionScreen => (String::new(), false),
+    };
+
     let show_connection_screen = matches!(mode, StartupMode::ConnectionScreen);
 
     // Serve the connection screen HTML through a custom URI scheme instead of
@@ -188,8 +215,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 .expect("connection response must build")
         })
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init());
+
+    // Shell plugin spawns CLI processes — desktop only
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        builder = builder.plugin(tauri_plugin_shell::init());
+    }
 
     // Desktop-only plugins
     #[cfg(desktop)]
@@ -222,10 +254,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         }
     }
 
-    // Always register the ServerHandleHolder so start_local can fill it later.
+    // Always register the ServerHandleHolder on desktop so start_local can fill it later.
+    // On mobile, there is no embedded server so this type does not exist.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let holder = ServerHandleHolder(std::sync::Mutex::new(server_handle));
 
     // Pre-compute initial values for interior-mutable state.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let (init_port, init_kernel_inner, init_url, init_remote) = match &mode {
         StartupMode::Remote(_) => (None, None, initial_url.clone(), true),
         StartupMode::Local => {
@@ -247,6 +282,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         StartupMode::ConnectionScreen => (None, None, String::new(), false),
     };
 
+    // Mobile: no kernel state, port state, or server handle — always thin client.
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let (init_port, init_kernel_inner, init_url, init_remote) = match &mode {
+        StartupMode::Remote(_) => (None::<u16>, None::<KernelInner>, initial_url.clone(), true),
+        StartupMode::ConnectionScreen => (None, None, String::new(), false),
+    };
+
     // Register ALL state types ONCE with initial values. Updates go through
     // interior-mutable RwLocks — Tauri `manage()` is a no-op for duplicates.
     builder = builder
@@ -255,25 +297,47 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         .manage(ServerUrlState(std::sync::RwLock::new(init_url)))
         .manage(RemoteMode(std::sync::RwLock::new(init_remote)));
 
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        builder = builder.manage(holder);
+    }
+
+    // `generate_handler!` does not support cfg attributes inside the macro, so we
+    // build two separate lists and select the right one at compile time.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let invoke_handler = tauri::generate_handler![
+        commands::get_port,
+        commands::get_status,
+        commands::get_agent_count,
+        commands::import_agent_toml,
+        commands::import_skill_file,
+        commands::get_autostart,
+        commands::set_autostart,
+        commands::check_for_updates,
+        commands::install_update,
+        commands::open_config_dir,
+        commands::open_logs_dir,
+        commands::uninstall_app,
+        connection::test_connection,
+        connection::connect_remote,
+        connection::start_local,
+    ];
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let invoke_handler = tauri::generate_handler![
+        commands::get_port,
+        commands::get_status,
+        commands::get_agent_count,
+        commands::import_agent_toml,
+        commands::import_skill_file,
+        commands::open_config_dir,
+        commands::open_logs_dir,
+        commands::uninstall_app,
+        connection::test_connection,
+        connection::connect_remote,
+    ];
+
     builder
-        .manage(holder)
-        .invoke_handler(tauri::generate_handler![
-            commands::get_port,
-            commands::get_status,
-            commands::get_agent_count,
-            commands::import_agent_toml,
-            commands::import_skill_file,
-            commands::get_autostart,
-            commands::set_autostart,
-            commands::check_for_updates,
-            commands::install_update,
-            commands::open_config_dir,
-            commands::open_logs_dir,
-            commands::uninstall_app,
-            connection::test_connection,
-            connection::connect_remote,
-            connection::start_local,
-        ])
+        .invoke_handler(invoke_handler)
         .setup(move |app| {
             if show_connection_screen {
                 let _window = WebviewWindowBuilder::new(
