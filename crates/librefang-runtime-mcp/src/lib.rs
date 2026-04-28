@@ -796,9 +796,17 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Read an HTTP response body up to [`MAX_RESPONSE_BYTES`].
 ///
-/// Rejects based on `Content-Length` header first (fast path), then reads
-/// the full body and errors if it exceeds the cap.
-async fn read_response_bytes_capped(response: reqwest::Response) -> Result<Vec<u8>, String> {
+/// Rejects based on `Content-Length` header first (fast path), then
+/// **streams** the body chunk-by-chunk and aborts mid-read once the
+/// running total would breach the cap.
+///
+/// The previous shape (`response.bytes().await` followed by a length
+/// check) happily allocated up to ~16 MiB before rejecting — a server
+/// omitting `Content-Length` (chunked transfer) forces that allocation
+/// per request and creates memory pressure under concurrent abuse.
+/// The audit of #3926 flagged this; fix is a streaming reader with a
+/// running byte counter.
+async fn read_response_bytes_capped(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     // Fast-path: reject via Content-Length before reading a single byte.
     if let Some(content_length) = response.content_length() {
         if content_length as usize > MAX_RESPONSE_BYTES {
@@ -808,19 +816,39 @@ async fn read_response_bytes_capped(response: reqwest::Response) -> Result<Vec<u
             ));
         }
     }
-    // Read the full body and enforce the cap.
-    let b = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
-    if b.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "MCP response body ({} bytes) exceeds the {MAX_RESPONSE_BYTES}-byte cap \
-             — response rejected",
-            b.len()
-        ));
+
+    // Streaming-path: consume chunks via reqwest's `chunk()` async API
+    // and bail out the moment the running total would breach the cap.
+    // No 16 MiB buffering for chunked-transfer servers that omit
+    // Content-Length.
+    let mut buf: Vec<u8> = Vec::new();
+    if let Some(hint) = response.content_length() {
+        // Pre-allocate when Content-Length is honest; clamp to avoid a
+        // malicious large hint forcing the allocation we're trying to
+        // avoid.
+        let cap_hint = (hint as usize).min(MAX_RESPONSE_BYTES);
+        buf.reserve(cap_hint);
     }
-    Ok(b.to_vec())
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                    return Err(format!(
+                        "MCP response body exceeds the {MAX_RESPONSE_BYTES}-byte cap \
+                         (streamed {} + next chunk {}) — response aborted",
+                        buf.len(),
+                        chunk.len()
+                    ));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break, // end of body
+            Err(e) => {
+                return Err(format!("Failed to read response body: {e}"));
+            }
+        }
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
