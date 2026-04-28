@@ -965,6 +965,19 @@ pub async fn build_router(
     // compatibility. Future versions (v2, v3) can be added as separate routers.
     let v1_routes = api_v1_routes();
 
+    // Upload routes are defined separately so they can share the auth/rate-limit
+    // layers but bypass RequestBodyLimitLayer — the handler enforces its own
+    // configurable max_upload_size_bytes (default 10 MB).
+    let upload_routes = Router::new()
+        .route(
+            "/api/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        )
+        .route(
+            "/api/v1/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        );
+
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
         .route(
@@ -1006,6 +1019,11 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
+        // Upload routes must be merged BEFORE the layer calls so that auth and
+        // rate-limit middleware apply to them.  They are intentionally excluded
+        // from RequestBodyLimitLayer (applied below) because the handler
+        // enforces its own configurable limit.
+        .merge(upload_routes)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -1034,24 +1052,15 @@ pub async fn build_router(
         )
         .layer(cors);
 
-    // Split body-limit application: apply the global limit to the main app,
-    // then merge the upload route WITHOUT the limit.  The handler enforces its
-    // own configurable max_upload_size_bytes (default 10 MB).
-    let upload_routes = Router::new()
-        .route(
-            "/api/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        )
-        .route(
-            "/api/v1/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        );
-
-    let app = app
-        .layer(RequestBodyLimitLayer::new(
-            kernel.config_ref().max_request_body_bytes,
-        ))
-        .merge(upload_routes);
+    // Apply the global request body size limit to the full app.  Upload routes
+    // were merged before the security layers above and therefore covered by
+    // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
+    // only apply to routes registered before the layer call, so routes merged
+    // after this point (channel_routes below) are also exempt.  Upload handler
+    // enforces its own max_upload_size_bytes cap instead.
+    let app = app.layer(RequestBodyLimitLayer::new(
+        kernel.config_ref().max_request_body_bytes,
+    ));
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
