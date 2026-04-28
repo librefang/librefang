@@ -1,7 +1,7 @@
 import { formatBytes } from "../lib/format";
-import { useState, useCallback, startTransition } from "react";
+import { useState, useCallback, useEffect, useRef, startTransition } from "react";
 import { useTranslation } from "react-i18next";
-import type { PluginItem, RegistryEntry } from "../api";
+import type { PluginItem, RegistryEntry, RegistryPluginListing } from "../api";
 import { usePlugins, usePluginRegistries } from "../lib/queries/plugins";
 import {
   useInstallPlugin,
@@ -15,13 +15,16 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
   Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 
 const EMPTY_PLUGINS: PluginItem[] = [];
 const EMPTY_REGISTRIES: RegistryEntry[] = [];
@@ -45,6 +48,8 @@ export function PluginsPage() {
   const [showScaffold, setShowScaffold] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [installingName, setInstallingName] = useState<string | null>(null);
+  const [detailsPlugin, setDetailsPlugin] = useState<PluginItem | null>(null);
+  const [detailsRegistryPlugin, setDetailsRegistryPlugin] = useState<{ rp: RegistryPluginListing; repo: string } | null>(null);
   const openInstall = useCallback(() => setShowInstall(true), []);
   useCreateShortcut(openInstall);
 
@@ -71,6 +76,18 @@ export function PluginsPage() {
   const depsMutation = useInstallPluginDeps();
 
   const plugins = pluginsQuery.data?.plugins ?? EMPTY_PLUGINS;
+
+  // First-time visitors with nothing installed land on the marketplace
+  // tab — installing from the registry is the obvious next step. Fires
+  // once per mount; if the user manually flips back to "Installed", the
+  // next refetch doesn't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!pluginsQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (plugins.length === 0) setTab("registry");
+  }, [pluginsQuery.isSuccess, plugins.length]);
   const registries = registriesQuery.data?.registries ?? EMPTY_REGISTRIES;
 
   const onRefresh = useCallback(() => {
@@ -164,7 +181,9 @@ export function PluginsPage() {
         </button>
       </div>
 
-      {/* Installed Tab */}
+      {/* Installed / Registry Tab content */}
+      <AnimatePresence mode="wait">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit">
       {tab === "installed" && (
         <div>
           {pluginsQuery.isLoading ? (
@@ -176,9 +195,16 @@ export function PluginsPage() {
               description={t("plugins.no_plugins_desc")}
             />
           ) : (
-            <div className="space-y-2 stagger-children">
+            <StaggerList className="space-y-2">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors">
+                <div
+                  key={p.name}
+                  className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-colors cursor-pointer"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setDetailsPlugin(p)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetailsPlugin(p); } }}
+                >
                   <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
@@ -219,7 +245,7 @@ export function PluginsPage() {
                   </div>
                 </div>
               ))}
-            </div>
+            </StaggerList>
           )}
         </div>
       )}
@@ -258,12 +284,13 @@ export function PluginsPage() {
                   {reg.plugins.length === 0 ? (
                     <p className="text-xs text-text-dim italic">{t("plugins.no_available")}</p>
                   ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
+                    <StaggerList className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       {reg.plugins.map(rp => (
                         <Card
                           key={rp.name}
                           padding="md"
-                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors"
+                          className="flex flex-col gap-3 hover:border-brand/30 transition-colors cursor-pointer"
+                          onClick={() => setDetailsRegistryPlugin({ rp, repo: reg.github_repo })}
                         >
                           <div className="flex items-start gap-3">
                             <div className="w-9 h-9 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
@@ -309,7 +336,7 @@ export function PluginsPage() {
                               <Button
                                 variant="primary"
                                 size="sm"
-                                onClick={() => handleRegistryInstall(rp.name, reg.github_repo)}
+                                onClick={(e) => { e.stopPropagation(); handleRegistryInstall(rp.name, reg.github_repo); }}
                                 disabled={installingName === `${reg.github_repo}:${rp.name}`}
                               >
                                 {installingName === `${reg.github_repo}:${rp.name}`
@@ -321,7 +348,7 @@ export function PluginsPage() {
                           </div>
                         </Card>
                       ))}
-                    </div>
+                    </StaggerList>
                   )}
                 </div>
               ))}
@@ -329,9 +356,11 @@ export function PluginsPage() {
           )}
         </div>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Install Modal */}
-      <Modal isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md" variant="panel-right">
+      <DrawerPanel isOpen={showInstall} onClose={() => setShowInstall(false)} title={t("plugins.install_title")} size="md">
         <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
@@ -395,10 +424,10 @@ export function PluginsPage() {
                 <Button variant="secondary" onClick={() => setShowInstall(false)}>{t("common.cancel")}</Button>
               </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Scaffold Modal */}
-      <Modal isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm" variant="panel-right">
+      <DrawerPanel isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
         <div className="p-5 space-y-4">
           <div>
             <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
@@ -446,7 +475,184 @@ export function PluginsPage() {
             <Button variant="secondary" onClick={() => setShowScaffold(false)}>{t("common.cancel")}</Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
+
+      {/* Plugin detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsPlugin}
+        onClose={() => setDetailsPlugin(null)}
+        title={detailsPlugin?.name ?? ""}
+        size="md"
+      >
+        {detailsPlugin && (
+          <div className="p-5 space-y-5">
+            {/* Hero */}
+            <div className="flex items-start gap-3">
+              <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                <Puzzle className="w-5 h-5 text-brand" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-lg font-black tracking-tight truncate">{detailsPlugin.name}</h2>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{detailsPlugin.version}</span>
+                  {!detailsPlugin.hooks_valid && <Badge variant="error">{t("plugins.invalid")}</Badge>}
+                </div>
+                {detailsPlugin.author && (
+                  <p className="text-[11px] text-text-dim/70 mt-0.5">{detailsPlugin.author}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Description */}
+            {detailsPlugin.description && (
+              <p className="text-xs text-text-dim leading-relaxed whitespace-pre-wrap">{detailsPlugin.description}</p>
+            )}
+
+            {/* Hooks */}
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">{t("plugins.hooks", { defaultValue: "Hooks" })}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {detailsPlugin.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
+                {detailsPlugin.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
+                {!detailsPlugin.hooks?.ingest && !detailsPlugin.hooks?.after_turn && (
+                  <span className="text-[11px] text-text-dim/50 italic">{t("common.none", { defaultValue: "none" })}</span>
+                )}
+              </div>
+            </div>
+
+            {/* Metadata */}
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">{t("common.metadata", { defaultValue: "Metadata" })}</p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[11px]">
+                <dt className="text-text-dim/70">{t("common.size", { defaultValue: "Size" })}</dt>
+                <dd className="font-mono">{formatBytes(detailsPlugin.size_bytes)}</dd>
+                {detailsPlugin.path && (
+                  <>
+                    <dt className="text-text-dim/70">{t("common.path", { defaultValue: "Path" })}</dt>
+                    <dd className="font-mono break-all text-[10px]">{detailsPlugin.path}</dd>
+                  </>
+                )}
+              </dl>
+            </div>
+
+            {/* Actions */}
+            <div className="flex flex-wrap gap-2 pt-3 border-t border-border-subtle/50">
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                disabled={depsMutation.isPending}
+                onClick={() => depsMutation.mutate(detailsPlugin.name, {
+                  onSuccess: () => addToast(t("plugins.deps_installed", { defaultValue: "Dependencies installed" }), "success"),
+                  onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.deps_failed", { defaultValue: "Dependency install failed" }), "error"),
+                })}
+              >
+                {t("plugins.deps", { defaultValue: "Install deps" })}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                className="!text-error hover:!bg-error/10"
+                onClick={() => {
+                  uninstallMutation.mutate(detailsPlugin.name, {
+                    onSuccess: () => {
+                      setDetailsPlugin(null);
+                      addToast(t("plugins.uninstall_success", { defaultValue: "Plugin removed" }), "success");
+                    },
+                    onError: (e: unknown) => addToast(getErrorMessage(e) || t("plugins.uninstall_failed", { defaultValue: "Uninstall failed" }), "error"),
+                  });
+                }}
+              >
+                {t("common.delete")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DrawerPanel>
+
+      {/* Registry plugin detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsRegistryPlugin}
+        onClose={() => setDetailsRegistryPlugin(null)}
+        title={detailsRegistryPlugin?.rp.name ?? ""}
+        size="md"
+      >
+        {detailsRegistryPlugin && (() => {
+          const { rp, repo } = detailsRegistryPlugin;
+          const installKey = `${repo}:${rp.name}`;
+          return (
+            <div className="p-5 space-y-5">
+              <div className="flex items-start gap-3">
+                <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 text-brand">
+                  <Puzzle className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-black tracking-tight truncate">{rp.name}</h2>
+                    {rp.version && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{rp.version}</span>
+                    )}
+                    {rp.installed && (
+                      <Badge variant="success">
+                        <Check className="w-3 h-3 mr-1" />
+                        {t("plugins.installed")}
+                      </Badge>
+                    )}
+                  </div>
+                  {rp.author && (
+                    <p className="text-[11px] text-text-dim/70 mt-0.5">{rp.author}</p>
+                  )}
+                  <a
+                    href={`https://github.com/${repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 mt-1 text-[11px] font-mono text-text-dim/70 hover:text-brand transition-colors"
+                  >
+                    <GitBranch className="w-3 h-3" />
+                    {repo}
+                  </a>
+                </div>
+              </div>
+
+              {rp.description && (
+                <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{rp.description}</p>
+              )}
+
+              {(rp.hooks ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("plugins.hooks", { defaultValue: "Hooks" })}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(rp.hooks ?? []).map(h => (
+                      <Badge key={h} variant="brand">{h}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-border-subtle/50">
+                {rp.installed ? (
+                  <Button variant="secondary" className="w-full" disabled leftIcon={<Check className="w-4 h-4" />}>
+                    {t("plugins.installed")}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="primary"
+                    className="w-full"
+                    disabled={installingName === installKey}
+                    leftIcon={installingName === installKey ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    onClick={() => handleRegistryInstall(rp.name, repo)}
+                  >
+                    {installingName === installKey ? t("common.loading") : t("plugins.install")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+      </DrawerPanel>
     </div>
   );
 }

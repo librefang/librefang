@@ -2,6 +2,8 @@ import { formatTime } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type AgentDetail,
   type PromptVersion,
@@ -20,7 +22,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
@@ -71,6 +73,7 @@ import {
   useStartExperiment,
   useSuspendAgent,
 } from "../lib/mutations/agents";
+import { StaggerList } from "../components/ui/StaggerList";
 
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
@@ -750,9 +753,9 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))] stagger-children">
+        <StaggerList className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
           {coreAgents.map(agent => renderAgentCard(agent))}
-        </div>
+        </StaggerList>
       )}
       {/* Agent Detail Drawer. Right-side inspector pattern (Linear / Figma):
           the agents list stays interactive while the drawer is open, so
@@ -776,9 +779,6 @@ export function AgentsPage() {
         const activeConfigMutation = detailAgent.is_hand
           ? patchHandAgentRuntimeConfigMutation
           : patchAgentConfigMutation;
-        // Hold backdrop dismissal during edit-in-flight so a stray click
-        // doesn't close the modal mid-PATCH and still toast "Agent renamed".
-        const lockBackdropDismiss = editingName || patchAgentMutation.isPending;
         const saveModelDisabled =
           activeConfigMutation.isPending
           || !modelDraft.provider.trim()
@@ -789,13 +789,11 @@ export function AgentsPage() {
           || parseFloat(modelDraft.temperature) < 0
           || parseFloat(modelDraft.temperature) > 2;
         return (
-        <Modal
+        <DrawerPanel
           isOpen
           onClose={closeDetailModal}
-          variant="drawer-right"
           size="xl"
           hideCloseButton
-          disableBackdropClose={lockBackdropDismiss}
         >
             {/* Header — sticky, identity + state. */}
             <div className="px-6 py-4 border-b border-border-subtle sticky top-0 bg-surface z-10">
@@ -1253,13 +1251,13 @@ export function AgentsPage() {
                 {t("agents.prompts")}
               </Button>
             </div>
-        </Modal>
+        </DrawerPanel>
         );
       })()}
 
       {/* Tools Editor Modal */}
       {showToolsEditor && toolsEditorAgentId && (
-        <Modal isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg" zIndex={60} overflowVisible variant="panel-right">
+        <DrawerPanel isOpen={showToolsEditor} onClose={closeToolsEditor} title={t("agents.tools_editor_title", { defaultValue: "Agent Tools" })} size="lg">
           <div className="p-6 space-y-5">
             <div>
               <p className="text-[11px] text-text-dim/70">
@@ -1403,16 +1401,15 @@ export function AgentsPage() {
               </div>
             </div>
           </div>
-        </Modal>
+        </DrawerPanel>
       )}
 
       {/* Create Agent Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={showCreate}
         onClose={closeCreateModal}
         title={t("agents.create_agent")}
         size="2xl"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Mode tabs — switching between Form and TOML round-trips the
@@ -1670,7 +1667,7 @@ export function AgentsPage() {
             <Button variant="secondary" onClick={closeCreateModal}>{t("common.cancel")}</Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Prompts & Experiments Modal */}
       {showPrompts && detailAgent && (
@@ -1740,6 +1737,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
+          <AnimatePresence mode="wait">
+          <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
           {activeTab === "versions" && (
             <div className="space-y-4">
               <div className="flex justify-end">
@@ -1924,6 +1923,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
               )}
             </div>
           )}
+          </motion.div>
+          </AnimatePresence>
         </div>
       </div>
     </div>

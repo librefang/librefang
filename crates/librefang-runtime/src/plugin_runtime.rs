@@ -37,6 +37,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+use crate::stderr_log::trim_for_log;
+
+/// `tracing` target for per-line plugin-hook stderr (issue #3256). Filter
+/// in operator logs via `RUST_LOG=plugin_stderr=info`. Stable wire-format
+/// — changing this string breaks downstream log filters and journalctl
+/// pipelines, and is pinned by the `plugin_stderr_target_is_stable` unit
+/// test.
+pub const PLUGIN_STDERR_TARGET: &str = "plugin_stderr";
+
 /// Classify a process exit status into a human-readable label.
 ///
 /// Returns a short string like `"OOM-killed (exit 137)"`, `"SIGSEGV (exit 139)"`,
@@ -1324,7 +1333,21 @@ pub async fn run_hook_json(
                 err_line.clear();
                 match stderr_reader.read_line(&mut err_line).await {
                     Ok(0) => break,
-                    Ok(_) => text.push_str(&err_line),
+                    Ok(_) => {
+                        // Stream each non-empty line to tracing as it arrives so
+                        // operators can monitor long-running hooks live (#3256).
+                        // The full line stays in `text` either way — the
+                        // post-exit `debug!` summary below is independent.
+                        if let Some(trimmed) = trim_for_log(&err_line) {
+                            tracing::info!(
+                                target: PLUGIN_STDERR_TARGET,
+                                hook = %hook_name,
+                                script = %script_path,
+                                "{trimmed}"
+                            );
+                        }
+                        text.push_str(&err_line);
+                    }
                     Err(_) => break,
                 }
             }
@@ -1890,6 +1913,14 @@ mod tests {
         assert_eq!(PluginRuntime::Python.version_args(), &["--version"]);
         assert_eq!(PluginRuntime::Node.version_args(), &["--version"]);
         assert_eq!(PluginRuntime::Ruby.version_args(), &["--version"]);
+    }
+
+    #[test]
+    fn plugin_stderr_target_is_stable() {
+        // Operator log filters and journalctl pipelines key off this
+        // string. Changing it is a breaking change — bump the docs and
+        // CHANGELOG together if you ever do.
+        assert_eq!(PLUGIN_STDERR_TARGET, "plugin_stderr");
     }
 
     #[test]

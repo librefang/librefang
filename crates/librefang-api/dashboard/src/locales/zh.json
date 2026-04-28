@@ -25,7 +25,7 @@
     "skills": "技能",
     "hands": "Hands",
     "plugins": "插件",
-    "mcp_servers": "MCP 服务器",
+    "mcp_servers": "MCP",
     "models": "模型",
     "media": "媒体生成",
     "analytics": "分析",
@@ -137,7 +137,15 @@
     "sort_name": "名称",
     "viewAll": "查看全部",
     "expand": "展开",
-    "collapse": "收起"
+    "collapse": "收起",
+    "add": "添加",
+    "remove": "移除",
+    "discard": "放弃更改",
+    "more_actions": "更多操作",
+    "none": "无",
+    "metadata": "元数据",
+    "size": "大小",
+    "path": "路径"
   },
   "status": {
     "running": "运行中",
@@ -380,7 +388,7 @@
     "hand_agent_hint": "你正在编辑由 Hand 创建的活动运行时智能体。改动仅在内存中生效；守护进程重启或 Hand 重新加载后会回退到 Hand 的配置。",
     "tools_cap": "工具",
     "network": "网络",
-    "help": "管理系统中的所有智能体。可以创建、暂停、恢复和删除智能体，查看其状态和配置。",
+    "help": "Agents 是这个 LibreFang 实例运行的所有自治单元。每个 agent 都有独立的身份、prompt、工具集、记忆与预算——以一行的形式存在于本页，直到被删除。从这里可以创建新 agent、编辑已有 agent、暂停 / 恢复，以及克隆好用的配置。\n\n使用步骤：\n\n1. 创建。点 \"Create agent\" 选择创建方式：表单、模板或裸 TOML。表单最简单；模板是预置原型（researcher、coder 等）；TOML 适合已经清楚要写什么的场景。\n\n2. 查看与编辑。点击某行打开详情面板——能看到 capabilities、hands、模型、最近活动。\"Edit\" 改名字 / prompt / 模型 / 工具策略；\"Edit template TOML\" 直接编辑完整 manifest。\n\n3. 生命周期。Suspend 暂停 agent（停触发器，状态保留）。Resume 恢复。Clone 把 manifest 复制到新 agent，方便 fork 而不破坏原版。Delete 是永久的——会话和记忆一起带走。\n\n典型场景：\n\n  · 起一个按领域分工的 agent（research / code / ops），每个独立 channel 和预算。\n  · Fork 一个跑得好的 agent，改 prompt 后并行 A/B 对比。\n  · 配额吃紧时暂停部分 agent，不丢配置和记忆。\n\n注意事项：\n\n  · agent.toml manifest 控制运行时行为——session_mode、max_concurrent_invocations、max_history_messages、命名工作区。表单覆盖常见情况；TOML 编辑器是兜底入口。\n  · 身份文件（SOUL.md、IDENTITY.md 等）放在 {workspace}/.identity/ 下。升级后首次 spawn 会自动迁移。\n  · 删除不可逆。要保留的话先 Suspend。",
     "builtin": {
       "academic-researcher": {
         "name": "学术研究员",
@@ -597,7 +605,7 @@
     "add": "添加供应商",
     "delete_confirm_title": "移除供应商密钥",
     "delete_confirm_message": "确定要移除此供应商的 API Key 吗？移除后该供应商将变为未配置状态。",
-    "help": "管理大模型供应商连接。测试连通性、配置 API Key，监控供应商健康状态。",
+    "help": "Providers 是 LLM 厂商连接（OpenAI、Anthropic、Gemini、Groq 等）——凭据、base URL、健康状态。模型目录的 availability 来自这里，每次 LLM 调用都路由经过一个已配置的 provider。\n\n使用步骤：\n\n1. 添加或编辑。\"Add\" 创建新 provider 连接——选种类、粘 API key，命中自托管 / 代理端点时再设 base URL。Edit 改已有的。\n\n2. 测试连通性。\"Batch test\" 一次 ping 所有已配置 provider；行内 test 测单个。Test 通过表示凭据能认证、端点可达。\n\n3. 自动选模型。Test 之后 \"Auto-select model\" 会给该 provider 选一个合理的默认模型，新建 agent 就有可用的。\n\n4. 看健康。状态徽标显示 healthy、限流或 auth-failed。\n\n典型场景：\n\n  · 上一个新 provider —— 粘 key、test、auto-select、完事。\n  · 改 base URL 把云端 Anthropic 切到本地代理。\n  · 排查 \"为什么没模型可用\"——多半是这里 key 缺失或过期。\n\n注意事项：\n\n  · provider 401 / 403 被识别为 \"可达，鉴权失败\"——跟 \"不可达\" 区分，让测试结果更准确。\n  · key 存在 config 里，把宿主机当作机密存储看待。\n  · 删 provider 不会删指向它的 agent——但这些 agent 的模型选项会失效，直到重新指。",
     "wizard_step_basics": "基本信息",
     "wizard_step_advanced": "高级选项",
     "wizard_step_models": "模型",
@@ -664,7 +672,7 @@
     "no_results": "没有匹配的通道",
     "no_configured": "暂无已配置的通道",
     "no_unconfigured": "暂无未配置的通道",
-    "help": "配置消息通道适配器和集成网关。设置 Slack、Discord、Telegram 等通道。",
+    "help": "Channels 是让人类跟你的 agent 对话的入站 / 出站桥梁——Slack、Discord、Telegram、邮件、webhook 等。每个 channel 有自己的 adapter；在这里配置 channel 等于把 adapter 跟一份凭据接起来并启用。\n\n使用步骤：\n\n1. 浏览目录。卡片显示运行时支持的所有 channel adapter，带 \"已配置 / 未配置\" 徽标和难度提示。\n\n2. 配置。在某个 channel 上点 \"Configure\"，填必填字段（token、app id、webhook URL 等）。保存后写入 config 并热重载 adapter——无需重启 daemon。\n\n3. 扫码登录。某些 adapter（如 WhatsApp Web）用扫码登录而非 token，点 \"QR login\" 用手机 app 扫。\n\n4. 验证。保存后卡片翻为 \"已配置\"，Comms 页就能看到该 adapter 的实时事件流。\n\n典型场景：\n\n  · 把 agent 接入团队 Slack，让任何人都能 DM 它。\n  · 配一个入站 webhook，让 agent 在 GitHub 事件上触发。\n  · 一个实例跑多个 Telegram 机器人，通过 channel binding 路由到不同 agent。\n\n注意事项：\n\n  · Channel binding（哪个 agent 在哪个 channel 上回应）写在 agent 的 manifest 里——本页只管 adapter 凭据。\n  · 部分 channel 字段是平台级密钥，存在本地 config，仅管理员可见。\n  · 重载会重新解析 channel 配置而不重启 daemon；重载失败时旧配置继续运行。",
     "test": "测试",
     "test_success": "通道测试通过",
     "test_failed": "通道测试失败",
@@ -708,7 +716,7 @@
     "stars_count": "星标",
     "downloads_count": "下载",
     "install_timeout": "安装超时",
-    "help": "浏览和安装技能以扩展智能体能力。管理已安装的技能，从市场中发现新技能。",
+    "help": "Skills 是原子能力——单一目的的 prompt + 工具片段，agent 拾起后扩展推理（如 \"总结长文档\"、\"抽取实体\"、\"做一次维基查找\"）。跟 hands（受管多工具包）和 plugins（裸代码）不同：skill 是声明式的小单元，常被热改。\n\n使用步骤：\n\n1. 浏览。按来源（内置、市场、自建）和分类筛选。每张卡显示作者、下载量、描述。\n\n2. 安装 / 创建。市场 skill 一键安装。\"Create\" 在页内写自定义 skill ——名字、描述、prompt；编辑器有合理上限。\n\n3. 演化。每个 skill 有演化历史——版本、changelog、附带文件。可以在不丢旧版的前提下迭代 prompt 或挂参考文档。\n\n4. 浏览注册表。Registry 标签显示更广的公开目录，可从那里拉取。\n\n典型场景：\n\n  · 装一个把某件事做得很好的社区 skill，省得自己写。\n  · Fork 一个 skill 改 prompt 适配本领域，通过 evolution 保留两版。\n  · 给自家 agent 建一套内部 skill 库共用。\n\n注意事项：\n\n  · skill 名字必须通过校验（不能有路径花招、有长度上限）。冲突会以 \"name conflict\" 报错。\n  · prompt 体积有上限——大段参考内容放 evolution 附带文件，别塞 prompt。\n  · \"security blocked\" 错误说明 skill 想做运行时禁止的事（比如往沙盒外写）。",
     "skillhub": "SkillHub",
     "skillhub_search_placeholder": "搜索 SkillHub...",
     "skillhub_rate_limited_desc": "SkillHub 请求频率限制，请稍后重试。",
@@ -782,7 +790,11 @@
     "err_security_blocked": "内容被安全扫描拦截，请移除可疑模式。",
     "err_invalid_name": "技能名称非法：仅允许小写字母、数字、连字符、下划线。",
     "err_create_failed": "创建技能失败，请重试。",
-    "outputs": "技能输出"
+    "outputs": "技能输出",
+    "evo_load_failed": "加载文件失败",
+    "evo_action_failed": "操作失败",
+    "evo_delete_failed": "删除失败",
+    "reload_failed": "刷新失败"
   },
   "hands": {
     "title": "Hands",
@@ -824,7 +836,7 @@
     "cat_data": "数据",
     "cat_development": "开发",
     "cat_productivity": "效率",
-    "help": "管理可组合的功能扩展包。激活、停用、暂停和恢复 Hands 以扩展智能体功能。",
+    "help": "Hands 是自治能力包——一组工具集 + 胶水逻辑打包成一个可拾取的 \"手\"，让 agent 获得一类完整能力（如 \"上网浏览\"、\"操控 Telegram bot\"、\"运行沙盒 shell\"）。它跟 skills（单一能力）和 plugins（裸扩展）不同：hand 是有生命周期管理的整套能力包。\n\n使用步骤：\n\n1. 浏览。每张卡显示 hand 名字、描述、状态（active / paused / degraded）和依赖。\n\n2. 启用。\"Activate\" 启用 hand——agent 申请时它的工具就可用了。\"Deactivate\" 干净下线。\n\n3. 暂停 / 恢复。Pause 保留状态但不接新活——调试或配额吃紧时不用清配置就能停。Resume 恢复。\n\n4. 配置投递。\"Configure delivery targets\" 把 hand 的输出路由到指定 channel / agent ——hand 与系统其他部分的编排开关。\n\n跟 Skills / Plugins / MCP 的区别：\n\n  · Skills —— 原子能力单元，粒度更小。\n  · Plugins —— 你写或装的裸运行时扩展。\n  · Hands —— 有生命周期管理的有主见的能力包。\n  · MCP —— 通过协议访问的外部工具服务器。\n\n典型场景：\n\n  · 启用一个 \"browser\" hand，让 agent 能抓网页并总结。\n  · 安静时段把吵闹的 hand 暂停掉，不动配置。\n  · 排查卡在 \"degraded\" 的 hand——读它的 manifest 错误信息找原因。\n\n注意事项：\n\n  · \"degraded\" 通常是缺依赖或健康检查失败——manifest 错误信息会指出原因。\n  · Deactivate 是优雅下线：在途调用跑完，不接新调用。",
     "settings_activate_first": "请先激活此 Hand 才能编辑其设置。",
     "settings_default": "默认值",
     "settings_save": "保存设置",
@@ -874,7 +886,7 @@
     "no_trend_data": "暂无趋势数据",
     "cost_per_call": "单次调用成本",
     "cheapest_call": "最低单次成本",
-    "help": "查看使用统计和成本分析。监控 API 调用次数、Token 消耗量，设置预算限额控制支出。",
+    "help": "Analytics 汇总本实例所有 agent 与 provider 的 LLM 调用花费、延迟、吞吐量。数据来自 metering 层——和 per-agent 预算同源，只是按维度切片做图。\n\n使用步骤：\n\n1. 选时间窗口。用时间范围选择器锁定今天 / 本周 / 本月或自定义区间，所有图表和表格会重新聚合。\n\n2. 看头部指标。总花费、总调用次数、平均每次成本、平均延迟——一眼判断当前花销是否健康。\n\n3. 下钻。\"Model performance\" 表格按模型拆分延迟 / 成本 / 调用次数，看哪个模型物有所值；每日趋势图显示用量是否在攀升。\n\n4. 设置防线。预算面板可设小时 / 日 / 月限额和告警阈值。越过阈值会进 Approvals。\n\n典型场景：\n\n  · 在月底账单到来前抓住失控的 agent——日趋势异常飙升 + Budget 页 per-agent 排名指出元凶。\n  · 选默认模型时跨 provider 比较延迟。\n  · 导出 CSV 给财务 / 报表用。\n\n注意事项：\n\n  · 数据随调用结果落入即更新——没有小时级聚合延迟，但最近几秒内的调用可能尚未计入。\n  · 成本根据模型目录里发布的价格计算；provider 改价就更新 Models 页对应条目。\n  · 这里设置的预算是全局的；per-agent 上限在 agent 自己的页面。",
     "cost": "费用",
     "avg": "平均",
     "min": "最小",
@@ -922,7 +934,7 @@
     "proactive_enabled": "启用",
     "auto_memorize": "自动记忆",
     "auto_retrieve": "自动召回",
-    "help": "管理智能体的记忆存储。添加、编辑、搜索和删除记忆，配置向量引擎和主动记忆设置。",
+    "help": "Memory 是 agent 的长期存储——embedding 向量加结构化记录，agent 在召回时取出来跨会话保持上下文。本页可以浏览、搜索、编辑、播种记忆，并配置 embedding 与召回行为。\n\n使用步骤：\n\n1. 浏览 / 搜索。列表显示最近记忆，含访问次数和元数据。搜索走向量相似（配置了 embedding provider 时）或文本回退。\n\n2. 添加。\"Add memory\" 手动播种事实——选范围（global / per-agent）、填内容、保存。适合手工策划的知识。\n\n3. 编辑 / 删除。点击行查看、编辑或删除。编辑会自动重新 embedding。\n\n4. 配置。设置面板切换自动记忆（agent 边跑边写）、自动召回（自动注入到上下文）、选 embedding provider 与 API key。\n\n典型场景：\n\n  · 一次性写入 \"对用户 @evan 始终用中文回复\"，不再写进 system prompt 里反复贴。\n  · 检视 agent 实际记下了什么，把低价值的剪掉。\n  · 切换 embedding provider（成本 / 质量变化时）。\n\n注意事项：\n\n  · 存储是 ~/.librefang/ 下的 SQLite，备份也在那里。\n  · per-agent 记忆不会跨 agent 串；global 记忆所有 agent 都能看到。\n  · 关掉自动召回不会删记忆——只是不再注入上下文。仍可手动查询。",
     "access_count": "访问次数",
     "category": "分类",
     "cleanup_success": "清理完成",
@@ -947,7 +959,7 @@
     "events": "事件流",
     "events_desc": "实时消息事件。",
     "connections": "连接",
-    "help": "监控通信总线。查看通道连接状态、智能体网络拓扑和实时消息事件。"
+    "help": "Comms 是消息总线的实时监控页。Channels 管配置，Comms 显示流量——已连接的 adapter、最近的发 / 收事件、agent ↔ channel 拓扑、基本健康状态。\n\n使用步骤：\n\n1. 健康行。活跃 channel、当日事件总数、daemon 运行时长——快速判断 \"总线还活着吗\"。\n\n2. 事件时间线。最新的 send / receive / error 事件，含来源、类型、时间戳。搜索可按 channel、agent 或文本过滤。\n\n3. 拓扑。可视化展示当前哪些 agent 在哪些 channel 上可达。\n\n典型场景：\n\n  · \"用户说 Telegram 机器人没回\" ——在时间线上找匹配的 receive 事件，看是否有对应的 send 发出。\n  · 抓那种 adapter 静默掉线（没有心跳事件）的情况。\n  · 看部署刚上线后流量是否在几秒内恢复。\n\n注意事项：\n\n  · 事件流是内存里的有上限缓冲，旧事件会被挤掉。要看深历史去审计轨迹和 channel 日志。\n  · 这里 \"在线\" 指 adapter 已连接，不保证上游服务（Slack、Telegram 等）也健康。"
   },
   "canvas": {
     "title": "流程设计器",
@@ -1121,7 +1133,7 @@
     "nodes_unit": "个节点",
     "automation_hub": "自动化中心",
     "templates": "模板",
-    "template_library": "模板库",
+    "template_library": "工作流市场",
     "my_workflows": "我的工作流",
     "use_template": "使用模板",
     "create_blank": "创建空白工作流",
@@ -1131,7 +1143,7 @@
     "delete_confirm": "确定要删除此工作流吗？",
     "open_workflows": "工作流列表",
     "untitled_workflow": "未命名工作流",
-    "help": "创建和管理自动化工作流。使用模板或通过可视化画布从零开始构建。",
+    "help": "Workflows 是多步自动化——由节点（LLM 调用、工具调用、分支等）组成的图，运行时自上而下执行。跟单次 scheduler 触发（一进一出）不同：workflow 是带分支与中间步骤的菜谱。可视化画布构建，模板播种常见形状。\n\n使用步骤：\n\n1. 创建。\"Create blank\" 打开空画布，或挑模板（\"my workflows\" 列你的，\"all workflows\" 列共享的）。\n\n2. 编辑节点。每个节点有自己的上下文（ctx_edit）——编辑 prompt、工具引用、分支条件。拖线连接节点。\n\n3. Dry run。\"Dry run\" 不调用 LLM 验证 workflow ——检查节点连线、缺失引用、agent ID 是否存在。正式跑前先 Dry run，省掉 token。\n\n4. Run now。提供运行输入，点 \"Run now\"；输出和 resolved prompt 会显示；\"Run history\" 跟踪历次运行。\n\n跟 Scheduler / Goals 的区别：\n\n  · Scheduler —— 单次触发，按时钟或事件。\n  · Goals —— 长期意图，有状态地跟踪。\n  · Workflows —— 可重复执行的多步带分支菜谱。\n\n典型场景：\n\n  · \"拉 issue → 总结 → 让 agent 出修复 → 发评论\" 打包成可重复 workflow。\n  · 模板化一个研究流水线，按是否找到文档分支。\n  · 把 workflow 作为 Scheduler cron 的目标——cron 到点触发该 workflow。\n\n注意事项：\n\n  · Dry run 能在不花 token 的前提下抓出 missing-agent / 未解析 prompt——大改动保存前先跑。\n  · Run history 是 per-workflow 的；输出在删除该 workflow 前都保留。\n  · 失败的运行会留下含失败点的记录，重试前先看一眼。",
     "search_placeholder": "搜索工作流...",
     "runs_label": "次运行",
     "empty_title": "还没有工作流",
@@ -1265,7 +1277,7 @@
     "cron_weekdays": "工作日 {{time}}",
     "cron_daily": "每天 {{time}}",
     "cron_invalid": "无效表达式",
-    "help": "使用 Cron 表达式调度自动化任务。创建、运行和删除定时任务，触发智能体执行操作。",
+    "help": "Scheduler 让 agent 按时钟或事件触发执行。Cron 风格的 schedule 按固定间隔触发；事件触发器在系统其他位置发生事件时触发。每次触发都会向目标 agent（或 workflow）投递一条消息——和人类手动发消息流程一样。\n\n使用步骤：\n\n1. 创建 schedule。\"Create job\" → 选 agent 或 workflow，写 cron 表达式（或选 \"every minute\" / \"every N hours\" 预设），填消息体，保存。\n\n2. 事件触发器。Events 标签可以把触发器绑到某个事件源，按事件触发而非时钟触发。\n\n3. 配置投递。\"Edit targets\" 把 schedule 的输出（agent 回复）路由到 channel、其他 agent 或 webhook。\n\n4. 管理。开关 active / disabled、查 \"next run\" 时间、删旧任务。\n\n跟 Goals / Workflows 的区别：\n\n  · Goals —— 长期意图，有状态地跟踪。\n  · Workflows —— 多步序列，常是图形结构。\n  · Scheduler —— 单次触发，按时钟或事件。\n\n典型场景：\n\n  · 每天 9 点向 ops agent 发 \"总结昨天的事故\"。\n  · \"每 15 分钟看一下队列，深度 > N 就动手\"。\n  · webhook 或另一个 agent 发事件时，事件驱动触发。\n\n注意事项：\n\n  · 同一个 agent 的所有 cron 触发共享一个会话——并不会按每次触发隔离。要按次隔离需用 session_mode = \"new\" 且别用 cron（要走 dispatcher 上的 trigger 路径）。\n  · Cron 触发受 per-agent 并发上限影响；长任务会阻塞下一次触发。\n  · Cron 表达式在解析器支持时是秒级精度；保存前看一眼 next-run 预览。",
     "next_run": "下次执行",
     "save_success": "计划已保存",
     "timezone": "时区",
@@ -1364,7 +1376,7 @@
     "shutdown_confirm_desc": "服务器将停止运行，仪表盘将无法访问。",
     "shutdown_confirm": "确认关闭",
     "shutdown_error": "关闭服务器失败",
-    "help": "查看引擎状态、系统健康、任务队列和资源使用情况。可重载配置或关闭服务器。",
+    "help": "Runtime 是引擎级 dashboard——kernel 健康、构建信息、监听地址、queue / lane 状态、审计链状态、备份、生命周期控制。回答 \"daemon 健不健康，现在在干什么\"。\n\n使用步骤：\n\n1. 健康行。活跃 agent、channel、审计条数、运行时长、构建时间、鉴权模式——一目了然的事实。\n\n2. 审计验证。\"Audit verify\" 走 hash 链报告 valid / invalid。可疑事件后或导出证据前跑一遍。\n\n3. 备份。\"Create backup\" 给 daemon 状态目录做快照。备份列表显示已有备份。\n\n4. 生命周期。重载配置（重读 config.toml，应用热重载字段）、清理 sessions（丢弃 idle 会话状态）、关闭（停 daemon——重启需外部命令）。\n\n典型场景：\n\n  · 改完配置：点 Reload，无需重启即可生效。\n  · 部署前 / 事故前：做备份以便回滚状态。\n  · 导出审计前确认链条完好。\n\n注意事项：\n\n  · Reload 只生效热重载字段——某些改动仍需完整重启（字段旁会有 \"needs restart\" 提示）。\n  · 清理 sessions 不破坏数据：只丢内存缓存，不动持久历史。\n  · 部分 per-agent 上限（如 max_concurrent_invocations）不会在 reload 时生效；要让 agent 重生才能生效。",
     "load_error": "加载运行时概览失败",
     "load_error_desc": "核心运行时数据暂时无法加载。请在守护进程和 API 健康检查恢复后重试。",
     "panics": "Panic 次数",
@@ -1436,7 +1448,7 @@
     "agent": "智能体",
     "message": "内容",
     "all_modules": "全部模块",
-    "help": "查看实时系统日志。按模块过滤、搜索日志内容，导出 JSON 用于分析。"
+    "help": "Logs 是实时诊断流——daemon tracing 层产出的结构化日志事件，可按模块过滤、按文本搜索。用于 \"运行时此刻在说什么\" 的调试；要看防篡改历史去 Audit trail。\n\n使用步骤：\n\n1. 按模块过滤。下拉选某个子系统（kernel / runtime / channel 等）。\"All modules\" 显示全部。\n\n2. 搜索。对消息体的自由文本匹配——找 agent id、channel 名或某个错误字符串很有用。\n\n3. 导出 JSON。把当前视图导出成 JSON，分享给支持人员或喂给外部日志工具。\n\n跟 Audit trail 的区别：\n\n  · Logs —— 诊断、细粒度、易失。回答 \"现在发生了什么\"。\n  · Audit trail —— 仅特权操作、hash 链、持久。回答 \"谁在何时做了什么\"。\n\n典型场景：\n\n  · 看 agent 启动并确认每个子系统都注册成功。\n  · 抓 5xx 时按 request id grep 日志。\n  · 抓事故前后日志导出 JSON 写 bug 报告。\n\n注意事项：\n\n  · 日志量有上限，旧事件会被挤掉。要长期保留可跑外部采集器（或抓 Prometheus）。\n  · 模块过滤是服务端做的；搜索是客户端在已加载数据上做的。\n  · 日志不会自动脱敏——如果消息可能含密钥或 PII，导出时要小心。"
   },
   "settings": {
     "title": "设置",
@@ -1529,7 +1541,7 @@
     "auto_dream_status_completed": "已完成",
     "auto_dream_status_failed": "失败",
     "auto_dream_status_aborted": "已中止",
-    "help": "配置系统偏好设置。切换主题、语言、导航布局，浏览可用工具列表。",
+    "help": "Dashboard 偏好与账号级开关。改本地 UI 设置、管理 TOTP、触发 Auto-Dream 都在这里——这里不修改磁盘上的 kernel 配置（那是 Config 页的工作）。\n\n页面内容：\n\n  · UI 偏好——语言（English / 中文）、主题（明 / 暗）、侧栏默认折叠。存在浏览器 localStorage，按设备隔离。\n  · TOTP 启用——给敏感操作（审批、删调度、装插件）加一道 6 位验证码。Setup 给你二维码和恢复码；Revoke 移除该校验。\n  · Auto-Dream——定期后台跑一遍，agent 复盘自己的会话日志、产生记忆更新。可手动触发、看正在跑的进度、开/关每日定时。\n\nSettings（本页）vs Config：\n\n  · Settings——单用户、单浏览器的轻量级 UI / 账号开关。\n  · Config (/dashboard/config)——kernel 级 TOML 编辑器：providers、channels、MCP servers、plugin 策略、运行时上限。那里改完要重载 kernel。\n\n注意事项：\n\n  · TOTP 密钥加密存在 kernel vault 里。Authenticator 和恢复码都丢的话，要管理员改配置并重启才能恢复。\n  · Auto-Dream 跑在 kernel 里，用 agent 自己的 session，会计入该 agent 的预算。如果你启用了 TOTP，\"Run now\" 按钮也要 6 位码。\n  · 主题/语言切换即时生效，不需要重载 kernel。",
     "backup": "备份",
     "export_config_btn": "导出配置",
     "export_config_desc": "将当前配置下载为 TOML 文件。",
@@ -2007,7 +2019,7 @@
     "clear_all": "清空全部",
     "clear_all_confirm": "确认删除所有目标？",
     "clear_all_partial": "已删除 {{succeeded}}/{{total}} 个目标，失败 {{failed}} 个。",
-    "help": "设定战略目标并跟踪进度。创建目标层级、应用模板，监控完成状态。"
+    "help": "Goals 是战略规划面——一棵 agent（或你）正在追的目标树，含进度、状态和父子关系。模板播种常见目标形状；树视图展示层级和向上汇总的进度。\n\n使用步骤：\n\n1. 创建。\"Create goal\" 打开表单填标题、描述、父目标、状态。或 \"Pick template\" 一次性铺开预置目标树（如 \"ship a feature\"、\"research a topic\"）。\n\n2. 跟踪。每个节点显示 pending / in-progress / completed。父节点进度由子节点汇总。点节点可内联编辑状态或描述。\n\n3. 清理。\"Clear all\" 整棵清空（带二次确认）——开新阶段时常用。\n\n跟 Scheduler / Workflows 的区别：\n\n  · Goals —— 想做什么。长期意图，可被 agent 读取。\n  · Scheduler / Workflows —— 怎么做。具体的触发与步骤。\n\n典型场景：\n\n  · 给 agent 一个长期方向，规划时可以参考。\n  · 跟踪一个跨周项目，人和 agent 都看同一棵树。\n\n注意事项：\n\n  · 模板是起点，应用后随便改。\n  · 删父节点会带走子节点，\"Clear all\" 前请确认。"
   },
   "sessions": {
     "title": "会话",
@@ -2019,7 +2031,7 @@
     "empty_desc": "智能体开始对话时会话将出现在这里。",
     "unknown_agent": "未知智能体",
     "just_now": "刚刚",
-    "help": "查看和管理智能体对话会话。切换活跃会话、删除旧会话，监控会话活动。",
+    "help": "Sessions 是每个 agent 的活跃和历史会话上下文。每个 session 是一条绑定到 agent + 来源（channel、cron、A2A peer 或人工）的消息 + 工具调用线程。本页可浏览、贴标签、清理。\n\n使用步骤：\n\n1. 搜索与筛选。输入文本按 agent、标签或最近消息搜索。Active vs. idle 由最近活动自动判定。\n\n2. 贴标签。\"Set label\" 给 session 打标签，方便日后找到——长时运行的线程里特别有用。\n\n3. 删除。删除不再需要的旧 session。该线程下 agent 的完整消息历史会一同删除。\n\n典型场景：\n\n  · 找 agent 跟某用户解决某问题的那条 session。\n  · 修剪繁忙一周后堆积的 channel session。\n  · 调试前先确认某 (channel, chat) 对应的是预期 session。\n\n注意事项：\n\n  · Channel 消息总是用规范 session id —— `(agent, \"<channel>:<chat>\")` ——所以同一用户始终落在同一线程。\n  · Cron 触发共享 per-agent 单一 session；这是有意为之（复用 prompt cache），但 cron 历史会一直增长。\n  · 删 session 不可逆。该 session 创建的 memory 条目仍保留（Memory 页是独立的）。",
     "set_label": "设置标签",
     "no_label": "添加标签",
     "label_placeholder": "标签..."
@@ -2041,7 +2053,7 @@
     },
     "queue_clear": "队列清空",
     "queue_clear_desc": "没有需要您审批的操作。",
-    "help": "审批人工审核请求。当智能体需要人类确认时，请求会出现在这里。",
+    "help": "Approvals 是人审队列。当 agent 调用一个标记 \"需要审批\" 的工具（破坏性 shell、大额 LLM 调用、敏感 HTTP 等）时，调用会暂停并产生一条请求落到这里。你批准、修改或拒绝；agent 拿到决策后继续执行。\n\n使用步骤：\n\n1. 分类。每张卡片显示 agent、工具、参数和需要审批的原因。用筛选按状态（pending / approved / rejected / expired）收窄。\n\n2. 决策。\"Approve\" 原样放行；\"Modify\" 在批准前编辑参数（例如收紧 SQL 的 WHERE）；\"Reject\" 取消调用，向 agent 返回错误。\n\n3. 批量处理。选中多条 pending 一起 approve / reject。如果你已绑定 TOTP，批量批准会被禁用（每次都要输新验证码）。\n\n4. 启用 TOTP。如果策略要求二次因素，走 TOTP setup 流程。绑定后单次审批需要 6 位验证码；批量批准不可用。\n\n典型场景：\n\n  · 让 agent 自治改代码，但所有 `rm -rf` / `git push` 必须人审。\n  · 第一次有 agent 想花超过 $X 做单次 LLM 调用时拦下来。\n  · 试运行阶段，所有渠道机器人回复都先过审一遍。\n\n注意事项：\n\n  · pending 请求有 TTL——超时未决策会自动过期，agent 拿到 \"rejected by timeout\"。TTL 在审批策略里可调。\n  · Modify 是可审计的：原参数和修改后参数的 diff 会写进审计日志。\n  · TOTP 是 per-operator 的。绑定与解绑也会进审计日志。",
     "selectAll": "全选",
     "approveSelected": "批量批准",
     "rejectSelected": "批量拒绝",
@@ -2115,6 +2127,7 @@
     "all_tiers": "全部",
     "available_only": "仅可用",
     "available": "可用",
+    "availability": "可用性",
     "results": "个模型",
     "free": "免费",
     "no_results": "没有匹配的模型。",
@@ -2141,7 +2154,7 @@
     "col_vision": "视觉",
     "col_streaming": "流式",
     "col_thinking": "思考",
-    "help": "浏览所有供应商的可用 LLM 模型。按等级、供应商和可用性筛选，比较模型能力和价格。",
+    "help": "模型目录是本实例对所有已配置 provider 上可用 LLM 模型的视图——ID、能力（tools / vision / streaming / thinking）、上下文窗口、输入 / 输出价格、tier。目录喂给每个 agent 的模型选择器和 Analytics 页的成本计算。\n\n使用步骤：\n\n1. 筛选与排序。按 provider、tier 或 \"available only\"（排除未配置 provider 的模型）过滤。按名字 / 别名搜索。\n\n2. 比较。列并排：上下文、输入价、输出价、tools、vision、thinking。给 agent 分配前先选合适的。\n\n3. 添加自定义。\"Add custom model\" 注册目录里没有的模型——适合刚发布的新模型或自托管端点。填 ID、显示名、provider、价格。\n\n4. 编辑 / 删除。微调显示名或价格。删除只对你添加的自定义条目可用。\n\n典型场景：\n\n  · 给做截图分析的 agent 选 vision-capable 模型。\n  · 在 LibreFang 还没出更新前，模型一发布就先注册进来。\n  · 在分配 agent 前审计哪些模型支持 tool-use。\n\n注意事项：\n\n  · \"available\" 取决于 provider 是否已配置且可达。先去 Providers 页配。\n  · 这里的价格就是成本计算器认为的——不准确就会让预算数字漂移。\n  · Aliases 让一个底层模型挂多个名字（例如 \"smart\" → claude-opus）。",
     "add_model": "添加模型",
     "add_custom_model": "添加自定义模型",
     "model_id": "模型 ID",
@@ -2202,7 +2215,7 @@
     "section": "媒体生成",
     "title": "媒体生成",
     "subtitle": "通过各供应商生成图片、语音、视频和音乐。",
-    "help": "所有媒体生成端点共享同一套 provider 抽象。若未选择 provider，后端会按能力自动选用第一个配置好的驱动。",
+    "help": "媒体生成是图像、语音、视频、音乐的跨 provider 入口。所有端点共享同一套 provider 抽象——选能力，可选指定 provider，写 prompt，生成。\n\n使用步骤：\n\n1. 选能力。Image / TTS / video / music 标签结构相同：prompt + 参数 + 生成。\n\n2. Provider 自动检测。provider 留在 auto，后端会按能力选第一个配置好的驱动；只在想锁定某个 provider 时手动覆盖。\n\n3. 调参数。Aspect ratio、数量、格式（wav / opus / flac 等）、有 / 无人声——每种能力暴露相应旋钮。\n\n4. 生成与下载。结果内联展示，\"Download\" 存到本地。\n\n典型场景：\n\n  · 不离开 dashboard 的快速一次性出图 / 配音。\n  · 切换 provider 下拉框，对同一个 prompt 跨 provider 比较结果。\n  · 生成短音频片段用于 channel bot 回复。\n\n注意事项：\n\n  · 成本走和 LLM 调用同一套 metering——大视频 / 长音乐可能很贵。\n  · 如果 \"auto\" 报 \"no provider configured\"，先去 Providers 页配一个。\n  · 输出文件存在 daemon 的媒体目录里；dashboard 流式展示，源文件以磁盘为准。",
     "load_error": "加载 provider 列表失败。",
     "configured": "已配置",
     "not_configured": "未配置",
@@ -2295,7 +2308,7 @@
     "connected": "已连接",
     "no_peers": "暂无连接节点",
     "no_peers_desc": "当前没有 OFP 节点连接到此实例。",
-    "help": "查看开放联邦协议网络状态。监控已连接的节点、节点身份和协议版本。"
+    "help": "Network 显示本实例在开放联邦协议（OFP）中的状态——已发现或被发现的对等 LibreFang 节点、本节点身份、使用的 OFP 版本。OFP 是 A2A 之下那一层：节点互相找到对方靠 OFP；连上之后说什么靠 A2A。\n\n使用步骤：\n\n1. 身份。node-id 和协议版本是本 LibreFang 实例对联邦的标识。\n\n2. 节点。显示每个已连接的对等节点和 online / offline 状态。空列表说明你还没在和任何人联邦。\n\n3. 状态。Online 表示 OFP 可达，本节点正在向外宣告自己。\n\n跟 A2A 的区别：\n\n  · Network —— 节点级联邦：外面有谁、连上了谁。\n  · A2A —— agent 级对话：那些节点上的 agent 能为彼此做什么。\n\n典型场景：\n\n  · 调试 A2A 前先确认两个 LibreFang 实例确实互相能看到。\n  · 读 node-id 发给对端做直连。\n\n注意事项：\n\n  · 联邦是可选且配置控制的。默认 \"no peers\" 是预期，除非你已配 peers。\n  · 网络状态是实时读，刷新即重新拉，无缓存。"
   },
   "a2a": {
     "section": "智能体互联",
@@ -2312,7 +2325,7 @@
     "task_placeholder": "描述此智能体要完成的任务...",
     "send": "发送",
     "tracked_tasks": "任务追踪",
-    "help": "发现并与外部 A2A 智能体交互。向远程智能体发送任务并跟踪执行状态。"
+    "help": "A2A（Agent-to-Agent）是 Google 推出的开放协议，让不同的 agent 运行时之间可以互相发现并调用。每个 A2A agent 在 /.well-known/agent.json 暴露一张\"agent card\"，描述自己的名字、能做的事（skills）以及如何接受任务。LibreFang 自己也在同一路径暴露 agent card，所以其他 A2A 客户端也能发现这个实例。\n\n使用步骤：\n\n1. 发现（Discover）。点右上角 \"Discover\"（快捷键：n），粘贴对方 agent 的 URL（例如 https://example.com/agents/research-bot）。LibreFang 会拉取 /.well-known/agent.json 并把对方加入\"外部智能体\"列表，显示它的能力和在线状态。\n\n2. 发送任务（Send task）。在任何 agent 卡片上点 \"Send task\"，用自然语言描述任务，提交。LibreFang 通过 JSON-RPC 发出任务并收到 task_id，新任务出现在\"任务追踪\"区。\n\n3. 追踪（Track）。点击任务上的 \"Refresh\" 查询状态：pending → completed / failed。远端完成后返回的结果会内嵌显示。\n\n跟 Channels 和 MCP 的区别：\n\n  · Channels —— 用户通过 Telegram / Slack / 等通讯软件跟你的 agent 聊天。方向：人 → agent。\n  · MCP —— 你的 agent 调用外部工具服务器。方向：agent → 工具。\n  · A2A —— 你的 agent 跟别人的 agent 对等通信。方向：agent ↔ agent。\n\n典型场景：\n\n  · 两台 LibreFang 实例（你 + 同事，或家里 + 公司）互相分发任务。\n  · 订阅某个专精的公开 A2A agent（研究 / 翻译 / 搜索等），把合适的任务转发出去。\n  · 内部多个 LibreFang 实例按领域分工，互相路由任务。\n\n注意事项：\n\n  · \"任务追踪\" 列表只保存在浏览器内存里——刷新页面会丢。远端有自己的任务存储，需要长期查询请记下 task_id。\n  · LibreFang 默认的 SSRF 防护会拦截 localhost / 内网地址的 discover。如果要发现局域网内的 agent，在 config.toml 把对方 host 加到 ssrf_allowed_hosts。\n  · A2A 生态还很年轻，公开的 A2A endpoint 目前很少。最直接的试用方式是再起一台 LibreFang 实例，互相 discover。"
   },
   "plugins": {
     "section": "扩展",
@@ -2344,7 +2357,7 @@
     "scaffold_desc": "这个插件做什么？",
     "create": "创建",
     "deps": "依赖",
-    "help": "安装和管理插件以扩展智能体能力。支持从插件市场、本地路径或 Git 仓库添加插件。",
+    "help": "Plugins 是运行时扩展——由你（或别人）写的代码，挂进 kernel 增加工具、hooks 或行为，超出核心自带的范围。跟 skills（声明式能力文档）和 hands（受管能力包）不同：plugin 是有完整运行时访问权限的裸代码。\n\n使用步骤：\n\n1. 浏览。\"Installed\" 标签列已启用的 plugins，含版本、hooks、依赖、大小、元数据；marketplace 标签列可装的。\n\n2. 安装。\"Install\" 可从 marketplace、本地路径或 Git 仓库 / 分支安装。依赖安装是流程的一部分；结果面板显示成功或失败步骤。\n\n3. 检视。点击 plugin 看 hooks、依赖、元数据——调试某个工具名归谁所有时很有用。\n\n4. 移除。Delete 卸载——删除代码并取消它注册的所有 hook。\n\n典型场景：\n\n  · 加一个把内部 API 暴露成 agent 工具的自定义 plugin。\n  · 从 Git URL 拉社区 plugin，固定到某个已知好的分支 / commit。\n  · 移除跟另一个 plugin 同名工具冲突的 plugin。\n\n注意事项：\n\n  · Plugin 以 daemon 权限运行——只装你信任的。\n  · 从 Git 装会锁分支；上游分支变了要重新 install 才会更新。\n  · 依赖安装失败会让 plugin 处于无效状态——面板会显示缺什么。",
     "deps_failed": "依赖安装失败",
     "deps_installed": "依赖已安装",
     "install_failed": "安装失败",
@@ -2354,7 +2367,9 @@
     "scaffold_failed": "创建失败",
     "scaffold_success": "插件已创建",
     "uninstall_failed": "卸载失败",
-    "uninstall_success": "插件已移除"
+    "uninstall_success": "插件已移除",
+    "invalid": "无效",
+    "hooks": "钩子"
   },
   "telemetry": {
     "badge": "可观测性",
@@ -2369,7 +2384,7 @@
     "latency": "延迟分布",
     "prometheus_endpoint": "Prometheus 端点",
     "view_raw": "查看原始数据",
-    "help": "监控系统指标、LLM Token 用量和 HTTP 请求可观测性数据。查看按 Agent 的用量明细和原始 Prometheus 数据。",
+    "help": "Telemetry 是系统级可观测性面——uptime、panic 数、重启次数、请求速率、错误率、活跃 session、LLM token 总量、Top HTTP 端点。数据来自 daemon 暴露的同一个 Prometheus 端点；本页只是渲染。\n\n使用步骤：\n\n1. 健康分区。Uptime、panics、restarts ——daemon 是不是稳定。\n\n2. 活动分区。活跃 agent、活跃 session、LLM 调用总量、今日成本——当下在发生什么。\n\n3. 可靠性分区。请求总量、错误率、Top 端点——API 是否在稳定服务流量。\n\n4. 查看原始数据。\"View raw\" 打开底层 Prometheus 文本端点，方便临时抓取或人工调试。\n\n典型场景：\n\n  · 早上扫一眼：uptime 正常、无 panic、错误率正常。\n  · 排查变慢：Top 端点列表直接指出元凶。\n  · 接外部 Prometheus / Grafana ——把它指向 \"View raw\" 链接的同一端点。\n\n注意事项：\n\n  · 数字是实时计数器；重启大多归零。要长期保留请外部抓取 Prometheus 端点。\n  · \"今日成本\" 按 daemon 时区的本地一天计。\n  · Per-agent 拆分在 Analytics / Budget 页；这里是系统全局视图。",
     "no_data": "暂无遥测数据。发起一些 API 请求以查看指标。",
     "llm_usage": "LLM 与 Token 用量",
     "total_tokens": "总 Token",
@@ -2386,7 +2401,16 @@
     "system_health": "系统健康",
     "per_agent": "按 Agent",
     "http_metrics": "HTTP 指标",
-    "tokens_1h": "1小时窗口"
+    "tokens_1h": "1小时窗口",
+    "section_health": "健康",
+    "section_activity": "活动",
+    "section_reliability": "稳定性",
+    "error_rate": "错误率",
+    "input_short": "入",
+    "output_short": "出",
+    "calls": "次调用",
+    "tools": "次工具",
+    "last_updated": "更新于"
   },
   "schema_form": {
     "select_option": "请选择...",
@@ -2502,7 +2526,7 @@
     "delete_failed": "删除 MCP 服务器失败",
     "show_tools": "显示工具",
     "hide_tools": "隐藏工具",
-    "help": "MCP（模型上下文协议）服务器通过外部工具和能力扩展您的智能体。\n\n支持的传输方式：\n- stdio：运行本地命令（如 npx、python）\n- SSE：通过 Server-Sent Events 连接\n- HTTP：通过 HTTP Streamable 连接",
+    "help": "MCP（Model Context Protocol）服务器是你的 agent 可以调用的外部工具提供方。协议标准化了工具发现和调用方式，所以任何符合 MCP 的服务器一旦加进来，都能被本实例的 agent 用上。\n\n支持的传输方式：\n  · stdio —— 运行本地命令（如 `npx`、`python`）\n  · SSE —— 通过 Server-Sent Events 连接\n  · HTTP —— 通过 HTTP Streamable 连接\n\n使用步骤：\n\n1. 从目录安装。在目录页找到已知服务器点 \"Install\"，传输、参数、env 都会预填。\n\n2. 自定义添加。\"Add server\" 可以接入任意 MCP 服务器——选传输、填 command / URL、加参数和 env。\n\n3. 鉴权。需要 OAuth 的服务器会显示 \"Authorize\"，点击进入 PKCE 流程。token 过期时 re-authorize；要回收时 revoke。\n\n4. 验证。添加 / 连接成功后，卡片会列出该服务器的工具列表。Agent 通过工具策略申请使用。\n\n典型场景：\n\n  · 接一个文件系统 MCP，让 agent 能读写一个沙盒目录。\n  · 接 SaaS MCP（Notion、Linear 等）做 ticket / doc 流。\n  · 跑一个内部 MCP 服务器，把业务 API 暴露给 agent。\n\n注意事项：\n\n  · OAuth 流程是 UI 驱动的——daemon 检测 401，API 服务器跑 PKCE 与 callback。服务器支持时使用 Dynamic Client Registration（RFC 7591）。\n  · env 变量值按你填的存；当作机密对待。\n  · 失败的服务器会以 auth-pending / failed 留在列表上；调试工具前先确认鉴权和传输。",
     "auth_authorized": "已授权",
     "auth_pending": "授权中...",
     "auth_authorize": "授权",
@@ -2514,7 +2538,7 @@
     "auth_start_failed": "启动认证失败",
     "auth_revoke_failed": "撤销认证失败",
     "tab_my_servers": "服务器",
-    "tab_catalog": "目录",
+    "tab_catalog": "MCP 市场",
     "catalog_subtitle": "浏览并安装预配置的 MCP 服务器模板",
     "catalog_empty": "暂无可用的 MCP 服务器模板",
     "catalog_empty_desc": "MCP 服务器模板将在 Registry 同步后显示。",
@@ -2559,7 +2583,11 @@
     "taint_skip_rule_sets_hint": "default = skip 会完全跳过扫描——上方 rule_sets 不会触发（包括 Log）。如需仅审计，请改回 default = scan。",
     "taint_rule_sets_placeholder": "[[taint_rules]] 中定义的名称，逗号分隔",
     "taint_rule_sets_overlap_hint": "多个集合覆盖同一规则时，最宽松的动作生效（log > warn > block）——仅审计的集合会静默使同规则上的 block 失效。",
-    "taint_rule_sets_unknown_hint": "未知 rule_set 名称：{{names}} —— 未在任何 [[taint_rules]] 中定义，扫描器会按 no-op 处理。"
+    "taint_rule_sets_unknown_hint": "未知 rule_set 名称：{{names}} —— 未在任何 [[taint_rules]] 中定义，扫描器会按 no-op 处理。",
+    "view_detail": "查看服务器详情",
+    "transport": "传输",
+    "required_env": "必需环境变量",
+    "setup_instructions": "设置说明"
   },
   "toml_viewer": {
     "tab_toml": "TOML",
@@ -2573,7 +2601,7 @@
   "audit": {
     "title": "审计日志",
     "subtitle": "按用户 / 动作 / Agent 检索的可筛选审计记录。",
-    "help": "记录每一次特权操作的 hash 链防篡改日志。筛选缩小内存窗口（服务端硬上限 5000 条）。导出可获取更深历史，或离线验证 hash 链。",
+    "help": "审计轨迹是这个实例每一次特权操作（agent spawn、审批、配置变更、RBAC 改动、密钥轮换等）的 hash 链防篡改日志。每条记录通过 SHA hash 链向前一条，事后改动旧记录会破坏链条，可被检测到。\n\n使用步骤：\n\n1. 筛选。按用户、agent、操作类型、channel 或时间区间收窄。筛选作用于内存窗口（服务端硬上限 5000 条）；更深历史需要导出。\n\n2. 检视。点击某行查看完整 payload、hash、prev-hash、时间戳。详情面板可复制 hash / JSON / 跳转链接，方便事故报告。\n\n3. 验证。Runtime 页有 \"Audit verify\" 按钮，会走完整链并报告 valid / invalid。可疑事件后或导出证据前跑一遍。\n\n4. 导出。CSV 用于报告；JSON 保留完整 payload 与 hashes，可离线验证链条（或喂给外部 SIEM）。\n\n典型场景：\n\n  · 事后回查：03:14 UTC 那次破坏性调用是谁批准的，参数是什么？\n  · 合规：每月导出所有 RBAC 与配置变更。\n  · 取证：通过离线重新验证链来检测某条记录是否被改过。\n\n注意事项：\n\n  · 5000 条内存窗口是热区上限，不是存储上限。旧记录还在磁盘上；导出从磁盘拉。\n  · 筛选只改变显示行数，不改变链条本身——验证总是对完整链做。\n  · 不要原地改记录。链条完整性依赖每条记录每个字节都和写入时一致。",
     "export_csv": "导出 CSV",
     "exporting": "导出中…",
     "export_error_title": "导出失败",
@@ -2627,5 +2655,322 @@
     "detail_copy_link": "复制永久链接",
     "detail_copied": "已复制",
     "open_detail": "查看详情"
+  },
+  "users": {
+    "title": "用户与权限",
+    "subtitle": "管理操作员账号、渠道绑定，并通过 CSV 批量导入。",
+    "badge": "Phase 4 / M6",
+    "help": "Users & RBAC 管理操作员账户和外部身份——每行是一个人或服务账户，含一个或多个 channel binding（Telegram / Discord / Slack / 邮箱）映射到 LibreFang 角色（admin / operator / viewer 等）。程序化访问的 API key 也在这里发放。仅管理员可访问。\n\n使用步骤：\n\n1. 创建。\"Create user\" → 填 ID、名字、角色；可选地加 channel binding 和 API key。保存。\n\n2. 编辑。点击行更新角色、增删 binding，设 per-user 预算 / memory / policy 提示（行上的徽标显示已设的项）。\n\n3. 批量入职。\"Paste CSV\" 一次导入多个用户——团队首日入职很方便。\n\n4. 轮换 / 撤销。Rotate 流程换 API key（旧 key 立即失效）。Delete 移除用户及所有 binding。\n\n典型场景：\n\n  · 加一个同事，让他在 Slack 上 DM 时按本人和正确角色路由。\n  · 给 CI 机器人发 API key 做程序化 agent 调用。\n  · 通过 CSV 批量入职一个团队 / 班级。\n\n注意事项：\n\n  · Rotate 对在途客户端是破坏性的——它们会立刻拿到 401。轮换生产 key 前要协调。\n  · Channel binding 在 (channel, identity) 上唯一——同一个 Telegram id 不能映射到两个 LibreFang 用户。\n  · per-user policy / 预算覆盖单独存放；行上的徽标告诉你哪个用户配了什么。",
+    "simulator_link": "权限模拟器",
+    "import_csv": "批量导入 (CSV)",
+    "create": "新建用户",
+    "create_title": "新建用户",
+    "edit_title": "编辑用户",
+    "search_label": "搜索",
+    "search_placeholder": "用户名或 platform_id…",
+    "role_filter_label": "角色",
+    "all_roles": "全部角色",
+    "role_label": "角色",
+    "name_label": "用户名",
+    "bindings_label": "渠道绑定",
+    "bindings_empty": "暂无绑定。可使用身份绑定向导，按平台格式提示填写 platform_id。",
+    "bindings_suffix": "条渠道绑定",
+    "empty_title": "暂无用户",
+    "empty_desc": "添加用户后再绑定平台身份，聊天事件才能归属到对应角色。",
+    "api_key": "API 密钥",
+    "has_policy_badge": "策略",
+    "has_policy_title": "该用户配置了独立的工具策略 / 类别 / 渠道规则。",
+    "has_memory_badge": "记忆",
+    "has_memory_title": "该用户配置了自定义的记忆命名空间 ACL。",
+    "has_budget_badge": "预算",
+    "has_budget_title": "该用户配置了独立的支出上限。",
+    "link": "绑定身份",
+    "rotate_key": "轮换 API 密钥",
+    "rotate_key_confirm": "立即轮换",
+    "view_budget": "预算 →",
+    "view_policy": "权限 →",
+    "user": "用户",
+    "confirm_delete_title": "删除用户？",
+    "confirm_delete_body": "将从 config.toml 中移除该用户并重建 RBAC 渠道索引。此前映射到该用户的平台身份将回落到默认拒绝路径。",
+    "confirm_rotate_title": "轮换 API 密钥？",
+    "confirm_rotate_body": "为该用户生成新的 API 密钥。旧密钥立即失效，仍在使用旧密钥的客户端在下次请求时会收到 401 错误。新的明文密钥仅在下一屏显示一次，服务器之后无法再次还原。",
+    "rotate_key_error_title": "轮换失败",
+    "rotate_key_done_title": "新 API 密钥 — 请立即复制",
+    "rotate_key_done_warning": "明文密钥仅显示这一次，请立即复制并妥善保存，服务器之后无法再次还原。",
+    "rotate_key_done_user": "用户",
+    "rotate_key_done_close": "我已复制密钥",
+    "err_name_required": "用户名不能为空。",
+    "err_id_required": "platform_id 不能为空。",
+    "wizard_title": "绑定平台身份",
+    "wizard_step1": "用户",
+    "wizard_step2": "平台",
+    "wizard_step3": "标识",
+    "wizard_step4": "确认",
+    "wizard_user_desc": "将为该用户新增一条绑定。此向导不会创建新用户 — 如需切换目标，请在列表中选择其他用户。",
+    "wizard_platform": "平台",
+    "wizard_platform_desc": "选择需要绑定的平台标识来源。",
+    "wizard_id_desc": "粘贴平台标识，格式提示会随所选渠道变化。",
+    "wizard_id_label": "platform_id",
+    "wizard_example": "示例",
+    "wizard_confirm_desc": "确认后将写入 config.toml。内核会就地重建 RBAC 渠道索引，无需重启。",
+    "wizard_unverified_title": "无自动归属校验",
+    "wizard_unverified_body": "LibreFang 暂未通过平台回查该 id 是否真正属于 {{user}}。具备 Owner 权限的人可以将任意 id 绑定到任意用户，导致后续 RBAC 与限流决策被悄悄改向。请在保存前与用户线下核对 platform_id。",
+    "wizard_unverified_ack": "我已通过线下渠道核实 {{platformId}} 属于 {{user}}。",
+    "wizard_ack_required": "请先确认归属警告再保存。",
+    "wizard_commit": "保存绑定",
+    "csv_read_failed": "无法读取文件 — 请尝试直接粘贴内容。",
+    "csv_paste": "或粘贴 CSV",
+    "csv_drop": "将 CSV 拖拽到此处，或点击选择文件。",
+    "import_title": "批量导入用户",
+    "import_desc": "上传包含 name,role,telegram,discord,slack,email 列的 CSV。角色必须为 owner / admin / user / viewer 之一。",
+    "import_preview": "预览",
+    "import_dry_summary": "演练结果",
+    "import_summary": "导入完成",
+    "import_dry_run": "演练导入",
+    "import_commit": "提交导入",
+    "import_bindings_count": "{{count}} 条绑定",
+    "import_result_counts": "新建 {{created}} · 更新 {{updated}} · 失败 {{failed}}",
+    "import_row_error": "第 {{row}} 行（{{name}}）：{{error}}",
+    "roles": {
+      "owner": "所有者",
+      "admin": "管理员",
+      "user": "用户",
+      "viewer": "访客"
+    },
+    "platforms": {
+      "telegram": {
+        "label": "Telegram",
+        "hint": "Telegram 数字用户 ID（可通过 @userinfobot 查看）。",
+        "example": "123456789"
+      },
+      "discord": {
+        "label": "Discord",
+        "hint": "Discord 数字用户 ID（开发者模式下右键 → 复制用户 ID）。",
+        "example": "987654321098765432"
+      },
+      "slack": {
+        "label": "Slack",
+        "hint": "Slack 成员 ID（个人资料 → 更多 → 复制成员 ID）。",
+        "example": "U01ABCDEFGH"
+      },
+      "email": {
+        "label": "邮箱",
+        "hint": "发件邮箱地址（用于 IMAP / Mailgun 渠道）。",
+        "example": "alice@example.com"
+      },
+      "wechat": {
+        "label": "微信",
+        "hint": "已配置企业的企业微信 / 微信 OpenID。",
+        "example": "abc123@im.wechat"
+      }
+    },
+    "row_actions": "更多操作",
+    "view_budget_chip": "预算",
+    "view_policy_chip": "权限",
+    "rotate_key_only_chance": "这是复制此密钥的唯一机会。关闭此对话框后，明文将丢失，服务器无法再次生成。",
+    "rotate_key_must_copy": "请先点击「复制」。复制到剪贴板后，关闭按钮才会启用。",
+    "rotate_key_failed_toast": "轮换失败：{{message}}",
+    "rotate_key_copy_failed": "复制失败，请手动选中并复制密钥后再关闭对话框。",
+    "rotate_key_copied_confirm": "已复制，可以关闭",
+    "csv_drop_aria": "上传 CSV 文件：拖放到此处或激活以浏览",
+    "csv_paste_placeholder": "alice,user,telegram=123456789;email=alice@example.com",
+    "wizard_step_platform": "平台",
+    "wizard_step_identity": "标识",
+    "wizard_user_chip": "正在关联标识到",
+    "wizard_show_warning": "为什么重要",
+    "wizard_hide_warning": "隐藏警告",
+    "wizard_step_back_aria": "返回第 {{n}} 步"
+  },
+  "userBudget": {
+    "fields": {
+      "max_hourly": "每小时上限（美元）",
+      "max_daily": "每日上限（美元）",
+      "max_monthly": "每月上限（美元）",
+      "alert_threshold": "告警阈值（0–1）"
+    },
+    "errors": {
+      "non_negative": "{{field}} 必须是有限的非负数",
+      "threshold_range": "alert_threshold 必须在 0.0..=1.0 范围内"
+    },
+    "toast": {
+      "saved": "支出上限已保存"
+    }
+  },
+  "userPolicy": {
+    "toggle": {
+      "configured": "已配置",
+      "not_set": "未设置"
+    },
+    "errors": {
+      "empty_entry": "{{field}} 中存在空白条目",
+      "duplicate_entry": "{{field}} 中存在重复条目 '{{item}}'",
+      "writable_not_subset": "memory_access.writable_namespaces['{{ns}}'] 不在 readable_namespaces 中（可写必须是可读的子集）"
+    },
+    "discard": "放弃更改",
+    "no_changes": "无未保存的更改",
+    "unsaved_changes": "有未保存的更改",
+    "save_disabled_invalid": "请先修正上方的校验错误才能保存",
+    "discard_confirm_title": "放弃未保存的更改？",
+    "discard_confirm_body": "将所有字段恢复为上次从服务器加载的值。自上次保存以来的修改将会丢失。"
+  },
+  "permissionSimulator": {
+    "status": {
+      "configured": "已配置",
+      "not_configured": "未配置"
+    },
+    "budget": {
+      "unlimited_window": "该窗口不限"
+    },
+    "actions": {
+      "ChatWithAgent": {
+        "label": "与 Agent 对话",
+        "description": "向运行中的 Agent 发送消息。"
+      },
+      "ViewConfig": {
+        "label": "查看配置",
+        "description": "读取内核配置（敏感信息已脱敏）。"
+      },
+      "ViewUsage": {
+        "label": "查看用量 / 账单",
+        "description": "查看 token / 成本仪表盘。"
+      },
+      "SpawnAgent": {
+        "label": "启动 Agent",
+        "description": "创建并启动新的 Agent 进程。"
+      },
+      "KillAgent": {
+        "label": "终止 Agent",
+        "description": "停止正在运行的 Agent。"
+      },
+      "InstallSkill": {
+        "label": "安装技能",
+        "description": "安装 ClawHub / Skillhub / 本地技能。"
+      },
+      "ModifyConfig": {
+        "label": "修改配置",
+        "description": "将变更写回 config.toml。"
+      },
+      "ManageUsers": {
+        "label": "管理用户",
+        "description": "创建 / 删除用户并重新绑定身份。"
+      }
+    }
+  },
+  "user_budget": {
+    "title": "用户预算",
+    "back": "返回用户列表",
+    "loading": "加载中…",
+    "fetch_error": "加载预算失败",
+    "set_limits": "设置消费上限",
+    "current_spend": "当前消费 (USD)",
+    "alert_breach": "已触发告警",
+    "enforced": "已强制执行",
+    "deferred": "强制执行已延迟",
+    "save": "保存",
+    "saving": "保存中…",
+    "clear": "清除上限",
+    "clearing": "清除中…",
+    "discard": "放弃更改",
+    "zero_means_unlimited": "将任意时间窗口设为 0 表示该窗口不限额。阈值是任一限额触发 BudgetExceeded 审计事件时的比例。",
+    "help": "单个用户的开销上限。这个用户在所有 agent、所有 channel 上的总花销都计入这个上限。给同事或外人开放你的 LibreFang 实例又不想被刷爆 provider 额度时用。\n\n预算如何叠加：\n\n  · 全局预算（/dashboard/runtime 设置）——kernel 整体上限。撞到了所有 agent 都停。\n  · 单 agent 预算（agent.toml 里设）——限制某个 agent。\n  · 单用户预算（本页）——限制某个用户的总花销。\n  · **最严格的限额生效**。全局还剩 $5、用户还剩 $50，那这个用户就只能再花 $5。\n\n本页显示：\n\n  · 当前周期花销、上限、已用百分比、滚动窗口（日 / 周 / 月）。\n  · 跨过告警阈值但未撞硬上限时显示 \"alert breach\" 徽章。\n  · 按 provider 拆分：每家 provider 在这个用户身上花了多少。\n\n注意事项：\n\n  · 没配预算的用户是无限额（仍受全局和 agent 级上限约束）。\n  · 改动在用户下一次请求时生效，正在跑的 LLM 调用不会被中断。\n  · 花销历史持久化在 SQLite，删用户不会删历史（审计需要）。",
+    "of_cap": "/ {{cap}}",
+    "over_threshold": "已超阈值",
+    "no_cap": "本窗口未设上限"
+  },
+  "user_policy": {
+    "title": "权限矩阵",
+    "back": "返回用户列表",
+    "save": "保存",
+    "saved": "策略已保存。",
+    "load_error_title": "加载策略失败",
+    "load_error_body": "守护进程在获取该用户的策略切片时返回了错误。",
+    "section_tool_policy": "工具允许 / 拒绝",
+    "tool_policy_desc": "针对单个用户的允许 + 拒绝模式。叠加在 Agent 和渠道规则之上。拒绝优先。",
+    "allowed_tools": "允许的工具",
+    "denied_tools": "拒绝的工具",
+    "glob_hint": "每行一个模式。允许使用 `*` 通配符。",
+    "glob_hint_deny": "始终优先于允许列表。",
+    "section_categories": "工具分类",
+    "categories_desc": "按工具组名称批量允许 / 拒绝（在 `KernelConfig.tool_policy.groups` 中定义）。",
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组",
+    "group_hint": "每行一个组名（例如 `web_tools`）。",
+    "section_memory": "记忆访问",
+    "memory_desc": "命名空间 ACL + PII 脱敏开关。可写命名空间必须是可读命名空间的子集。",
+    "readable_ns": "可读命名空间",
+    "writable_ns": "可写命名空间",
+    "ns_hint": "每行一个命名空间。`*` 匹配全部。",
+    "writable_hint": "必须是可读命名空间的子集。",
+    "pii_access": "PII 访问",
+    "export_allowed": "允许导出",
+    "delete_allowed": "允许删除",
+    "section_channels": "按渠道的工具规则",
+    "channels_desc": "按渠道适配器（telegram / discord / …）覆盖用户的工具范围。使用下方输入框添加自定义适配器。",
+    "custom_channel": "自定义",
+    "remove_channel": "移除渠道",
+    "add_channel_label": "添加渠道",
+    "add_channel_placeholder": "wechat, matrix, …",
+    "add_channel_hint": "渠道适配器名称（小写）。必须与桥接器发出的键匹配。",
+    "add_channel_err_empty": "渠道名称必填。",
+    "add_channel_err_duplicate": "渠道 '{{key}}' 已存在规则。",
+    "help": "单个用户的 RBAC 全貌：能调哪些工具、放行哪些 category、哪些 channel 规则套在他身上、能跟哪些 agent 对话。**只读视图**——要改值请去 Users 页编辑用户，或者直接改 kernel 配置。\n\n三层叠加产生最终判定：\n\n  · 用户级 tool_policy / tool_categories——本页显示的覆盖。\n  · agent 级 ToolPolicy——agent.toml 里配。\n  · channel 级规则——[channels.<name>] 配置里设。\n\n使用步骤：\n\n  1. 顶部选用户。本页所有区段都按这个用户筛选。\n  2. 每一层显示：已配规则 + \"未配置\"标记（意思是\"穿透到下一层\"）。\n  3. 想看一次具体调用的最终判定，去 Permission Simulator (/dashboard/permission-simulator)，它会按 (user, agent, tool, channel) 跑完整交集。\n\n权限矩阵（本页）vs 权限模拟器：\n\n  · 矩阵——原始配置切片，不做决策逻辑。\n  · 模拟器——按具体场景跑三层交集，告诉你结果。\n\n注意事项：\n\n  · \"未配置\" 不等于\"拒绝\"，意思是\"穿透到其他层\"。某用户没配 tool_policy，仍然受 agent 和 channel 层规则约束。\n  · channel 规则只在请求经由该 channel 时才生效；web dashboard 和 CLI 调用绕过 channel 规则。\n  · 本页只读，编辑入口在 /dashboard/users → 点用户 → 编辑弹窗。"
+  },
+  "tool_policy": {
+    "allowed_tools": "允许的工具",
+    "denied_tools": "拒绝的工具"
+  },
+  "tool_categories": {
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组"
+  },
+  "memory_access": {
+    "readable_namespaces": "可读命名空间",
+    "writable_namespaces": "可写命名空间"
+  },
+  "simulator": {
+    "title": "权限模拟器",
+    "subtitle": "选择一名用户，查看所有影响其权限的 RBAC 输入。",
+    "badge": "实时",
+    "user_label": "用户",
+    "choose_user": "选择用户…",
+    "empty_title": "没有可模拟的用户",
+    "empty_desc": "请先在用户页面添加用户。",
+    "not_found_title": "未找到用户",
+    "not_found_desc": "所选用户未在 AuthManager 中注册。该用户可能在用户列表缓存之后已从 config.toml 中移除。",
+    "error_title": "无法加载有效权限",
+    "role_matrix_caption": "角色级粗粒度权限",
+    "requires": "需要",
+    "help": "权限模拟器选定一个用户后展示构成其有效权限的所有 RBAC 输入——角色、tool policy、允许 / 拒绝工具列表、允许 / 拒绝分组、channel 规则与 binding、memory namespace、预算上限、PII 访问、删除 / 导出权限。这是 \"为什么用户 X 有 / 没有访问 Y\" 的调试面。\n\n使用步骤：\n\n1. 选用户。用选择器，页面会铺开该用户的各分区。\n\n2. 看每个分区。每个分区显示该用户的原始配置切片——角色矩阵、tool policy、channel binding、memory 权限、预算等。\"未配置\" 表示该层对此用户保持沉默。\n\n3. 跟实际比对。运行时在调用时把这些切片做交集；本页不显示单次调用的网关判定，只显示输入。\n\n跟实际跑 agent 的区别：\n\n  · 模拟器 —— 快速静态查看所有输入，无需 LLM 调用。\n  · 实际 agent 调用 —— 唯一能反映真实行为的事实来源。\n\n典型场景：\n\n  · \"为什么用户 @bob 不能删记忆？\" ——分区显示 delete_off。\n  · \"新 tool policy 是不是真的对 @alice 生效了？\" ——看允许 / 拒绝列表。\n  · 给新外部用户开权限前审计 channel 规则覆盖。\n\n注意事项：\n\n  · 各分区显示原始切片，不是网关判定。运行时网关取 per-agent ToolPolicy + per-user tool_policy / tool_categories + per-channel 规则的交集；\"未配置\" 交给其他层决定。\n  · 模拟器读当前配置——你在 Users / Policy 页改完，刷新就立刻反映。",
+    "tool_policy_title": "工具策略（按用户）",
+    "tool_policy_unset": "交由 Agent ToolPolicy 和渠道规则决定。",
+    "allowed_tools": "允许",
+    "denied_tools": "拒绝",
+    "no_allow_list": "未设置允许列表",
+    "no_deny_list": "未设置拒绝列表",
+    "tool_categories_title": "工具分类（按 ToolGroup 批量）",
+    "tool_categories_unset": "该用户没有分类级别的覆盖。",
+    "allowed_groups": "允许的组",
+    "denied_groups": "拒绝的组",
+    "memory_title": "记忆访问",
+    "memory_unset": "回退到角色默认 ACL（Owner/Admin = 完全访问，User = proactive + kv:*，Viewer = proactive 只读）。",
+    "readable_namespaces": "可读命名空间",
+    "writable_namespaces": "可写命名空间",
+    "no_namespaces": "无命名空间",
+    "pii_access_on": "PII 访问 已开启",
+    "pii_access_off": "PII 已脱敏",
+    "export_on": "允许导出",
+    "export_off": "禁止导出",
+    "delete_on": "允许删除",
+    "delete_off": "禁止删除",
+    "budget_title": "按用户的预算上限",
+    "budget_unset": "未设置用户级上限。仅受全局 / Agent / 提供商预算约束。",
+    "budget_hourly": "每小时",
+    "budget_daily": "每天",
+    "budget_monthly": "每月",
+    "alert_threshold_label": "告警阈值",
+    "channel_bindings_title": "渠道绑定",
+    "bindings_unset": "未绑定平台 ID。来自任何渠道的入站消息都将无法识别。",
+    "channel_rules_title": "按渠道的工具覆盖",
+    "channel_rules_unset": "未配置渠道级覆盖。全局 ApprovalPolicy.channel_rules 仍生效。"
   }
 }

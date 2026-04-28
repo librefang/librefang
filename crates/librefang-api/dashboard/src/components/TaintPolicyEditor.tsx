@@ -11,7 +11,7 @@ import {
 } from "../api";
 import { useUpdateMcpTaintPolicy } from "../lib/mutations/mcp";
 import { useMcpTaintRules } from "../lib/queries/mcp";
-import { Modal } from "./ui/Modal";
+import { DrawerPanel } from "./ui/DrawerPanel";
 import { Button } from "./ui/Button";
 import { Badge } from "./ui/Badge";
 import { Input } from "./ui/Input";
@@ -160,12 +160,11 @@ export function TaintPolicyEditor({
   }, [tools, scanning, mutation, server, addToast, onClose, t]);
 
   return (
-    <Modal
+    <DrawerPanel
       isOpen={isOpen}
       onClose={onClose}
       title={t("mcp.taint_policy_title", "Taint policy — {{name}}", { name: server.name })}
       size="3xl"
-      variant="panel-right"
     >
       <div className="flex flex-col gap-4 p-4 overflow-y-auto">
         {/* Server-level scanning toggle */}
@@ -260,7 +259,7 @@ export function TaintPolicyEditor({
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 

@@ -1,22 +1,101 @@
+# .dockerignore — what NOT to send to the Docker daemon as build context.
+#
+# Two goals: (1) keep secrets and runtime user data out of build layers,
+# (2) cut context-upload time for remote builders by skipping caches and
+# large generated dirs the Dockerfile rebuilds itself.
+#
+# Mirrors most of .gitignore's exclusions because anything not in git
+# probably shouldn't be in the image either. Patterns reuse the same
+# structure for easier review.
+
+# ── Secrets and user-private state ────────────────────────────────────
+.env
+.env.*
+secrets.env
+secrets.env.*
+config.toml
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
+
+# ── Runtime data files ────────────────────────────────────────────────
+# Local databases and journal files left over from `librefang start` —
+# may contain user prompts, agent state, message history.
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+collector_hand_state.json
+collector_knowledge_base.json
+predictions_database.json
+prediction_report_*.md
+message_journal.jsonl
+BUILD_LOG.md
+
+# ── Build outputs (Dockerfile rebuilds these inside the image) ────────
+target
+target-*
+target-isolated
+crates/librefang-api/static/react/
+dist
+**/*.rs.bk
+result
+/rust_out
+
+# ── Node.js — vendored deps + dashboard caches ────────────────────────
+node_modules
+.vite
+.wrangler
+.serena
+
+# ── VCS, CI, repo metadata ────────────────────────────────────────────
 .git
 .github
-.claude
+.gitattributes
+.gitnexus
+
+# ── Editor / dev-shell / agent state ──────────────────────────────────
 .vscode
 .idea
-target
+.devcontainer
+.cargo
+.config
+.envrc
+.direnv
+.claude
+.codex
+.omc
+.qwen
+.plans
+*.swp
+*.swo
+*~
+
+# ── Local toolchain pinning ───────────────────────────────────────────
+flake.nix
+flake.lock
+mise.toml
+mise.lock
+
+# ── Docs and ancillary repo content not built into the image ──────────
+# `examples/` stays in the context — librefang-cli/src/templates.rs
+# uses include_str! to embed examples/custom-agent/agent.toml at
+# compile time, so excluding it breaks the build.
 docs
 sdk
 scripts
+articles
+i18n
+web
 *.md
 !crates/**/*.md
 LICENSE-*
 CLAUDE.md
-BUILD_LOG.md
-.env
-.env.*
-*.db
-*.sqlite
-*.pem
-*.key
+AGENTS.md
+
+# ── OS metadata ───────────────────────────────────────────────────────
 Thumbs.db
 .DS_Store

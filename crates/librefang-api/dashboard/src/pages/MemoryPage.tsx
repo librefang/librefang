@@ -14,10 +14,11 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, Edit2, Loader2, Settings } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // Add Memory Dialog
 function AddMemoryDialog({ onClose }: { onClose: () => void }) {
@@ -36,7 +37,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md" variant="panel-right">
+    <DrawerPanel isOpen={true} onClose={onClose} title={t("memory.add_memory")} size="md">
       <div className="p-4 sm:p-6">
         <div className="space-y-4">
           <div>
@@ -83,7 +84,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -102,7 +103,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   };
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md" variant="panel-right">
+    <DrawerPanel isOpen={true} onClose={onClose} title={t("memory.edit_memory")} size="md">
       <div className="p-4 sm:p-6">
         <div>
           <label className="text-xs font-bold text-text-dim mb-1 block">{t("memory.content")}</label>
@@ -121,7 +122,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -139,7 +140,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   if (!stats) return null;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
+    <StaggerList className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {kpis.map((kpi, i) => (
         <Card key={i} hover padding="md">
           <div className="flex items-center justify-between">
@@ -149,7 +150,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
           <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
         </Card>
       ))}
-    </div>
+    </StaggerList>
   );
 }
 
@@ -219,7 +220,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
   const labelCls = "text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1 block";
 
   return (
-    <Modal isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg" variant="panel-right">
+    <DrawerPanel isOpen={true} onClose={onClose} title={t("memory.config_title", { defaultValue: "Memory Configuration" })} size="lg">
       <p className="text-xs text-text-dim -mt-2 mb-4">{t("memory.config_desc", { defaultValue: "Changes are written to config.toml. Restart required for full effect." })}</p>
 
       {configQuery.isLoading || !form ? (
@@ -307,7 +308,7 @@ function MemoryConfigDialog({ onClose }: { onClose: () => void }) {
         </Button>
         <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }
 

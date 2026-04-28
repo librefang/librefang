@@ -1,7 +1,7 @@
 //! All configuration struct and enum type definitions, including Default impls and associated helper functions.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
@@ -205,6 +205,19 @@ pub struct ChannelOverrides {
     /// channel and existing configs keep their current output byte-for-byte.
     #[serde(default)]
     pub prefix_agent_name: PrefixStyle,
+    /// Whether thread-ownership claiming applies to this channel. When set
+    /// to `false`, every routed agent dispatches even if another agent
+    /// already replied in the same thread — useful for "broadcast" channels
+    /// where multiple agents are intended to chime in together. Default
+    /// `true`: a single agent owns each `(channel, thread)` for the
+    /// configured TTL (and an explicit @-mention re-claims for the new
+    /// agent). DMs always bypass the registry. See #3334.
+    #[serde(default = "default_thread_ownership_enabled")]
+    pub thread_ownership_enabled: bool,
+}
+
+fn default_thread_ownership_enabled() -> bool {
+    true
 }
 
 impl Default for ChannelOverrides {
@@ -236,6 +249,7 @@ impl Default for ChannelOverrides {
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
             prefix_agent_name: PrefixStyle::Off,
+            thread_ownership_enabled: true,
         }
     }
 }
@@ -979,6 +993,114 @@ pub struct FallbackProviderConfig {
     /// Base URL override (uses catalog default if None).
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+/// Side-task category for the auxiliary LLM client.
+///
+/// Each variant maps to a separate fallback chain in `[llm.auxiliary]` so
+/// users can pick a cheap model per task without polluting the primary
+/// agent's provider list. See `librefang_runtime::aux_client` for the
+/// resolution algorithm and the published default chains.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxTask {
+    /// LLM-driven context compression (history summarisation).
+    Compression,
+    /// Session / trajectory title generation.
+    Title,
+    /// Search-result summarisation.
+    Search,
+    /// Image / video / vision-capable description.
+    Vision,
+    /// Browser-tool vision-driven page understanding.
+    BrowserVision,
+}
+
+impl AuxTask {
+    /// Stable string slug used in TOML and logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuxTask::Compression => "compression",
+            AuxTask::Title => "title",
+            AuxTask::Search => "search",
+            AuxTask::Vision => "vision",
+            AuxTask::BrowserVision => "browser_vision",
+        }
+    }
+}
+
+impl std::fmt::Display for AuxTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Auxiliary LLM client configuration — one cheap-tier fallback chain per
+/// side task.
+///
+/// Each entry is a list of `provider:model` references resolved in order
+/// against the user's already-configured credentials. A task with no entries
+/// (or whose entries cannot be initialised because the relevant API keys are
+/// missing) silently falls back to the primary driver — the auxiliary client
+/// is purely a routing optimisation, never a permission gate.
+///
+/// ```toml
+/// [llm.auxiliary]
+/// compression    = ["openrouter:anthropic/claude-3-5-haiku", "anthropic:haiku"]
+/// title          = ["openrouter:meta-llama/llama-3.1-8b-instruct", "groq:llama-3.1-8b-instant"]
+/// search         = ["openrouter:anthropic/claude-3-5-haiku", "openai:gpt-4o-mini"]
+/// vision         = ["anthropic:sonnet", "openai:gpt-4o-mini"]
+/// browser_vision = ["anthropic:sonnet", "openai:gpt-4o-mini"]
+/// ```
+///
+/// Uses `BTreeMap` rather than `HashMap` so serialised output is
+/// deterministic (see issue #3298).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct AuxiliaryConfig {
+    /// Per-task ordered chain of `provider:model` references.
+    pub tasks: BTreeMap<AuxTask, Vec<String>>,
+}
+
+impl AuxiliaryConfig {
+    /// Build an empty config (every task falls back to the primary driver).
+    pub fn empty() -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+        }
+    }
+
+    /// Lookup the configured chain for `task`, if any.
+    pub fn chain_for(&self, task: AuxTask) -> Option<&[String]> {
+        self.tasks.get(&task).map(|v| v.as_slice())
+    }
+
+    /// Whether this config has any user-supplied entries.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+/// Top-level `[llm]` section. Currently only carries `auxiliary` — primary
+/// driver configuration still lives in `[default_model]` / `[[fallback_providers]]`
+/// so this struct exists purely to namespace future LLM-routing knobs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Per-task auxiliary fallback chains. See [`AuxiliaryConfig`].
+    pub auxiliary: AuxiliaryConfig,
 }
 
 /// Text-to-speech configuration.
@@ -2506,6 +2628,10 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
+    /// `[llm]` section — currently carries the auxiliary side-task chain
+    /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
+    #[serde(default)]
+    pub llm: LlmConfig,
     /// Browser automation configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
@@ -3494,6 +3620,30 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub requires: Vec<PluginSystemRequirement>,
+    /// Per-language translation overrides for `name` and `description`.
+    ///
+    /// Keyed by BCP-47 language tag (`zh`, `zh-TW`, `ja`, `ko`, `de`, `es`,
+    /// `fr`, …). API routes resolve `Accept-Language` against this table and
+    /// fall back to the top-level English fields when no entry matches.
+    ///
+    /// ```toml
+    /// [i18n.zh]
+    /// name = "自动摘要"
+    /// description = "持续维护会话摘要，帮助 Agent 在长对话中不丢失上下文。"
+    /// ```
+    #[serde(default)]
+    pub i18n: std::collections::HashMap<String, PluginI18n>,
+}
+
+/// A per-language override for a plugin's user-facing strings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginI18n {
+    /// Localized plugin name. Falls back to the top-level `name`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description. Falls back to the top-level `description`.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A single system-binary requirement declared in `plugin.toml`.
@@ -4513,6 +4663,7 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
+            llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
             skills: SkillsConfig::default(),

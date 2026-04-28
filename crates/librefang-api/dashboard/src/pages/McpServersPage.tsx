@@ -1,6 +1,8 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type McpServerConfigured, type McpServerConnected, type McpTransport,
   type McpCatalogEntry,
@@ -20,7 +22,7 @@ import { Badge } from "../components/ui/Badge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
@@ -447,6 +449,7 @@ function ServerCard({
   onEditTaintPolicy,
   onDelete,
   onAuthSuccess,
+  onViewDetail,
   t,
 }: {
   server: McpServerConfigured;
@@ -457,6 +460,7 @@ function ServerCard({
   onEditTaintPolicy: () => void;
   onDelete: () => void;
   onAuthSuccess?: () => void;
+  onViewDetail: () => void;
   t: (key: string, opts?: any) => string;
 }) {
   const isConnected = conn?.connected ?? false;
@@ -489,7 +493,14 @@ function ServerCard({
           : "from-error via-error/60 to-error/30"
       }`} />
 
-      <div className="p-5 flex-1 flex flex-col">
+      <div
+        className="p-5 flex-1 flex flex-col cursor-pointer"
+        role="button"
+        tabIndex={0}
+        onClick={onViewDetail}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onViewDetail(); } }}
+        aria-label={t("mcp.view_detail", { defaultValue: "View server details" })}
+      >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -632,6 +643,8 @@ export function McpServersPage() {
   const [editingServer, setEditingServer] = useState<McpServerConfigured | null>(null);
   const [taintEditingServer, setTaintEditingServer] = useState<McpServerConfigured | null>(null);
   const [deletingServer, setDeletingServer] = useState<McpServerConfigured | null>(null);
+  const [detailsServer, setDetailsServer] = useState<McpServerConfigured | null>(null);
+  const [detailsCatalog, setDetailsCatalog] = useState<McpCatalogEntry | null>(null);
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<ServerFormState>(defaultForm);
   const [searchQuery, setSearchQuery] = useState("");
@@ -654,6 +667,18 @@ export function McpServersPage() {
   const data = serversQuery.data;
   const configured = data?.configured ?? [];
   const connected = data?.connected ?? [];
+
+  // First-time visitors with no servers configured land on the marketplace
+  // tab — installing a template is the obvious next step, and the empty
+  // "Servers" tab gave them nothing to act on. Only fires once per mount;
+  // if the user manually switches back to "servers", we don't override.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!serversQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if (configured.length === 0) setTab("catalog");
+  }, [serversQuery.isSuccess, configured.length]);
 
   const connectedMap = useMemo(() => {
     const map = new Map<string, McpServerConnected>();
@@ -896,6 +921,8 @@ export function McpServersPage() {
         </button>
       </div>
 
+      <AnimatePresence mode="wait">
+      <motion.div key={tab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="space-y-4">
       {tab === "servers" && (
         <>
           {/* Search + filter toolbar */}
@@ -992,6 +1019,7 @@ export function McpServersPage() {
                     onEdit={() => openEdit(server)}
                     onEditTaintPolicy={() => setTaintEditingServer(server)}
                     onDelete={() => deleteServer(server)}
+                    onViewDetail={() => setDetailsServer(server)}
                     t={t}
                   />
                 );
@@ -1044,7 +1072,13 @@ export function McpServersPage() {
                         ? "from-success via-success/60 to-success/30"
                         : "from-brand via-brand/60 to-brand/30"
                     }`} />
-                    <div className="p-5 flex-1 flex flex-col">
+                    <div
+                      className="p-5 flex-1 flex flex-col cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setDetailsCatalog(tpl)}
+                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetailsCatalog(tpl); } }}
+                    >
                       {/* Header */}
                       <div className="flex items-start justify-between gap-3 mb-3">
                         <div className="flex items-center gap-3 min-w-0">
@@ -1129,14 +1163,15 @@ export function McpServersPage() {
           )}
         </>
       )}
+      </motion.div>
+      </AnimatePresence>
 
       {/* Add / Edit Modal */}
-      <Modal
+      <DrawerPanel
         isOpen={isModalOpen}
         onClose={() => { setShowAddModal(false); setEditingServer(null); setForm(defaultForm); }}
         title={editingServer ? t("mcp.edit_server") : t("mcp.add_server")}
         size="lg"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           {/* Name */}
@@ -1261,15 +1296,14 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Catalog env setup modal */}
-      <Modal
+      <DrawerPanel
         isOpen={!!installingTemplate}
         onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
         title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
         size="md"
-        variant="panel-right"
       >
         <div className="p-5 space-y-4">
           <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>
@@ -1313,7 +1347,7 @@ export function McpServersPage() {
             </Button>
           </div>
         </div>
-      </Modal>
+      </DrawerPanel>
 
       {/* Delete confirmation */}
       <ConfirmDialog
@@ -1342,6 +1376,257 @@ export function McpServersPage() {
           onClose={() => setTaintEditingServer(null)}
         />
       )}
+
+      {/* Server detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsServer}
+        onClose={() => setDetailsServer(null)}
+        title={detailsServer?.name ?? ""}
+        size="lg"
+      >
+        {detailsServer && (() => {
+          const conn = connectedMap.get(serverIdentityOf(detailsServer));
+          const isConnected = conn?.connected ?? false;
+          const transportType = getTransportType(detailsServer);
+          const transport = detailsServer.transport;
+          return (
+            <div className="p-5 space-y-5">
+              {/* Hero */}
+              <div className="flex items-start gap-3">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+                  isConnected
+                    ? "bg-success/15 text-success"
+                    : "bg-brand/10 text-brand"
+                }`}>
+                  <Plug className="w-5 h-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-black tracking-tight truncate">{detailsServer.name}</h2>
+                    <Badge variant={isConnected ? "success" : "error"} dot>
+                      {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
+                    </Badge>
+                    <Badge variant="default">{transportType.toUpperCase()}</Badge>
+                  </div>
+                  {detailsServer.template_id && (
+                    <p className="text-[11px] text-text-dim/70 mt-0.5 font-mono">{detailsServer.template_id}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* OAuth state */}
+              {detailsServer.auth_state && detailsServer.auth_state.state !== "ok" && (
+                <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs text-warning">
+                  <p className="font-bold mb-1">{detailsServer.auth_state.state}</p>
+                  {detailsServer.auth_state.message && (
+                    <p className="text-text-dim">{detailsServer.auth_state.message}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Transport */}
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                  {t("mcp.transport", { defaultValue: "Transport" })}
+                </p>
+                {transportType === "stdio" ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-start gap-2 text-xs">
+                      <Terminal className="w-3.5 h-3.5 text-text-dim/60 shrink-0 mt-0.5" />
+                      <code className="font-mono text-[11px] break-all">{transport?.command ?? "-"}</code>
+                    </div>
+                    {(transport?.args ?? []).length > 0 && (
+                      <div className="ml-5 flex flex-wrap gap-1">
+                        {(transport?.args ?? []).map((a, i) => (
+                          <code key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-main/60 text-text-dim">{a}</code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-xs">
+                    <Globe className="w-3.5 h-3.5 text-text-dim/60 shrink-0" />
+                    <code className="font-mono text-[11px] break-all">{transport?.url ?? "-"}</code>
+                  </div>
+                )}
+                <div className="mt-2 flex items-center gap-2 text-[11px] text-text-dim/70">
+                  <Clock className="w-3 h-3" />
+                  {t("mcp.timeout")}: {detailsServer.timeout_secs ?? 30}s
+                </div>
+              </div>
+
+              {/* Env */}
+              {(detailsServer.env ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.env", { defaultValue: "Environment" })}
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {(detailsServer.env ?? []).map((e, i) => (
+                      <code key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-main/60 text-text-dim">{e}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Headers */}
+              {(detailsServer.headers ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.headers", { defaultValue: "Headers" })}
+                  </p>
+                  <div className="space-y-1">
+                    {(detailsServer.headers ?? []).map((h, i) => (
+                      <code key={i} className="block font-mono text-[10px] px-2 py-1 rounded bg-main/60 text-text-dim break-all">{h}</code>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Tools */}
+              {conn?.tools && conn.tools.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.tools")} ({conn.tools.length})
+                  </p>
+                  <div className="space-y-1.5 max-h-80 overflow-y-auto scrollbar-thin">
+                    {conn.tools.map((tool) => (
+                      <div key={tool.name} className="p-2.5 rounded-lg bg-main/40 border border-border-subtle/50">
+                        <span className="text-xs font-mono font-bold text-text-main">{tool.name}</span>
+                        {tool.description && (
+                          <p className="text-[10px] text-text-dim leading-snug mt-0.5">{tool.description}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex flex-wrap gap-2 pt-3 border-t border-border-subtle/50">
+                <Button
+                  variant="secondary" size="sm"
+                  leftIcon={<Settings className="w-3.5 h-3.5" />}
+                  onClick={() => { const s = detailsServer; setDetailsServer(null); openEdit(s); }}
+                >
+                  {t("common.edit")}
+                </Button>
+                <Button
+                  variant="secondary" size="sm"
+                  leftIcon={<ShieldHalf className="w-3.5 h-3.5" />}
+                  onClick={() => { const s = detailsServer; setDetailsServer(null); setTaintEditingServer(s); }}
+                >
+                  {t("mcp.taint_policy_short", "Taint")}
+                </Button>
+                <Button
+                  variant="secondary" size="sm"
+                  leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                  className="!text-error hover:!bg-error/10"
+                  onClick={() => { const s = detailsServer; setDetailsServer(null); deleteServer(s); }}
+                >
+                  {t("common.delete")}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </DrawerPanel>
+
+      {/* Catalog template detail drawer */}
+      <DrawerPanel
+        isOpen={!!detailsCatalog}
+        onClose={() => setDetailsCatalog(null)}
+        title={detailsCatalog?.name ?? ""}
+        size="md"
+      >
+        {detailsCatalog && (() => {
+          const alreadyAdded = detailsCatalog.installed || installedTemplateIds.has(detailsCatalog.id);
+          return (
+            <div className="p-5 space-y-5">
+              <div className="flex items-start gap-3">
+                <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+                  alreadyAdded ? "bg-success/15 text-success" : "bg-brand/10 text-brand"
+                }`}>
+                  {detailsCatalog.icon
+                    ? <CatalogIcon icon={detailsCatalog.icon} className="w-5 h-5" />
+                    : <Plug className="w-5 h-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-black tracking-tight truncate">{detailsCatalog.name}</h2>
+                    {alreadyAdded && (
+                      <Badge variant="success" dot>
+                        <Check className="h-3 w-3 mr-0.5" />
+                        {t("mcp.catalog_installed")}
+                      </Badge>
+                    )}
+                  </div>
+                  {detailsCatalog.category && (
+                    <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mt-0.5">{detailsCatalog.category}</p>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-sm text-text-dim leading-relaxed whitespace-pre-wrap">{detailsCatalog.description}</p>
+
+              {(detailsCatalog.tags ?? []).length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {detailsCatalog.tags!.map(tag => (
+                    <span key={tag} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-brand/10 text-brand">{tag}</span>
+                  ))}
+                </div>
+              )}
+
+              {(detailsCatalog.required_env ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.required_env", { defaultValue: "Required environment" })}
+                  </p>
+                  <div className="space-y-1.5">
+                    {(detailsCatalog.required_env ?? []).map(e => (
+                      <div key={e.name} className="flex items-center gap-2 p-2 rounded-lg bg-main/40 border border-border-subtle/50">
+                        <Key className="w-3 h-3 text-text-dim/60 shrink-0" />
+                        <code className="font-mono text-[11px] font-bold text-text-main">{e.name}</code>
+                        {e.label && <span className="text-[10px] text-text-dim truncate flex-1">{e.label}</span>}
+                        {e.get_url && (
+                          <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline shrink-0" aria-label="Get key">
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {detailsCatalog.setup_instructions && (
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
+                    {t("mcp.setup_instructions", { defaultValue: "Setup" })}
+                  </p>
+                  <pre className="text-[11px] text-text-dim leading-relaxed whitespace-pre-wrap font-sans p-3 rounded-lg bg-main/40 border border-border-subtle/50">{detailsCatalog.setup_instructions}</pre>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-border-subtle/50">
+                <Button
+                  variant="primary"
+                  className="w-full"
+                  disabled={alreadyAdded}
+                  leftIcon={alreadyAdded ? <Check className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                  onClick={() => {
+                    const tpl = detailsCatalog;
+                    setDetailsCatalog(null);
+                    installFromTemplate(tpl);
+                  }}
+                >
+                  {alreadyAdded ? t("mcp.catalog_installed") : t("mcp.catalog_install")}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </DrawerPanel>
     </div>
   );
 }

@@ -23,3 +23,8 @@ base64 = { workspace = true }
 dashmap = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
+dirs = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

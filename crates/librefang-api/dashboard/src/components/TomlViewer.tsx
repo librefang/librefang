@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Copy, Download, Loader2 } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { Modal } from "./ui/Modal";
 import { useUIStore } from "../lib/store";
+import { tabContent } from "../lib/motion";
 
 interface TomlViewerProps {
   isOpen: boolean;
@@ -126,11 +128,20 @@ export function TomlViewer({
             {t("toml_viewer.loading")}
           </div>
         ) : (
-          <div className="max-h-[65vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main">
-            <pre className="min-w-full px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">
-              {body}
-            </pre>
-          </div>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab}
+              variants={tabContent}
+              initial="initial"
+              animate="animate"
+              exit="exit"
+              className="max-h-[65vh] overflow-x-auto overflow-y-auto rounded-xl border border-border-subtle bg-main"
+            >
+              <pre className="min-w-full px-3 py-2 text-[11px] font-mono text-text whitespace-pre-wrap">
+                {body}
+              </pre>
+            </motion.div>
+          </AnimatePresence>
         )}
       </div>
     </Modal>

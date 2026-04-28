@@ -732,7 +732,7 @@ pub async fn execute_tool_raw(
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
-        "channel_send" => tool_channel_send(input, *kernel, *workspace_root).await,
+        "channel_send" => tool_channel_send(input, *kernel, *workspace_root, *sender_id).await,
 
         // Persistent process tools
         "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
@@ -1881,12 +1881,12 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
         // --- Channel send tool (proactive outbound messaging) ---
         ToolDefinition {
             name: "channel_send".to_string(),
-            description: "Send a message or media to a user on a configured channel (email, telegram, slack, etc). For email: recipient is the email address; optionally set subject. For media: set image_url, file_url, or file_path to send an image or file instead of (or alongside) text. Use thread_id to reply in a specific thread/topic.".to_string(),
+            description: "Send a message or media to a user on a configured channel (email, telegram, slack, etc). For email: recipient is the email address; optionally set subject. For media: set image_url, file_url, or file_path to send an image or file instead of (or alongside) text. Use thread_id to reply in a specific thread/topic. When recipient is omitted during message handling, the tool automatically replies to the original sender.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "channel": { "type": "string", "description": "Channel adapter name (e.g., 'email', 'telegram', 'slack', 'discord')" },
-                    "recipient": { "type": "string", "description": "Platform-specific recipient identifier (email address, user ID, etc.)" },
+                    "recipient": { "type": "string", "description": "Platform-specific recipient identifier (email address, user ID, etc.). Omit only when replying from an inbound message context where the original sender is available." },
                     "subject": { "type": "string", "description": "Optional subject line (used for email; ignored for other channels)" },
                     "message": { "type": "string", "description": "The message body to send (required for text, optional caption for media)" },
                     "image_url": { "type": "string", "description": "URL of an image to send (supported on Telegram, Discord, Slack)" },
@@ -1901,7 +1901,7 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                     "poll_correct_option": { "type": "integer", "description": "Index of the correct answer (0-based, for quiz mode)" },
                     "poll_explanation": { "type": "string", "description": "Explanation shown after answering (quiz mode)" }
                 },
-                "required": ["channel", "recipient"]
+                "required": ["channel"]
             }),
         },
         // --- Hand tools (curated autonomous capability packages) ---
@@ -3858,6 +3858,7 @@ async fn tool_channel_send(
     input: &serde_json::Value,
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
+    sender_id: Option<&str>,
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
@@ -3866,9 +3867,16 @@ async fn tool_channel_send(
         .ok_or("Missing 'channel' parameter")?
         .trim()
         .to_lowercase();
+
+    // Use recipient from input, or fall back to sender_id from context
+    // This allows agents to reply to the original sender without explicitly
+    // knowing the platform-specific ID (e.g., Telegram chat_id)
     let recipient = input["recipient"]
         .as_str()
-        .ok_or("Missing 'recipient' parameter")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(sender_id)
+        .ok_or("Missing 'recipient' parameter. When replying to the original sender, recipient is auto-filled — ensure channel_send is called in response to a message.")?
         .trim();
 
     if recipient.is_empty() {
@@ -6122,7 +6130,7 @@ mod tests {
             "recipient": "@user",
             "message": "here is the api_key=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None)
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
             .await
             .expect_err("channel_send must reject tainted message");
         assert!(
@@ -6143,7 +6151,7 @@ mod tests {
             "image_url": "https://example.com/cat.png",
             "message": "see attached. token=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None)
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
             .await
             .expect_err("image caption must be sink-checked");
         assert!(
@@ -6164,12 +6172,57 @@ mod tests {
             "poll_question": "guess my api_key=sk-abcdefghijklmnop",
             "poll_options": ["yes", "no"],
         });
-        let err = tool_channel_send(&input, Some(&kernel), None)
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
             .await
             .expect_err("poll question must be sink-checked");
         assert!(
             err.contains("taint") || err.contains("violation"),
             "expected taint violation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_auto_fills_recipient_from_sender_id() {
+        // Test that channel_send uses sender_id when recipient is omitted
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            // recipient intentionally omitted
+            "message": "Hello from auto-reply!",
+        });
+        // This should NOT error with "Missing recipient" because sender_id is provided
+        // It will error with "Channel file data send not available" because the mock kernel
+        // doesn't implement channel_send, but that's expected
+        let result = tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram")).await;
+        // The error should NOT be about missing recipient
+        let err_msg = result.unwrap_err();
+        assert!(
+            !err_msg.contains("Missing 'recipient'"),
+            "Expected auto-fill to work, but got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_channel_send_requires_recipient_without_sender_id() {
+        // Test that channel_send still requires recipient when sender_id is None
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::new(AtomicUsize::new(0)),
+            user_gate_override: None,
+        });
+        let input = serde_json::json!({
+            "channel": "telegram",
+            // recipient intentionally omitted
+            "message": "Hello!",
+        });
+        let err = tool_channel_send(&input, Some(&kernel), None, None)
+            .await
+            .expect_err("channel_send must require recipient without sender_id");
+        assert!(
+            err.contains("Missing 'recipient'"),
+            "Expected missing recipient error, got: {err}"
         );
     }
 

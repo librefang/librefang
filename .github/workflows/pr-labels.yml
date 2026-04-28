@@ -1,12 +1,16 @@
 name: PR Labels
 
+# Path-based area labels (e.g. `area/cli`, `area/dashboard`) keyed off
+# `.github/labeler.yml`. The review-state labels (`ready-for-review` ↔
+# `needs-changes`) are owned by `pr-status-labels.yml`, which queries
+# the real review state via `listReviews` instead of trying to infer
+# it from issue comments or treating every author push as
+# "all-resolved" — see librefang/librefang#3262 for the bug that
+# motivated removing the inference path.
+
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, closed]
-  pull_request_review:
-    types: [submitted]
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
@@ -20,98 +24,7 @@ jobs:
       github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/labeler@v6
+      - uses: actions/labeler@634933edcd8ababfe52f92936142cc22ac488b1b # v6
         with:
           configuration-path: .github/labeler.yml
           sync-labels: true
-
-  # ── Review state tracking ─────────────────────────────────────────
-  review-state:
-    if: >-
-      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
-      (github.event_name != 'pull_request_target' || github.event.pull_request.user.login != 'dependabot[bot]')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Update review state labels
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-
-          LABEL_REVIEW="ready-for-review"
-          LABEL_CHANGES="needs-changes"
-
-          add_label() { gh pr edit "$PR" --repo "$REPO" --add-label "$1" 2>/dev/null || true; }
-          remove_label() { gh pr edit "$PR" --repo "$REPO" --remove-label "$1" 2>/dev/null || true; }
-
-          has_label() {
-            gh pr view "$PR" --repo "$REPO" --json labels --jq ".labels[].name" \
-              | grep -qx "$1" 2>/dev/null
-          }
-
-          is_maintainer() {
-            case "$1" in
-              OWNER|MEMBER|COLLABORATOR) return 0 ;;
-              *) return 1 ;;
-            esac
-          }
-
-          # ── PR opened / reopened / synchronize / closed ───────────
-          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            PR="${{ github.event.pull_request.number }}"
-            ACTION="${{ github.event.action }}"
-
-            case "$ACTION" in
-              opened|reopened)
-                add_label "$LABEL_REVIEW"
-                remove_label "$LABEL_CHANGES"
-                ;;
-              synchronize)
-                if has_label "$LABEL_CHANGES"; then
-                  remove_label "$LABEL_CHANGES"
-                  add_label "$LABEL_REVIEW"
-                fi
-                ;;
-              closed)
-                remove_label "$LABEL_REVIEW"
-                remove_label "$LABEL_CHANGES"
-                ;;
-            esac
-
-          # ── Formal PR review ──────────────────────────────────────
-          elif [ "${{ github.event_name }}" = "pull_request_review" ]; then
-            PR="${{ github.event.pull_request.number }}"
-            STATE="${{ github.event.review.state }}"
-            ASSOC="${{ github.event.review.author_association }}"
-
-            if is_maintainer "$ASSOC"; then
-              case "$STATE" in
-                changes_requested)
-                  remove_label "$LABEL_REVIEW"
-                  add_label "$LABEL_CHANGES"
-                  ;;
-                approved)
-                  remove_label "$LABEL_REVIEW"
-                  remove_label "$LABEL_CHANGES"
-                  ;;
-              esac
-            fi
-
-          # ── Comment on a PR ───────────────────────────────────────
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            PR="${{ github.event.issue.number }}"
-            ASSOC="${{ github.event.comment.author_association }}"
-
-            if is_maintainer "$ASSOC"; then
-              if has_label "$LABEL_REVIEW"; then
-                remove_label "$LABEL_REVIEW"
-                add_label "$LABEL_CHANGES"
-              fi
-            else
-              if has_label "$LABEL_CHANGES"; then
-                remove_label "$LABEL_CHANGES"
-                add_label "$LABEL_REVIEW"
-              fi
-            fi
-          fi

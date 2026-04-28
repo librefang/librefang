@@ -952,6 +952,20 @@ pub fn known_providers() -> Vec<&'static str> {
         .collect()
 }
 
+/// Look up the wire-format an arbitrary provider speaks, by canonical name
+/// or alias. Returns `None` if the name doesn't match any registered
+/// provider, in which case callers should default to `OpenAI` (the most
+/// common shape). This lets out-of-tree probes pick correct endpoint paths
+/// (`/models` vs `/v1/models`) and auth headers (`Authorization: Bearer`
+/// vs `x-api-key` + `anthropic-version`) without hardcoding per-provider
+/// branches at every call site.
+pub fn provider_api_format(name: &str) -> Option<ApiFormat> {
+    PROVIDER_REGISTRY
+        .iter()
+        .find(|p| p.name == name || p.aliases.contains(&name))
+        .map(|p| p.api_format)
+}
+
 /// `(env_var, provider_id)` pairs for every cloud provider in the registry
 /// that requires an API key. Both the canonical `api_key_env` and the
 /// optional `alt_api_key_env` (e.g. `GOOGLE_API_KEY` for `gemini`) are

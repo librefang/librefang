@@ -4050,7 +4050,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4072,6 +4072,7 @@ dependencies = [
  "librefang-extensions",
  "librefang-hands",
  "librefang-kernel",
+ "librefang-llm-drivers",
  "librefang-memory",
  "librefang-migrate",
  "librefang-runtime",
@@ -4113,7 +4114,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "aes 0.9.0",
  "async-trait",
@@ -4161,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -4206,7 +4207,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "axum",
  "clap",
@@ -4221,6 +4222,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
+ "tauri-plugin-barcode-scanner",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-notification",
@@ -4235,7 +4237,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4266,7 +4268,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "chrono",
  "dashmap",
@@ -4284,7 +4286,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-http"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "librefang-types",
  "reqwest 0.13.2",
@@ -4296,7 +4298,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4341,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-handle"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "librefang-types",
@@ -4352,7 +4354,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-metering"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "librefang-memory",
  "librefang-runtime",
@@ -4362,7 +4364,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel-router"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "dirs 6.0.0",
  "librefang-hands",
@@ -4377,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-driver"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "librefang-types",
@@ -4389,21 +4391,24 @@ dependencies = [
 
 [[package]]
 name = "librefang-llm-drivers"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
  "dashmap",
+ "dirs 6.0.0",
  "futures",
  "librefang-http",
  "librefang-llm-driver",
  "librefang-runtime-oauth",
  "librefang-types",
+ "rand 0.10.0",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
@@ -4412,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4432,7 +4437,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4450,7 +4455,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4502,7 +4507,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-mcp"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -4523,7 +4528,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-oauth"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -4542,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime-wasm"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "anyhow",
  "librefang-http",
@@ -4557,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "aho-corasick",
  "chrono",
@@ -4585,7 +4590,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-telemetry"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "librefang-types",
  "metrics",
@@ -4593,7 +4598,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-testing"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "axum",
@@ -4612,7 +4617,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4637,7 +4642,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8429,6 +8434,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-barcode-scanner"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "485cbcf227f04117e930be748ea71d835900466dcd1d455d5ec284d36107a305"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tauri-plugin-dialog"
 version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11230,7 +11249,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "2026.4.27-beta6"
+version = "2026.4.28-beta7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -11238,6 +11257,7 @@ dependencies = [
  "librefang-migrate",
  "regex",
  "serde_json",
+ "sha2",
  "toml_edit 0.25.11+spec-1.1.0",
 ]
 

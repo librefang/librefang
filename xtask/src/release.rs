@@ -509,6 +509,30 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         _ => println!("  Warning: cargo update failed, continuing"),
     }
 
+    // --- Regenerate OpenAPI spec + SDK clients ---
+    // openapi.json and the generated SDK source files (sdk/go/librefang.go,
+    // sdk/rust/src/lib.rs, sdk/javascript/index.js, sdk/python/librefang/
+    // librefang_client.py) embed the workspace version string. If we skip
+    // this, CI's "OpenAPI Drift" check regenerates them in the runner and
+    // fails because the version embedded in the checked-in artifacts no
+    // longer matches the just-bumped Cargo.toml.
+    println!();
+    println!("Regenerating OpenAPI spec and SDK clients...");
+    let openapi_status = Command::new("cargo")
+        .args(["xtask", "codegen", "--openapi"])
+        .current_dir(&root)
+        .status()?;
+    if !openapi_status.success() {
+        return Err("cargo xtask codegen --openapi failed".into());
+    }
+    let sdk_status = Command::new("python3")
+        .args(["scripts/codegen-sdks.py"])
+        .current_dir(&root)
+        .status()?;
+    if !sdk_status.success() {
+        return Err("python3 scripts/codegen-sdks.py failed".into());
+    }
+
     // --- Generate Dev.to article (skip for pre-releases or --no-article) ---
     let article_path = if !args.no_article && !is_prerelease && !is_lts {
         let article = root.join(format!("articles/release-{}.md", changelog_version));
@@ -632,10 +656,15 @@ pip install librefang-sdk
         "Cargo.toml",
         "Cargo.lock",
         "CHANGELOG.md",
+        "openapi.json",
         "sdk/javascript/package.json",
+        "sdk/javascript/index.js",
         "sdk/python/setup.py",
+        "sdk/python/librefang/librefang_client.py",
         "sdk/rust/Cargo.toml",
         "sdk/rust/README.md",
+        "sdk/rust/src/lib.rs",
+        "sdk/go/librefang.go",
         "packages/whatsapp-gateway/package.json",
         "crates/librefang-desktop/tauri.conf.json",
     ];
@@ -855,6 +884,24 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
         .current_dir(root)
         .status();
 
+    // Regenerate OpenAPI spec + SDK clients so the embedded version matches
+    // (same reason as the main release path — the OpenAPI Drift CI check
+    // would otherwise fail on this LTS bump commit).
+    let openapi_status = Command::new("cargo")
+        .args(["xtask", "codegen", "--openapi"])
+        .current_dir(root)
+        .status()?;
+    if !openapi_status.success() {
+        return Err("cargo xtask codegen --openapi failed".into());
+    }
+    let sdk_status = Command::new("python3")
+        .args(["scripts/codegen-sdks.py"])
+        .current_dir(root)
+        .status()?;
+    if !sdk_status.success() {
+        return Err("python3 scripts/codegen-sdks.py failed".into());
+    }
+
     // Commit version bump if there are changes
     let has_changes = !Command::new("git")
         .args(["diff", "--quiet"])
@@ -865,7 +912,16 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
 
     if has_changes {
         let _ = Command::new("git")
-            .args(["add", "Cargo.toml", "Cargo.lock"])
+            .args([
+                "add",
+                "Cargo.toml",
+                "Cargo.lock",
+                "openapi.json",
+                "sdk/javascript/index.js",
+                "sdk/python/librefang/librefang_client.py",
+                "sdk/rust/src/lib.rs",
+                "sdk/go/librefang.go",
+            ])
             .current_dir(root)
             .status();
         let lts_msg = format!("chore: bump to {}", tag);

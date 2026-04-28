@@ -1,4 +1,10 @@
 [tools]
 just = "1.48"
 pnpm = "10.33"
-rust = "1.92"
+# Match the workspace MSRV declared in Cargo.toml's
+# `[workspace.package].rust-version`. The active toolchain at build
+# time still comes from `rust-toolchain.toml` (currently `stable`);
+# this entry is the floor mise will install when bootstrapping a
+# local environment. Keeping it below the MSRV produces an immediate
+# `rustc` error from cargo, which is confusing — keep these in sync.
+rust = "1.94.1"

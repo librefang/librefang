@@ -736,7 +736,13 @@ Call this whenever a plugin mysteriously does nothing — `runtime_available: fa
 - **Path traversal**: script paths may not contain `..` components — rejected at every invocation, not just load time.
 - **Env scrubbing**: every inherited env var is wiped (`env_clear`) before the subprocess spawns. LibreFang then sets `LIBREFANG_AGENT_ID`, `LIBREFANG_MESSAGE`, `LIBREFANG_RUNTIME`, forwards `PATH` and `HOME` from the parent process, adds the runtime's passthrough set (e.g. `PYTHONPATH`/`VIRTUAL_ENV` for Python, `GEM_HOME`/`GEM_PATH` for Ruby — see `runtime_passthrough_vars`), and finally forwards anything listed in the agent's `allowed_env_vars`. Your hook can read `LIBREFANG_AGENT_ID` / `LIBREFANG_MESSAGE` from the environment as an alternative to parsing stdin JSON.
 
-Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook.
+Hook stderr is captured and printed to LibreFang's own logs — use it liberally for debug logging from inside your hook. Each line is forwarded to tracing **as it arrives** under the `plugin_stderr` target (Python tools get `python_stderr`), so long-running hooks can stream progress to `journalctl` / `docker logs` instead of going silent until they exit. Filter with `RUST_LOG=plugin_stderr=info` (or `python_stderr=info`).
+
+After the hook exits, the full captured stderr is *also* emitted as a single `debug!`-level summary so existing tooling that scrapes `"hook stderr:"` keeps working. The two channels are independent — operators that enable both will see each line streamed live AND once more in the post-exit summary.
+
+> **Buffering caveat (especially Python)** — most language runtimes block-buffer stderr by default, so progress lines won't reach the daemon until the buffer fills or the process exits. For live streaming, flush after each line: `print(..., file=sys.stderr, flush=True)` in Python, `STDERR.sync = true` in Ruby. Node has no userspace stdio buffer of its own, so `process.stderr.write(...)` reaches the daemon as soon as the kernel pipe drains. Or run the interpreter in line-buffered mode (`python -u`).
+
+> **Don't put secrets on stderr.** Once an operator enables `RUST_LOG=plugin_stderr=info` (or `python_stderr=info`), every stderr line from every hook lands in the daemon log — and from there into `journalctl`, `docker logs`, or whatever sink ships logs off-host. Tokens, API keys, PII, and anything else you don't want persisted by the platform's log retention should never be `print`-ed to stderr. Use `debug` framing (gated by the same `RUST_LOG`) only when you've audited the content.
 
 ---
 
