@@ -339,19 +339,14 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
         return e;
     }
 
-    // SECURITY (Bug #3867): WASM execution runs inside `tokio::task::spawn_blocking`.
-    // Using `Handle::block_on` directly inside a blocking thread can deadlock
-    // on single-threaded runtimes and — more critically — bypasses the
-    // epoch-based watchdog: the epoch only ticks inside the async context, so a
-    // blocking async call that stalls never trips the timeout.
-    //
-    // `tokio::task::block_in_place` tells the runtime to move other tasks off
-    // the current thread before blocking, which avoids the deadlock and keeps
-    // the scheduler responsive.  The epoch watchdog thread is unaffected —
-    // it runs independently and will still fire `increment_epoch` when the
-    // wall-clock deadline is reached.
+    // SECURITY: Use block_in_place instead of block_on so the tokio scheduler
+    // can continue making progress (including the epoch-increment watchdog)
+    // while this thread is parked waiting for the async HTTP call to complete.
+    // block_on inside spawn_blocking creates a nested runtime and bypasses the
+    // epoch watchdog, allowing a WASM guest to stall the host indefinitely.
+    let handle = state.tokio_handle.clone();
     tokio::task::block_in_place(|| {
-        state.tokio_handle.block_on(async {
+        handle.block_on(async {
             // Build a DNS-pinned client so the HTTP request connects to the
             // same IPs we already validated (prevents DNS-rebinding TOCTOU).
             let mut builder = librefang_http::proxied_client_builder();
@@ -574,18 +569,14 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
-    // off this thread before blocking, avoiding deadlock and preserving the
-    // epoch watchdog's ability to interrupt.
-    tokio::task::block_in_place(|| {
-        match state
-            .tokio_handle
-            .block_on(kernel.send_to_agent(target, message))
-        {
-            Ok(response) => json!({"ok": response}),
-            Err(e) => json!({"error": e}),
-        }
-    })
+    // SECURITY: Use block_in_place so the epoch watchdog can make progress
+    // while the host-to-agent round-trip is in flight. Plain block_on inside
+    // spawn_blocking creates a nested runtime that starves the watchdog.
+    let handle = state.tokio_handle.clone();
+    match tokio::task::block_in_place(|| handle.block_on(kernel.send_to_agent(target, message))) {
+        Ok(response) => json!({"ok": response}),
+        Err(e) => json!({"error": e}),
+    }
 }
 
 fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -600,20 +591,20 @@ fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_jso
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    // SECURITY: Enforce capability inheritance — child <= parent
-    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
-    // off this thread before blocking, avoiding deadlock and preserving the
-    // epoch watchdog's ability to interrupt.
-    tokio::task::block_in_place(|| {
-        match state.tokio_handle.block_on(kernel.spawn_agent_checked(
+    // SECURITY: Enforce capability inheritance — child <= parent.
+    // Use block_in_place so the epoch watchdog can make progress during the
+    // synchronous wait; plain block_on inside spawn_blocking bypasses it.
+    let handle = state.tokio_handle.clone();
+    match tokio::task::block_in_place(|| {
+        handle.block_on(kernel.spawn_agent_checked(
             manifest_toml,
             Some(&state.agent_id),
             &state.capabilities,
-        )) {
-            Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
-            Err(e) => json!({"error": e}),
-        }
-    })
+        ))
+    }) {
+        Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
+        Err(e) => json!({"error": e}),
+    }
 }
 
 #[cfg(test)]
@@ -689,10 +680,7 @@ mod tests {
         let value = "sk-should-not-reach-child";
         std::env::set_var(&key, value);
 
-        // Use the explicit absolute path so the capability check passes even
-        // with the new separator-aware glob — `*` does not cross `/` so we
-        // grant the exact command we are about to run.
-        let state = test_state(vec![Capability::ShellExec("/usr/bin/env".to_string())]);
+        let state = test_state(vec![Capability::ShellExec("*".to_string())]);
         let result = host_shell_exec(
             &state,
             &json!({
@@ -706,7 +694,7 @@ mod tests {
 
         let ok = result
             .get("ok")
-            .expect("shell_exec should succeed with matching ShellExec capability");
+            .expect("shell_exec should succeed with ShellExec(*) capability");
         let stdout = ok
             .get("stdout")
             .and_then(|s| s.as_str())

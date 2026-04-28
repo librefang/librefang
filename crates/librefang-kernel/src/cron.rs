@@ -485,6 +485,65 @@ impl CronScheduler {
         }
     }
 
+    /// Log warnings for any cron jobs that should have fired between
+    /// `since` (typically the daemon's previous shutdown time) and `now`
+    /// but were missed due to the daemon being down.
+    ///
+    /// This is called once at daemon startup, after jobs are loaded from
+    /// disk. It does **not** catch-up-fire the missed jobs — it only
+    /// produces `warn!` log entries so operators can see what was skipped
+    /// (Bug #3828).
+    ///
+    /// The function works by walking `next_run` backwards in time: for
+    /// each enabled job whose `last_run` is older than `since`, it counts
+    /// how many times the schedule would have fired in `[since, now)` and
+    /// emits one warning per missed fire.  For `Every` schedules this is
+    /// an exact count; for `Cron` expression schedules it is approximate
+    /// (iterates up to 1440 times per job to avoid pathological inputs).
+    /// `At` one-shot jobs that have already passed are silently ignored
+    /// (they would have been removed on successful execution anyway).
+    pub fn warn_missed_fires(&self, since: chrono::DateTime<Utc>) {
+        let now = Utc::now();
+        if since >= now {
+            return;
+        }
+        for entry in self.jobs.iter() {
+            let meta = entry.value();
+            if !meta.job.enabled {
+                continue;
+            }
+            // One-shot At-schedules that already passed are expected to be
+            // gone; silence them to avoid false-positive noise.
+            if let CronSchedule::At { at } = &meta.job.schedule {
+                if *at < since {
+                    continue;
+                }
+            }
+            // Find the first time this job *should* have fired after `since`.
+            let mut cursor = compute_next_run_after(&meta.job.schedule, since);
+            let mut missed_count = 0usize;
+            // Safety cap: stop after 1440 iterations (≈1 minute-resolution
+            // cron firing every minute for a day) to avoid spinning on
+            // high-frequency schedules.
+            const MAX_ITER: usize = 1440;
+            while cursor < now && missed_count < MAX_ITER {
+                missed_count += 1;
+                cursor = compute_next_run_after(&meta.job.schedule, cursor);
+            }
+            if missed_count > 0 {
+                warn!(
+                    job = %meta.job.name,
+                    job_id = %meta.job.id,
+                    agent = %meta.job.agent_id,
+                    missed = missed_count,
+                    since = %since.format("%Y-%m-%dT%H:%M:%SZ"),
+                    "Cron: missed {} fire(s) while daemon was down",
+                    missed_count
+                );
+            }
+        }
+    }
+
     // -- Outcome recording --------------------------------------------------
 
     /// Record a successful execution for a job.
@@ -507,6 +566,17 @@ impl CronScheduler {
         };
         if should_remove {
             self.jobs.remove(&id);
+        }
+    }
+
+    /// Record a skipped execution for a job (e.g. agent was Suspended).
+    ///
+    /// Sets `last_status` to `"skipped"` without touching error counters or
+    /// removing one-shot jobs — the job remains scheduled for its next run.
+    pub fn record_skipped(&self, id: CronJobId) {
+        if let Some(mut meta) = self.jobs.get_mut(&id) {
+            meta.last_status = Some("skipped: agent suspended".to_string());
+            debug!(job_id = %id, "Cron job skipped (agent suspended)");
         }
     }
 

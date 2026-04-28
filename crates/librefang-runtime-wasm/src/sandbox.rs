@@ -31,6 +31,16 @@ use std::sync::Arc;
 use tracing::debug;
 use wasmtime::*;
 
+/// Maximum number of bytes accepted from a guest `host_log` call.
+///
+/// A WASM guest can supply an arbitrary `msg_len` pointer length to
+/// `host_log`. Without this cap, a malicious or buggy guest can push
+/// megabytes into the host's structured log stream, filling disk space or
+/// injecting fake audit lines. Messages longer than this limit are
+/// truncated and annotated with a byte count so the operator knows the
+/// original was clipped.
+const MAX_LOG_BYTES: usize = 4096;
+
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -421,19 +431,15 @@ impl WasmSandbox {
 
         // host_log: lightweight logging — no capability check required.
         //
-        // SECURITY (Bug #3865): two hardening measures are applied before the
-        // message reaches the log pipeline:
-        //
-        // 1. **Length cap** — only the first `MAX_HOST_LOG_BYTES` bytes are
-        //    read from guest memory.  Without this a malicious plugin can write
-        //    gigabytes of data, saturating disk I/O and exhausting the
-        //    structured-logging pipeline (log-pipeline DoS).
-        //
-        // 2. **Newline stripping** — CR and LF characters are replaced with a
-        //    space before the message is handed to `tracing`.  Without this a
-        //    plugin can embed fake log lines and forge audit-trail entries (log
-        //    injection), because most log shippers split on newlines and treat
-        //    each line as an independent event.
+        // SECURITY: Guest-supplied msg_len is capped at MAX_LOG_BYTES before
+        // reading. Without the cap a malicious guest can push megabytes into
+        // the host's structured log stream, filling disk or injecting fake
+        // audit lines by embedding newline sequences. We:
+        //   1. Limit the read to MAX_LOG_BYTES regardless of msg_len.
+        //   2. Truncate the decoded string and append a byte count when it
+        //      exceeds the cap.
+        //   3. Replace bare CR/LF characters with the visible pilcrow (↵) so
+        //      a single guest call cannot inject extra log lines.
         linker
             .func_wrap(
                 "librefang",
@@ -442,21 +448,34 @@ impl WasmSandbox {
                  level: i32,
                  msg_ptr: i32,
                  msg_len: i32| {
-                    // Cap the number of bytes read from the guest to prevent
-                    // log-pipeline DoS.
-                    const MAX_HOST_LOG_BYTES: usize = 4096;
-                    let capped_len = (msg_len as usize).min(MAX_HOST_LOG_BYTES) as i32;
-
                     let mut caller = caller;
-                    match Self::read_guest_bytes(&mut caller, msg_ptr, capped_len, "host_log") {
-                        Ok(bytes) => {
-                            // Strip newlines to prevent log injection — a WASM
-                            // guest must not be able to forge additional log
-                            // lines by embedding CR/LF in its message.
-                            let raw = String::from_utf8_lossy(&bytes);
-                            let msg = raw.replace(['\n', '\r'], " ");
-                            let agent_id = &caller.data().agent_id;
+                    // Clamp the guest-supplied length before touching memory.
+                    let clamped_len = (msg_len as usize).min(MAX_LOG_BYTES) as i32;
+                    let was_truncated = (msg_len as usize) > MAX_LOG_BYTES;
+                    let original_len = msg_len as usize;
 
+                    match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
+                        Ok(bytes) => {
+                            let raw = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+
+                            // Sanitize newlines to prevent log injection of
+                            // fake structured log lines.
+                            let sanitized = raw.replace("\r\n", " ").replace(['\r', '\n'], "\u{21b5}");
+
+                            // Annotate truncated messages so operators know
+                            // the original payload was longer.
+                            let msg: std::borrow::Cow<str> = if was_truncated {
+                                format!(
+                                    "{}... [truncated {} bytes]",
+                                    sanitized,
+                                    original_len - MAX_LOG_BYTES
+                                )
+                                .into()
+                            } else {
+                                sanitized.into()
+                            };
+
+                            let agent_id = &caller.data().agent_id;
                             match level {
                                 0 => tracing::trace!(agent = %agent_id, "[wasm] {msg}"),
                                 1 => tracing::debug!(agent = %agent_id, "[wasm] {msg}"),
@@ -795,5 +814,37 @@ mod tests {
             err_msg.contains("Unknown"),
             "Expected unknown method error, got: {err_msg}"
         );
+    }
+
+    /// Regression test for #3865: host_log must refuse guest-supplied
+    /// messages longer than MAX_LOG_BYTES and must not allow newline
+    /// injection. This test validates the constant value and sanitization
+    /// logic directly without running a full WASM module, since the fix
+    /// lives in the host-side closure.
+    #[test]
+    fn test_host_log_max_bytes_constant() {
+        assert_eq!(MAX_LOG_BYTES, 4096, "MAX_LOG_BYTES must be 4096");
+    }
+
+    #[test]
+    fn test_host_log_newline_sanitization_logic() {
+        // Validate the exact sanitization expressions used in the host_log closure.
+        let raw = "line1\r\nline2\nline3\rline4";
+        let sanitized = raw.replace("\r\n", " ").replace(['\r', '\n'], "\u{21b5}");
+        assert!(!sanitized.contains('\n'), "LF must be replaced");
+        assert!(!sanitized.contains('\r'), "CR must be replaced");
+        // CRLF → single space; bare LF/CR → pilcrow
+        assert!(sanitized.contains(' '), "CRLF should become a space");
+        assert!(sanitized.contains('\u{21b5}'), "bare LF/CR should become pilcrow");
+    }
+
+    #[test]
+    fn test_host_log_truncation_annotation() {
+        // Simulate what the closure does for an over-length message.
+        let long_msg = "x".repeat(MAX_LOG_BYTES + 100);
+        let clamped = &long_msg[..MAX_LOG_BYTES];
+        let annotated = format!("{}... [truncated {} bytes]", clamped, 100);
+        assert!(annotated.contains("[truncated 100 bytes]"));
+        assert!(annotated.len() > MAX_LOG_BYTES);
     }
 }

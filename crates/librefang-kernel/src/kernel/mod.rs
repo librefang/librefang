@@ -2828,6 +2828,13 @@ impl LibreFangKernel {
             Ok(count) => {
                 if count > 0 {
                     info!("Loaded {count} cron job(s) from disk");
+                    // Bug #3828: warn about any fires that were missed while the
+                    // daemon was down.  We use "5 minutes ago" as a conservative
+                    // lower bound because we don't persist a shutdown timestamp;
+                    // operators can correlate with daemon restart time in logs.
+                    // This only logs warnings — it does not catch-up-fire.
+                    let warn_since = chrono::Utc::now() - chrono::Duration::minutes(5);
+                    cron_scheduler.warn_missed_fires(warn_since);
                 }
             }
             Err(e) => {
@@ -11144,7 +11151,28 @@ system_prompt = "You are a helpful assistant."
         // `New`; persistent fires reuse the canonical session and must
         // serialize at the per-agent mutex, so we leave session_id_override
         // = None for them.
+        // Bug #3841: burst events fire triggers out-of-order via independent
+        // tokio::spawn.  Fix: collect all trigger dispatches for this event
+        // into a single spawned task and execute them **sequentially** inside
+        // it.  Each individual dispatch still acquires the global trigger-lane
+        // semaphore and per-agent semaphore, preserving all existing
+        // concurrency limits — but triggers produced by the same event are
+        // now guaranteed to reach agents in evaluation order, not in arbitrary
+        // tokio scheduler order.
         if let Some(weak) = self.self_handle.get() {
+            // Pre-resolve per-trigger data before spawning so the spawned
+            // future does not borrow `self` or `triggered` across the await.
+            struct TriggerDispatch {
+                kernel: Arc<LibreFangKernel>,
+                aid: AgentId,
+                msg: String,
+                mode_override: Option<librefang_types::agent::SessionMode>,
+                session_id_override: Option<SessionId>,
+                trigger_sem: Arc<tokio::sync::Semaphore>,
+                agent_sem: Arc<tokio::sync::Semaphore>,
+            }
+
+            let mut dispatches: Vec<TriggerDispatch> = Vec::with_capacity(triggered.len());
             for trigger_match in &triggered {
                 let kernel = match weak.upgrade() {
                     Some(k) => k,
@@ -11173,41 +11201,69 @@ system_prompt = "You are a helpful assistant."
                     .semaphore_for_lane(librefang_runtime::command_lane::Lane::Trigger);
                 let agent_sem = kernel.agent_concurrency_for(aid);
 
+                dispatches.push(TriggerDispatch {
+                    kernel,
+                    aid,
+                    msg,
+                    mode_override,
+                    session_id_override,
+                    trigger_sem,
+                    agent_sem,
+                });
+            }
+
+            if !dispatches.is_empty() {
                 tokio::spawn(async move {
-                    // (1) Global trigger lane permit. `acquire_owned` so the
-                    //     permit moves into the spawned task and drops at
-                    //     task exit.
-                    let _lane_permit = match trigger_sem.acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => return, // lane closed during shutdown
-                    };
-                    // (2) Per-agent permit.
-                    let _agent_permit = match agent_sem.acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => return,
-                    };
-                    // (3) Inner per-session mutex applies inside
-                    //     send_message_full when session_id_override is Some.
-                    let handle: Option<Arc<dyn KernelHandle>> = kernel
-                        .self_handle
-                        .get()
-                        .and_then(|w| w.upgrade())
-                        .map(|arc| arc as Arc<dyn KernelHandle>);
-                    let home_channel = kernel.resolve_agent_home_channel(aid);
-                    if let Err(e) = kernel
-                        .send_message_full(
+                    // Execute trigger dispatches sequentially to preserve
+                    // the order in which the trigger engine evaluated them.
+                    // Each dispatch still acquires its semaphore permits
+                    // (global trigger-lane + per-agent) before calling
+                    // send_message_full, so back-pressure and concurrency
+                    // caps continue to apply correctly.
+                    for d in dispatches {
+                        let TriggerDispatch {
+                            kernel,
                             aid,
-                            &msg,
-                            handle,
-                            None,
-                            home_channel.as_ref(),
+                            msg,
                             mode_override,
-                            None,
                             session_id_override,
-                        )
-                        .await
-                    {
-                        warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                            trigger_sem,
+                            agent_sem,
+                        } = d;
+
+                        // (1) Global trigger lane permit.
+                        let _lane_permit = match trigger_sem.acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => return, // lane closed during shutdown
+                        };
+                        // (2) Per-agent permit.
+                        let _agent_permit = match agent_sem.acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        // (3) Inner per-session mutex applies inside
+                        //     send_message_full when session_id_override is Some.
+                        let handle: Option<Arc<dyn KernelHandle>> = kernel
+                            .self_handle
+                            .get()
+                            .and_then(|w| w.upgrade())
+                            .map(|arc| arc as Arc<dyn KernelHandle>);
+                        let home_channel = kernel.resolve_agent_home_channel(aid);
+                        if let Err(e) = kernel
+                            .send_message_full(
+                                aid,
+                                &msg,
+                                handle,
+                                None,
+                                home_channel.as_ref(),
+                                mode_override,
+                                None,
+                                session_id_override,
+                            )
+                            .await
+                        {
+                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                        }
                     }
                 });
             }
@@ -12238,20 +12294,23 @@ system_prompt = "You are a helpful assistant."
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
 
-                                // Skip the cron fire entirely for Suspended agents.
-                                // This check must happen BEFORE pre_check_script (which has
-                                // side effects) so a suspended agent never triggers external
-                                // scripts or accumulates record_success counts (#3839).
-                                if let Some(entry) = kernel.registry.get(agent_id) {
-                                    if entry.state == librefang_types::agent::AgentState::Suspended
-                                    {
-                                        tracing::debug!(
-                                            agent_id = %agent_id,
-                                            job = %job_name,
-                                            "skipping cron fire: agent is suspended"
-                                        );
-                                        continue; // Do NOT record_success
-                                    }
+                                // Bug #3839: skip cron fires for Suspended agents.
+                                // Check agent state before running pre_check_script or
+                                // dispatching any message — a Suspended agent cannot run,
+                                // and recording success here would be misleading.
+                                let is_suspended = kernel
+                                    .registry
+                                    .get(agent_id)
+                                    .map(|e| e.state == AgentState::Suspended)
+                                    .unwrap_or(false);
+                                if is_suspended {
+                                    warn!(
+                                        job = %job_name,
+                                        agent = %agent_id,
+                                        "Cron: agent is Suspended, skipping fire"
+                                    );
+                                    kernel.cron_scheduler.record_skipped(job_id);
+                                    continue;
                                 }
 
                                 // Wake-gate: run pre_check_script and check for
