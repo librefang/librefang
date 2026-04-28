@@ -524,6 +524,9 @@ pub async fn auth(
             | "/api/auth/callback"
             | "/api/auth/dashboard-login"
             | "/api/auth/dashboard-check"
+            // Mobile pairing — phone has no API key yet, needs to exchange
+            // the one-time QR token for the daemon's api_key.
+            | "/api/pairing/complete"
     ) || path.starts_with("/api/providers/github-copilot/oauth/");
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
