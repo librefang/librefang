@@ -1019,7 +1019,7 @@ export function ConfigPage({ category }: { category: string }) {
 
       {/* Sticky unsaved changes bar */}
       {hasPendingChanges && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none">
+        <div className="fixed bottom-0 left-0 right-0 z-40 flex justify-center pointer-events-none pb-safe">
           <div className="mb-5 flex items-center gap-3 px-4 py-2.5 rounded-2xl border border-warning/30 bg-surface shadow-lg pointer-events-auto">
             <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0" />
             <span className="text-xs font-semibold text-warning">

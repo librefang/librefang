@@ -701,7 +701,7 @@ export function App() {
           </div>
         </nav>
 
-        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+        <div className={`border-t border-border-subtle p-4 pb-safe ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
           <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">

@@ -2755,7 +2755,7 @@ export function ChatPage() {
           </div>
 
           {/* Input area */}
-          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          <div className={`p-2 sm:p-4 pb-safe border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               agentId={selectedAgentId ?? ""}
               onSend={sendMessage}
