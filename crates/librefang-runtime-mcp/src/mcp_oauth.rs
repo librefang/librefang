@@ -175,29 +175,61 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
 fn is_ssrf_blocked_host(host: &str) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    let lower = host.to_lowercase();
+    fn blocked_v4(v4: Ipv4Addr) -> bool {
+        let o = v4.octets();
+        // 127.0.0.0/8 loopback
+        o[0] == 127
+        // 10.0.0.0/8
+        || o[0] == 10
+        // 172.16.0.0/12
+        || (o[0] == 172 && (o[1] & 0xf0) == 16)
+        // 192.168.0.0/16
+        || (o[0] == 192 && o[1] == 168)
+        // 169.254.0.0/16 link-local (incl. cloud IMDS 169.254.169.254)
+        || (o[0] == 169 && o[1] == 254)
+    }
+
+    /// IPv4 embedded in an IPv6 address through one of the two forms
+    /// that route packets to an IPv4 endpoint on the wire:
+    ///   * IPv4-mapped: `::ffff:x.x.x.x` (RFC 4291 §2.5.5.2)
+    ///   * NAT64:       `64:ff9b::x.x.x.x` (RFC 6052)
+    /// Without these, `http://[::ffff:7f00:0001]/` bypasses the V4
+    /// loopback check entirely — the daemon happily connects to
+    /// 127.0.0.1 over an IPv6 socket.
+    fn ipv6_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            return Some(v4);
+        }
+        let s = v6.segments();
+        if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|seg| *seg == 0) {
+            return Some(Ipv4Addr::new(
+                (s[6] >> 8) as u8,
+                (s[6] & 0xff) as u8,
+                (s[7] >> 8) as u8,
+                (s[7] & 0xff) as u8,
+            ));
+        }
+        None
+    }
+
+    // Strip a trailing dot ("localhost." is the same host as "localhost"
+    // to a resolver) before the hostname comparison.
+    let lower = host.trim_end_matches('.').to_lowercase();
     if lower == "localhost" || lower == "metadata.google.internal" {
         return true;
     }
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         return match ip {
-            IpAddr::V4(v4) => {
-                let o = v4.octets();
-                // 127.0.0.0/8 loopback
-                o[0] == 127
-                // 10.0.0.0/8
-                || o[0] == 10
-                // 172.16.0.0/12
-                || (o[0] == 172 && (o[1] & 0xf0) == 16)
-                // 192.168.0.0/16
-                || (o[0] == 192 && o[1] == 168)
-                // 169.254.0.0/16 link-local
-                || (o[0] == 169 && o[1] == 254)
-            }
+            IpAddr::V4(v4) => blocked_v4(v4),
             IpAddr::V6(v6) => {
+                if let Some(v4) = ipv6_embedded_ipv4(v6) {
+                    if blocked_v4(v4) {
+                        return true;
+                    }
+                }
                 let segs = v6.segments();
                 // ::1 loopback
                 v6.is_loopback()
@@ -932,6 +964,37 @@ mod tests {
             url,
             "https://my-mcp-server.example.com/.well-known/oauth-authorization-server"
         );
+    }
+
+    /// Regression: `::ffff:x.x.x.x` (IPv4-mapped IPv6) used to bypass
+    /// the V4 loopback check.  Packets to this address are delivered to
+    /// the V4 endpoint on the wire, so it must be classified by the V4
+    /// rules.
+    #[test]
+    fn well_known_url_blocks_ipv4_mapped_ipv6_loopback() {
+        assert!(well_known_url("http://[::ffff:7f00:0001]/mcp").is_none());
+        assert!(well_known_url("http://[::ffff:127.0.0.1]/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_ipv4_mapped_ipv6_imds() {
+        // 169.254.169.254 — AWS / Azure IMDS — delivered via mapped V6.
+        assert!(well_known_url("http://[::ffff:a9fe:a9fe]/mcp").is_none());
+    }
+
+    /// NAT64 prefix `64:ff9b::x.x.x.x` (RFC 6052) is the second wire
+    /// path that delivers packets to a V4 endpoint over a V6 socket.
+    #[test]
+    fn well_known_url_blocks_nat64_loopback() {
+        assert!(well_known_url("http://[64:ff9b::7f00:1]/mcp").is_none());
+    }
+
+    /// Trailing-dot variants of `localhost` resolve to the same host;
+    /// the lookup must be case- and dot-insensitive.
+    #[test]
+    fn well_known_url_blocks_localhost_with_trailing_dot() {
+        assert!(well_known_url("http://localhost./mcp").is_none());
+        assert!(well_known_url("http://LOCALHOST/mcp").is_none());
     }
 
     // -- #3713: validate_metadata_endpoints domain-mismatch tests --
