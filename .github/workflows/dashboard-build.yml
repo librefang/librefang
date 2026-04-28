@@ -25,6 +25,13 @@ on:
         required: true
         type: string
 
+# Cancel superseded runs on the same ref (e.g. when a PR is force-pushed).
+# Main-branch and release runs each get their own group so they don't cancel
+# each other.
+concurrency:
+  group: dashboard-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -42,6 +49,8 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard
+        # pnpm 10 in CI ignores both .npmrc and pnpm-workspace.yaml for the
+        # ignored-builds setting; pass it on the CLI so it can't be missed.
         run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
 
       - name: Typecheck
@@ -50,11 +59,8 @@ jobs:
 
       - name: Run tests
         working-directory: crates/librefang-api/dashboard
+        # Includes the no-inline-fetch lint test (src/lib/__tests__/no-inline-fetch.test.ts)
         run: pnpm run test
-
-      - name: Run lint checks
-        working-directory: crates/librefang-api/dashboard
-        run: pnpm run test:lint
 
       - name: Build dashboard
         working-directory: crates/librefang-api/dashboard
@@ -66,6 +72,7 @@ jobs:
           tar -czf /tmp/dashboard-dist.tar.gz .
 
       - name: Upload to release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

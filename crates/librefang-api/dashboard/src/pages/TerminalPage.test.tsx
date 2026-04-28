@@ -72,6 +72,10 @@ vi.mock("@tanstack/react-query", async () => {
   };
 });
 
+// jsdom has no canvas, so the real `Terminal` blows up. Stub the
+// surface area `TerminalPage` actually touches; keep it minimal so a
+// future caller that reaches for a new method gets a loud failure
+// instead of a silent no-op.
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
@@ -98,6 +102,7 @@ vi.mock("@xterm/addon-search", () => ({
   SearchAddon: class {
     findNext() {}
     findPrevious() {}
+    dispose() {}
   },
 }));
 
