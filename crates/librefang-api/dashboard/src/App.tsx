@@ -141,12 +141,12 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
       <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
-        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
+        <div role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title" className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
             <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
               {isCredentials ? <User className="h-7 w-7 text-brand" /> : <Lock className="h-7 w-7 text-brand" />}
             </div>
-            <h2 className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
+            <h2 id="auth-dialog-title" className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
             <p className="text-sm text-text-dim mt-1">{t(isCredentials ? "auth.credentials_description" : "auth.description")}</p>
           </div>
           {isHybrid && (
@@ -315,11 +315,12 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
-        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
+        <div role="dialog" aria-modal="true" aria-labelledby="change-credentials-dialog-title" className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
           <div className="flex items-center justify-between px-6 pt-6 pb-4">
-            <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
+            <h2 id="change-credentials-dialog-title" className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
             <button
               onClick={onClose}
+              aria-label={t("common.close", { defaultValue: "Close dialog" })}
               className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             >
               <X className="h-3.5 w-3.5" />

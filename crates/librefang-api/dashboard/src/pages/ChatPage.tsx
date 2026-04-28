@@ -2216,6 +2216,9 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Message windowing: render only the last N messages to avoid DOM bloat in
+  // long sessions. The user can load earlier messages with the button above.
+  const [visibleCount, setVisibleCount] = useState(50);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
@@ -2225,9 +2228,11 @@ export function ChatPage() {
   const patchAgentConfigMutation = usePatchAgentConfig();
   const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
 
-  // Sync agent selection to URL search params
+  // Sync agent selection to URL search params. Also reset the visible-message
+  // window so new agent sessions start from the tail end of history.
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
+    setVisibleCount(50);
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
@@ -2731,7 +2736,16 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map(msg => (
+                {/* Load-earlier button — shown when history exceeds the render window */}
+                {messages.length > visibleCount && (
+                  <button
+                    onClick={() => setVisibleCount(prev => prev + 50)}
+                    className="w-full py-2 px-4 rounded-xl text-xs font-semibold text-text-dim bg-main hover:bg-surface-hover border border-border-subtle transition-colors"
+                  >
+                    {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
+                  </button>
+                )}
+                {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
                     key={msg.id}
                     message={msg}

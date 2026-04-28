@@ -571,7 +571,7 @@ export function AgentsPage() {
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="relative shrink-0">
                 <Avatar fallback={agent.name} size="lg" />
-                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
+                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" role="img" aria-label="Agent active" />}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 min-w-0">
@@ -801,7 +801,7 @@ export function AgentsPage() {
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} role="img" aria-label={isDetailSuspended ? "Agent suspended" : isDetailCrashed ? "Agent crashed" : "Agent active"} />
                   </div>
                   <div className="min-w-0 flex-1">
                     {editingName ? (
@@ -1718,13 +1718,13 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl" onClick={onClose}>
-      <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="prompts-experiments-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-border-subtle flex items-center justify-between shrink-0">
           <div>
-            <h3 className="text-lg font-black">{agentName}</h3>
+            <h3 id="prompts-experiments-dialog-title" className="text-lg font-black">{agentName}</h3>
             <p className="text-xs text-text-dim">Prompts & Experiments</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close dialog" })}><X className="w-4 h-4" /></button>
         </div>
         
         <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
@@ -1781,8 +1781,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
               {showCreateVersion && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
-                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 className="font-bold mb-4">Create Prompt Version</h4>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-version-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-version-dialog-title" className="font-bold mb-4">Create Prompt Version</h4>
                     <div className="space-y-4">
                       <div>
                         <label className="text-xs text-text-dim">System Prompt</label>
@@ -1882,8 +1882,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
               {showCreateExperiment && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
-                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 className="font-bold mb-4">Create Experiment</h4>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-experiment-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-experiment-dialog-title" className="font-bold mb-4">Create Experiment</h4>
                     <div className="space-y-4">
                       <div>
                         <label className="text-xs text-text-dim">Experiment Name</label>
