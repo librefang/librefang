@@ -523,6 +523,20 @@ struct LibreFangMemorySection {
 /// Write or update a key in a secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
 fn write_secret_env(path: &Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+    // Reject newlines in key or value — they would allow injecting additional
+    // KEY=VALUE pairs into the file, silently overwriting other secrets.
+    if key.contains('\n') || key.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret key must not contain newline characters",
+        ));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain newline characters",
+        ));
+    }
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()

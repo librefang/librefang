@@ -4817,6 +4817,20 @@ pub(crate) fn write_secret_env(
     key: &str,
     value: &str,
 ) -> Result<(), std::io::Error> {
+    // Reject newlines in key or value — they would allow injecting additional
+    // KEY=VALUE pairs into the file, silently overwriting other secrets.
+    if key.contains('\n') || key.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret key must not contain newline characters",
+        ));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain newline characters",
+        ));
+    }
     validate_static_file_path(path, "secrets.env")
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let mut lines: Vec<String> = if path.exists() {
@@ -5810,5 +5824,56 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
             !raw.contains("[channels.discord]"),
             "channel section should have been removed — got:\n{raw}"
         );
+    }
+
+    #[test]
+    fn write_secret_env_rejects_newline_in_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let err = write_secret_env(&path, "KEY\nINJECTED=bad", "value").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("newline"),
+            "expected newline error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn write_secret_env_rejects_carriage_return_in_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let err = write_secret_env(&path, "KEY\rINJECTED=bad", "value").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("newline"));
+    }
+
+    #[test]
+    fn write_secret_env_rejects_newline_in_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let err = write_secret_env(&path, "MY_KEY", "good\nINJECTED=evil").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            err.to_string().contains("newline"),
+            "expected newline error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn write_secret_env_rejects_carriage_return_in_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        let err = write_secret_env(&path, "MY_KEY", "good\rINJECTED=evil").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("newline"));
+    }
+
+    #[test]
+    fn write_secret_env_accepts_normal_key_and_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "MY_API_KEY", "super-secret-value-123").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("MY_API_KEY=super-secret-value-123"));
     }
 }
