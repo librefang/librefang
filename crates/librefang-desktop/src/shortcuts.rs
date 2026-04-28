@@ -1,4 +1,8 @@
 //! System-wide keyboard shortcuts for the LibreFang desktop app.
+//!
+//! Desktop-only: global keyboard shortcuts are not supported on iOS or Android.
+
+#![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};

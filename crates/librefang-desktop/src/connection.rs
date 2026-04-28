@@ -144,6 +144,8 @@ pub async fn connect_remote(
 
 /// Start a local LibreFang server, store state, optionally save preference,
 /// and navigate the WebView to the local dashboard.
+/// Desktop-only: mobile is always a thin client connecting to a remote daemon.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 pub async fn start_local(
     remember: bool,

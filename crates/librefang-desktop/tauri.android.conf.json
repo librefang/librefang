@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "ai.librefang.app",
+  "app": {
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "android": {
+      "minSdkVersion": 26
+    }
+  }
+}
