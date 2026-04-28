@@ -3698,7 +3698,7 @@ pub async fn update_agent(
         ),
 =======
     // Apply the new manifest to the in-memory registry (preserves runtime-only
-    // fields like workspace path and tags). Bug #3824.
+    // fields like workspace path and tags).
     if let Err(e) = state
         .kernel
         .agent_registry()
@@ -3720,7 +3720,7 @@ pub async fn update_agent(
     }
 
     // Write updated manifest to agent.toml on disk so the file matches the
-    // in-memory state and doesn't override changes on next boot (#996, #1018).
+    // in-memory state and doesn't override changes on next boot.
     state.kernel.persist_manifest_to_disk(agent_id);
 
     if let Some(entry) = state.kernel.agent_registry().get(agent_id) {

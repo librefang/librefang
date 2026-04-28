@@ -728,7 +728,7 @@ pub async fn auth(
     // headers. For all other REST routes the token must come from an
     // Authorization: Bearer or X-API-Key header — query params appear in
     // access logs, Referer headers, and browser history, making them easy to
-    // accidentally leak. Bug #3838.
+    // accidentally leak.
     //
     // Allowed path prefixes:
     //   /api/agents/{id}/ws           — WebSocket upgrade (can't set headers)
@@ -742,9 +742,7 @@ pub async fn auth(
     // See issue #962 (ported from openfang).
     let is_ws_or_sse_path = path.ends_with("/ws")
         || path.starts_with("/ws/")
-        || path == "/ws"
-        || path.ends_with("/stream")
-        || path == "/api/logs/stream";
+        || path.ends_with("/stream");
 
     let query_token_decoded = if is_ws_or_sse_path {
         request
