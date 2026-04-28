@@ -28,12 +28,8 @@ fn test_config() -> KernelConfig {
 }
 
 #[tokio::test]
+#[ignore = "Requires GROQ_API_KEY environment variable"]
 async fn test_full_pipeline_with_groq() {
-    if std::env::var("GROQ_API_KEY").is_err() {
-        eprintln!("GROQ_API_KEY not set, skipping integration test");
-        return;
-    }
-
     // Boot kernel
     let config = test_config();
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
@@ -87,12 +83,8 @@ memory_write = ["self.*"]
 }
 
 #[tokio::test]
+#[ignore = "Requires GROQ_API_KEY environment variable"]
 async fn test_multiple_agents_different_models() {
-    if std::env::var("GROQ_API_KEY").is_err() {
-        eprintln!("GROQ_API_KEY not set, skipping integration test");
-        return;
-    }
-
     let config = test_config();
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
