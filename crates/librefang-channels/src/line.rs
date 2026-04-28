@@ -211,31 +211,20 @@ fn verify_line_signature(secret: &[u8], body: &[u8], signature: &str) -> bool {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    type HmacSha256 = Hmac<Sha256>;
-
-    let Ok(mut mac) = HmacSha256::new_from_slice(secret) else {
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret) else {
         warn!("LINE: failed to create HMAC instance");
         return false;
     };
     mac.update(body);
     let result = mac.finalize().into_bytes();
 
-    // Compare with constant-time base64 decode + verify
     use base64::Engine;
     let Ok(expected) = base64::engine::general_purpose::STANDARD.decode(signature) else {
         warn!("LINE: invalid base64 in X-Line-Signature");
         return false;
     };
 
-    // Constant-time comparison to prevent timing attacks
-    if result.len() != expected.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in result.iter().zip(expected.iter()) {
-        diff |= a ^ b;
-    }
-    diff == 0
+    crate::http_client::ct_eq(&result, &expected)
 }
 
 /// Parse a LINE webhook event into a `ChannelMessage`.
@@ -370,29 +359,36 @@ impl ChannelAdapter for LineAdapter {
                 let secret = Arc::clone(&channel_secret);
                 let tx = Arc::clone(&tx);
                 let account_id = Arc::clone(&account_id);
-                move |headers: axum::http::HeaderMap,
-                      body: axum::extract::Json<serde_json::Value>| {
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let secret = Arc::clone(&secret);
                     let tx = Arc::clone(&tx);
                     let account_id = Arc::clone(&account_id);
                     async move {
-                        // Verify X-Line-Signature
-                        let signature = headers
+                        // Verify X-Line-Signature — header is mandatory.
+                        // The HMAC must cover the *raw wire bytes*, not bytes
+                        // round-tripped through `serde_json::Value` (which
+                        // would normalize key order, whitespace, and number
+                        // formatting and never match LINE's actual digest).
+                        let Some(signature) = headers
                             .get("x-line-signature")
                             .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
+                        else {
+                            warn!("LINE: missing X-Line-Signature header");
+                            return axum::http::StatusCode::BAD_REQUEST;
+                        };
 
-                        let body_bytes = serde_json::to_vec(&body.0).unwrap_or_default();
-
-                        if !signature.is_empty()
-                            && !verify_line_signature(secret.as_bytes(), &body_bytes, signature)
-                        {
+                        if !verify_line_signature(secret.as_bytes(), &body, signature) {
                             warn!("LINE: invalid webhook signature");
                             return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
+                        let body_json: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return axum::http::StatusCode::BAD_REQUEST,
+                        };
+
                         // Parse events array
-                        if let Some(events) = body.0["events"].as_array() {
+                        if let Some(events) = body_json["events"].as_array() {
                             for event in events {
                                 if let Some(mut msg) = parse_line_event(event) {
                                     // Inject account_id for multi-bot routing
@@ -628,6 +624,62 @@ mod tests {
         });
 
         assert!(parse_line_event(&event).is_none());
+    }
+
+    #[test]
+    fn test_verify_line_signature_round_trip() {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let secret = b"channel-secret-bytes";
+        let body = br#"{"events":[{"type":"message","message":{"text":"hi"}}],"destination":"U1"}"#;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(body);
+        let digest = mac.finalize().into_bytes();
+        let sig = base64::engine::general_purpose::STANDARD.encode(digest);
+
+        assert!(verify_line_signature(secret, body, &sig));
+        // Wrong secret → reject.
+        assert!(!verify_line_signature(b"different-secret", body, &sig));
+        // Mutated body → reject.
+        let mutated =
+            br#"{"events":[{"type":"message","message":{"text":"HI"}}],"destination":"U1"}"#;
+        assert!(!verify_line_signature(secret, mutated, &sig));
+    }
+
+    /// Regression test for the wire-bytes vs JSON-roundtrip bug: LINE's
+    /// HMAC must verify the raw bytes the platform sent, not the bytes
+    /// produced by re-serializing `serde_json::Value`. The two diverge in
+    /// at least key ordering and whitespace, so the roundtripped form
+    /// will never match the original digest.
+    #[test]
+    fn test_line_signature_breaks_when_body_round_tripped_through_value() {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let secret = b"channel-secret-bytes";
+        // Wire body has b before a, plus extra whitespace — a real LINE
+        // payload's exact byte layout is up to LINE.
+        let wire_body = br#"{"b":1,  "a":2}"#;
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(wire_body);
+        let digest = mac.finalize().into_bytes();
+        let sig = base64::engine::general_purpose::STANDARD.encode(digest);
+
+        assert!(verify_line_signature(secret, wire_body, &sig));
+
+        // Round-trip through serde_json::Value re-orders keys and removes
+        // whitespace, so the digest no longer matches. (This is exactly
+        // what the previous handler was doing, which would have rejected
+        // every legitimate LINE webhook.)
+        let value: serde_json::Value = serde_json::from_slice(wire_body).unwrap();
+        let round_tripped = serde_json::to_vec(&value).unwrap();
+        assert_ne!(wire_body.as_slice(), round_tripped.as_slice());
+        assert!(!verify_line_signature(secret, &round_tripped, &sig));
     }
 
     #[test]

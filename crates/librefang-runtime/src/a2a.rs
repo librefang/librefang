@@ -12,7 +12,8 @@
 use librefang_types::agent::AgentManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -96,6 +97,13 @@ pub struct A2aTask {
     /// Artifacts produced by the task.
     #[serde(default)]
     pub artifacts: Vec<A2aArtifact>,
+    /// The local agent ID that this task was dispatched to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The external A2A caller's agent ID (from `X-A2A-Agent-ID` header or
+    /// registered A2A agent entry). Stored for audit / ACL purposes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_a2a_agent_id: Option<String>,
 }
 
 /// A2A task status.
@@ -219,6 +227,9 @@ struct TrackedTask {
 /// Default TTL for tasks: 24 hours.
 const DEFAULT_TASK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Tasks older than 7 days are pruned from the SQLite backing store on startup.
+const DB_TASK_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+
 /// In-memory store for tracking A2A task lifecycle.
 ///
 /// Tasks are created by `tasks/send`, polled by `tasks/get`, and cancelled
@@ -237,6 +248,8 @@ pub struct A2aTaskStore {
     max_tasks: usize,
     /// Time-to-live for any task regardless of state.
     task_ttl: Duration,
+    /// Optional SQLite connection for persistent storage.
+    db: Option<Arc<Mutex<rusqlite::Connection>>>,
 }
 
 impl A2aTaskStore {
@@ -246,6 +259,7 @@ impl A2aTaskStore {
             tasks: Mutex::new(HashMap::new()),
             max_tasks,
             task_ttl: DEFAULT_TASK_TTL,
+            db: None,
         }
     }
 
@@ -255,8 +269,213 @@ impl A2aTaskStore {
             tasks: Mutex::new(HashMap::new()),
             max_tasks,
             task_ttl,
+            db: None,
         }
     }
+
+    /// Open or create a SQLite-backed task store at `db_path`.
+    ///
+    /// The caller is responsible for providing a path in the daemon's data
+    /// directory. The store creates the schema on first open, prunes rows
+    /// older than 7 days, and loads surviving tasks into memory so pollers
+    /// do not receive 404 after a restart.
+    ///
+    /// Persistence is **best-effort**: every mutation that returns to the
+    /// caller has been written to memory but the SQLite write only logs a
+    /// `warn!` on failure. A full disk or read-only volume therefore
+    /// degrades silently to in-memory-only behaviour for the affected
+    /// rows; tasks that have not yet been re-saved are lost on restart.
+    pub fn with_persistence(max_tasks: usize, db_path: &Path) -> Self {
+        match rusqlite::Connection::open(db_path) {
+            Ok(conn) => {
+                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+                    .unwrap_or_else(|e| warn!("a2a_tasks: failed to set PRAGMA: {e}"));
+
+                // The first iteration of this schema split messages into
+                // `input` / `output` columns, dropping artifacts and
+                // session_id entirely and losing chronological ordering on
+                // mixed user/agent conversations. v2 stores the full
+                // `messages` / `artifacts` arrays as JSON and adds
+                // `session_id`. Drop any v1 table — the schema only
+                // shipped in unmerged PR revisions, so there is no
+                // production data to migrate.
+                if let Err(e) = conn.execute_batch(
+                    "DROP TABLE IF EXISTS a2a_tasks;
+                     CREATE TABLE IF NOT EXISTS a2a_tasks_v2 (
+                        id                  TEXT PRIMARY KEY,
+                        status              TEXT NOT NULL,
+                        session_id          TEXT,
+                        messages_json       TEXT NOT NULL,
+                        artifacts_json      TEXT NOT NULL,
+                        agent_id            TEXT,
+                        caller_a2a_agent_id TEXT,
+                        created_at          INTEGER NOT NULL,
+                        updated_at          INTEGER NOT NULL
+                     );",
+                ) {
+                    warn!("a2a_tasks: failed to create schema: {e}");
+                }
+
+                let db = Arc::new(Mutex::new(conn));
+                let mut store = Self {
+                    tasks: Mutex::new(HashMap::new()),
+                    max_tasks,
+                    task_ttl: DEFAULT_TASK_TTL,
+                    db: Some(Arc::clone(&db)),
+                };
+
+                // Prune rows older than 7 days, then load survivors into memory.
+                store.db_prune_old_tasks();
+                store.db_load_into_memory();
+                store
+            }
+            Err(e) => {
+                warn!(
+                    "a2a_tasks: failed to open persistence DB at {}: {e} — falling back to in-memory only",
+                    db_path.display()
+                );
+                Self::new(max_tasks)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SQLite helpers
+    // ------------------------------------------------------------------
+
+    /// Delete tasks older than `DB_TASK_RETENTION_SECS` from the DB.
+    fn db_prune_old_tasks(&self) {
+        let db_arc = match &self.db {
+            Some(d) => d,
+            None => return,
+        };
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let cutoff = now_unix_secs() - DB_TASK_RETENTION_SECS;
+        if let Err(e) = conn.execute(
+            "DELETE FROM a2a_tasks_v2 WHERE created_at < ?1",
+            rusqlite::params![cutoff],
+        ) {
+            warn!("a2a_tasks: failed to prune old tasks: {e}");
+        } else {
+            debug!("a2a_tasks: pruned rows created before unix={cutoff}");
+        }
+    }
+
+    /// Load all tasks from the DB into the in-memory map.
+    fn db_load_into_memory(&mut self) {
+        let db_arc = match &self.db {
+            Some(d) => d,
+            None => return,
+        };
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = match conn.prepare(
+            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("a2a_tasks: failed to prepare load query: {e}");
+                return;
+            }
+        };
+
+        let rows: Vec<_> = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,         // id
+                row.get::<_, String>(1)?,         // status (JSON)
+                row.get::<_, Option<String>>(2)?, // session_id
+                row.get::<_, String>(3)?,         // messages_json
+                row.get::<_, String>(4)?,         // artifacts_json
+                row.get::<_, Option<String>>(5)?, // agent_id
+                row.get::<_, Option<String>>(6)?, // caller_a2a_agent_id
+            ))
+        }) {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                warn!("a2a_tasks: failed to load tasks from DB: {e}");
+                return;
+            }
+        };
+        drop(stmt);
+
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut loaded = 0usize;
+        for (
+            id,
+            status_json,
+            session_id,
+            messages_json,
+            artifacts_json,
+            agent_id,
+            caller_a2a_agent_id,
+        ) in rows
+        {
+            let Some(task) = decode_task_row(
+                id.clone(),
+                &status_json,
+                session_id,
+                &messages_json,
+                &artifacts_json,
+                agent_id,
+                caller_a2a_agent_id,
+            ) else {
+                continue;
+            };
+            tasks.insert(
+                id,
+                TrackedTask {
+                    task,
+                    updated_at: Instant::now(),
+                },
+            );
+            loaded += 1;
+        }
+        info!("a2a_tasks: loaded {loaded} task(s) from persistence DB");
+    }
+
+    /// Upsert a task into the SQLite backing store. Persists the full
+    /// `messages` and `artifacts` arrays plus `session_id` so a round-trip
+    /// through the DB returns an identical task.
+    fn db_upsert(&self, task: &A2aTask) {
+        let db_arc = match &self.db {
+            Some(d) => d,
+            None => return,
+        };
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let status_json = serde_json::to_string(&task.status).unwrap_or_default();
+        let messages_json =
+            serde_json::to_string(&task.messages).unwrap_or_else(|_| "[]".to_string());
+        let artifacts_json =
+            serde_json::to_string(&task.artifacts).unwrap_or_else(|_| "[]".to_string());
+        let now = now_unix_secs();
+        if let Err(e) = conn.execute(
+            "INSERT INTO a2a_tasks_v2 (id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+             ON CONFLICT(id) DO UPDATE SET
+               status              = excluded.status,
+               session_id          = excluded.session_id,
+               messages_json       = excluded.messages_json,
+               artifacts_json      = excluded.artifacts_json,
+               agent_id            = excluded.agent_id,
+               caller_a2a_agent_id = excluded.caller_a2a_agent_id,
+               updated_at          = excluded.updated_at",
+            rusqlite::params![
+                task.id,
+                status_json,
+                task.session_id,
+                messages_json,
+                artifacts_json,
+                task.agent_id,
+                task.caller_a2a_agent_id,
+                now,
+            ],
+        ) {
+            warn!("a2a_tasks: failed to upsert task {}: {e}", task.id);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // In-memory helpers
+    // ------------------------------------------------------------------
 
     /// Remove all tasks whose `updated_at` is older than the TTL.
     fn evict_expired(tasks: &mut HashMap<String, TrackedTask>, ttl: Duration) {
@@ -267,6 +486,9 @@ impl A2aTaskStore {
     /// Insert a task. Expired tasks are swept first, then capacity eviction
     /// is applied if needed.
     pub fn insert(&self, task: A2aTask) {
+        // Persist first so we never miss a task even if eviction removes it.
+        self.db_upsert(&task);
+
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
 
         // Lazy TTL sweep — remove all expired tasks regardless of state.
@@ -311,12 +533,64 @@ impl A2aTaskStore {
     }
 
     /// Get a task by ID.
+    ///
+    /// Falls back to the SQLite backing store when the task has been evicted
+    /// from the in-memory map (e.g. after a restart that loaded older tasks
+    /// beyond the in-memory cap).
     pub fn get(&self, task_id: &str) -> Option<A2aTask> {
-        self.tasks
+        // Fast path: in-memory hit.
+        if let Some(tracked) = self
+            .tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(task_id)
-            .map(|tracked| tracked.task.clone())
+        {
+            return Some(tracked.task.clone());
+        }
+
+        // Slow path: query the DB for tasks that may have been evicted from memory.
+        let db_arc = self.db.as_ref()?;
+        let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let result = conn.query_row(
+            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2 WHERE id = ?1",
+            rusqlite::params![task_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        );
+
+        match result {
+            Ok((
+                id,
+                status_json,
+                session_id,
+                messages_json,
+                artifacts_json,
+                agent_id,
+                caller_a2a_agent_id,
+            )) => decode_task_row(
+                id,
+                &status_json,
+                session_id,
+                &messages_json,
+                &artifacts_json,
+                agent_id,
+                caller_a2a_agent_id,
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                warn!("a2a_tasks: DB lookup for {task_id} failed: {e}");
+                None
+            }
+        }
     }
 
     /// Update a task's status and optionally add messages/artifacts.
@@ -325,6 +599,7 @@ impl A2aTaskStore {
         if let Some(tracked) = tasks.get_mut(task_id) {
             tracked.task.status = status.into();
             tracked.updated_at = Instant::now();
+            self.db_upsert(&tracked.task);
             true
         } else {
             false
@@ -339,6 +614,7 @@ impl A2aTaskStore {
             tracked.task.artifacts.extend(artifacts);
             tracked.task.status = A2aTaskStatus::Completed.into();
             tracked.updated_at = Instant::now();
+            self.db_upsert(&tracked.task);
         }
     }
 
@@ -349,6 +625,7 @@ impl A2aTaskStore {
             tracked.task.messages.push(error_message);
             tracked.task.status = A2aTaskStatus::Failed.into();
             tracked.updated_at = Instant::now();
+            self.db_upsert(&tracked.task);
         }
     }
 
@@ -366,6 +643,61 @@ impl A2aTaskStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Return the current UNIX timestamp in seconds.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Decode one row from the `a2a_tasks_v2` schema into an `A2aTask`.
+///
+/// Returns `None` and logs a warning if the row's `status` column doesn't
+/// deserialize to a recognised state (lets the load path skip a bad row
+/// rather than aborting the whole load). `messages_json` and
+/// `artifacts_json` failures fall back to empty arrays — they were
+/// authored by us, so we tolerate `null` / older shapes by yielding `[]`
+/// rather than dropping the task entirely.
+#[allow(clippy::too_many_arguments)]
+fn decode_task_row(
+    id: String,
+    status_json: &str,
+    session_id: Option<String>,
+    messages_json: &str,
+    artifacts_json: &str,
+    agent_id: Option<String>,
+    caller_a2a_agent_id: Option<String>,
+) -> Option<A2aTask> {
+    let status: A2aTaskStatusWrapper = match serde_json::from_str(status_json) {
+        Ok(s) => s,
+        Err(_) => {
+            match serde_json::from_value(serde_json::Value::String(status_json.to_string())) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                    "a2a_tasks: skipping task {id} with unrecognised status {status_json:?}: {e}"
+                );
+                    return None;
+                }
+            }
+        }
+    };
+
+    let messages: Vec<A2aMessage> = serde_json::from_str(messages_json).unwrap_or_default();
+    let artifacts: Vec<A2aArtifact> = serde_json::from_str(artifacts_json).unwrap_or_default();
+
+    Some(A2aTask {
+        id,
+        session_id,
+        status,
+        messages,
+        artifacts,
+        agent_id,
+        caller_a2a_agent_id,
+    })
 }
 
 impl Default for A2aTaskStore {
@@ -612,6 +944,8 @@ mod tests {
             status: A2aTaskStatus::Submitted.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         assert_eq!(task.status, A2aTaskStatus::Submitted);
 
@@ -716,6 +1050,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
         assert_eq!(store.len(), 1);
@@ -733,6 +1069,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
 
@@ -761,6 +1099,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
         assert!(store.cancel("t-3"));
@@ -780,6 +1120,8 @@ mod tests {
                 status: A2aTaskStatus::Completed.into(),
                 messages: vec![],
                 artifacts: vec![],
+                agent_id: None,
+                caller_a2a_agent_id: None,
             };
             store.insert(task);
         }
@@ -792,6 +1134,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
         // One was evicted, plus the new one
@@ -810,6 +1154,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
         assert_eq!(store.len(), 1);
@@ -822,6 +1168,8 @@ mod tests {
             status: A2aTaskStatus::Submitted.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task2);
 
@@ -844,6 +1192,8 @@ mod tests {
                 status: A2aTaskStatus::Working.into(),
                 messages: vec![],
                 artifacts: vec![],
+                agent_id: None,
+                caller_a2a_agent_id: None,
             };
             store.insert(task);
         }
@@ -856,6 +1206,8 @@ mod tests {
             status: A2aTaskStatus::Working.into(),
             messages: vec![],
             artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
         };
         store.insert(task);
         assert!(store.len() <= 2);
@@ -884,5 +1236,141 @@ mod tests {
         assert_eq!(back.listen_path, "/a2a");
         assert_eq!(back.external_agents.len(), 1);
         assert_eq!(back.external_agents[0].name, "other-agent");
+    }
+
+    /// Round-trip a fully-populated task through the SQLite backing store:
+    /// insert, drop the store, reopen on the same DB path, and verify
+    /// `get` returns every field we wrote — including `session_id`,
+    /// interleaved user/agent messages (in order), and artifacts.
+    ///
+    /// This is the regression test the original PR was missing — the
+    /// schema split messages into `input` / `output` columns and silently
+    /// dropped artifacts and `session_id`, all of which would have been
+    /// caught here.
+    #[test]
+    fn test_persistence_round_trip_preserves_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+
+        let original = A2aTask {
+            id: "round-trip-1".to_string(),
+            session_id: Some("session-abc".to_string()),
+            status: A2aTaskStatus::Working.into(),
+            // Deliberately interleave user / agent / user so the old schema
+            // (which split by role) would scramble the order on reload.
+            messages: vec![
+                A2aMessage {
+                    role: "user".to_string(),
+                    parts: vec![A2aPart::Text {
+                        text: "first user msg".to_string(),
+                    }],
+                },
+                A2aMessage {
+                    role: "agent".to_string(),
+                    parts: vec![A2aPart::Text {
+                        text: "agent response".to_string(),
+                    }],
+                },
+                A2aMessage {
+                    role: "user".to_string(),
+                    parts: vec![A2aPart::Text {
+                        text: "follow-up".to_string(),
+                    }],
+                },
+            ],
+            artifacts: vec![A2aArtifact {
+                name: Some("result.txt".to_string()),
+                description: None,
+                metadata: None,
+                index: Some(0),
+                last_chunk: Some(true),
+                parts: vec![A2aPart::Text {
+                    text: "final artifact".to_string(),
+                }],
+            }],
+            agent_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            caller_a2a_agent_id: Some("caller-bot".to_string()),
+        };
+
+        // Phase 1 — write through the persistent store, then drop it.
+        {
+            let store = A2aTaskStore::with_persistence(100, &db_path);
+            store.insert(original.clone());
+        }
+
+        // Phase 2 — reopen on the same path; load_into_memory should
+        // restore the task exactly.
+        let store = A2aTaskStore::with_persistence(100, &db_path);
+        let reloaded = store
+            .get("round-trip-1")
+            .expect("task should survive a store restart");
+
+        assert_eq!(reloaded.id, original.id);
+        assert_eq!(reloaded.session_id, original.session_id);
+        assert_eq!(reloaded.status.state(), original.status.state());
+        assert_eq!(
+            reloaded.messages.len(),
+            original.messages.len(),
+            "all messages should round-trip"
+        );
+        for (loaded, expected) in reloaded.messages.iter().zip(original.messages.iter()) {
+            assert_eq!(
+                loaded.role, expected.role,
+                "message roles should match in order"
+            );
+        }
+        assert_eq!(
+            reloaded.artifacts.len(),
+            original.artifacts.len(),
+            "artifacts should round-trip"
+        );
+        assert_eq!(reloaded.agent_id, original.agent_id);
+        assert_eq!(reloaded.caller_a2a_agent_id, original.caller_a2a_agent_id);
+    }
+
+    /// The slow path of `get` (querying the DB directly when the
+    /// in-memory map has evicted the task) must produce the same task
+    /// shape as the load path. Construct two stores with `max_tasks=1`
+    /// to force eviction, then verify the evicted task is still
+    /// returned by `get` via the SQLite fallback.
+    #[test]
+    fn test_persistence_get_falls_back_to_db_after_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+
+        let store = A2aTaskStore::with_persistence(1, &db_path);
+        let evicted = A2aTask {
+            id: "evicted-1".to_string(),
+            session_id: Some("s1".to_string()),
+            status: A2aTaskStatus::Completed.into(),
+            messages: vec![A2aMessage {
+                role: "user".to_string(),
+                parts: vec![A2aPart::Text {
+                    text: "hi".to_string(),
+                }],
+            }],
+            artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
+        };
+        let kept = A2aTask {
+            id: "kept-1".to_string(),
+            session_id: None,
+            status: A2aTaskStatus::Working.into(),
+            messages: vec![],
+            artifacts: vec![],
+            agent_id: None,
+            caller_a2a_agent_id: None,
+        };
+        store.insert(evicted);
+        store.insert(kept);
+
+        // The first task was evicted from memory by capacity pressure but
+        // the DB still has it — `get` should find it via the slow path.
+        let got = store
+            .get("evicted-1")
+            .expect("evicted task must still be retrievable from the DB");
+        assert_eq!(got.id, "evicted-1");
+        assert_eq!(got.session_id.as_deref(), Some("s1"));
     }
 }
