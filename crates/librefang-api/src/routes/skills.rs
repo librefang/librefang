@@ -2185,6 +2185,21 @@ pub async fn install_hand_deps(
             cmd.to_string()
         };
 
+        // Guard against shell injection: reject commands that contain shell
+        // metacharacters that are never needed in legitimate package-manager
+        // install strings (semicolons, pipes, backticks, redirects, etc.).
+        if final_cmd.contains(|c: char| {
+            matches!(c, ';' | '|' | '&' | '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '\n' | '\r')
+        }) {
+            results.push(serde_json::json!({
+                "key": req.key,
+                "status": "error",
+                "command": final_cmd,
+                "message": "Install command contains disallowed shell metacharacters and was rejected for security reasons",
+            }));
+            continue;
+        }
+
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
         let output = match tokio::time::timeout(
