@@ -1366,7 +1366,12 @@ jobs:
 
       - name: Initialise Android project
         working-directory: crates/librefang-desktop
-        run: cargo tauri android init
+        # See mobile-smoke.yml — the repo's `gen/android/README.md`
+        # placeholder confuses tauri-cli into thinking the project is
+        # already scaffolded. Wipe it so init starts clean.
+        run: |
+          rm -rf gen/android
+          cargo tauri android init
 
       - name: Decode Android signing keystore
         id: keystore

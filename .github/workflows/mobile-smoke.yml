@@ -93,7 +93,15 @@ jobs:
 
       - name: Initialise Android project
         working-directory: crates/librefang-desktop
-        run: cargo tauri android init
+        # The repo ships gen/android/README.md as a placeholder so the
+        # directory exists in fresh clones. tauri-cli treats any pre-existing
+        # gen/android as "already populated" and refuses to scaffold the
+        # missing package layout, failing init with "Project directory
+        # gen/android/app/src/main/java/ai/librefang/app does not exist".
+        # Wipe the placeholder before init so we always start from clean.
+        run: |
+          rm -rf gen/android
+          cargo tauri android init
 
       - name: Build debug APK (unsigned)
         working-directory: crates/librefang-desktop
