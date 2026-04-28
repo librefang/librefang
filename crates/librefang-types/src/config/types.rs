@@ -902,6 +902,11 @@ pub struct RateLimitConfig {
     /// Flush text buffer when it exceeds this many characters. Default: 200.
     #[serde(default = "default_ws_debounce_chars")]
     pub ws_debounce_chars: usize,
+    /// Max login attempts per IP per 15-minute window on auth endpoints
+    /// (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10.
+    /// Set to 0 to disable the per-IP auth rate limiter.
+    #[serde(default = "default_auth_rate_limit_per_ip")]
+    pub auth_rate_limit_per_ip: u32,
 }
 
 fn default_api_requests_per_minute() -> u32 {
@@ -928,6 +933,9 @@ fn default_ws_debounce_ms() -> u64 {
 fn default_ws_debounce_chars() -> usize {
     200
 }
+fn default_auth_rate_limit_per_ip() -> u32 {
+    10
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -940,6 +948,7 @@ impl Default for RateLimitConfig {
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
+            auth_rate_limit_per_ip: default_auth_rate_limit_per_ip(),
         }
     }
 }

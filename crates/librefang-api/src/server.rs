@@ -860,6 +860,8 @@ pub async fn build_router(
         keys
     }));
 
+    let auth_login_limiter = Arc::new(rate_limiter::AuthLoginLimiter::new());
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -883,6 +885,7 @@ pub async fn build_router(
         webhook_router,
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: auth_login_limiter.clone(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -1013,6 +1016,7 @@ pub async fn build_router(
         limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
         retry_after_secs: rl_cfg.retry_after_secs,
     };
+    let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
 
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
@@ -1101,6 +1105,10 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn_with_state(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            (auth_login_limiter, auth_rl_max_attempts),
+            rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
@@ -1472,14 +1480,20 @@ pub async fn run_daemon(
                     before - sessions.len()
                 };
 
+                // Prune stale auth-rate-limit entries (windows older than 30 minutes).
+                let before_auth_rl = st.auth_login_limiter.map.len();
+                st.auth_login_limiter.prune_stale();
+                let auth_rl_removed = before_auth_rl - st.auth_login_limiter.map.len();
+
                 let claw_removed = before_claw - st.clawhub_cache.len();
                 let skill_removed = before_skill - st.skillhub_cache.len();
-                let total = claw_removed + skill_removed + expired_sessions;
+                let total = claw_removed + skill_removed + expired_sessions + auth_rl_removed;
                 if total > 0 {
                     tracing::info!(
                         clawhub = claw_removed,
                         skillhub = skill_removed,
                         sessions = expired_sessions,
+                        auth_rate_limit_entries = auth_rl_removed,
                         "API cache GC sweep completed"
                     );
                 }
