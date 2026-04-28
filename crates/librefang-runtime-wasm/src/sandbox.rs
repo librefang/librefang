@@ -56,6 +56,34 @@ impl Default for SandboxConfig {
     }
 }
 
+/// `ResourceLimiter` implementation that caps WASM linear-memory growth at a
+/// configured byte ceiling. Attached to every `Store` so that WASM plugins
+/// cannot allocate unbounded host memory regardless of their fuel budget.
+struct MemoryLimiter {
+    max_bytes: usize,
+}
+
+impl wasmtime::ResourceLimiter for MemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        Ok(desired <= self.max_bytes)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        // No table-element cap — only memory is bounded here.
+        Ok(true)
+    }
+}
+
 /// State carried in each WASM Store, accessible by host functions.
 pub struct GuestState {
     /// Capabilities granted to this guest — checked before every host call.
@@ -66,6 +94,8 @@ pub struct GuestState {
     pub agent_id: String,
     /// Tokio runtime handle for async operations in sync host functions.
     pub tokio_handle: tokio::runtime::Handle,
+    /// Memory limiter enforcing `SandboxConfig::max_memory_bytes`.
+    limiter: MemoryLimiter,
 }
 
 /// Result of executing a WASM module.
@@ -157,7 +187,7 @@ impl WasmSandbox {
         let module = Module::new(engine, wasm_bytes)
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
-        // Create store with guest state
+        // Create store with guest state (includes the memory limiter)
         let mut store = Store::new(
             engine,
             GuestState {
@@ -165,8 +195,15 @@ impl WasmSandbox {
                 kernel,
                 agent_id: agent_id.to_string(),
                 tokio_handle,
+                limiter: MemoryLimiter {
+                    max_bytes: config.max_memory_bytes,
+                },
             },
         );
+
+        // Enforce the memory cap: every memory.grow call from the guest goes
+        // through MemoryLimiter::memory_growing before any allocation happens.
+        store.limiter(|state| &mut state.limiter);
 
         // Set fuel budget (deterministic metering)
         if config.fuel_limit > 0 {
@@ -600,6 +637,33 @@ mod tests {
         let sandbox = WasmSandbox::new().unwrap();
         // Engine should be created successfully
         drop(sandbox);
+    }
+
+    /// Regression: max_memory_bytes must be enforced at runtime, not just
+    /// declared. A guest module that requests more memory than the cap should
+    /// be rejected — before this fix the cap was a no-op comment.
+    #[test]
+    fn test_memory_limiter_blocks_excess_growth() {
+        let mut limiter = MemoryLimiter {
+            // 1 MiB cap
+            max_bytes: 1024 * 1024,
+        };
+        // Within limit → allowed
+        assert_eq!(
+            limiter
+                .memory_growing(0, 64 * 1024, None)
+                .expect("should not error"),
+            true,
+            "growth within cap must be permitted"
+        );
+        // Exceeds limit → denied
+        assert_eq!(
+            limiter
+                .memory_growing(0, 2 * 1024 * 1024, None)
+                .expect("should not error"),
+            false,
+            "growth beyond cap must be denied"
+        );
     }
 
     #[tokio::test]
