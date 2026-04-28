@@ -1,0 +1,243 @@
+# Mobile Release SOP
+
+End-to-end runbook for shipping LibreFang mobile builds to **TestFlight**
+(iOS) and **Play Internal Testing** (Android). Pairs with the desktop
+release flow in [Production](/operations/production) — these steps cover
+only what is mobile-specific.
+
+This SOP assumes the [mobile CI](https://github.com/librefang/librefang/blob/main/.github/workflows/release.yml)
+jobs `mobile_android` and `mobile_ios` are already wired up (closed by
+PR #3970) and that the upload secrets in
+[`.github/SECRETS.md`](https://github.com/librefang/librefang/blob/main/.github/SECRETS.md)
+are configured.
+
+<Note>
+  Distribution to humans (TestFlight invite, Play tester opt-in, App Store
+  submission) is mostly compliance and out-of-band review work. Budget two
+  weeks of calendar time even if engineering work is ~3 days.
+</Note>
+
+---
+
+## Included Topics
+
+- [Prerequisites — one-time per store](#prerequisites--one-time-per-store)
+- [Version-mapping scheme](#version-mapping-scheme)
+- [Cutting a release](#cutting-a-release)
+- [TestFlight track](#testflight-track)
+- [Play Internal Testing track](#play-internal-testing-track)
+- [Promoting to production](#promoting-to-production)
+- [Recovering from failed uploads](#recovering-from-failed-uploads)
+
+---
+
+## Prerequisites — one-time per store
+
+Track these in the issue tracker; once done they do not recur.
+
+### Apple
+
+1. **Apple Developer Program** enrollment ($99 / year). Pick the
+   organisational variant if LibreFang has a legal entity, individual
+   otherwise. Personnel changes inside an organisational team do not
+   force a re-enrollment.
+2. **App Store Connect app record** with bundle id `ai.librefang.app`,
+   primary category *Productivity*. Reserve early — bundle id squatting
+   is irreversible.
+3. **Distribution certificate + provisioning profile** (Ad Hoc + App
+   Store). Export the cert as `.p12` and feed the four
+   `APPLE_*` signing secrets in `.github/SECRETS.md`.
+4. **App Store Connect API key** with the *App Manager* role. Feed the
+   three `APPLE_API_KEY_*` upload secrets.
+5. **Privacy policy** live at `librefang.ai/privacy-mobile`. The draft
+   template lives at [`.github/templates/PRIVACY_MOBILE_TEMPLATE.md`](https://github.com/librefang/librefang/blob/main/.github/templates/PRIVACY_MOBILE_TEMPLATE.md)
+   — review with legal, then publish under
+   `docs/src/app/privacy-mobile/`.
+6. **App Privacy questionnaire** in App Store Connect. Declare:
+   - "API key" → user-input contact info
+   - "Agent conversation logs" → user content
+   - All entries marked **Data Not Linked to User** (LibreFang does not
+     bind data to an Apple ID).
+7. **Encryption export compliance**: the iOS build pipeline already
+   stamps `ITSAppUsesNonExemptEncryption = false` into the Info.plist
+   and passes `uses-non-exempt-encryption: "false"` to the TestFlight
+   action — no manual form needed unless future code adds non-standard
+   crypto.
+
+### Google
+
+1. **Play Console account** ($25 one-time). Enable two-step verification
+   on the developer account before adding any artifact.
+2. **App record** with package `ai.librefang.app`, default language
+   English. Same package id as iOS by convention; the bundle ids do not
+   actually need to match across stores but doing so simplifies the
+   ops surface.
+3. **Upload key** (separate from the app-signing key when Play App
+   Signing is enabled — recommended). Lose the upload key and you can
+   reset it via Play Console; lose the app-signing key Google holds and
+   you cannot ship updates ever again. Back up offline.
+4. **Service-account JSON** with the *Release Manager* role on the app.
+   Feed it as `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`.
+5. **Privacy policy** (same URL as iOS).
+6. **Data Safety form**: identical content to Apple's questionnaire.
+7. **Content rating**: Productivity / Tools, no objectionable content.
+
+---
+
+## Version-mapping scheme
+
+Both stores reject builds whose build numbers regress. The CI pipeline
+derives them deterministically:
+
+| Where | Field | Formula | Example |
+|---|---|---|---|
+| Both | display version | `[workspace.package].version` from root `Cargo.toml`, with any `-betaN` / `-rcN` suffix stripped | `2026.4.28-beta7` → `2026.4.28` |
+| iOS | `CFBundleShortVersionString` | display version | `2026.4.28` |
+| iOS | `CFBundleVersion` | `YYYYMMDDNN` UTC, NN = `run_number % 100` | `2026042901` |
+| Android | `versionName` | display version | `2026.4.28` |
+| Android | `versionCode` | same `YYYYMMDDNN` integer | `2026042901` |
+
+The build number fits in a 32-bit signed integer until **2027-12-31**.
+Before that date, switch the formula to a smaller domain (e.g.
+`(year - 2024) * 1_000_000 + month * 10_000 + day * 100 + nn`) and update
+both jobs in `release.yml`.
+
+> **Why YYYYMMDDNN?** Both stores want monotonic build numbers across all
+> historical uploads. A date-based scheme makes "what date was this
+> build cut?" answerable without cross-referencing git, which matters
+> during App Review where the rollback window is hours.
+
+---
+
+## Cutting a release
+
+The end-to-end flow once the prerequisites are in place:
+
+1. Bump `[workspace.package].version` in root `Cargo.toml`. Conventional
+   commits: `chore(release): vYYYY.M.D-betaN`.
+2. Tag the commit `vYYYY.M.D-betaN` and push the tag. The mobile jobs
+   run only on tags matching `refs/tags/v*`.
+3. Watch the `mobile_android` and `mobile_ios` jobs in the Actions
+   tab. Both have `continue-on-error: true` so a flake does not break
+   the desktop matrix; that means you have to actually look at the
+   summary, not just the green check at the bottom of the workflow run.
+4. On success, `.aab` / `.apk` / `.ipa` attach to the GitHub Release
+   *and* the unattended upload pushes to Play Internal Testing /
+   TestFlight respectively.
+5. Note the build numbers (`Mobile / Android` / `Mobile / iOS` step
+   summaries print `versionName=… versionCode=…` and
+   `CFBundleShortVersionString=… CFBundleVersion=…`). You will need these
+   for the store dashboards.
+
+If the upload secrets are not yet configured, the jobs degrade
+gracefully: GitHub Release upload still happens, the store-promotion
+step prints `::notice::` and exits 0.
+
+---
+
+## TestFlight track
+
+After `mobile_ios` finishes the upload step:
+
+1. App Store Connect → My Apps → LibreFang → **TestFlight** tab. The
+   build appears in *Processing* (5–30 min for a clean build, longer if
+   binary symbol upload is slow).
+2. While processing: fill in the *Test Information* fields (test
+   credentials → see below; what to test; description). These are
+   shared across all TestFlight builds — fill once, edit only when the
+   message changes.
+3. Add the build to the **librefang-internal** group (up to 100 emails,
+   no review). Internal testers receive the invite email within
+   minutes.
+4. For the first **External Testing** build, submit for *Beta App
+   Review*. Turnaround is ~24 h; common rejection reasons:
+   - Reviewer cannot reach a daemon. Provide a test daemon URL and an
+     API key in the App Review notes. Rotate the API key on the test
+     daemon after the review window closes.
+   - "Sign-in wall": the wizard requires a daemon URL on first launch,
+     which Apple may flag as a sign-in wall. The mitigation is a clear
+     paragraph in the review notes explaining that the daemon
+     connection IS the product.
+5. Each build expires **90 days** after upload. Set a calendar reminder
+   to push a fresh internal build monthly so the beta channel never
+   goes dark.
+
+---
+
+## Play Internal Testing track
+
+After `mobile_android` finishes the upload step:
+
+1. Play Console → LibreFang → **Testing → Internal testing**. The
+   `.aab` appears in the active release within ~5 min.
+2. **Pre-launch report**: Play runs the build on a fleet of real
+   devices and emails crash reports. Always read these before
+   promoting to closed / open testing — the pre-launch report often
+   surfaces device-specific layout breakage that the simulator misses.
+3. Tester management is by email list — paste internal team emails
+   into the *Testers* tab. The opt-in URL is shareable.
+4. To promote to **Closed Testing**: Play Console → Closed testing →
+   Promote release → pick the same `.aab`. No re-upload needed.
+5. **Open Testing** = public beta. Defer until the product is solid;
+   open testing has the same review surface as production.
+
+---
+
+## Promoting to production
+
+This is a deliberate human gate — both stores impose review latency,
+and a regression caught in beta is cheap, while one caught after an
+auto-promote is expensive.
+
+### iOS
+
+1. App Store Connect → App Store tab → *iOS App* → New version with the
+   target `CFBundleShortVersionString`. Pick the TestFlight build to
+   submit for review.
+2. **App Review** turnaround: 1–3 days first time, faster on updates
+   (often under 24 h). Common follow-ups: reviewer asks for credentials, or
+   for a video walkthrough.
+3. Choose *Manual release* on the version page so the green light from
+   App Review does not push the build to users instantly.
+
+### Android
+
+1. Play Console → Production → Create new release → reuse the existing
+   AAB (do **not** rebuild — same artifact must traverse all tracks).
+2. Roll out gradually: 5% → 20% → 50% → 100% over 48–72 h. Watch the
+   Vitals and ANR rate at each step. Halt and roll back if ANR rate
+   spikes above 0.47% or crash rate above 1.09% (Play's "bad behaviour"
+   thresholds).
+3. First production release: full review, ~3 days. Subsequent updates:
+   typically under 12 h.
+
+---
+
+## Recovering from failed uploads
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `mobile_android` step "Upload to Play Internal Testing" fails with `403` | Service account lacks the *Release Manager* role, or the app is not yet published to Internal Testing for the first time | Grant the SA the role; if first upload, do a manual upload via Play Console once to bootstrap the track |
+| `mobile_ios` step "Upload to TestFlight" fails `Authentication credentials are missing or invalid` | API key revoked or `APPLE_API_KEY_P8` was pasted with stripped newlines | Regenerate the key; ensure the secret value retains the BEGIN/END PEM markers verbatim |
+| Apple build stuck in *Processing* > 24 h | Apple-side processing delay (rare); occasionally a binary issue | Wait 24 h, then file a TSI ticket through Apple Developer support if still stuck |
+| Play release shows "Internal app sharing only" instead of going to Internal Testing | The CI uploaded to the *internal app sharing* lane (no track set) | Double-check `track: internal` on the `r0adkll/upload-google-play` action invocation |
+| `versionCode X has already been used` | Same calendar day, > 100 release re-runs (the `NN` slot wraps) | Manually bump the `NN` slot in the workflow for the next run, or wait for the next UTC day |
+
+---
+
+## Calendar checklist
+
+Annual or recurring tasks the SOP depends on — set calendar reminders:
+
+- **Apple Distribution cert**: rotate yearly (see
+  [`.github/SECRETS.md`](https://github.com/librefang/librefang/blob/main/.github/SECRETS.md)
+  → "Rotation runbook (yearly Apple cert refresh)").
+- **App Store Connect API key**: rotate yearly or sooner on personnel
+  change.
+- **TestFlight build refresh**: monthly — push a fresh internal build
+  before the 90-day expiry so the beta channel does not go dark.
+- **Apple Developer Program**: $99 renewal yearly. Auto-renew is
+  enabled by default; verify the billing card has not expired.
+- **Privacy policy**: re-read yearly. Stores allow surprise audits —
+  drift between stated and actual data practices is the most common
+  cause of unprompted app removal.

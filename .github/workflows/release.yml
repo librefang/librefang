@@ -1387,6 +1387,57 @@ jobs:
           rm -rf gen/android
           cargo tauri android init
 
+      # See docs/operations/mobile-release for the full version-mapping
+      # rationale. Both stores require monotonically increasing build
+      # numbers; we derive YYYYMMDDNN from the current UTC date and the
+      # workflow run number so consecutive same-day re-runs do not
+      # regress.
+      - name: Compute mobile build numbers
+        id: ver
+        run: |
+          set -euo pipefail
+          # Display version: workspace.package.version from root Cargo.toml,
+          # stripped of any pre-release suffix (`-beta7` etc.). Stores reject
+          # non-numeric segments in the user-visible version string.
+          DISPLAY_FULL=$(awk '/^\[workspace.package\]/{f=1; next} f && /^version *=/ {gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)
+          if [ -z "$DISPLAY_FULL" ]; then
+            echo "::error::Could not parse [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          DISPLAY="${DISPLAY_FULL%%-*}"
+          # Build number scheme YYYYMMDDNN (#3348). NN is run_number mod 100;
+          # >100 release attempts on a single calendar day will collide and
+          # the store will reject the build with a clear error — acceptable
+          # given the practical release cadence. YYYYMMDDNN fits in int32
+          # (max 2_147_483_647) until 2027-12-31; revisit before that.
+          DATE=$(date -u +%Y%m%d)
+          NN=$(printf "%02d" $(( ${{ github.run_number }} % 100 )))
+          BUILD="${DATE}${NN}"
+          {
+            echo "display=$DISPLAY"
+            echo "display_full=$DISPLAY_FULL"
+            echo "build=$BUILD"
+          } >> "$GITHUB_OUTPUT"
+          echo "Display: $DISPLAY (from $DISPLAY_FULL)  Build: $BUILD"
+
+      - name: Inject Android version
+        working-directory: crates/librefang-desktop
+        env:
+          DISPLAY: ${{ steps.ver.outputs.display }}
+          BUILD: ${{ steps.ver.outputs.build }}
+        run: |
+          set -euo pipefail
+          # Stamp the user-visible version (versionName) into tauri.conf.json.
+          jq --arg ver "$DISPLAY" '.version = $ver' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          # Override the auto-derived versionCode with the YYYYMMDDNN scheme.
+          # tauri-cli respects bundle.android.versionCode when present.
+          jq --argjson code "$BUILD" \
+            '.bundle = (.bundle // {}) | .bundle.android = (.bundle.android // {}) | .bundle.android.versionCode = $code' \
+            tauri.android.conf.json > tauri.android.conf.json.tmp
+          mv tauri.android.conf.json.tmp tauri.android.conf.json
+          echo "Android: versionName=$DISPLAY versionCode=$BUILD"
+
       - name: Decode Android signing keystore
         id: keystore
         env:
@@ -1442,6 +1493,36 @@ jobs:
             echo "Uploading $base"
             gh release upload "$TAG" "$f" --clobber || true
           done
+
+      # Unattended Play Internal Testing upload (#3348). Skipped silently
+      # if GOOGLE_PLAY_SERVICE_ACCOUNT_JSON is not configured (forks,
+      # first-run repos), so the rest of the release pipeline is
+      # unaffected. The aab from the signed build is the only acceptable
+      # input — apks and unsigned debug builds are not promotable.
+      - name: Check Play upload secret
+        id: play_gate
+        if: steps.keystore.outputs.signed == 'true' && steps.art.outputs.aab != ''
+        env:
+          PLAY_SA_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -n "$PLAY_SA_JSON" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::GOOGLE_PLAY_SERVICE_ACCOUNT_JSON not set — skipping Play Internal Testing upload"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to Play Internal Testing
+        if: steps.play_gate.outputs.ready == 'true'
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ai.librefang.app
+          releaseFiles: ${{ steps.art.outputs.aab }}
+          track: internal
+          status: completed
+          # Promote manually from the Play Console after pre-launch reports
+          # come back clean — see docs/operations/mobile-release.
 
       - name: Wipe keystore from runner
         if: always()
@@ -1508,6 +1589,61 @@ jobs:
         working-directory: crates/librefang-desktop
         run: cargo tauri ios init
 
+      # Mirror of the Android version-derivation logic. Both jobs run in
+      # parallel for the same tag, so each computes its own copy. Same
+      # YYYYMMDDNN scheme — see docs/operations/mobile-release.
+      - name: Compute mobile build numbers
+        id: ver
+        run: |
+          set -euo pipefail
+          DISPLAY_FULL=$(awk '/^\[workspace.package\]/{f=1; next} f && /^version *=/ {gsub(/[" ]/,"",$3); print $3; exit}' Cargo.toml)
+          if [ -z "$DISPLAY_FULL" ]; then
+            echo "::error::Could not parse [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          DISPLAY="${DISPLAY_FULL%%-*}"
+          DATE=$(date -u +%Y%m%d)
+          NN=$(printf "%02d" $(( ${{ github.run_number }} % 100 )))
+          BUILD="${DATE}${NN}"
+          {
+            echo "display=$DISPLAY"
+            echo "display_full=$DISPLAY_FULL"
+            echo "build=$BUILD"
+          } >> "$GITHUB_OUTPUT"
+          echo "Display: $DISPLAY (from $DISPLAY_FULL)  Build: $BUILD"
+
+      - name: Inject iOS version
+        working-directory: crates/librefang-desktop
+        env:
+          DISPLAY: ${{ steps.ver.outputs.display }}
+          BUILD: ${{ steps.ver.outputs.build }}
+        run: |
+          set -euo pipefail
+          # Tauri reads the user-visible string (CFBundleShortVersionString)
+          # from the root tauri.conf.json `version` field.
+          jq --arg ver "$DISPLAY" '.version = $ver' tauri.conf.json > tauri.conf.json.tmp
+          mv tauri.conf.json.tmp tauri.conf.json
+          # Override CFBundleVersion via the iOS Info.plist that
+          # `cargo tauri ios init` just generated. PlistBuddy is the
+          # supported macOS toolchain path; xcrun plutil would also work
+          # but is more verbose for in-place edits.
+          PLIST=$(find gen/apple -name 'Info.plist' -path '*_iOS*' | head -1)
+          if [ -z "$PLIST" ] || [ ! -f "$PLIST" ]; then
+            echo "::error::Could not locate generated iOS Info.plist under gen/apple/*_iOS"
+            find gen/apple -name 'Info.plist' || true
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $DISPLAY" "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $DISPLAY" "$PLIST"
+          # Encryption export compliance — declare standard encryption
+          # only (TLS via system frameworks). Pre-set the flag so first
+          # App Review submission does not block on the form.
+          /usr/libexec/PlistBuddy -c "Set :ITSAppUsesNonExemptEncryption false" "$PLIST" \
+            || /usr/libexec/PlistBuddy -c "Add :ITSAppUsesNonExemptEncryption bool false" "$PLIST"
+          echo "iOS plist=$PLIST CFBundleShortVersionString=$DISPLAY CFBundleVersion=$BUILD"
+
       - name: Import distribution certificate
         id: keychain
         env:
@@ -1572,6 +1708,41 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
           gh release upload "$TAG" "$IPA_PATH" --clobber || true
+
+      # Unattended TestFlight upload (#3348). Uses an App Store Connect
+      # API key — preferred over Apple ID + app-specific password since
+      # the API key is revocable per-key and does not require a human
+      # 2FA prompt. Skipped silently if any of the three secrets are
+      # missing so forks and first-run repos are unaffected.
+      - name: Check TestFlight upload secrets
+        id: tf_gate
+        if: steps.keychain.outputs.signed == 'true' && steps.art.outputs.ipa != ''
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER_ID: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$APPLE_API_KEY_ID" ] \
+             && [ -n "$APPLE_API_KEY_ISSUER_ID" ] \
+             && [ -n "$APPLE_API_KEY_P8" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::APPLE_API_KEY_* secrets not all set — skipping TestFlight upload"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to TestFlight
+        if: steps.tf_gate.outputs.ready == 'true'
+        uses: Apple-Actions/upload-testflight-build@9af5bd758aaff3f82a372079a38f029d60a7163b # v5.0.0
+        with:
+          app-path: ${{ steps.art.outputs.ipa }}
+          issuer-id: ${{ secrets.APPLE_API_KEY_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPLE_API_KEY_ID }}
+          # The action wants the PKCS8-formatted .p8 contents verbatim
+          # (BEGIN/END lines preserved). Store the raw .p8 text in the
+          # secret — GitHub Actions handles multi-line values fine.
+          api-private-key: ${{ secrets.APPLE_API_KEY_P8 }}
+          uses-non-exempt-encryption: "false"
 
       - name: Tear down keychain
         if: always() && steps.keychain.outputs.keychain != ''
