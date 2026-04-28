@@ -4931,9 +4931,10 @@ system_prompt = "You are a helpful assistant."
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
-            // Release the reservation immediately — no tokens will be consumed
+            // No LLM call is made; release reservation without inflating
+            // llm_calls or the burst window.
             self.scheduler
-                .settle_reservation(agent_id, token_reservation, &Default::default());
+                .release_reservation(agent_id, token_reservation);
             return Ok(AgentLoopResult::default());
         }
 
@@ -5269,11 +5270,10 @@ system_prompt = "You are a helpful assistant."
                 Ok(result)
             }
             Err(e) => {
-                // Release the pre-charged token reservation — no tokens were
-                // consumed because the agent loop failed before or during the
-                // LLM call.
+                // Release the pre-charged token reservation — the agent loop
+                // failed before completing, no usage to settle.
                 self.scheduler
-                    .settle_reservation(agent_id, token_reservation, &Default::default());
+                    .release_reservation(agent_id, token_reservation);
 
                 // SECURITY: Record failed message in audit trail
                 self.audit_log.record(
@@ -5719,12 +5719,12 @@ system_prompt = "You are a helpful assistant."
                         Ok(result)
                     }
                     Err(e) => {
-                        // Release reservation — no tokens consumed
-                        kernel_clone.scheduler.settle_reservation(
-                            agent_id,
-                            token_reservation,
-                            &Default::default(),
-                        );
+                        // Non-LLM agent (wasm/python) failed — never made an
+                        // LLM call, release reservation without inflating
+                        // llm_calls.
+                        kernel_clone
+                            .scheduler
+                            .release_reservation(agent_id, token_reservation);
                         kernel_clone.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
@@ -6539,13 +6539,11 @@ system_prompt = "You are a helpful assistant."
                     Ok(result)
                 }
                 Err(e) => {
-                    // Release the pre-charged token reservation — the loop
-                    // failed so no tokens need to be permanently reserved.
-                    kernel_clone.scheduler.settle_reservation(
-                        agent_id,
-                        token_reservation,
-                        &Default::default(),
-                    );
+                    // Release the pre-charged token reservation — the
+                    // streaming loop failed, no usage to settle.
+                    kernel_clone
+                        .scheduler
+                        .release_reservation(agent_id, token_reservation);
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
