@@ -71,6 +71,7 @@ use crate::types::ApiErrorResponse;
     get,
     path = "/api/models",
     tag = "models",
+    operation_id = "list_all_models",
     responses(
         (status = 200, description = "List available models", body = Vec<serde_json::Value>)
     )

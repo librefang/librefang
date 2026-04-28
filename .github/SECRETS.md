@@ -62,6 +62,53 @@ base64 -w0 release.jks > keystore.b64   # paste contents into ANDROID_KEYSTORE_B
 
 ---
 
+## Mobile store distribution (release.yml `mobile_android` / `mobile_ios`)
+
+Required to push signed builds straight to **Play Internal Testing** and
+**TestFlight** without a human in the loop. Independent of the signing
+secrets above — when these are absent the build still attaches to the
+GitHub release; only the store-promotion step is skipped.
+
+### Google Play
+
+| Secret | Purpose | Format | Rotation |
+|---|---|---|---|
+| `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON` | Service-account JSON for the Google Play Developer API. Must hold the **Release Manager** role (or narrower: "Release to testing tracks") on `ai.librefang.app` | Raw JSON (paste contents directly) | When personnel changes or the SA key is rotated in GCP |
+
+**Generation reference**
+
+1. Play Console → Setup → API access → link a Google Cloud project.
+2. In GCP, create a service account, generate a JSON key, download it.
+3. Back in Play Console → API access → grant the SA the *Release Manager*
+   role (or the narrower "Release to testing tracks" if you want the
+   automation locked out of production).
+4. Paste the JSON contents into `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`. No
+   base64 step required — the secret store handles multi-line values.
+
+### Apple TestFlight (App Store Connect API)
+
+| Secret | Purpose | Format | Rotation |
+|---|---|---|---|
+| `APPLE_API_KEY_ID` | App Store Connect API key identifier (10-char string) | plain string | When the key is revoked |
+| `APPLE_API_KEY_ISSUER_ID` | Issuer ID of the Apple developer team (UUID) | plain string | n/a |
+| `APPLE_API_KEY_P8` | PKCS8-formatted private key contents (`-----BEGIN PRIVATE KEY----- … -----END PRIVATE KEY-----`) | raw `.p8` text incl. BEGIN/END | Rotate yearly or on personnel change |
+
+**Generation reference**
+
+1. App Store Connect → Users and Access → Integrations → App Store
+   Connect API → Generate a key with **App Manager** role.
+2. Download the `.p8` (one-time download — keep an offline backup).
+3. Copy the issuer ID from the same page.
+4. Paste the raw `.p8` contents (including the BEGIN / END lines) into
+   `APPLE_API_KEY_P8`. GitHub Actions accepts multi-line secret values;
+   no base64 step is required.
+
+API-key auth is preferred over Apple-ID + app-specific password: the key
+is revocable per-key without 2FA prompts and does not inherit the human
+owner's account scope.
+
+---
+
 ## Desktop signing (release.yml `desktop`)
 
 | Secret | Purpose |

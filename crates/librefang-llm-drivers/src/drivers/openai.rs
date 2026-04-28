@@ -943,9 +943,13 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
-            if let Some(secs) = self.request_timeout_secs {
-                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
-            }
+            // Per-request timeout takes priority; fall back to driver-level config,
+            // then a 300 s default so the daemon never waits indefinitely.
+            let timeout_secs = request
+                .timeout_secs
+                .or(self.request_timeout_secs)
+                .unwrap_or(300);
+            req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()
@@ -974,9 +978,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: retry_after
-                        .as_millis()
-                        .min(u64::MAX as u128) as u64,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1352,9 +1354,13 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
-            if let Some(secs) = self.request_timeout_secs {
-                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
-            }
+            // Per-request timeout takes priority; fall back to driver-level config,
+            // then a 300 s default so the daemon never waits indefinitely.
+            let timeout_secs = request
+                .timeout_secs
+                .or(self.request_timeout_secs)
+                .unwrap_or(300);
+            req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()
@@ -1380,9 +1386,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: retry_after
-                        .as_millis()
-                        .min(u64::MAX as u128) as u64,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1528,7 +1532,9 @@ impl LlmDriver for OpenAIDriver {
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 if receiver_dropped {
-                    tracing::debug!("streaming receiver dropped; cancelling OpenAI-compatible LLM stream");
+                    tracing::debug!(
+                        "streaming receiver dropped; cancelling OpenAI-compatible LLM stream"
+                    );
                     break;
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
@@ -1598,7 +1604,11 @@ impl LlmDriver for OpenAIDriver {
                                 for action in think_filter.process(text) {
                                     match action {
                                         FilterAction::EmitText(t) => {
-                                            if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
+                                            if tx
+                                                .send(StreamEvent::TextDelta { text: t })
+                                                .await
+                                                .is_err()
+                                            {
                                                 receiver_dropped = true;
                                             }
                                         }
@@ -1721,7 +1731,11 @@ impl LlmDriver for OpenAIDriver {
                             }
                         }
                         FilterAction::EmitThinking(t) => {
-                            if tx.send(StreamEvent::ThinkingDelta { text: t }).await.is_err() {
+                            if tx
+                                .send(StreamEvent::ThinkingDelta { text: t })
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }

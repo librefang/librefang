@@ -685,7 +685,7 @@ class ModelsResource {
     return this._c._request("POST", "/api/catalog/update");
   }
 
-  async listModels() {
+  async listAllModels() {
     return this._c._request("GET", "/api/models");
   }
 

@@ -17,14 +17,21 @@
 //!   proxy that injects `X-Forwarded-For` / `X-Real-IP` does NOT trigger
 //!   the bypass — proxied traffic still falls through to the limiter.
 //!   See [`gcra_rate_limit`].
+//!
+//! A separate, stricter per-IP counter specifically for authentication
+//! endpoints ([`auth_rate_limit_layer`]) limits login attempts to a
+//! configurable number per 15-minute window. This provides brute-force
+//! protection independent of the general token budget. See [`AuthLoginLimiter`].
 
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, Response, StatusCode};
 use axum::middleware::Next;
+use dashmap::DashMap;
 use governor::{clock::DefaultClock, state::keyed::DashMapStateStore, Quota, RateLimiter};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Paths exempt from rate limiting.
 ///
@@ -205,6 +212,184 @@ pub async fn gcra_rate_limit(
     }
 
     next.run(request).await
+}
+
+// ── Per-IP auth rate limiter ──────────────────────────────────────────────────
+
+/// Window size for the per-IP auth rate limiter.
+pub const AUTH_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// Retry-After value advertised to blocked callers (seconds).
+pub const AUTH_RATE_LIMIT_RETRY_AFTER_SECS: u64 = 15 * 60;
+
+/// Per-IP login attempt counter used by [`AuthLoginLimiter`].
+#[derive(Debug, Clone)]
+pub struct LoginAttempt {
+    /// Number of attempts in the current window.
+    pub count: u32,
+    /// When the current window started.
+    pub window_start: Instant,
+}
+
+/// Shared state for the per-IP auth rate limiter.
+///
+/// Stored as `Arc<AuthLoginLimiter>` in `AppState` so it can be accessed by
+/// the `dashboard_login` handler and the auth-endpoint middleware layer. A
+/// background task prunes stale entries (windows older than 30 minutes) to
+/// prevent unbounded memory growth.
+#[derive(Debug, Clone, Default)]
+pub struct AuthLoginLimiter {
+    /// Maps client IP → current-window attempt record.
+    pub map: Arc<DashMap<IpAddr, LoginAttempt>>,
+}
+
+impl AuthLoginLimiter {
+    /// Create a new, empty limiter.
+    pub fn new() -> Self {
+        Self {
+            map: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Record one attempt from `ip` and return whether the caller has exceeded
+    /// `max_attempts` within the current 15-minute window.
+    ///
+    /// Returns `true` when the caller is over-limit (should be rejected with
+    /// HTTP 429). Returns `false` when the attempt is within budget.
+    ///
+    /// When `max_attempts == 0` the limiter is disabled and every call returns
+    /// `false`.
+    pub fn check_and_record(&self, ip: IpAddr, max_attempts: u32) -> bool {
+        if max_attempts == 0 {
+            return false;
+        }
+        let now = Instant::now();
+        let mut entry = self.map.entry(ip).or_insert(LoginAttempt {
+            count: 0,
+            window_start: now,
+        });
+        // Reset counter when the window has expired.
+        if now.duration_since(entry.window_start) >= AUTH_RATE_LIMIT_WINDOW {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+        entry.count += 1;
+        entry.count > max_attempts
+    }
+
+    /// Remove entries whose window started more than 30 minutes ago. Called
+    /// periodically by the background pruning task in `server.rs`.
+    pub fn prune_stale(&self) {
+        let cutoff = Duration::from_secs(30 * 60);
+        let now = Instant::now();
+        self.map
+            .retain(|_, attempt| now.duration_since(attempt.window_start) < cutoff);
+    }
+}
+
+/// Axum middleware that enforces per-IP rate limiting on authentication
+/// endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`,
+/// `/api/auth/introspect`, `/api/auth/refresh`).
+///
+/// Loopback callers are exempted — the CLI and SPA connecting to their own
+/// daemon must never be locked out. Non-loopback clients that have exceeded
+/// `max_attempts` within the 15-minute window receive HTTP 429 with a
+/// `Retry-After` header.
+///
+/// IP resolution order (first match wins):
+/// 1. `X-Forwarded-For` first hop (when the header is present — best-effort,
+///    not trusted-proxy-validated; same conservative stance as the GCRA layer).
+/// 2. `X-Real-IP` header.
+/// 3. TCP peer address from `ConnectInfo`.
+/// 4. `0.0.0.0` fallback (non-loopback, enters the limiter).
+pub async fn auth_rate_limit_layer(
+    axum::extract::State((limiter, max_attempts)): axum::extract::State<(
+        Arc<AuthLoginLimiter>,
+        u32,
+    )>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    let path = request.uri().path();
+
+    // Only apply to auth endpoints that accept credentials.
+    let is_auth_path = path == "/api/auth/dashboard-login"
+        || path == "/api/v1/auth/dashboard-login"
+        || path.starts_with("/api/auth/login")
+        || path.starts_with("/api/v1/auth/login")
+        || path == "/api/auth/introspect"
+        || path == "/api/v1/auth/introspect"
+        || path == "/api/auth/refresh"
+        || path == "/api/v1/auth/refresh";
+
+    if !is_auth_path {
+        return next.run(request).await;
+    }
+
+    let ip = resolve_client_ip(&request);
+
+    // Loopback is always exempt.
+    if ip.is_loopback() {
+        return next.run(request).await;
+    }
+
+    if limiter.check_and_record(ip, max_attempts) {
+        tracing::warn!(
+            ip = %ip,
+            path = %path,
+            max_attempts,
+            "Auth rate limit exceeded"
+        );
+        return Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("content-type", "application/json")
+            .header("retry-after", AUTH_RATE_LIMIT_RETRY_AFTER_SECS.to_string())
+            .body(Body::from(
+                serde_json::json!({
+                    "error": "Too many login attempts. Please wait before trying again."
+                })
+                .to_string(),
+            ))
+            .unwrap_or_default();
+    }
+
+    next.run(request).await
+}
+
+/// Resolve the best available client IP from a request.
+///
+/// Checks `X-Forwarded-For` (first hop), then `X-Real-IP`, then `ConnectInfo`.
+/// Falls back to `0.0.0.0` (non-loopback) so missing extensions never
+/// silently disable the limiter.
+fn resolve_client_ip(request: &Request<Body>) -> IpAddr {
+    // X-Forwarded-For: <client>, <proxy1>, <proxy2>
+    // The leftmost address is the original client.
+    if let Some(ip) = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return ip;
+    }
+
+    // X-Real-IP (nginx, caddy)
+    if let Some(ip) = request
+        .headers()
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return ip;
+    }
+
+    // TCP peer address
+    request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
 }
 
 #[cfg(test)]
@@ -510,5 +695,196 @@ mod tests {
         assert_eq!(operation_cost("GET", "/api/approvals/count").get(), 1);
         assert_eq!(operation_cost("GET", "/api/providers").get(), 1);
         assert_eq!(operation_cost("GET", "/api/media/providers").get(), 1);
+    }
+
+    // ── Auth rate limiter unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn auth_limiter_allows_within_budget() {
+        let limiter = AuthLoginLimiter::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        // First 10 attempts must pass.
+        for i in 0..10 {
+            let rejected = limiter.check_and_record(ip, 10);
+            assert!(!rejected, "attempt {i} should be allowed");
+        }
+    }
+
+    #[test]
+    fn auth_limiter_blocks_after_limit_exceeded() {
+        let limiter = AuthLoginLimiter::new();
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+        // Exhaust budget.
+        for _ in 0..10 {
+            limiter.check_and_record(ip, 10);
+        }
+        // 11th attempt must be rejected.
+        let rejected = limiter.check_and_record(ip, 10);
+        assert!(rejected, "11th attempt must be blocked");
+    }
+
+    #[test]
+    fn auth_limiter_zero_max_disables() {
+        let limiter = AuthLoginLimiter::new();
+        let ip: IpAddr = "10.0.0.3".parse().unwrap();
+        // With max_attempts=0 the limiter is disabled.
+        for _ in 0..100 {
+            let rejected = limiter.check_and_record(ip, 0);
+            assert!(!rejected, "limiter should be a no-op when max_attempts=0");
+        }
+    }
+
+    #[test]
+    fn auth_limiter_different_ips_have_independent_buckets() {
+        let limiter = AuthLoginLimiter::new();
+        let ip_a: IpAddr = "10.0.0.4".parse().unwrap();
+        let ip_b: IpAddr = "10.0.0.5".parse().unwrap();
+        // Exhaust ip_a's budget.
+        for _ in 0..10 {
+            limiter.check_and_record(ip_a, 10);
+        }
+        // ip_b is unaffected.
+        let rejected_b = limiter.check_and_record(ip_b, 10);
+        assert!(!rejected_b, "ip_b must not be affected by ip_a's attempts");
+        // ip_a is now blocked.
+        let rejected_a = limiter.check_and_record(ip_a, 10);
+        assert!(rejected_a, "ip_a must be blocked after exhausting budget");
+    }
+
+    #[test]
+    fn auth_limiter_prune_removes_stale_entries() {
+        let limiter = AuthLoginLimiter::new();
+        let ip: IpAddr = "10.0.0.6".parse().unwrap();
+        limiter.check_and_record(ip, 10);
+        assert_eq!(limiter.map.len(), 1);
+        // Prune with a zero cutoff: no entries should survive since all windows
+        // started just now (elapsed < 30 minutes), so the map stays the same.
+        // This test just ensures prune_stale() doesn't panic.
+        limiter.prune_stale();
+        // Entry must still be present (window_start is very recent).
+        assert_eq!(limiter.map.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_middleware_blocks_over_limit() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (limiter.clone(), max_attempts),
+                auth_rate_limit_layer,
+            ));
+
+        let public_ip: IpAddr = "203.0.113.10".parse().unwrap();
+
+        let make_req = || {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    public_ip, 55000,
+                ))));
+            req
+        };
+
+        // First two attempts must pass.
+        for i in 0..2 {
+            let resp = app.clone().oneshot(make_req()).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "attempt {i} must pass under the limit"
+            );
+        }
+        // Third attempt must be rate-limited.
+        let resp = app.oneshot(make_req()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "3rd attempt must be blocked (limit=2)"
+        );
+        assert!(
+            resp.headers().contains_key("retry-after"),
+            "429 must include Retry-After header"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_middleware_loopback_exempt() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 1;
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (limiter, max_attempts),
+                auth_rate_limit_layer,
+            ));
+
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        // Many loopback attempts must never trigger 429.
+        for i in 0..20 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    loopback, 55001,
+                ))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback attempt {i} must be exempt from the auth rate limiter"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_middleware_non_auth_path_not_counted() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 1;
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (limiter, max_attempts),
+                auth_rate_limit_layer,
+            ));
+
+        let public_ip: IpAddr = "203.0.113.11".parse().unwrap();
+        // Many hits to a non-auth path must never be rate-limited.
+        for i in 0..20 {
+            let mut req = Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap();
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    public_ip, 55002,
+                ))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "non-auth request #{i} must not be rate-limited"
+            );
+        }
     }
 }

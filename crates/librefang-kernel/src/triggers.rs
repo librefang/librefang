@@ -11,7 +11,7 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::event::{Event, EventPayload, LifecycleEvent, SystemEvent};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -125,6 +125,13 @@ pub struct Trigger {
     /// `Some(mode)` overrides for this specific trigger.
     #[serde(default)]
     pub session_mode: Option<librefang_types::agent::SessionMode>,
+    /// Wall-clock timestamp of the last time this trigger fired.
+    ///
+    /// Persisted to disk so that cooldown state survives daemon restarts.
+    /// `None` means the trigger has never fired (or the field was not present
+    /// in an older persisted file — `#[serde(default)]` handles both cases).
+    #[serde(default)]
+    pub last_fired_at: Option<DateTime<Utc>>,
 }
 
 /// A trigger match result with optional session mode override.
@@ -164,8 +171,12 @@ pub struct TriggerEngine {
     triggers: DashMap<TriggerId, Trigger>,
     /// Index: agent_id → list of trigger IDs belonging to that agent.
     agent_triggers: DashMap<AgentId, Vec<TriggerId>>,
-    /// Per-trigger last fire timestamp for cooldown enforcement.
-    last_fired: DashMap<TriggerId, Instant>,
+    /// Per-trigger last fire wall-clock timestamp for cooldown enforcement.
+    ///
+    /// Uses `DateTime<Utc>` rather than `std::time::Instant` so that the state
+    /// can be round-tripped through the `Trigger.last_fired_at` field on disk,
+    /// surviving daemon restarts without resetting all cooldown windows.
+    last_fired: DashMap<TriggerId, DateTime<Utc>>,
     /// Maximum number of triggers that can fire from a single event.
     max_triggers_per_event: usize,
     /// Default cooldown duration (seconds) applied when a trigger has no override.
@@ -219,6 +230,9 @@ impl TriggerEngine {
 
     /// Load persisted triggers from disk and rebuild the agent index.
     ///
+    /// Restores `last_fired` state from `Trigger.last_fired_at` so that
+    /// cooldown windows survive daemon restarts.
+    ///
     /// Returns the number of triggers loaded. Returns `Ok(0)` if the
     /// persistence file does not exist or no path is configured.
     pub fn load(&self) -> LibreFangResult<usize> {
@@ -252,6 +266,12 @@ impl TriggerEngine {
         for trigger in triggers {
             let id = trigger.id;
             let agent_id = trigger.agent_id;
+            // Restore cooldown state from the persisted last_fired_at timestamp.
+            // This ensures that a trigger which fired shortly before a restart
+            // still honours its cooldown window after the daemon comes back up.
+            if let Some(last_fired_at) = trigger.last_fired_at {
+                self.last_fired.insert(id, last_fired_at);
+            }
             self.triggers.insert(id, trigger);
             // Guard against duplicate IDs in a corrupted file: only add to the
             // per-agent index if this ID isn't already present.
@@ -266,13 +286,29 @@ impl TriggerEngine {
 
     /// Persist all triggers to disk via atomic write (write to `.tmp`, then rename).
     ///
+    /// Snapshots the current `last_fired` timestamp into each trigger's
+    /// `last_fired_at` field before serializing so that cooldown state is
+    /// restored correctly on next load.
+    ///
     /// Does nothing when no persistence path is configured.
     pub fn persist(&self) -> LibreFangResult<()> {
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(()),
         };
-        let triggers: Vec<Trigger> = self.triggers.iter().map(|e| e.value().clone()).collect();
+        // Clone triggers and stamp current last_fired timestamps into them so
+        // that cooldown state is preserved across restarts.
+        let triggers: Vec<Trigger> = self
+            .triggers
+            .iter()
+            .map(|e| {
+                let mut t = e.value().clone();
+                if let Some(ts) = self.last_fired.get(&t.id) {
+                    t.last_fired_at = Some(*ts);
+                }
+                t
+            })
+            .collect();
         let data = serde_json::to_string_pretty(&triggers).map_err(|e| {
             LibreFangError::Internal(format!("Failed to serialize trigger jobs: {e}"))
         })?;
@@ -357,6 +393,7 @@ impl TriggerEngine {
             target_agent,
             cooldown_secs,
             session_mode,
+            last_fired_at: None,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
@@ -453,6 +490,7 @@ impl TriggerEngine {
                 target_agent: old.target_agent,
                 cooldown_secs: old.cooldown_secs,
                 session_mode: old.session_mode,
+                last_fired_at: old.last_fired_at,
             };
             self.triggers.insert(new_id, trigger);
             self.agent_triggers
@@ -603,7 +641,7 @@ impl TriggerEngine {
         let event_description = describe_event(event);
         let mut matches = Vec::new();
         let mut state_mutated = false;
-        let now = Instant::now();
+        let now = Utc::now();
 
         for mut entry in self.triggers.iter_mut() {
             let trigger = entry.value_mut();
@@ -620,12 +658,14 @@ impl TriggerEngine {
                 continue;
             }
 
-            // Check per-trigger cooldown
+            // Check per-trigger cooldown using wall-clock timestamps so that
+            // cooldown windows survive daemon restarts.
             let cooldown =
                 Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&trigger.id) {
-                    if now.duration_since(*last) < cooldown {
+                    let elapsed = (now - *last).to_std().unwrap_or(Duration::ZERO);
+                    if elapsed < cooldown {
                         debug!(
                             trigger_id = %trigger.id,
                             "Trigger skipped (cooldown active)"
@@ -1834,8 +1874,7 @@ mod tests {
         let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            matches[0].session_mode_override,
-            None,
+            matches[0].session_mode_override, None,
             "session_mode_override must be None when the trigger has no override; \
              the dispatcher should then fall back to the agent manifest default"
         );
@@ -1849,9 +1888,9 @@ mod tests {
         use librefang_types::agent::SessionMode;
 
         // Helper that mimics the single line in the kernel dispatch loop.
-        let resolve = |trigger_override: Option<SessionMode>, manifest: SessionMode| -> SessionMode {
-            trigger_override.unwrap_or(manifest)
-        };
+        let resolve = |trigger_override: Option<SessionMode>,
+                       manifest: SessionMode|
+         -> SessionMode { trigger_override.unwrap_or(manifest) };
 
         // Case 1: trigger override = New → New regardless of manifest
         assert_eq!(
@@ -1901,7 +1940,10 @@ mod tests {
         );
 
         // Sanity: override is present before the patch.
-        assert_eq!(engine.get_trigger(tid).unwrap().session_mode, Some(SessionMode::New));
+        assert_eq!(
+            engine.get_trigger(tid).unwrap().session_mode,
+            Some(SessionMode::New)
+        );
 
         // Clear the override.
         engine.update(
@@ -1916,6 +1958,81 @@ mod tests {
             engine.get_trigger(tid).unwrap().session_mode,
             None,
             "patching session_mode = Some(None) must clear the per-trigger override"
+        );
+    }
+
+    // -- cooldown persistence across restarts (#3779) -------------------------
+
+    /// Verify that `last_fired_at` survives a persist → load round-trip so
+    /// that cooldown windows are honoured after a daemon restart.
+    #[test]
+    fn test_cooldown_state_survives_persist_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let persist_path = dir.path().join("trigger_jobs.json");
+
+        // ── Session 1: fire a trigger and persist ──────────────────────────
+        let engine1 = TriggerEngine {
+            triggers: DashMap::new(),
+            agent_triggers: DashMap::new(),
+            last_fired: DashMap::new(),
+            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
+            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            persist_path: Some(persist_path.clone()),
+        };
+        let agent_id = AgentId::new();
+        // Register with a 60-second cooldown so it won't expire during the test.
+        let tid = engine1.register_with_target(
+            agent_id,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+            None,
+            Some(60),
+            None,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+
+        // Fire once to set last_fired
+        let (matches, _) = engine1.evaluate(&event);
+        assert_eq!(matches.len(), 1, "First fire must succeed");
+        assert!(engine1.last_fired.contains_key(&tid));
+
+        // Persist (stamps last_fired_at into the trigger JSON)
+        engine1.persist().unwrap();
+
+        // ── Session 2: load and verify cooldown is still active ────────────
+        let engine2 = TriggerEngine {
+            triggers: DashMap::new(),
+            agent_triggers: DashMap::new(),
+            last_fired: DashMap::new(),
+            max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
+            default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
+            persist_path: Some(persist_path),
+        };
+        let loaded = engine2.load().unwrap();
+        assert_eq!(loaded, 1, "Should have loaded exactly one trigger");
+
+        // The loaded trigger must have last_fired populated from last_fired_at
+        let triggers = engine2.list_all();
+        assert_eq!(triggers.len(), 1);
+        assert!(
+            triggers[0].last_fired_at.is_some(),
+            "last_fired_at must be persisted"
+        );
+
+        // The cooldown must still be active — the trigger should NOT fire again
+        let (matches2, _) = engine2.evaluate(&event);
+        assert_eq!(
+            matches2.len(),
+            0,
+            "Cooldown must be honoured after loading persisted state"
         );
     }
 }

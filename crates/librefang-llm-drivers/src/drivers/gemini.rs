@@ -868,9 +868,7 @@ impl LlmDriver for GeminiDriver {
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
@@ -993,9 +991,7 @@ impl LlmDriver for GeminiDriver {
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
@@ -1028,9 +1024,7 @@ impl LlmDriver for GeminiDriver {
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 if receiver_dropped {
-                    tracing::debug!(
-                        "streaming receiver dropped; cancelling Gemini LLM stream"
-                    );
+                    tracing::debug!("streaming receiver dropped; cancelling Gemini LLM stream");
                     break;
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;

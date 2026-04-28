@@ -570,7 +570,8 @@ pub async fn auth(
             // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
             // task transcripts — require authentication (Bug #3781).
             || path == "/a2a/agents"
-            || path.starts_with("/api/uploads/")
+            // /api/uploads/* is intentionally NOT in the public list — uploads
+            // require authentication, UUID guessing is not access control (#3361).
             || path.starts_with("/api/auth/login"));
     let always_public =
         always_public_method_free || always_public_get_only || is_mcp_oauth_callback;

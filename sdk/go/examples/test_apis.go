@@ -14,7 +14,7 @@ func main() {
 	skills, _ := client.Skills.ListSkills()
 	fmt.Printf("Skills: %d\n", len(librefang.ToSlice(skills)))
 
-	models, _ := client.Models.ListModels()
+	models, _ := client.Models.ListAllModels()
 	fmt.Printf("Models: %d\n", len(librefang.ToSlice(models)))
 
 	providers, _ := client.Providers.ListProviders()

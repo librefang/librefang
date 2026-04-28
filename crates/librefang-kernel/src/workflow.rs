@@ -599,7 +599,10 @@ impl WorkflowEngine {
             return;
         }
         let engine = self.clone();
-        let _ = tokio::task::spawn_blocking(move || engine.persist_runs()).await;
+        match tokio::task::spawn_blocking(move || engine.persist_runs()).await {
+            Ok(()) => {}
+            Err(e) => warn!("workflow persist task panicked: {e}"),
+        }
     }
 
     /// Register a new workflow definition.

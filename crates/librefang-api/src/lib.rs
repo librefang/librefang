@@ -81,9 +81,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
     let mut tmp = path.to_path_buf();
     let file_name = path
         .file_name()
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename")
-        })?
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing filename"))?
         .to_os_string();
     let mut tmp_name = file_name;
     tmp_name.push(format!(".{}.{seq}.tmp", std::process::id()));

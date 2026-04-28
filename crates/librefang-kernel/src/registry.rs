@@ -4,6 +4,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 use librefang_types::error::{LibreFangError, LibreFangResult};
+use std::sync::Arc;
 
 /// Registry of all agents in the kernel.
 pub struct AgentRegistry {
@@ -118,6 +119,23 @@ impl AgentRegistry {
     /// List all agents, sorted by name for deterministic ordering.
     pub fn list(&self) -> Vec<AgentEntry> {
         let mut entries: Vec<AgentEntry> = self.agents.iter().map(|e| e.value().clone()).collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// List all agents as `Arc<AgentEntry>`, sorted by name.
+    ///
+    /// Prefer this over `list()` in hot paths (e.g. per-LLM-turn prompt
+    /// construction) where the returned entries are read-only. Callers share
+    /// ownership of the `Arc` without deep-cloning the underlying struct; only
+    /// one `AgentEntry::clone()` per entry happens here to create the `Arc`.
+    /// See #3685.
+    pub fn list_arcs(&self) -> Vec<Arc<AgentEntry>> {
+        let mut entries: Vec<Arc<AgentEntry>> = self
+            .agents
+            .iter()
+            .map(|e| Arc::new(e.value().clone()))
+            .collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }

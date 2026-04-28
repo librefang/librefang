@@ -874,7 +874,7 @@ impl ModelsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/catalog/update".to_string(), None, &[]).await
     }
 
-    pub async fn list_models(&self) -> Result<Value> {
+    pub async fn list_all_models(&self) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/models".to_string(), None, &[]).await
     }
 

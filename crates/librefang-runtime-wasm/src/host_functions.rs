@@ -564,7 +564,11 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_recall(key, None) {
+    // SECURITY: Prefix the key with the agent_id to give each agent its own
+    // isolated KV namespace (Bug #3837). Without this prefix all agents share
+    // a flat key space, so agent A can read or overwrite agent B's keys.
+    let namespaced_key = format!("{}:{key}", state.agent_id);
+    match kernel.memory_recall(&namespaced_key, None) {
         Ok(Some(val)) => json!({"ok": val}),
         Ok(None) => json!({"ok": null}),
         Err(e) => json!({"error": e}),
@@ -590,7 +594,11 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_store(key, value, None) {
+    // SECURITY: Prefix the key with the agent_id so each agent's KV entries
+    // live in a separate namespace and cannot be accessed by other agents
+    // (Bug #3837).
+    let namespaced_key = format!("{}:{key}", state.agent_id);
+    match kernel.memory_store(&namespaced_key, value, None) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": e}),
     }
@@ -862,6 +870,206 @@ mod tests {
         let result = host_kv_get(&state, &json!({"key": "test"}));
         let err = result["error"].as_str().unwrap();
         assert!(err.contains("kernel"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Mock KernelHandle for KV namespace isolation tests (Bug #3837)
+    // ---------------------------------------------------------------------------
+
+    struct RecordingKernel {
+        /// Records every (namespaced_key, value) passed to memory_store.
+        stored: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        /// Records every namespaced_key passed to memory_recall.
+        recalled: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingKernel {
+        fn new() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                stored: std::sync::Mutex::new(Vec::new()),
+                recalled: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl librefang_kernel_handle::KernelHandle for RecordingKernel {
+        async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
+            Err("not implemented".to_string())
+        }
+        async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        fn list_agents(&self) -> Vec<librefang_kernel_handle::AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _: &str) -> Result<(), String> {
+            Err("not implemented".to_string())
+        }
+        fn memory_store(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            self.stored.lock().unwrap().push((key.to_string(), value));
+            Ok(())
+        }
+        fn memory_recall(
+            &self,
+            key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            self.recalled.lock().unwrap().push(key.to_string());
+            Ok(None)
+        }
+        fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+        fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
+            vec![]
+        }
+        async fn task_post(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Err("not implemented".to_string())
+        }
+        async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Ok(vec![])
+        }
+        async fn task_delete(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_retry(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
+            Ok(())
+        }
+        async fn knowledge_add_entity(
+            &self,
+            _: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Ok(vec![])
+        }
+    }
+
+    fn state_with_kernel(
+        agent_id: &str,
+        capabilities: Vec<Capability>,
+        kernel: std::sync::Arc<RecordingKernel>,
+    ) -> GuestState {
+        GuestState {
+            capabilities,
+            kernel: Some(kernel),
+            agent_id: agent_id.to_string(),
+            tokio_handle: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Regression test for Bug #3837: kv_get must namespace the key with
+    /// agent_id so that two agents cannot read each other's KV entries.
+    #[tokio::test]
+    async fn test_kv_get_key_is_namespaced_with_agent_id() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        host_kv_get(&state, &json!({"key": "secret"}));
+
+        let recalled = kernel.recalled.lock().unwrap();
+        assert_eq!(recalled.len(), 1, "Expected exactly one memory_recall call");
+        assert_eq!(
+            recalled[0], "agent-alice:secret",
+            "kv_get must prefix the key with agent_id to isolate namespaces"
+        );
+    }
+
+    /// Regression test for Bug #3837: kv_set must namespace the key with
+    /// agent_id so that two agents cannot overwrite each other's KV entries.
+    #[tokio::test]
+    async fn test_kv_set_key_is_namespaced_with_agent_id() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        host_kv_set(&state, &json!({"key": "counter", "value": 42}));
+
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(stored.len(), 1, "Expected exactly one memory_store call");
+        assert_eq!(
+            stored[0].0, "agent-bob:counter",
+            "kv_set must prefix the key with agent_id to isolate namespaces"
+        );
+    }
+
+    /// Two agents using the same guest key must produce different namespaced
+    /// keys — that is the whole point of the namespace isolation.
+    #[tokio::test]
+    async fn test_kv_two_agents_same_guest_key_different_namespaced_keys() {
+        let kernel_a = RecordingKernel::new();
+        let state_a = state_with_kernel(
+            "agent-alice",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel_a),
+        );
+        host_kv_get(&state_a, &json!({"key": "shared_name"}));
+
+        let kernel_b = RecordingKernel::new();
+        let state_b = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel_b),
+        );
+        host_kv_get(&state_b, &json!({"key": "shared_name"}));
+
+        let recalled_a = kernel_a.recalled.lock().unwrap();
+        let recalled_b = kernel_b.recalled.lock().unwrap();
+
+        assert_ne!(
+            recalled_a[0], recalled_b[0],
+            "Different agents must produce different namespaced keys for the same guest key"
+        );
+        assert!(
+            recalled_a[0].starts_with("agent-alice:"),
+            "Alice's key must be prefixed with her agent_id"
+        );
+        assert!(
+            recalled_b[0].starts_with("agent-bob:"),
+            "Bob's key must be prefixed with his agent_id"
+        );
     }
 
     #[tokio::test]

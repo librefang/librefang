@@ -1472,7 +1472,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                             true
                                         }
                                         Ok((false, _)) => {
-                                            self.kernel.approvals().record_totp_failure(sender_id);
+                                            let _ = self
+                                                .kernel
+                                                .approvals()
+                                                .record_totp_failure(sender_id);
                                             return "Invalid recovery code.".into();
                                         }
                                         Err(e) => return format!("Recovery code error: {e}"),
@@ -1495,7 +1498,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             ) {
                                 Ok(true) => true,
                                 Ok(false) => {
-                                    self.kernel.approvals().record_totp_failure(sender_id);
+                                    let _ = self
+                                        .kernel
+                                        .approvals()
+                                        .record_totp_failure(sender_id);
                                     return "Invalid TOTP code.".into();
                                 }
                                 Err(e) => return format!("TOTP error: {e}"),
@@ -2331,20 +2337,29 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-signal")]
     for sig_config in config.signal.iter() {
         if !sig_config.phone_number.is_empty() {
-            let adapter = Arc::new(
-                SignalAdapter::new(
-                    sig_config.api_url.clone(),
-                    sig_config.phone_number.clone(),
-                    sig_config.allowed_users.clone(),
-                )
-                .with_account_id(sig_config.account_id.clone())
-                .with_poll_interval(sig_config.poll_interval_secs),
-            );
-            adapters.push((
-                adapter,
-                sig_config.default_agent.clone(),
-                sig_config.account_id.clone(),
-            ));
+            match SignalAdapter::with_options(
+                sig_config.api_url.clone(),
+                sig_config.phone_number.clone(),
+                sig_config.allowed_users.clone(),
+                sig_config.api_key.clone(),
+                sig_config.allow_local,
+            ) {
+                Ok(signal_adapter) => {
+                    let adapter = Arc::new(
+                        signal_adapter
+                            .with_account_id(sig_config.account_id.clone())
+                            .with_poll_interval(sig_config.poll_interval_secs),
+                    );
+                    adapters.push((
+                        adapter,
+                        sig_config.default_agent.clone(),
+                        sig_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    warn!("Signal channel disabled: {e}");
+                }
+            }
         } else {
             warn!("Signal configured but phone_number is empty, skipping");
         }

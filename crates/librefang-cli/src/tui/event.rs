@@ -5,6 +5,7 @@ use librefang_runtime::agent_loop::AgentLoopResult;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use ratatui::crossterm::event::{self, Event as CtEvent, KeyEvent, KeyEventKind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -49,6 +50,10 @@ pub enum AppEvent {
     Key(KeyEvent),
     /// Periodic tick for animations (spinners, etc.).
     Tick,
+    /// Terminal was resized to the given (width, height).
+    Resize(u16, u16),
+    /// Bracketed-paste text received from the terminal.
+    Paste(String),
     /// A streaming event from the LLM (daemon SSE or kernel mpsc).
     Stream(StreamEvent),
     /// The streaming agent loop finished.
@@ -210,6 +215,14 @@ pub enum AppEvent {
     CommsSendResult(String),
     /// Comms task post result.
     CommsTaskResult(String),
+
+    // ── Async chat helpers (previously blocking on the event-loop thread) ──
+    /// Agent model label fetched for chat header.
+    ChatModelLabelLoaded { agent_id: String, label: String },
+    /// Model list loaded for the model picker in chat.
+    ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
+    /// Agent list loaded for the /agents chat command.
+    ChatAgentListLoaded(Vec<String>),
 }
 
 /// Spawn the crossterm polling + tick thread. Returns sender + receiver.
@@ -229,6 +242,8 @@ pub fn spawn_event_thread(
                         CtEvent::Key(key) if key.kind == KeyEventKind::Press => {
                             poll_tx.send(AppEvent::Key(key))
                         }
+                        CtEvent::Resize(w, h) => poll_tx.send(AppEvent::Resize(w, h)),
+                        CtEvent::Paste(text) => poll_tx.send(AppEvent::Paste(text)),
                         _ => Ok(()),
                     };
                     if sent.is_err() {
@@ -245,6 +260,30 @@ pub fn spawn_event_thread(
     });
 
     (tx, rx)
+}
+
+// ── Stream cancellation ─────────────────────────────────────────────────────
+
+/// A cancellation token for a background SSE/in-process stream thread.
+///
+/// Setting the flag to `true` causes the thread to stop reading and exit on
+/// its next iteration. Dropping the token without cancelling is a no-op.
+#[derive(Clone)]
+pub struct StreamCancelToken(Arc<AtomicBool>);
+
+impl StreamCancelToken {
+    fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Signal the stream thread to stop.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 // ── Original spawn functions ────────────────────────────────────────────────
@@ -294,12 +333,17 @@ pub fn spawn_kernel_boot(config: Option<std::path::PathBuf>, tx: mpsc::Sender<Ap
 }
 
 /// Spawn a background thread for in-process streaming.
+///
+/// Returns a [`StreamCancelToken`] that the caller can use to abort the stream
+/// when the user navigates away or starts a new chat session.
 pub fn spawn_inprocess_stream(
     kernel: Arc<LibreFangKernel>,
     agent_id: AgentId,
     message: String,
     tx: mpsc::Sender<AppEvent>,
-) {
+) -> StreamCancelToken {
+    let token = StreamCancelToken::new();
+    let cancel = token.clone();
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -317,9 +361,15 @@ pub fn spawn_inprocess_stream(
             Ok((mut rx, handle)) => {
                 rt.block_on(async {
                     while let Some(ev) = rx.recv().await {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
                         if tx.send(AppEvent::Stream(ev)).is_err() {
                             return;
                         }
+                    }
+                    if cancel.is_cancelled() {
+                        return;
                     }
                     let result = handle
                         .await
@@ -333,21 +383,26 @@ pub fn spawn_inprocess_stream(
             }
         }
     });
+    token
 }
 
 /// Spawn a background thread for daemon SSE streaming.
+///
+/// Returns a [`StreamCancelToken`] that the caller can use to abort the stream
+/// when the user navigates away or starts a new chat session.
 pub fn spawn_daemon_stream(
     base_url: String,
     agent_id: String,
     message: String,
     api_key: Option<String>,
     tx: mpsc::Sender<AppEvent>,
-) {
+) -> StreamCancelToken {
+    let token = StreamCancelToken::new();
+    let cancel = token.clone();
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Read};
 
-        let client =
-            make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
 
         let url = format!("{base_url}/api/agents/{agent_id}/message/stream");
         let resp = client
@@ -384,6 +439,9 @@ pub fn spawn_daemon_stream(
 
         let reader = BufReader::new(RespReader(resp));
         for line in reader.lines() {
+            if cancel.is_cancelled() {
+                return;
+            }
             let line = match line {
                 Ok(l) => l,
                 Err(_) => break,
@@ -463,6 +521,7 @@ pub fn spawn_daemon_stream(
             owner_notice: None,
         })));
     });
+    token
 }
 
 /// Blocking fallback for daemon chat (non-streaming).
@@ -472,8 +531,7 @@ fn daemon_fallback(
     message: &str,
     api_key: Option<&str>,
 ) -> Result<AgentLoopResult, String> {
-    let client =
-        make_daemon_client_with_timeout(api_key, Duration::from_secs(120));
+    let client = make_daemon_client_with_timeout(api_key, Duration::from_secs(120));
 
     let resp = client
         .post(format!("{base_url}/api/agents/{agent_id}/message"))
@@ -525,8 +583,7 @@ pub fn spawn_daemon_agent(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let client =
-            make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
 
         let resp = client
             .post(format!("{base_url}/api/agents"))
@@ -759,7 +816,8 @@ pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/channels/{channel}/test"))
@@ -879,7 +937,8 @@ pub fn spawn_run_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
                 .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
@@ -917,7 +976,8 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/workflows"))
@@ -990,7 +1050,8 @@ pub fn spawn_create_trigger(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/triggers"))
@@ -1330,7 +1391,9 @@ fn make_daemon_client_with_timeout(
         }
         builder = builder.default_headers(headers);
     }
-    builder.build().unwrap_or_else(|_| crate::http_client::new_client())
+    builder
+        .build()
+        .unwrap_or_else(|_| crate::http_client::new_client())
 }
 
 /// Fetch sessions list.
@@ -2089,7 +2152,8 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon { base_url, api_key } => {
-            let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(15));
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(15));
             let start = std::time::Instant::now();
             match client
                 .post(format!("{base_url}/api/providers/{name}/test"))
@@ -2879,6 +2943,90 @@ pub fn spawn_comms_task(
             let _ = tx.send(AppEvent::CommsTaskResult(
                 "Task post not supported in-process".to_string(),
             ));
+        }
+    });
+}
+
+/// Fetch the model label for a daemon agent (used when entering chat).
+/// Sends `ChatModelLabelLoaded` so the event loop can update `chat.model_label`
+/// without blocking the render/input thread.
+pub fn spawn_fetch_agent_model_label(
+    base_url: String,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client
+            .get(format!("{base_url}/api/agents/{agent_id}"))
+            .send()
+        {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let provider = body["model_provider"].as_str().unwrap_or("?");
+                let model = body["model_name"].as_str().unwrap_or("?");
+                let label = format!("{provider}/{model}");
+                let _ = tx.send(AppEvent::ChatModelLabelLoaded { agent_id, label });
+            }
+        }
+    });
+}
+
+/// Fetch the model list from the daemon for the chat model picker.
+/// Sends `ChatModelsForPicker` so the event loop can open the picker
+/// without blocking the render/input thread.
+pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let models: Vec<super::screens::chat::ModelEntry> = body["models"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|m| m["available"].as_bool().unwrap_or(false))
+                            .map(|m| super::screens::chat::ModelEntry {
+                                id: m["id"].as_str().unwrap_or("").to_string(),
+                                display_name: m["display_name"].as_str().unwrap_or("").to_string(),
+                                provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = tx.send(AppEvent::ChatModelsForPicker(models));
+            }
+        }
+    });
+}
+
+/// Fetch the agent list from the daemon for the /agents chat command.
+/// Sends `ChatAgentListLoaded` so the event loop can push the reply
+/// without blocking the render/input thread.
+pub fn spawn_fetch_agents_for_chat(base_url: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let arr = if let Some(arr) = body.as_array() {
+                    arr.clone()
+                } else if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                let lines: Vec<String> = arr
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} [{}] {}",
+                            a["name"].as_str().unwrap_or("?"),
+                            a["state"].as_str().unwrap_or("?"),
+                            a["model_name"].as_str().unwrap_or("?"),
+                        )
+                    })
+                    .collect();
+                let _ = tx.send(AppEvent::ChatAgentListLoaded(lines));
+            }
         }
     });
 }

@@ -828,9 +828,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A discovery failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
         if !response.status().is_success() {
             return Err(format!("A2A discovery returned {}", response.status()));
@@ -874,9 +872,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A send_task failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
         let body: serde_json::Value = response
@@ -914,9 +910,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A get_task failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
         let body: serde_json::Value = response

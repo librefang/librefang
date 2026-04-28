@@ -14,7 +14,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -286,6 +286,28 @@ impl ChannelAdapter for WebhookAdapter {
                                 axum::http::StatusCode::FORBIDDEN,
                                 "Forbidden: invalid signature",
                             );
+                        }
+
+                        // Replay-attack protection: reject requests whose
+                        // X-Webhook-Timestamp is more than 5 minutes stale.
+                        if let Some(ts_header) = headers.get("X-Webhook-Timestamp") {
+                            if let Ok(ts_str) = ts_header.to_str() {
+                                if let Ok(ts_ms) = ts_str.parse::<i64>() {
+                                    let now_ms = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as i64;
+                                    if (now_ms - ts_ms).abs() > 5 * 60 * 1000 {
+                                        warn!("Webhook: timestamp too old — possible replay attack");
+                                        return (
+                                            axum::http::StatusCode::FORBIDDEN,
+                                            "Forbidden: timestamp too old",
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            warn!("Webhook: request has no X-Webhook-Timestamp — replay protection unavailable");
                         }
 
                         let json_body: serde_json::Value = match serde_json::from_slice(&body) {

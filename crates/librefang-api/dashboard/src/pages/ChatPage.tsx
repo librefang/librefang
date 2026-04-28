@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
+import { buildAuthenticatedWebSocket, sendAgentMessage, loadAgentSession } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
@@ -147,10 +147,11 @@ function useWebSocket(
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
   const onDropRef = useRef<(() => void) | null>(null);
-  // Bug #3847: store the current URL in a ref so the reconnect closure always
-  // reads the latest value rather than capturing the URL from the previous
-  // agent via a stale closure.
+  // Bug #3847: store the current URL + WS sub-protocols in refs so the
+  // reconnect closure always reads the latest values rather than capturing
+  // them from the previous agent via a stale closure.
   const urlRef = useRef<string>("");
+  const protocolsRef = useRef<string[]>([]);
   // Bug #3854: track whether we've hit a terminal auth-error state
   const authErrorRef = useRef(false);
   // Keep onAuthError in a ref to avoid triggering the effect when the caller
@@ -173,18 +174,29 @@ function useWebSocket(
     const wsPath = sessionId
       ? `${base}?session_id=${encodeURIComponent(sessionId)}`
       : base;
-    // Bug #3847: keep urlRef current so the reconnect closure always uses
-    // the latest agent's URL even after an agent switch and reconnect cycle.
-    urlRef.current = buildAuthenticatedWebSocketUrl(wsPath);
+    // Bug #3847: keep urlRef + protocolsRef current so the reconnect closure
+    // always uses the latest agent's URL even after an agent switch and
+    // reconnect cycle. #3963 carries the bearer via WebSocket sub-protocols
+    // so the token never appears in the URL or proxy access logs.
+    {
+      const { url: latestUrl, protocols: latestProtocols } =
+        buildAuthenticatedWebSocket(wsPath);
+      urlRef.current = latestUrl;
+      protocolsRef.current = latestProtocols;
+    }
     retriesRef.current = 0;
     authErrorRef.current = false;
 
     function connect() {
-      // Bug #3847: read from the ref, not the closed-over local variable, so
-      // we always target the current agent on reconnect.
+      // Bug #3847: read from the refs, not closed-over locals, so we always
+      // target the current agent on reconnect.
       const currentUrl = urlRef.current;
+      const currentProtocols = protocolsRef.current;
       try {
-        const ws = new WebSocket(currentUrl);
+        const ws = new WebSocket(
+          currentUrl,
+          currentProtocols.length > 0 ? currentProtocols : undefined,
+        );
 
         ws.onopen = () => {
           setWsConnected(true);

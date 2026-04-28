@@ -67,6 +67,7 @@ pub use users::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;
+use crate::rate_limiter::KeyedRateLimiter;
 use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::i18n::{self, ErrorTranslator};
@@ -148,6 +149,14 @@ pub struct AppState {
     /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
     /// them into the kernel's trusted external-agent list.
     pub pending_a2a_agents: DashMap<String, librefang_runtime::a2a::AgentCard>,
+    /// Per-IP brute-force limiter for authentication endpoints.
+    /// Shared between the auth-endpoint middleware layer and the background
+    /// prune task so stale entries are reclaimed every 5 minutes.
+    pub auth_login_limiter: Arc<crate::rate_limiter::AuthLoginLimiter>,
+    /// GCRA rate limiter — shared with the middleware layer so the background GC
+    /// task can call `retain_recent()` to evict stale per-IP entries and prevent
+    /// the DashMap from growing unbounded over a long-running daemon. See #3668.
+    pub gcra_limiter: Arc<KeyedRateLimiter>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

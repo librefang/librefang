@@ -282,6 +282,23 @@ pub fn build_reload_plan_with_caps(
             .push("vault config changed".to_string());
     }
 
+    // Queue concurrency config — lane semaphores and per-agent caps are
+    // created once at kernel boot and cannot be resized at runtime without
+    // draining all in-flight tasks. Surfacing a restart-required diagnostic
+    // prevents silent no-ops (issue #3628).
+    if field_changed(&old.queue.concurrency, &new.queue.concurrency) {
+        plan.restart_required = true;
+        plan.restart_reasons.push(
+            "queue.concurrency.* changed — lane semaphores are fixed at boot; \
+             restart the daemon to apply the new concurrency limits"
+                .to_string(),
+        );
+        warn!(
+            "config reload: queue.concurrency.* changed but cannot be applied \
+             at runtime — restart the daemon to pick up new lane/per-agent limits"
+        );
+    }
+
     // ----- Hot-reloadable fields -----
 
     if field_changed(&old.channels, &new.channels) {

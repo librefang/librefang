@@ -78,6 +78,9 @@ async fn build_harness(tool_invoke: ToolInvokeConfig) -> Harness {
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(0),
+        ),
     });
 
     let app = Router::new()

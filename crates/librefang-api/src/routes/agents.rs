@@ -1541,8 +1541,10 @@ pub async fn send_message(
             };
             let t = ErrorTranslator::new(l);
             ApiErrorResponse {
-                error: t
-                    .t_args("api-error-message-delivery-failed", &[("reason", &e.to_string())]),
+                error: t.t_args(
+                    "api-error-message-delivery-failed",
+                    &[("reason", &e.to_string())],
+                ),
                 code: Some(code.to_string()),
                 r#type: Some(code.to_string()),
                 details: None,
@@ -3683,12 +3685,17 @@ pub async fn update_agent(
 
     drop(t);
 
+    // `update_manifest` preserves workspace/name/tags, re-grants capabilities,
+    // refreshes scheduler quotas, persists to SQLite, and writes agent.toml.
+    // Per-agent concurrency caps and session_mode caches still require
+    // kill+respawn — flagged in the response note.
     match state.kernel.update_manifest(agent_id, manifest) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "agent_id": id,
+                "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
             })),
         ),
         Err(e) => (
@@ -6302,6 +6309,8 @@ mod monitoring_tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new(0)),
             pending_a2a_agents: dashmap::DashMap::new(),
         });
         (state, tmp)

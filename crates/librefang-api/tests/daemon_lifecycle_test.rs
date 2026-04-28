@@ -131,6 +131,9 @@ async fn test_full_daemon_lifecycle() {
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(0),
+        ),
     });
 
     let app = Router::new()
@@ -274,6 +277,9 @@ async fn test_server_immediate_responsiveness() {
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(0),
+        ),
     });
 
     let app = Router::new()

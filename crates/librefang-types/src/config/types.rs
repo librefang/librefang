@@ -902,6 +902,11 @@ pub struct RateLimitConfig {
     /// Flush text buffer when it exceeds this many characters. Default: 200.
     #[serde(default = "default_ws_debounce_chars")]
     pub ws_debounce_chars: usize,
+    /// Max login attempts per IP per 15-minute window on auth endpoints
+    /// (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10.
+    /// Set to 0 to disable the per-IP auth rate limiter.
+    #[serde(default = "default_auth_rate_limit_per_ip")]
+    pub auth_rate_limit_per_ip: u32,
 }
 
 fn default_api_requests_per_minute() -> u32 {
@@ -928,6 +933,9 @@ fn default_ws_debounce_ms() -> u64 {
 fn default_ws_debounce_chars() -> usize {
     200
 }
+fn default_auth_rate_limit_per_ip() -> u32 {
+    10
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -940,6 +948,7 @@ impl Default for RateLimitConfig {
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
+            auth_rate_limit_per_ip: default_auth_rate_limit_per_ip(),
         }
     }
 }
@@ -2947,22 +2956,27 @@ pub struct KernelConfig {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
-    /// No checking — all messages pass through (default).
-    #[default]
+    /// No checking — all messages pass through. Set `mode = "off"` in
+    /// `[sanitize]` to opt out of prompt-injection detection.
     Off,
     /// Log a warning but allow the message through.
     Warn,
-    /// Reject the message and send an error to the user.
+    /// Reject the message and send an error to the user (default).
+    #[default]
     Block,
 }
 
 /// Configuration for channel input sanitization / prompt-injection detection.
 ///
+/// The sanitizer is **enabled by default** (mode = "block"). To opt out set
+/// `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:
+///
 /// ```toml
 /// [sanitize]
-/// mode = "warn"           # off | warn | block
+/// mode = "block"          # off | warn | block  (default: block)
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
+/// # disable_input_sanitizer = true  # emergency opt-out
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -2973,14 +2987,20 @@ pub struct SanitizeConfig {
     pub max_message_length: usize,
     /// Additional regex patterns that should trigger a block/warn.
     pub custom_block_patterns: Vec<String>,
+    /// Emergency opt-out: set to `true` to disable all input sanitization.
+    /// Not recommended for production — prefer `mode = "warn"` for monitoring
+    /// without blocking, or `mode = "off"` for a softer disable.
+    #[serde(default)]
+    pub disable_input_sanitizer: bool,
 }
 
 impl Default for SanitizeConfig {
     fn default() -> Self {
         Self {
-            mode: SanitizeMode::Off,
+            mode: SanitizeMode::Block,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 }
@@ -3711,6 +3731,12 @@ pub struct ExternalAuthConfig {
     /// When configured, these take precedence over the top-level single-provider fields.
     #[serde(default)]
     pub providers: Vec<OidcProvider>,
+    /// Require `email_verified = true` in the OIDC ID token before allowing login.
+    /// Defaults to `true`. Set to `false` only if your identity provider does not
+    /// set this claim. When `true`, logins where the claim is absent or false are
+    /// rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).
+    #[serde(default = "default_true")]
+    pub require_email_verified: bool,
 }
 
 /// Configuration for a single OIDC/OAuth2 provider.
@@ -3758,6 +3784,12 @@ pub struct OidcProvider {
     /// JWT audience claim to validate.
     #[serde(default)]
     pub audience: String,
+    /// Override the global `require_email_verified` setting for this provider.
+    /// `None` means inherit from `ExternalAuthConfig::require_email_verified`.
+    /// Set to `false` only if this specific provider does not issue `email_verified`
+    /// claims (e.g. GitHub's user API does not include the field for OAuth2 flows).
+    #[serde(default)]
+    pub require_email_verified: Option<bool>,
 }
 
 fn default_oauth_client_secret_env() -> String {
@@ -3793,6 +3825,7 @@ impl Default for ExternalAuthConfig {
             audience: String::new(),
             session_ttl_secs: default_session_ttl(),
             providers: Vec::new(),
+            require_email_verified: true,
         }
     }
 }
@@ -3879,6 +3912,11 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
+fn default_workflow_stale_timeout_minutes() -> u64 {
+    60
+}
+
 /// Default tool execution timeout in seconds (120s).
 fn default_tool_timeout_secs() -> u64 {
     120
@@ -3887,11 +3925,6 @@ fn default_tool_timeout_secs() -> u64 {
 /// Default maximum upload size in bytes (10 MB).
 fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
-}
-
-/// Default workflow stale timeout: 60 minutes.
-fn default_workflow_stale_timeout_minutes() -> u64 {
-    60
 }
 
 /// Default maximum concurrent background LLM calls.
@@ -5111,6 +5144,26 @@ pub struct NetworkConfig {
     pub max_peers: u32,
     /// Pre-shared secret for OFP HMAC authentication (required when network is enabled).
     pub shared_secret: String,
+    /// SECURITY (#3876): Maximum number of  requests a single OFP
+    /// peer may send per minute before being rate-limited.
+    ///
+    /// Each peer connection is tracked independently. Excess messages are
+    /// rejected with a 429 error response; a  is emitted with the
+    /// peer ID and current rate so operators can investigate abuse.
+    ///
+    /// Set to  to disable per-peer message rate limiting (not recommended
+    /// for production federations). Default: 60.
+    pub max_messages_per_peer_per_minute: u32,
+    /// SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.
+    ///
+    /// When set, the node tracks how many tokens each peer's
+    /// requests have consumed in the current hour window. If a peer exceeds
+    /// this budget the request is rejected with a 429 error.
+    ///
+    ///  means no per-peer token cap (default). Set to a value like
+    ///  to bound the LLM spend a single federated peer can force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_llm_tokens_per_peer_per_hour: Option<u64>,
 }
 
 impl Default for NetworkConfig {
@@ -5121,6 +5174,8 @@ impl Default for NetworkConfig {
             mdns_enabled: true,
             max_peers: 50,
             shared_secret: String::new(),
+            max_messages_per_peer_per_minute: 60,
+            max_llm_tokens_per_peer_per_hour: None,
         }
     }
 }
@@ -5140,6 +5195,14 @@ impl std::fmt::Debug for NetworkConfig {
                 } else {
                     "<redacted>"
                 },
+            )
+            .field(
+                "max_messages_per_peer_per_minute",
+                &self.max_messages_per_peer_per_minute,
+            )
+            .field(
+                "max_llm_tokens_per_peer_per_hour",
+                &self.max_llm_tokens_per_peer_per_hour,
             )
             .finish()
     }
@@ -5519,6 +5582,14 @@ pub struct SignalConfig {
     /// Poll interval in seconds for checking new messages (default: 2).
     #[serde(default = "default_signal_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// Optional API key sent as `Authorization: Bearer <api_key>` on every request.
+    /// If absent, requests are sent without an Authorization header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.
+    /// Defaults to `false`; set to `true` only when signal-cli runs on localhost.
+    #[serde(default)]
+    pub allow_local: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -5533,6 +5604,8 @@ impl Default for SignalConfig {
             account_id: None,
             default_agent: None,
             poll_interval_secs: default_signal_poll_interval_secs(),
+            api_key: None,
+            allow_local: false,
             overrides: ChannelOverrides::default(),
         }
     }
