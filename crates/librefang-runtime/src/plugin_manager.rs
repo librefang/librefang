@@ -15,21 +15,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Env var: set to a base64-encoded Ed25519 public key (32 bytes) to enable
-/// Ed25519 signature verification for the plugin registry index and archives.
-///
-/// Configure via:
-///   - `LIBREFANG_REGISTRY_PUBKEY=<base64-ed25519-pubkey>` env var, OR
-///   - `plugin_registry_public_key` field in config.toml (agent layer reads it
-///     and injects it into the env before calling plugin manager functions).
-///
-/// When not configured: plugins are installed without Ed25519 verification
-/// (a `warn!` is emitted). When configured and invalid: installation is aborted.
-///
-/// To generate a key pair:
-///   openssl genpkey -algorithm ed25519 -out signing.key
-///   openssl pkey -in signing.key -pubout -outform DER | tail -c 32 | base64
-
 /// Verify an Ed25519 signature over registry index JSON bytes.
 ///
 /// The registry is expected to serve a companion file `index.json.sig`
@@ -205,8 +190,6 @@ pub async fn fetch_verified_index(
     client: &reqwest::Client,
     registry: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use base64::Engine as _;
-
     let cache_path = registry_cache_path(registry);
     let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
         .ok()
@@ -865,11 +848,6 @@ async fn install_from_registry(
         }
     }
 
-    // --- Bug #3804: Verify hook script checksums from manifest [integrity] table ---
-    // Load the manifest from disk (it was written during the archive extraction above).
-    // If the [integrity] table is populated, every declared hook script is verified
-    // against its SHA-256; a mismatch is fatal.  An absent [integrity] table emits a
-    // warning so operators know the publisher did not sign hook scripts.
     match load_plugin_manifest_raw(&target_dir) {
         Ok(manifest) => {
             if manifest.integrity.is_empty() {
@@ -908,8 +886,7 @@ async fn install_from_registry(
         }
     }
 
-    // Verify Ed25519 archive signature (optional — absent sig is OK, wrong sig is fatal).
-    // Only attempt verification when a real public key is configured.
+    // Only attempt Ed25519 archive signature verification when a real public key is configured.
     let archive_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
