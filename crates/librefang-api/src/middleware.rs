@@ -714,15 +714,6 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let header_auth = api_token.map(&matches_any);
 
-<<<<<<< HEAD
-    // SECURITY: ?token= query-string auth is deliberately NOT checked here.
-    // Query parameters are written to server access logs, retained in browser
-    // history, and forwarded in HTTP Referer headers to third parties. Tokens
-    // must only arrive via Authorization: Bearer or X-API-Key headers, or via
-    // the session cookie. WebSocket upgrades are the sole exception (browsers
-    // cannot set custom headers on WebSocket connections); they authenticate
-    // via crate::ws::ws_auth_token, which never passes through this middleware.
-=======
     // SECURITY: ?token= query parameter is ONLY accepted for WebSocket upgrade
     // requests and SSE streaming endpoints where browsers cannot send custom
     // headers. For all other REST routes the token must come from an
@@ -752,7 +743,6 @@ pub async fn auth(
     } else {
         None
     };
->>>>>>> b9c55db9 (fix(api): channel body limit, remove ?token= from non-WS routes, implement PUT agents, deduplicate operationIds)
 
     // Accept if header auth matches a static API key or legacy token
     if header_auth == Some(true) {

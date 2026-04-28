@@ -40,29 +40,49 @@ fn sanitize_channel_error(err: &str) -> String {
 
 /// Check if text looks like a raw tool call leaked as content.
 ///
+/// Responses longer than this are overwhelmingly natural language, not raw
+/// tool-call JSON that leaked through the bridge.  Only start-of-text
+/// patterns are reliable at arbitrary lengths; substring checks produce
+/// false positives on long explanatory text that *mentions* tool calls.
+const MAX_HEURISTIC_LEN: usize = 2000;
+
 /// Some providers emit tool calls as plain text (recovered by
 /// `agent_loop::recover_text_tool_calls`). These should not be
 /// forwarded to the user through streaming channels.
 fn looks_like_tool_call(text: &str) -> bool {
     let t = text.trim();
-    // JSON-style tool calls (may appear at start of text)
-    t.starts_with("[{")
-        || t.starts_with("functions.")
-        || t.starts_with("{\"type\":\"function\"")
-        || (t.starts_with('[') && t.contains("'type': 'text'"))
-        || contains_bare_json_tool_call(t)
-        // Tag-based patterns — use contains() because tool call tags may
-        // appear after natural language preamble
-        || t.contains("<function=")
-        || t.contains("<function>")
-        || t.contains("<function ")
-        || t.contains("<tool>")
-        || t.contains("[TOOL_CALL]")
-        || t.contains("<tool_call>")
-        // Pattern 4: markdown code block containing a tool call
-        || contains_markdown_tool_call(t)
-        // Pattern 5: backtick-wrapped tool call
-        || contains_backtick_tool_call(t)
+
+    // Start-of-text patterns — safe at any length because a genuine leaked
+    // tool call starts immediately with recognisable JSON/prefix markers.
+    if t.starts_with("[{") || t.starts_with("functions.") || t.starts_with("{\"type\":\"function\"")
+    {
+        return true;
+    }
+
+    // Substring / structural patterns — only reliable for short responses.
+    // Long natural-language replies that *discuss* tools would otherwise
+    // trigger false positives here.
+    if text.len() <= MAX_HEURISTIC_LEN {
+        if (t.starts_with('[') && t.contains("'type': 'text'"))
+            || contains_bare_json_tool_call(t)
+            // Tag-based patterns — use contains() because tool call tags may
+            // appear after natural language preamble
+            || t.contains("<function=")
+            || t.contains("<function>")
+            || t.contains("<function ")
+            || t.contains("<tool>")
+            || t.contains("[TOOL_CALL]")
+            || t.contains("<tool_call>")
+            // Pattern 4: markdown code block containing a tool call
+            || contains_markdown_tool_call(t)
+            // Pattern 5: backtick-wrapped tool call
+            || contains_backtick_tool_call(t)
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn contains_markdown_tool_call(text: &str) -> bool {
@@ -3639,6 +3659,25 @@ mod tests {
         // agent_send tool call emitted as bare JSON by some providers (#2379)
         let text = r#"{"name": "agent_send", "parameters": {"agent_id": "AgentB", "message": "Hello from AgentA"}}"#;
         assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_long_response_mentioning_tool_call() {
+        // A long natural-language response that mentions "tool_call" should NOT
+        // be filtered (#4028).  Pad to exceed MAX_HEURISTIC_LEN.
+        let padding = "x".repeat(2001);
+        let text =
+            format!("Here is an explanation of how tool_call patterns work in the API. {padding}");
+        assert!(!looks_like_tool_call(&text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_still_filters_start_of_text_json_regardless_of_length() {
+        // A start-of-text JSON tool call must still be caught even when the
+        // full buffer is long (#4028).
+        let padding = " ".repeat(2001);
+        let text = format!("[{{\"tool_call\":\"x\"}}{padding}");
+        assert!(looks_like_tool_call(&text));
     }
 
     /// Verify that tool call JSON emitted as text (without ToolUseStart) is
