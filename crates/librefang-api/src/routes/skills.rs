@@ -2171,13 +2171,6 @@ pub async fn install_hand_deps(
             }
         };
 
-        // Execute the install command
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
-
         // For winget on Windows, add --accept flags to avoid interactive prompts
         let final_cmd = if cfg!(windows) && cmd.starts_with("winget ") {
             format!("{cmd} --accept-source-agreements --accept-package-agreements")
@@ -2200,13 +2193,27 @@ pub async fn install_hand_deps(
             continue;
         }
 
+        // Split into program + arguments and exec directly — no shell involved.
+        // This eliminates the sh -c / cmd /C injection vector entirely.
+        let parts: Vec<&str> = final_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            results.push(serde_json::json!({
+                "key": req.key,
+                "status": "error",
+                "command": final_cmd,
+                "message": "Install command is empty",
+            }));
+            continue;
+        }
+        let program = parts[0];
+        let args = &parts[1..];
+
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
         let output = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
-            tokio::process::Command::new(shell)
-                .arg(flag)
-                .arg(&final_cmd)
+            tokio::process::Command::new(program)
+                .args(args)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null())
