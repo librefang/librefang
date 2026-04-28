@@ -109,17 +109,16 @@ jobs:
 
   ios_smoke:
     name: iOS (simulator, unsigned)
-    # macos-26 ships Xcode 26 + iOS 26.4 Simulator runtime pre-staged.
-    # Matches the local dev setup (Xcode 26.4.1 + iOS 26.4 SDK), so the
-    # smoke binary is built against the same SDK developers ship from.
+    # macos-26 ships Xcode 26 (default 26.2) + iOS 26.x Simulator runtimes
+    # pre-staged. Use the default Xcode rather than pinning 26.4.1: pinning
+    # forces a setup-xcode switch (~1–2 min overhead per run) for an SDK
+    # delta that doesn't materially affect a Tauri smoke build, which only
+    # needs *some* iOS 26 SDK to verify the toolchain still produces a
+    # binary.
     runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: maxim-lobanov/setup-xcode@1242409711ff5721add51979e9e11e23ebb7e5a4 # v1
-        with:
-          xcode-version: "26.4.1"
 
       - name: Show selected Xcode
         run: |
