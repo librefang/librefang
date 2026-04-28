@@ -3927,11 +3927,6 @@ fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
 }
 
-/// Default workflow stale timeout: 60 minutes.
-fn default_workflow_stale_timeout_minutes() -> u64 {
-    60
-}
-
 /// Default maximum concurrent background LLM calls.
 fn default_max_concurrent_bg_llm() -> usize {
     5
