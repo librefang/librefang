@@ -327,9 +327,17 @@ pub async fn auth_start(
         }
     }
 
-    // Generate PKCE challenge and state
+    // Generate PKCE challenge and state.
+    // Embed the MCP server name in the state so the callback can verify the state
+    // was issued for exactly this server — prevents cross-flow CSRF where state
+    // from server A is replayed against server B's callback.
+    // Format: "{url-safe-server-name}:{random-nonce}"
     let (pkce_verifier, pkce_challenge) = mcp_oauth::generate_pkce();
-    let pkce_state = mcp_oauth::generate_state();
+    let pkce_state = format!(
+        "{}:{}",
+        percent_encode_param(&name),
+        mcp_oauth::generate_state()
+    );
 
     // Wipe any abandoned prior-flow state before storing new PKCE values.
     for field in &["pkce_verifier", "pkce_state", "redirect_uri"] {
@@ -491,11 +499,21 @@ pub async fn auth_callback(
     };
 
     // Validate state using constant-time comparison to prevent timing attacks.
+    // The state format is "{url-safe-server-name}:{random-nonce}" — the prefix
+    // binds the callback to the MCP server that initiated the flow.
+    let expected_prefix = format!("{}:", percent_encode_param(&name));
+    let prefix_ok = received_state.starts_with(&expected_prefix);
     let received_bytes = received_state.as_bytes();
     let stored_bytes = stored_state.as_bytes();
-    let states_match = received_bytes.len() == stored_bytes.len()
+    let nonce_match = received_bytes.len() == stored_bytes.len()
         && bool::from(received_bytes.ct_eq(stored_bytes));
-    if !states_match {
+    if !prefix_ok || !nonce_match {
+        tracing::warn!(
+            server = %name,
+            prefix_ok,
+            nonce_match,
+            "OAuth state validation failed — possible CSRF or cross-flow replay"
+        );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
             name.clone(),
@@ -531,8 +549,10 @@ pub async fn auth_callback(
         }
     };
 
-    // Exchange authorization code for tokens
-    let http_client = reqwest::Client::new();
+    // Exchange authorization code for tokens.
+    // Use the proxy-aware client so token endpoint requests respect proxy config
+    // and inherit default connect/read timeouts (prevents hung token exchanges).
+    let http_client = librefang_runtime::http_client::proxied_client();
     let mut form_params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),

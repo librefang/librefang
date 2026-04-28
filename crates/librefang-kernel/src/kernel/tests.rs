@@ -4621,3 +4621,177 @@ fn mcp_summary_inner_tool_list_is_sorted() {
         "Inner tool list must be sorted; got: {summary}"
     );
 }
+
+// ─── resolve_dispatch_session_id ──────────────────────────────────────────
+//
+// Backstop for the session-id-in-failure-log change: ensures the kernel
+// dispatch site and the warn log line always agree on which session id was
+// used, including the `session_mode = "new"` path that would otherwise mint
+// a different fresh id deeper inside `execute_llm_agent`. Tests target the
+// pure helper directly so they don't need a live kernel + driver setup.
+
+fn dummy_sender(channel: &str, chat_id: Option<&str>) -> SenderContext {
+    SenderContext {
+        channel: channel.to_string(),
+        chat_id: chat_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn resolve_dispatch_session_id_returns_none_for_wasm_module() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let got = resolve_dispatch_session_id(
+        "wasm:foo",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(got, None);
+}
+
+#[test]
+fn resolve_dispatch_session_id_returns_none_for_python_module() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let got = resolve_dispatch_session_id(
+        "python:foo",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(got, None);
+}
+
+#[test]
+fn resolve_dispatch_session_id_explicit_override_wins() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let override_sid = SessionId::new();
+    let sender = dummy_sender("telegram", Some("chat-1"));
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::New,
+        Some(&sender),
+        Some(librefang_types::agent::SessionMode::Persistent),
+        Some(override_sid),
+    );
+    assert_eq!(got, Some(override_sid));
+}
+
+#[test]
+fn resolve_dispatch_session_id_uses_channel_scope_with_chat_id() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let sender = dummy_sender("telegram", Some("chat-42"));
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        Some(&sender),
+        None,
+        None,
+    );
+    let expected = SessionId::for_channel(agent_id, "telegram:chat-42");
+    assert_eq!(got, Some(expected));
+}
+
+#[test]
+fn resolve_dispatch_session_id_uses_channel_only_when_no_chat_id() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let sender = dummy_sender("slack", None);
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        Some(&sender),
+        None,
+        None,
+    );
+    let expected = SessionId::for_channel(agent_id, "slack");
+    assert_eq!(got, Some(expected));
+}
+
+#[test]
+fn resolve_dispatch_session_id_canonical_session_bypasses_channel_scope() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let sender = SenderContext {
+        channel: "telegram".to_string(),
+        chat_id: Some("chat-7".to_string()),
+        use_canonical_session: true,
+        ..Default::default()
+    };
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        Some(&sender),
+        None,
+        None,
+    );
+    assert_eq!(got, Some(entry_sid));
+}
+
+#[test]
+fn resolve_dispatch_session_id_persistent_mode_returns_entry_session() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::Persistent,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(got, Some(entry_sid));
+}
+
+#[test]
+fn resolve_dispatch_session_id_new_mode_mints_fresh_session() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::New,
+        None,
+        None,
+        None,
+    );
+    let sid = got.expect("expected Some session id");
+    assert_ne!(sid, entry_sid, "New mode must mint a fresh session id");
+}
+
+#[test]
+fn resolve_dispatch_session_id_session_mode_override_beats_manifest() {
+    let agent_id = AgentId::new();
+    let entry_sid = SessionId::new();
+    // Manifest says New, override says Persistent → must return entry id.
+    let got = resolve_dispatch_session_id(
+        "builtin:chat",
+        agent_id,
+        entry_sid,
+        librefang_types::agent::SessionMode::New,
+        None,
+        Some(librefang_types::agent::SessionMode::Persistent),
+        None,
+    );
+    assert_eq!(got, Some(entry_sid));
+}

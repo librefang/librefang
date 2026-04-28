@@ -304,6 +304,46 @@ fn collect_rotation_key_specs(
     specs
 }
 
+/// Resolve the effective session id used by the dispatch site in
+/// `send_message_full_with_upstream`. Mirrors the resolution that
+/// `execute_llm_agent` performs internally so the kernel and any failure /
+/// supervisor logs agree on which session id was actually used — including
+/// when `session_mode = "new"` would otherwise mint a fresh id deeper in
+/// the stack. Returns `None` for module types that do not carry a session
+/// (wasm, python).
+fn resolve_dispatch_session_id(
+    module: &str,
+    agent_id: AgentId,
+    entry_session_id: SessionId,
+    manifest_session_mode: librefang_types::agent::SessionMode,
+    sender_context: Option<&SenderContext>,
+    session_mode_override: Option<librefang_types::agent::SessionMode>,
+    session_id_override: Option<SessionId>,
+) -> Option<SessionId> {
+    if module.starts_with("wasm:") || module.starts_with("python:") {
+        return None;
+    }
+    if let Some(sid) = session_id_override {
+        return Some(sid);
+    }
+    Some(match sender_context {
+        Some(ctx) if !ctx.channel.is_empty() && !ctx.use_canonical_session => {
+            let scope = match &ctx.chat_id {
+                Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
+                _ => ctx.channel.clone(),
+            };
+            SessionId::for_channel(agent_id, &scope)
+        }
+        _ => {
+            let mode = session_mode_override.unwrap_or(manifest_session_mode);
+            match mode {
+                librefang_types::agent::SessionMode::Persistent => entry_session_id,
+                librefang_types::agent::SessionMode::New => SessionId::new(),
+            }
+        }
+    })
+}
+
 /// One in-flight `(agent, session)` loop. Stored in
 /// `LibreFangKernel.running_tasks` to support per-session cancellation
 /// (`stop_session_run`) and runtime introspection
@@ -4752,6 +4792,21 @@ system_prompt = "You are a helpful assistant."
             return Ok(AgentLoopResult::default());
         }
 
+        // Resolve the effective session id up front for the LLM path so we
+        // can include it in supervisor / failure logs below, then pass it
+        // back down as the explicit override so the kernel and the log line
+        // agree on the id even when `session_mode = "new"` would otherwise
+        // mint a fresh session inside `execute_llm_agent`.
+        let resolved_session_id: Option<SessionId> = resolve_dispatch_session_id(
+            &entry.manifest.module,
+            agent_id,
+            entry.session_id,
+            entry.manifest.session_mode,
+            sender_context,
+            session_mode_override,
+            session_id_override,
+        );
+
         // Dispatch based on module type
         let result = match entry.manifest.module.as_str() {
             module if module.starts_with("wasm:") => {
@@ -4772,7 +4827,7 @@ system_prompt = "You are a helpful assistant."
                     sender_context,
                     session_mode_override,
                     thinking_override,
-                    session_id_override,
+                    resolved_session_id.or(session_id_override),
                     upstream_interrupt,
                 )
                 .await
@@ -5075,7 +5130,15 @@ system_prompt = "You are a helpful assistant."
 
                 // Record the failure in supervisor for health reporting
                 self.supervisor.record_panic();
-                warn!(agent_id = %agent_id, error = %e, "Agent loop failed — recorded in supervisor");
+                let session_id_for_log = resolved_session_id
+                    .map(|s| s.0.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
+                warn!(
+                    agent_id = %agent_id,
+                    session_id = %session_id_for_log,
+                    error = %e,
+                    "Agent loop failed — recorded in supervisor"
+                );
 
                 // Push failure notification to alert_channels
                 let agent_name = self
@@ -8800,6 +8863,56 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Apply a caller-supplied manifest to a running agent and persist it to
+    /// disk.  This is the in-memory counterpart of `reload_agent_from_disk`:
+    /// instead of reading the TOML file it accepts a pre-parsed manifest,
+    /// replaces the registry entry, refreshes capabilities / quota / memory,
+    /// invalidates the tool cache, and then persists the new state to
+    /// `agent.toml` so the change survives a restart.
+    ///
+    /// The same invariants as `reload_agent_from_disk` are enforced:
+    /// - `name` and `tags` are locked to the current values (use the rename /
+    ///   tag APIs to change them)
+    /// - `workspace` is preserved when the incoming manifest leaves it unset
+    pub fn update_manifest(
+        &self,
+        agent_id: AgentId,
+        mut new_manifest: librefang_types::agent::AgentManifest,
+    ) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Preserve invariants that the registry indices depend on.
+        if new_manifest.workspace.is_none() {
+            new_manifest.workspace = entry.manifest.workspace.clone();
+        }
+        new_manifest.name = entry.manifest.name.clone();
+        new_manifest.tags = entry.manifest.tags.clone();
+
+        self.registry
+            .replace_manifest(agent_id, new_manifest)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(refreshed) = self.registry.get(agent_id) {
+            let caps = manifest_to_capabilities(&refreshed.manifest);
+            self.capabilities.grant(agent_id, caps);
+            self.scheduler
+                .update_quota(agent_id, refreshed.manifest.resources.clone());
+            let _ = self.memory.save_agent(&refreshed);
+        }
+
+        // Invalidate the per-agent tool cache so skill/MCP allowlist changes
+        // take effect on the next message.
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        // Persist to disk so the change survives a daemon restart.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, "Applied and persisted updated agent manifest");
+        Ok(())
+    }
+
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty
@@ -12036,7 +12149,19 @@ system_prompt = "You are a helpful assistant."
                                 // {"wakeAgent": false} in the last non-empty output line.
                                 // Only fires when the script exits successfully.
                                 if let Some(script_path) = pre_check_script {
-                                    if !cron_script_wake_gate(&job_name, script_path).await {
+                                    // Resolve the agent workspace so cron_script_wake_gate
+                                    // can restrict the child's cwd to the agent's own directory.
+                                    let agent_ws = kernel
+                                        .registry
+                                        .get(agent_id)
+                                        .and_then(|e| e.manifest.workspace.clone());
+                                    if !cron_script_wake_gate(
+                                        &job_name,
+                                        script_path,
+                                        agent_ws.as_deref(),
+                                    )
+                                    .await
+                                    {
                                         tracing::info!(
                                             job = %job_name,
                                             "cron: script gate wakeAgent=false, skipping agent"
@@ -14932,45 +15057,119 @@ fn sanitize_reviewer_block(s: &str, max_chars: usize) -> String {
 /// - Find the last non-empty stdout line and try to parse it as JSON.
 /// - If the parsed object has `"wakeAgent": false` (strict bool), return false.
 /// - Everything else (non-JSON, missing key, null, 0, "") → return true.
-async fn cron_script_wake_gate(job_name: &str, script_path: &str) -> bool {
+///
+/// # Security hardening
+///
+/// `pre_check_script` used to inherit the full daemon environment, allowing
+/// it to read API keys and other secrets from env vars.  It also had no
+/// working-directory restriction and no stdout size limit.
+///
+/// This implementation now:
+/// * Clears the inherited environment with `env_clear()` so daemon secrets
+///   are not leaked to the child process.
+/// * Passes only `PATH` and `HOME` so the script can still locate standard
+///   binaries without receiving application-layer credentials.
+/// * Sets `current_dir` to the agent workspace when one is available,
+///   otherwise falls back to a system temp directory.
+/// * Caps stdout (and stderr) at 64 KiB to prevent a misbehaving script
+///   from filling daemon memory.
+async fn cron_script_wake_gate(
+    job_name: &str,
+    script_path: &str,
+    agent_workspace: Option<&std::path::Path>,
+) -> bool {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
     use tokio::process::Command;
+
+    /// Maximum bytes we read from stdout before truncating.
+    const MAX_OUTPUT: usize = 64 * 1024; // 64 KiB
+
+    // Resolve a safe working directory for the child process.
+    // Preference order: agent workspace → system temp → current dir.
+    let cwd = agent_workspace
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+
+    // Build the command with a stripped-down environment.
+    // `env_clear` prevents all inherited daemon env vars (API keys, secrets,
+    // socket paths, etc.) from reaching the child.  We selectively restore
+    // the two vars that most scripts need to function correctly.
+    let mut cmd = Command::new(script_path);
+    cmd.env_clear();
+    if let Ok(path_val) = std::env::var("PATH") {
+        cmd.env("PATH", path_val);
+    }
+    if let Ok(home_val) = std::env::var("HOME") {
+        cmd.env("HOME", home_val);
+    }
+    cmd.current_dir(&cwd);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
 
     // Hard cap: pre-check scripts must complete within 30 s.
     // A hung script would otherwise block the cron dispatcher indefinitely.
-    let run = async { Command::new(script_path).output().await };
-
-    let output = match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
-        Err(_elapsed) => {
-            tracing::warn!(
-                job = %job_name,
-                script = %script_path,
-                "cron: pre-check script timed out after 30s, waking agent"
-            );
-            return true;
+    let run = async {
+        let child = cmd.spawn();
+        match child {
+            Err(e) => Err(e),
+            Ok(mut child) => {
+                // Cap stdout at MAX_OUTPUT bytes.
+                let mut stdout_buf = Vec::with_capacity(MAX_OUTPUT.min(4096));
+                if let Some(stdout) = child.stdout.take() {
+                    let _ = stdout
+                        .take(MAX_OUTPUT as u64)
+                        .read_to_end(&mut stdout_buf)
+                        .await;
+                }
+                // Drain stderr (up to the same cap) to avoid blocking the child.
+                if let Some(stderr) = child.stderr.take() {
+                    let mut _discard = Vec::new();
+                    let _ = stderr
+                        .take(MAX_OUTPUT as u64)
+                        .read_to_end(&mut _discard)
+                        .await;
+                }
+                let status = child.wait().await?;
+                Ok((status, stdout_buf))
+            }
         }
-        Ok(Err(e)) => {
-            tracing::warn!(
-                job = %job_name,
-                script = %script_path,
-                error = %e,
-                "cron: pre-check script failed to launch, waking agent"
-            );
-            return true;
-        }
-        Ok(Ok(o)) => o,
     };
 
-    if !output.status.success() {
+    let (status, raw_stdout) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), run).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    job = %job_name,
+                    script = %script_path,
+                    "cron: pre-check script timed out after 30s, waking agent"
+                );
+                return true;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    job = %job_name,
+                    script = %script_path,
+                    error = %e,
+                    "cron: pre-check script failed to launch, waking agent"
+                );
+                return true;
+            }
+            Ok(Ok(pair)) => pair,
+        };
+
+    if !status.success() {
         tracing::warn!(
             job = %job_name,
             script = %script_path,
-            code = ?output.status.code(),
+            code = ?status.code(),
             "cron: pre-check script exited non-zero, waking agent"
         );
         return true;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&raw_stdout);
     parse_wake_gate(&stdout)
 }
 

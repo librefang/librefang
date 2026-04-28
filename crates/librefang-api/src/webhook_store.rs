@@ -253,6 +253,11 @@ impl CreateWebhookRequest {
         }
         validate_webhook_url(&self.url)?;
         if let Some(ref s) = self.secret {
+            if s.is_empty() {
+                return Err(
+                    "secret must not be empty; omit the field entirely to create a webhook without authentication".to_string(),
+                );
+            }
             if s.len() > MAX_SECRET_LEN {
                 return Err(format!(
                     "secret exceeds maximum length of {} chars",
@@ -528,6 +533,18 @@ mod tests {
         req.url = "not a url".to_string();
         let err = store.create(req).unwrap_err();
         assert!(err.contains("not a valid URL"));
+    }
+
+    #[test]
+    fn create_rejects_empty_secret() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        req.secret = Some(String::new());
+        let err = store.create(req).unwrap_err();
+        assert!(
+            err.contains("secret must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

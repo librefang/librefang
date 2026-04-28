@@ -386,14 +386,17 @@ pub async fn auth(
     } else {
         after_version.strip_suffix('/').unwrap_or(&after_version)
     };
-    // Loopback requests (CLI on the same machine) bypass auth entirely —
-    // BUT if a Bearer/X-API-Key/?token= matches a configured user_api_key,
-    // attribute the request before short-circuiting so RBAC-gated handlers
-    // (audit, per-user budget write, …) that require an AuthenticatedApiUser
-    // extension can still be reached from loopback callers like the CLI or
-    // a Vite dev-proxy. Anonymous loopback (no token at all) keeps the
-    // legacy trusted-anonymous behaviour. Non-loopback callers fall through
-    // to the full auth flow below.
+    // SECURITY: Loopback requests go through the same auth check as all other
+    // connections. The unconditional loopback bypass has been removed — any
+    // process on the same host must supply a valid token just like a remote
+    // caller (see bug #3558).
+    //
+    // We still perform early token attribution here so that RBAC-gated
+    // handlers (audit, per-user budget write, …) that require an
+    // AuthenticatedApiUser extension work correctly for loopback callers that
+    // carry a valid session or per-user API key (e.g. the CLI, a Vite
+    // dev-proxy). After attribution the request falls through to the normal
+    // is_public / token-verification flow below — there is no early return.
     {
         let is_loopback = request
             .extensions()
@@ -402,13 +405,9 @@ pub async fn auth(
             .unwrap_or(false);
         if is_loopback {
             if let Some(token_str) = extract_request_token(&request) {
-                // First try user_api_keys (Argon2 verify against api_key_hash).
-                // Fall back to active dashboard sessions (random hex token
-                // exact match) — without this, a loopback caller carrying a
-                // dashboard_login session (the most common shape: the SPA
-                // proxied through Vite at 127.0.0.1) would lose its role
-                // attribution at the very first middleware hop and audit
-                // would still 403 the dashboard user.
+                // First try active dashboard sessions (random hex token exact
+                // match) — the SPA proxied through Vite at 127.0.0.1 presents
+                // a session cookie that must retain its role attribution.
                 let session_attribution = {
                     let sessions = auth_state.active_sessions.read().await;
                     sessions.get(&token_str).cloned()
@@ -423,26 +422,21 @@ pub async fn auth(
                             user_id,
                         });
                     }
-                    return next.run(request).await;
+                    // Fall through to normal auth — the session token will be
+                    // validated again in the main token-check path below.
                 }
-                // Use the local `user_api_keys` snapshot taken at the top
-                // of `auth()` (line ~363) — `auth_state.user_api_keys` is
-                // an `Arc<RwLock<Vec<…>>>` since the rotate-key fix and
-                // does not expose `iter()` directly. The snapshot is the
-                // single source of truth for this request.
-                if let Some(user) = user_api_keys
+                // Try per-user API keys (Argon2 verify against api_key_hash).
+                // Use the local `user_api_keys` snapshot taken at the top of
+                // `auth()` — single source of truth for this request.
+                else if let Some(user) = user_api_keys
                     .iter()
                     .find(|user| {
                         crate::password_hash::verify_password(&token_str, &user.api_key_hash)
                     })
                     .cloned()
                 {
-                    // Mirror the non-loopback role gate so attributing a
-                    // Viewer/User key on loopback can't smuggle a write the
-                    // same key would be denied over the LAN. Without this
-                    // the attribution would be honest about *who* you are
-                    // but dishonest about *what you can do*, which is worse
-                    // than the legacy trusted-anonymous bypass.
+                    // Apply the role gate so a Viewer/User key on loopback
+                    // cannot smuggle a write it would be denied over the LAN.
                     if !user_role_allows_request(user.role, &method, path) {
                         if let Some(ref audit) = auth_state.audit_log {
                             audit.record_with_context(
@@ -479,9 +473,12 @@ pub async fn auth(
                         role: user.role,
                         user_id: user.user_id,
                     });
+                    // Fall through to normal auth — the token will be
+                    // re-verified in the main token-check path below.
                 }
             }
-            return next.run(request).await;
+            // No early return — loopback requests continue through the
+            // standard is_public check and token verification below.
         }
     }
 
@@ -1927,5 +1924,45 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- Regression tests for bug #3558: loopback bypass removed -----------
+
+    /// Regression #3558: when an api_key IS configured, a loopback request
+    /// with NO token must be rejected. The old code unconditionally let any
+    /// loopback caller through; the fix removes that bypass so loopback goes
+    /// through the same token check as every other origin.
+    #[tokio::test]
+    async fn configured_key_loopback_no_token_is_rejected() {
+        let app = protected_router(with_key_state("secret"));
+        let resp = app.oneshot(req_with_addr("127.0.0.1")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "loopback with a configured api_key but no token must be 401, not bypassed"
+        );
+    }
+
+    /// Regression #3558: when an api_key IS configured, a loopback request
+    /// WITH the correct token must still succeed (the fix must not break
+    /// legitimate loopback callers that present credentials).
+    #[tokio::test]
+    async fn configured_key_loopback_valid_token_is_allowed() {
+        let app = protected_router(with_key_state("secret"));
+        let addr: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/agents/1")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback with a valid bearer token must still be allowed through"
+        );
     }
 }

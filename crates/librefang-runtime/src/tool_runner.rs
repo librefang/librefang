@@ -537,6 +537,26 @@ pub async fn execute_tool_raw(
                 };
             };
 
+            // FIXME(#3822): shell_exec does not enforce readonly_workspace_prefixes.
+            // Named workspaces declared with `mode = "r"` are exposed to the shell
+            // environment via TOOLS.md, but nothing prevents the spawned process from
+            // writing to those directories.  A proper sandbox (e.g. Linux mount
+            // namespaces, macOS sandbox-exec, or a chroot) is required to close this
+            // gap.  Until then we emit a warning whenever readonly prefixes exist so
+            // the issue is visible in daemon logs.
+            // Track: https://github.com/librefang/librefang/issues/3822
+            if let (Some(k), Some(aid)) = (kernel, caller_agent_id) {
+                let ro = k.readonly_workspace_prefixes(aid);
+                if !ro.is_empty() {
+                    tracing::warn!(
+                        agent_id = %aid,
+                        readonly_prefixes = ?ro,
+                        "shell_exec: readonly_workspace_prefixes are not enforced for shell \
+                         commands — the spawned process may write to read-only named workspaces"
+                    );
+                }
+            }
+
             let is_full_exec = exec_policy
                 .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
@@ -2639,6 +2659,10 @@ async fn tool_shell_exec(
     // Capture piped output so we can collect it after the process exits.
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+
+    // Ensure the child is terminated when the Child handle is dropped (e.g.
+    // on timeout or session cancellation) rather than becoming an orphan.
+    cmd.kill_on_drop(true);
 
     // Spawn the child process so we hold a handle that can be killed if the
     // session interrupt fires while the command is running.  Using `output()`
@@ -5081,6 +5105,7 @@ async fn convert_to_ogg_opus(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn();
 
     let mut child = match spawn_result {
