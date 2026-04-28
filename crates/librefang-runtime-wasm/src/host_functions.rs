@@ -330,30 +330,43 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
         return e;
     }
 
-    state.tokio_handle.block_on(async {
-        // Build a DNS-pinned client so the HTTP request connects to the
-        // same IPs we already validated (prevents DNS-rebinding TOCTOU).
-        let mut builder = librefang_http::proxied_client_builder();
-        for addr in &ssrf_result.resolved {
-            builder = builder.resolve(&ssrf_result.hostname, *addr);
-        }
-        let client = builder.build().expect("HTTP client build");
-        let request = match method.to_uppercase().as_str() {
-            "POST" => client.post(url).body(body.to_string()),
-            "PUT" => client.put(url).body(body.to_string()),
-            "DELETE" => client.delete(url),
-            _ => client.get(url),
-        };
-        match request.send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                match resp.text().await {
-                    Ok(text) => json!({"ok": {"status": status, "body": text}}),
-                    Err(e) => json!({"error": format!("Failed to read response: {e}")}),
-                }
+    // SECURITY (Bug #3867): WASM execution runs inside `tokio::task::spawn_blocking`.
+    // Using `Handle::block_on` directly inside a blocking thread can deadlock
+    // on single-threaded runtimes and — more critically — bypasses the
+    // epoch-based watchdog: the epoch only ticks inside the async context, so a
+    // blocking async call that stalls never trips the timeout.
+    //
+    // `tokio::task::block_in_place` tells the runtime to move other tasks off
+    // the current thread before blocking, which avoids the deadlock and keeps
+    // the scheduler responsive.  The epoch watchdog thread is unaffected —
+    // it runs independently and will still fire `increment_epoch` when the
+    // wall-clock deadline is reached.
+    tokio::task::block_in_place(|| {
+        state.tokio_handle.block_on(async {
+            // Build a DNS-pinned client so the HTTP request connects to the
+            // same IPs we already validated (prevents DNS-rebinding TOCTOU).
+            let mut builder = librefang_http::proxied_client_builder();
+            for addr in &ssrf_result.resolved {
+                builder = builder.resolve(&ssrf_result.hostname, *addr);
             }
-            Err(e) => json!({"error": format!("Request failed: {e}")}),
-        }
+            let client = builder.build().expect("HTTP client build");
+            let request = match method.to_uppercase().as_str() {
+                "POST" => client.post(url).body(body.to_string()),
+                "PUT" => client.put(url).body(body.to_string()),
+                "DELETE" => client.delete(url),
+                _ => client.get(url),
+            };
+            match request.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    match resp.text().await {
+                        Ok(text) => json!({"ok": {"status": status, "body": text}}),
+                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                    }
+                }
+                Err(e) => json!({"error": format!("Request failed: {e}")}),
+            }
+        })
     })
 }
 
@@ -552,13 +565,18 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match state
-        .tokio_handle
-        .block_on(kernel.send_to_agent(target, message))
-    {
-        Ok(response) => json!({"ok": response}),
-        Err(e) => json!({"error": e}),
-    }
+    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
+    // off this thread before blocking, avoiding deadlock and preserving the
+    // epoch watchdog's ability to interrupt.
+    tokio::task::block_in_place(|| {
+        match state
+            .tokio_handle
+            .block_on(kernel.send_to_agent(target, message))
+        {
+            Ok(response) => json!({"ok": response}),
+            Err(e) => json!({"error": e}),
+        }
+    })
 }
 
 fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -574,14 +592,19 @@ fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_jso
         None => return json!({"error": "No kernel handle available"}),
     };
     // SECURITY: Enforce capability inheritance — child <= parent
-    match state.tokio_handle.block_on(kernel.spawn_agent_checked(
-        manifest_toml,
-        Some(&state.agent_id),
-        &state.capabilities,
-    )) {
-        Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
-        Err(e) => json!({"error": e}),
-    }
+    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
+    // off this thread before blocking, avoiding deadlock and preserving the
+    // epoch watchdog's ability to interrupt.
+    tokio::task::block_in_place(|| {
+        match state.tokio_handle.block_on(kernel.spawn_agent_checked(
+            manifest_toml,
+            Some(&state.agent_id),
+            &state.capabilities,
+        )) {
+            Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
+            Err(e) => json!({"error": e}),
+        }
+    })
 }
 
 #[cfg(test)]
