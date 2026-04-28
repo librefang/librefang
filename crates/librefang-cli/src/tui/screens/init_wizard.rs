@@ -617,15 +617,32 @@ pub fn run() -> InitResult {
         // initial Enter press (fixes #3629: write-before-validate).
         if state.key_test == KeyTestState::Testing {
             if let Ok(ok) = test_rx.try_recv() {
-                // Persist the key now that we have a test result. We write for
-                // both Ok (verified) and Warn (unverified but user confirmed)
-                // so the daemon can pick it up either way.
-                if let Some(p) = state.provider() {
-                    if !p.env_var.is_empty() {
-                        let _ = dotenv::save_env_key(p.env_var, &state.api_key_input);
-                    }
-                }
+                // Persist ONLY when the validation succeeded.  The
+                // pre-fix comment claimed the Warn path was "unverified
+                // but user confirmed", but the wizard auto-advances
+                // 600 ms after either Ok or Warn (see the matches!
+                // block below) — there is no explicit confirmation
+                // step.  Writing a failing key still landed it in
+                // .env, so the daemon booted with a key the wizard
+                // had just told the user was bad.  Now Warn keeps the
+                // user-typed value in `state.api_key_input` only, the
+                // UI surfaces the validation message, and nothing
+                // hits disk until the user retries with a key that
+                // actually authenticates.
                 state.key_test = if ok {
+                    if let Some(p) = state.provider() {
+                        if !p.env_var.is_empty() {
+                            if let Err(e) =
+                                dotenv::save_env_key(p.env_var, &state.api_key_input)
+                            {
+                                tracing::warn!(
+                                    provider = ?p.name,
+                                    error = %e,
+                                    "init wizard: failed to persist verified API key"
+                                );
+                            }
+                        }
+                    }
                     KeyTestState::Ok
                 } else {
                     KeyTestState::Warn
