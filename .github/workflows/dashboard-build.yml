@@ -10,6 +10,12 @@ on:
       - 'crates/librefang-api/dashboard/package.json'
       - 'crates/librefang-api/dashboard/vite.config.*'
       - 'crates/librefang-api/dashboard/tsconfig.*'
+  pull_request:
+    paths:
+      - 'crates/librefang-api/dashboard/src/**'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/vite.config.*'
+      - 'crates/librefang-api/dashboard/tsconfig.*'
   release:
     types: [published]
   workflow_dispatch:
@@ -36,9 +42,19 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/librefang-api/dashboard
-        # pnpm 10 in CI ignores both .npmrc and pnpm-workspace.yaml for the
-        # ignored-builds setting; pass it on the CLI so it can't be missed.
         run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
+
+      - name: Typecheck
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run typecheck
+
+      - name: Run tests
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run test
+
+      - name: Run lint checks
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run test:lint
 
       - name: Build dashboard
         working-directory: crates/librefang-api/dashboard

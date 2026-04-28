@@ -101,6 +101,7 @@ function buildExportUrl(
 // the browser would download the daemon's 401 / login HTML as
 // `audit.csv`. Fetch with the Bearer header, materialise the body as
 // a Blob, then programmatically click an object-URL anchor.
+// Exception: file download (blob response)
 async function downloadExport(
   filters: AuditQueryFilters,
   format: "csv" | "json",
@@ -109,6 +110,7 @@ async function downloadExport(
   const token = localStorage.getItem("librefang-api-key") || "";
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  // Exception: file download (blob response)
   const resp = await fetch(url, { headers });
   if (!resp.ok) {
     throw await ApiError.fromResponse(resp);

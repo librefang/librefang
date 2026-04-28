@@ -76,11 +76,14 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
+    options: Record<string, unknown> = {};
     loadAddon() {}
     open() {}
     write() {}
+    clear() {}
     onData() {}
     onResize() {}
+    attachCustomKeyEventHandler() {}
     dispose() {}
   },
 }));
@@ -88,6 +91,13 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit() {}
+  },
+}));
+
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class {
+    findNext() {}
+    findPrevious() {}
   },
 }));
 
