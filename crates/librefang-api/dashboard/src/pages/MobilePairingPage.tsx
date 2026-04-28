@@ -1,5 +1,4 @@
-import { useEffect, useRef } from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
 import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2 } from "lucide-react";

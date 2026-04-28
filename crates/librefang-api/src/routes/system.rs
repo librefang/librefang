@@ -2868,6 +2868,7 @@ pub async fn remove_binding(
 pub async fn pairing_request(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    headers: axum::http::HeaderMap,
     axum::extract::Host(host): axum::extract::Host,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2880,10 +2881,17 @@ pub async fn pairing_request(
         Ok(req) => {
             // Encode QR payload as base64 JSON so base_url (with "://") doesn't
             // need percent-encoding inside the outer librefang:// URI.
+            // Respect X-Forwarded-Proto so HTTPS reverse-proxy deployments get
+            // the correct scheme in the QR code.
+            let scheme = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(',').next().unwrap_or("http").trim())
+                .unwrap_or("http");
             let base_url = if host.is_empty() {
                 String::new()
             } else {
-                format!("http://{host}")
+                format!("{scheme}://{host}")
             };
             let payload = serde_json::json!({
                 "v": 1,

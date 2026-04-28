@@ -1,16 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPairingRequest,
-  completePairing,
   listPairedDevices,
   removePairedDevice,
   type PairingRequestResult,
   type PairedDevice,
-  type PairingCompleteResult,
 } from "../../api";
 import { pairingKeys } from "./keys";
 
-export type { PairingRequestResult, PairedDevice, PairingCompleteResult };
+export type { PairingRequestResult, PairedDevice };
 
 export function usePairingRequest(enabled: boolean) {
   return useQuery({
@@ -27,12 +25,6 @@ export function usePairedDevices() {
   return useQuery({
     queryKey: pairingKeys.devices(),
     queryFn: listPairedDevices,
-  });
-}
-
-export function useCompletePairing() {
-  return useMutation({
-    mutationFn: completePairing,
   });
 }
 

@@ -69,9 +69,10 @@ export function ConnectWizardPage() {
       const payloadB64 = uri.searchParams.get("payload");
       if (!payloadB64) throw new Error("Invalid QR code: missing payload");
 
-      // base64url (no-pad) → standard base64 → JSON
+      // base64url (no-pad) → standard base64 with padding → JSON
       const stdB64 = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
-      const payloadJson = atob(stdB64);
+      const padded = stdB64.padEnd(Math.ceil(stdB64.length / 4) * 4, "=");
+      const payloadJson = atob(padded);
       const payload = JSON.parse(payloadJson) as {
         v: number;
         base_url: string;
@@ -85,6 +86,9 @@ export function ConnectWizardPage() {
       }
 
       const pairingUrl = payload.base_url.replace(/\/$/, "");
+      if (!pairingUrl.startsWith("http://") && !pairingUrl.startsWith("https://")) {
+        throw new Error("Invalid QR code: unexpected base_url protocol");
+      }
       const platform = /Android/.test(navigator.userAgent) ? "android" : "ios";
 
       const res = await fetch(`${pairingUrl}/api/pairing/complete`, {
@@ -175,10 +179,11 @@ export function ConnectWizardPage() {
         {tab === "manual" ? (
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-text-dim uppercase tracking-wider">
+              <label htmlFor="daemon-url" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
                 Daemon URL
               </label>
               <input
+                id="daemon-url"
                 type="url"
                 inputMode="url"
                 autoCapitalize="none"
@@ -192,10 +197,11 @@ export function ConnectWizardPage() {
               />
             </div>
             <div className="space-y-1.5">
-              <label className="text-xs font-semibold text-text-dim uppercase tracking-wider">
+              <label htmlFor="api-key" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
                 API Key
               </label>
               <input
+                id="api-key"
                 type="password"
                 placeholder="••••••••••••••••"
                 value={apiKey}

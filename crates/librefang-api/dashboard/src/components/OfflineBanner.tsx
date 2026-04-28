@@ -41,7 +41,7 @@ export function OfflineBanner() {
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: -40, opacity: 0 }}
           transition={{ type: "spring", stiffness: 300, damping: 30 }}
-          className="fixed top-0 inset-x-0 z-50 flex items-center justify-center gap-3 px-4 py-2 bg-error/90 text-white text-sm font-medium backdrop-blur-sm"
+          className="fixed top-0 inset-x-0 z-[60] flex items-center justify-center gap-3 px-4 py-2 bg-error/90 text-white text-sm font-medium backdrop-blur-sm"
         >
           <WifiOff className="w-4 h-4 shrink-0" />
           <span>Daemon unreachable</span>

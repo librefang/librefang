@@ -32,7 +32,7 @@ export interface StoredCredentials {
 }
 
 export async function storeCredentials(creds: StoredCredentials): Promise<void> {
-  if (!isTauri()) {
+  if (!isMobileTauri()) {
     sessionStorage.setItem("lf_creds", JSON.stringify(creds));
     return;
   }
@@ -43,7 +43,7 @@ export async function storeCredentials(creds: StoredCredentials): Promise<void> 
 }
 
 export async function getCredentials(): Promise<StoredCredentials | null> {
-  if (!isTauri()) {
+  if (!isMobileTauri()) {
     const raw = sessionStorage.getItem("lf_creds");
     return raw ? (JSON.parse(raw) as StoredCredentials) : null;
   }
@@ -55,7 +55,7 @@ export async function getCredentials(): Promise<StoredCredentials | null> {
 }
 
 export async function clearCredentials(): Promise<void> {
-  if (!isTauri()) {
+  if (!isMobileTauri()) {
     sessionStorage.removeItem("lf_creds");
     return;
   }
