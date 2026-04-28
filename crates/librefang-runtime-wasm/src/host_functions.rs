@@ -883,4 +883,35 @@ mod tests {
             "example.com:80"
         );
     }
+
+    /// Regression for #3814: capability check must use the canonical path,
+    /// not the raw path supplied by the guest. A traversal path like
+    /// `../../etc/passwd` must be rejected by path resolution *before* any
+    /// capability comparison can be made — it must never reach the file read.
+    #[tokio::test]
+    async fn test_fs_read_traversal_rejected_before_capability_check() {
+        // Even with a wildcard FileRead grant, traversal paths are rejected.
+        let state = test_state(vec![Capability::FileRead("*".to_string())]);
+        let result = host_fs_read(&state, &json!({"path": "../../etc/passwd"}));
+        let err = result["error"].as_str().unwrap();
+        assert!(
+            err.contains("traversal") || err.contains("forbidden"),
+            "traversal path must be rejected; got: {err}"
+        );
+    }
+
+    /// Regression for #3814: same for fs_write.
+    #[tokio::test]
+    async fn test_fs_write_traversal_rejected_before_capability_check() {
+        let state = test_state(vec![Capability::FileWrite("*".to_string())]);
+        let result = host_fs_write(
+            &state,
+            &json!({"path": "../../tmp/evil.txt", "content": "x"}),
+        );
+        let err = result["error"].as_str().unwrap();
+        assert!(
+            err.contains("traversal") || err.contains("forbidden"),
+            "traversal path must be rejected; got: {err}"
+        );
+    }
 }
