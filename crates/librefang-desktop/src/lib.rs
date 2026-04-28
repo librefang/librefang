@@ -340,6 +340,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         commands::open_config_dir,
         commands::open_logs_dir,
         commands::uninstall_app,
+        commands::store_credentials,
+        commands::get_credentials,
+        commands::clear_credentials,
         connection::test_connection,
         connection::connect_remote,
     ]);
