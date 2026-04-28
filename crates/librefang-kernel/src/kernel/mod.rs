@@ -2847,7 +2847,7 @@ impl LibreFangKernel {
                     // operators can correlate with daemon restart time in logs.
                     // This only logs warnings — it does not catch-up-fire.
                     let warn_since = chrono::Utc::now() - chrono::Duration::minutes(5);
-                    cron_scheduler.warn_missed_fires(warn_since);
+                    cron_scheduler.log_missed_fires_since(warn_since);
                 }
             }
             Err(e) => {

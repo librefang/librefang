@@ -514,7 +514,13 @@ impl CronScheduler {
     /// (iterates up to 1440 times per job to avoid pathological inputs).
     /// `At` one-shot jobs that have already passed are silently ignored
     /// (they would have been removed on successful execution anyway).
-    pub fn warn_missed_fires(&self, since: chrono::DateTime<Utc>) {
+    ///
+    /// Distinct from [`Self::warn_missed_fires`] (no-arg), which both
+    /// logs and reschedules overdue jobs for catch-up firing. Both were
+    /// independently introduced as fixes for #3828 in PRs #3906 and
+    /// #3923 and ended up colliding on the same name; this one is the
+    /// since-windowed log-only variant.
+    pub fn log_missed_fires_since(&self, since: chrono::DateTime<Utc>) {
         let now = Utc::now();
         if since >= now {
             return;

@@ -4638,6 +4638,10 @@ fn dummy_sender(channel: &str, chat_id: Option<&str>) -> SenderContext {
     SenderContext {
         channel: channel.to_string(),
         chat_id: chat_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
 // ── session_mode_override resolution + trigger concurrency caps (#3754, #3755) ──
 
 /// Helper: boot a minimal kernel in a temp directory.
@@ -4828,6 +4832,8 @@ fn resolve_dispatch_session_id_session_mode_override_beats_manifest() {
         None,
     );
     assert_eq!(got, Some(entry_sid));
+}
+
 // -- #3754: session_mode_override resolution via agent_concurrency_for --------
 
 /// An agent with `session_mode = "new"` and `max_concurrent_invocations = 3`
