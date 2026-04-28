@@ -220,6 +220,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use base64::Engine as _;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::agent::AgentId;
@@ -2863,44 +2864,100 @@ pub async fn remove_binding(
 
 // ─── Device Pairing endpoints ───────────────────────────────────────────
 
+/// Resolve the daemon base_url that mobile clients should connect to,
+/// embedded in the QR pairing payload.
+///
+/// Resolution order:
+/// 1. `pairing.public_base_url` (operator-supplied, immune to header tampering)
+/// 2. `Host` request header + scheme inferred from `X-Forwarded-Proto`
+///
+/// Returns `Err` only when neither path produces a usable URL — callers
+/// surface that as 500 rather than emit a malformed QR.
+fn resolve_pairing_base_url(
+    configured: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    host: &str,
+) -> Result<String, String> {
+    if let Some(url) = configured {
+        let trimmed = url.trim().trim_end_matches('/');
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if host.is_empty() {
+        return Err("Cannot resolve daemon base_url: missing Host header and \
+                    pairing.public_base_url is not set"
+            .to_string());
+    }
+    // Take the first comma-separated value, trim, and only accept it if
+    // the result is non-empty — header value `""` or `, https` would
+    // otherwise yield `://host`.
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("http");
+    Ok(format!("{scheme}://{host}"))
+}
+
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
 #[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = serde_json::Value)))]
 pub async fn pairing_request(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
     headers: axum::http::HeaderMap,
-    axum::extract::Host(host): axum::extract::Host,
 ) -> impl IntoResponse {
+    // Pull the Host header directly — axum 0.8 dropped the dedicated `Host`
+    // extractor, and the project doesn't depend on `axum-extra`. The header
+    // is mandatory in HTTP/1.1 so a missing one signals a malformed client.
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
         return ApiErrorResponse::not_found(t.t("api-error-pairing-not-enabled"))
             .into_json_tuple()
             .into_response();
     }
+    // Resolve the base_url the mobile client should hit.
+    //
+    // Prefer the operator-configured `pairing.public_base_url` so the QR
+    // payload is not influenced by request headers — trusting client
+    // `X-Forwarded-Proto` would let any authenticated dashboard caller
+    // forge `https://` even on a plain-HTTP daemon.
+    //
+    // When unset, fall back to `Host` + scheme inferred from
+    // `X-Forwarded-Proto` (filtering blank values so we never emit
+    // `://host`). If `Host` is also unusable, refuse rather than ship a
+    // QR with a broken base_url.
+    let base_url = match resolve_pairing_base_url(
+        state.kernel.config_ref().pairing.public_base_url.as_deref(),
+        &headers,
+        &host,
+    ) {
+        Ok(url) => url,
+        Err(msg) => {
+            return ApiErrorResponse::internal(msg)
+                .into_json_tuple()
+                .into_response();
+        }
+    };
     match state.kernel.pairing_ref().create_pairing_request() {
         Ok(req) => {
             // Encode QR payload as base64 JSON so base_url (with "://") doesn't
             // need percent-encoding inside the outer librefang:// URI.
-            // Respect X-Forwarded-Proto so HTTPS reverse-proxy deployments get
-            // the correct scheme in the QR code.
-            let scheme = headers
-                .get("x-forwarded-proto")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.split(',').next().unwrap_or("http").trim())
-                .unwrap_or("http");
-            let base_url = if host.is_empty() {
-                String::new()
-            } else {
-                format!("{scheme}://{host}")
-            };
             let payload = serde_json::json!({
                 "v": 1,
                 "base_url": base_url,
                 "token": req.token,
                 "expires_at": req.expires_at.to_rfc3339(),
             });
-            let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(payload.to_string());
+            let payload_b64 =
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
             let qr_uri = format!("librefang://pair?payload={payload_b64}");
             Json(serde_json::json!({
                 "token": req.token,

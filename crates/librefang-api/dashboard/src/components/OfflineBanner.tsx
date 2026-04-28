@@ -1,36 +1,30 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { WifiOff, RefreshCw } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import { useHealthDetail } from "../lib/queries/runtime";
+import { runtimeKeys } from "../lib/queries/keys";
 
+/**
+ * Surfaces a "daemon unreachable" banner when the dedicated `/api/health/detail`
+ * polling query fails. Anchoring on a single connectivity probe avoids the
+ * earlier behavior where any 5xx from any unrelated endpoint flickered the
+ * banner — daemon status now drives daemon-status UI, nothing else.
+ */
 export function OfflineBanner() {
   const qc = useQueryClient();
-  const [offline, setOffline] = useState(false);
+  const { isError, isFetching, refetch } = useHealthDetail();
   const [retrying, setRetrying] = useState(false);
 
-  useEffect(() => {
-    const cache = qc.getQueryCache();
-    const unsub = cache.subscribe((event) => {
-      if (event.type === "updated") {
-        const { status, error } = event.query.state;
-        if (status === "error") {
-          const err = error as { status?: number } | null;
-          // Only surface network / server errors, not expected 4xx responses.
-          if (!err?.status || err.status >= 500) {
-            setOffline(true);
-          }
-        } else if (status === "success") {
-          setOffline(false);
-        }
-      }
-    });
-    return unsub;
-  }, [qc]);
+  const offline = isError;
 
   const retry = async () => {
     setRetrying(true);
     try {
-      await qc.refetchQueries({ type: "active" });
+      await refetch();
+      // Once connectivity is back, prod any other queries that may have
+      // failed during the outage so the rest of the dashboard refreshes.
+      await qc.refetchQueries({ queryKey: runtimeKeys.all, exact: false });
     } finally {
       setRetrying(false);
     }
@@ -50,10 +44,10 @@ export function OfflineBanner() {
           <span>Daemon unreachable</span>
           <button
             onClick={retry}
-            disabled={retrying}
+            disabled={retrying || isFetching}
             className="ml-2 flex items-center gap-1.5 rounded-lg border border-white/30 px-2.5 py-1 text-xs hover:bg-white/10 transition-colors disabled:opacity-50"
           >
-            <RefreshCw className={`w-3 h-3 ${retrying ? "animate-spin" : ""}`} />
+            <RefreshCw className={`w-3 h-3 ${retrying || isFetching ? "animate-spin" : ""}`} />
             Retry
           </button>
         </motion.div>

@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
-import { isMobileTauri, scanQrCode, storeCredentials, getCredentials } from "../lib/tauri";
+import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
+import { useConnectManual, useConnectViaQr } from "../lib/mutations/connection";
 
 type Tab = "manual" | "qr";
 type Step = "idle" | "scanning" | "connecting" | "done" | "error";
@@ -10,28 +11,91 @@ function navigateToDashboard(baseUrl: string) {
   window.location.href = baseUrl.replace(/\/$/, "") + "/dashboard";
 }
 
+function defaultDisplayName(): string {
+  if (/Android/.test(navigator.userAgent)) return "Android device";
+  if (/iPad/.test(navigator.userAgent)) return "iPad";
+  if (/iPhone|iPod/.test(navigator.userAgent)) return "iPhone";
+  return "LibreFang Mobile";
+}
+
+function devicePlatform(): string {
+  return /Android/.test(navigator.userAgent) ? "android" : "ios";
+}
+
+interface PairingPayload {
+  v: number;
+  base_url: string;
+  token: string;
+  expires_at: string;
+}
+
+function decodeQrPayload(raw: string): PairingPayload {
+  // Parse librefang://pair?payload=<base64url-no-pad>
+  const uri = new URL(raw);
+  const payloadB64 = uri.searchParams.get("payload");
+  if (!payloadB64) throw new Error("Invalid QR code: missing payload");
+
+  // base64url (no-pad) → standard base64 → JSON. atob tolerates missing
+  // padding in modern engines; explicit padEnd is not needed.
+  const stdB64 = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
+  const payload = JSON.parse(atob(stdB64)) as PairingPayload;
+
+  if (payload.v !== 1) throw new Error("Unsupported QR format version");
+  if (new Date(payload.expires_at).getTime() < Date.now()) {
+    throw new Error("QR code has expired — refresh it on the desktop");
+  }
+  if (
+    !payload.base_url.startsWith("http://") &&
+    !payload.base_url.startsWith("https://")
+  ) {
+    throw new Error("Invalid QR code: unexpected base_url protocol");
+  }
+  return payload;
+}
+
 export function ConnectWizardPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("manual");
   const [step, setStep] = useState<Step>("idle");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [displayName, setDisplayName] = useState(defaultDisplayName());
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Already connected → skip wizard
+  const connectManual = useConnectManual();
+  const connectQr = useConnectViaQr();
+
+  // Already connected → verify creds still work, then skip wizard.
+  // Stale creds (e.g. master key rotated) are cleared so the user lands
+  // back here instead of getting stuck on a 401 in the dashboard.
   useEffect(() => {
-    getCredentials().then((creds) => {
-      if (creds) {
-        if (isMobileTauri()) {
-          navigateToDashboard(creds.base_url);
+    let cancelled = false;
+    void (async () => {
+      const creds = await getCredentials();
+      if (!creds || cancelled) return;
+      try {
+        const resp = await fetch(`${creds.base_url}/api/health`, {
+          headers: { Authorization: `Bearer ${creds.api_key}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (cancelled) return;
+        if (resp.ok) {
+          if (isMobileTauri()) {
+            navigateToDashboard(creds.base_url);
+          } else {
+            void navigate({ to: "/overview" });
+          }
         } else {
-          void navigate({ to: "/overview" });
+          await clearCredentials();
         }
+      } catch {
+        if (!cancelled) await clearCredentials();
       }
-    });
+    })();
+    return () => { cancelled = true; };
   }, [navigate]);
 
-  async function connectManual() {
+  function handleManualSubmit() {
     const url = baseUrl.trim().replace(/\/$/, "");
     const key = apiKey.trim();
     if (!url || !key) return;
@@ -42,22 +106,22 @@ export function ConnectWizardPage() {
     }
     setStep("connecting");
     setErrorMsg("");
-    try {
-      const resp = await fetch(`${url}/api/health`, {
-        headers: { Authorization: `Bearer ${key}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-      await storeCredentials({ base_url: url, api_key: key });
-      setStep("done");
-      setTimeout(() => navigateToDashboard(url), 1200);
-    } catch (err: unknown) {
-      setStep("error");
-      setErrorMsg(err instanceof Error ? err.message : "Connection failed");
-    }
+    connectManual.mutate(
+      { baseUrl: url, apiKey: key },
+      {
+        onSuccess: () => {
+          setStep("done");
+          setTimeout(() => navigateToDashboard(url), 1200);
+        },
+        onError: (err: unknown) => {
+          setStep("error");
+          setErrorMsg(err instanceof Error ? err.message : "Connection failed");
+        },
+      },
+    );
   }
 
-  async function connectQr() {
+  async function handleQrSubmit() {
     setStep("scanning");
     setErrorMsg("");
     try {
@@ -66,57 +130,28 @@ export function ConnectWizardPage() {
         setStep("idle");
         return;
       }
+      const payload = decodeQrPayload(raw);
+      const pairingUrl = payload.base_url.replace(/\/$/, "");
 
       setStep("connecting");
-
-      // Parse librefang://pair?payload=<base64url-no-pad>
-      const uri = new URL(raw);
-      const payloadB64 = uri.searchParams.get("payload");
-      if (!payloadB64) throw new Error("Invalid QR code: missing payload");
-
-      // base64url (no-pad) → standard base64 with padding → JSON
-      const stdB64 = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
-      const padded = stdB64.padEnd(Math.ceil(stdB64.length / 4) * 4, "=");
-      const payloadJson = atob(padded);
-      const payload = JSON.parse(payloadJson) as {
-        v: number;
-        base_url: string;
-        token: string;
-        expires_at: string;
-      };
-
-      if (payload.v !== 1) throw new Error("Unsupported QR format version");
-      if (new Date(payload.expires_at).getTime() < Date.now()) {
-        throw new Error("QR code has expired — refresh it on the desktop");
-      }
-
-      const pairingUrl = payload.base_url.replace(/\/$/, "");
-      if (!pairingUrl.startsWith("http://") && !pairingUrl.startsWith("https://")) {
-        throw new Error("Invalid QR code: unexpected base_url protocol");
-      }
-      const platform = /Android/.test(navigator.userAgent) ? "android" : "ios";
-
-      const res = await fetch(`${pairingUrl}/api/pairing/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      connectQr.mutate(
+        {
+          baseUrl: pairingUrl,
           token: payload.token,
-          display_name: "LibreFang Mobile",
-          platform,
-        }),
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (res.status === 410) throw new Error("Pairing token expired or already used");
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error ?? `Server returned ${res.status}`);
-      }
-
-      const result = await res.json() as { api_key: string };
-      await storeCredentials({ base_url: pairingUrl, api_key: result.api_key });
-      setStep("done");
-      setTimeout(() => navigateToDashboard(pairingUrl), 1200);
+          displayName: displayName.trim() || defaultDisplayName(),
+          platform: devicePlatform(),
+        },
+        {
+          onSuccess: (result) => {
+            setStep("done");
+            setTimeout(() => navigateToDashboard(result.baseUrl), 1200);
+          },
+          onError: (err: unknown) => {
+            setStep("error");
+            setErrorMsg(err instanceof Error ? err.message : "Pairing failed");
+          },
+        },
+      );
     } catch (err: unknown) {
       setStep("error");
       setErrorMsg(err instanceof Error ? err.message : "Pairing failed");
@@ -216,7 +251,7 @@ export function ConnectWizardPage() {
               />
             </div>
             <button
-              onClick={() => void connectManual()}
+              onClick={handleManualSubmit}
               disabled={busy || !baseUrl.trim() || !apiKey.trim()}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >
@@ -235,6 +270,23 @@ export function ConnectWizardPage() {
           </div>
         ) : (
           <div className="space-y-4">
+            <div className="space-y-1.5">
+              <label htmlFor="device-name" className="text-xs font-semibold text-text-dim uppercase tracking-wider">
+                Device name
+              </label>
+              <input
+                id="device-name"
+                type="text"
+                placeholder="My iPhone"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                disabled={busy}
+                className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40 disabled:opacity-50"
+              />
+              <p className="text-xs text-text-dim">
+                Shown on the desktop so you can revoke this device later.
+              </p>
+            </div>
             <div className="rounded-2xl border border-border-subtle bg-surface p-6 text-center space-y-3">
               <QrCode className="w-10 h-10 mx-auto text-text-dim" />
               <div className="text-sm text-text-dim space-y-1">
@@ -246,7 +298,7 @@ export function ConnectWizardPage() {
               </div>
             </div>
             <button
-              onClick={() => void connectQr()}
+              onClick={() => void handleQrSubmit()}
               disabled={busy}
               className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
             >

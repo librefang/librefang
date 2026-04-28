@@ -3868,24 +3868,12 @@ export interface PairedDevice {
   paired_at: string;
 }
 
-export interface PairingCompleteResult {
-  device_id: string;
-  api_key: string;
-  display_name: string;
-  platform: string;
-  paired_at: string;
-}
+// Pairing completion is initiated by the mobile client against an arbitrary
+// daemon URL (cross-origin), so it lives in `lib/mutations/connection.ts`
+// rather than this same-origin api module.
 
 export async function createPairingRequest(): Promise<PairingRequestResult> {
   return post<PairingRequestResult>("/api/pairing/request", {});
-}
-
-export async function completePairing(body: {
-  token: string;
-  display_name: string;
-  platform: string;
-}): Promise<PairingCompleteResult> {
-  return post<PairingCompleteResult>("/api/pairing/complete", body);
 }
 
 export async function listPairedDevices(): Promise<PairedDevice[]> {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import QRCode from "qrcode";
-import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2 } from "lucide-react";
+import { Smartphone, RefreshCw, CheckCircle, Clock, Trash2, AlertCircle } from "lucide-react";
 import { usePairingRequest, usePairedDevices, useRemovePairedDevice } from "../lib/queries/pairing";
 import { pairingKeys } from "../lib/queries/keys";
 
@@ -129,6 +129,17 @@ export function MobilePairingPage() {
           <h2 className="text-sm font-bold uppercase tracking-wider text-text-dim">
             Paired Devices
           </h2>
+          {removeDevice.isError && (
+            <div className="flex items-center gap-2 rounded-lg border border-error/20 bg-error/5 p-2.5 text-sm text-error">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>
+                Failed to remove device:{" "}
+                {removeDevice.error instanceof Error
+                  ? removeDevice.error.message
+                  : "unknown error"}
+              </span>
+            </div>
+          )}
           <div className="space-y-2">
             {devices.map((d) => (
               <div
