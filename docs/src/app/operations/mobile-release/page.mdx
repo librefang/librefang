@@ -97,10 +97,12 @@ derives them deterministically:
 | Android | `versionName` | display version | `2026.4.28` |
 | Android | `versionCode` | same `YYYYMMDDNN` integer | `2026042901` |
 
-The build number fits in a 32-bit signed integer until **2027-12-31**.
-Before that date, switch the formula to a smaller domain (e.g.
-`(year - 2024) * 1_000_000 + month * 10_000 + day * 100 + nn`) and update
-both jobs in `release.yml`.
+The binding ceiling is Play's `versionCode` hard cap of **2,100,000,000**
+(int32 has more headroom but Play caps lower). The YYYYMMDDNN scheme
+stays under that cap until **2100-01-01**. Before then, switch the
+formula to a smaller domain (e.g.
+`(year - 2024) * 1_000_000 + month * 10_000 + day * 100 + nn`) and
+update both jobs in `release.yml`.
 
 > **Why YYYYMMDDNN?** Both stores want monotonic build numbers across all
 > historical uploads. A date-based scheme makes "what date was this

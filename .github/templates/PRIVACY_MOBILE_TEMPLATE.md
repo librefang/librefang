@@ -75,11 +75,17 @@ rules.
 
 ## Children's privacy
 
-The App is not directed to children under 13. We do not knowingly
-collect data from children. If you believe a child has used the App,
-contact us at REPLACE-WITH-CONTACT and we will purge any record we
-might hold (we do not maintain a user database, so there is typically
-nothing to purge).
+The App is not directed to children under the relevant minimum age
+(13 under COPPA in the US; 16 under GDPR-K in the EU and UK, lowered
+to 13 by some member states). We do not knowingly collect data from
+children. If you believe a child has used the App, contact us at
+REPLACE-WITH-CONTACT and we will purge any record we might hold (we
+do not maintain a user database, so there is typically nothing to
+purge).
+
+> Legal note: confirm the operative age threshold for the App's
+> primary distribution markets and replace this paragraph with the
+> jurisdiction-specific wording legal supplies.
 
 ## Data retention
 
@@ -131,3 +137,26 @@ Use this when filling in the App Store Connect / Play Data Safety forms.
 
 If a future feature changes any "No" above, this sheet **and** the
 published policy must be updated in the same PR before merge.
+
+---
+
+## Items flagged for legal review (not yet drafted)
+
+The body above documents what the App actually does. The following
+**jurisdiction-specific clauses** are intentionally not drafted here —
+they require legal sign-off, not engineering judgment. Surface them
+when handing this template over:
+
+- **GDPR data-controller identification** — name, address, EU/UK
+  representative (Art. 27) if no EU establishment.
+- **Lawful basis statement** for each processing activity (likely
+  legitimate interest given the no-server-collection model, but legal
+  decides).
+- **CCPA / CPRA "Do Not Sell or Share" disclosure** — even when
+  nothing is sold, the affirmative disclosure is required.
+- **Children's-privacy operative age** — set per primary distribution
+  market (US: 13; EU/UK: 13–16 by member state). The body above
+  parameterises this, legal must replace with a single concrete value.
+- **Dispute resolution / governing law** clause.
+- **Effective-date and prior-version archive** policy (App Store
+  reviewers occasionally check that earlier versions are linkable).

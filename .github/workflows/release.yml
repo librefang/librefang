@@ -1408,8 +1408,9 @@ jobs:
           # Build number scheme YYYYMMDDNN (#3348). NN is run_number mod 100;
           # >100 release attempts on a single calendar day will collide and
           # the store will reject the build with a clear error — acceptable
-          # given the practical release cadence. YYYYMMDDNN fits in int32
-          # (max 2_147_483_647) until 2027-12-31; revisit before that.
+          # given the practical release cadence. The binding ceiling is
+          # Play's 2_100_000_000 versionCode cap, not int32 — YYYYMMDDNN
+          # stays under that cap until 2100-01-01.
           DATE=$(date -u +%Y%m%d)
           NN=$(printf "%02d" $(( ${{ github.run_number }} % 100 )))
           BUILD="${DATE}${NN}"

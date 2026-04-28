@@ -88,8 +88,9 @@
 | Android | `versionName` | display version | `2026.4.28` |
 | Android | `versionCode` | 同样的 `YYYYMMDDNN` 整数 | `2026042901` |
 
-build 号在 **2027-12-31** 前可装入 32 位有符号整数。在此之前需切换到
-更小值域的公式（例如
+实际硬上限是 Play 的 `versionCode` 上限 **2,100,000,000**（int32 有更多
+余量但 Play 卡得更紧）。YYYYMMDDNN 方案在 **2100-01-01** 前都低于该
+上限。在此之前需切换到更小值域的公式（例如
 `(year - 2024) * 1_000_000 + month * 10_000 + day * 100 + nn`），并
 同步更新 `release.yml` 中的两个任务。
 
