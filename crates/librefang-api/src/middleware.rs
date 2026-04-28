@@ -740,9 +740,8 @@ pub async fn auth(
     // Percent-decode (but NOT form-urlencoded) so literal `+` characters in
     // base64-derived tokens are preserved instead of being turned into spaces.
     // See issue #962 (ported from openfang).
-    let is_ws_or_sse_path = path.ends_with("/ws")
-        || path.starts_with("/ws/")
-        || path.ends_with("/stream");
+    let is_ws_or_sse_path =
+        path.ends_with("/ws") || path.starts_with("/ws/") || path.ends_with("/stream");
 
     let query_token_decoded = if is_ws_or_sse_path {
         request
