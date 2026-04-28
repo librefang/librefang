@@ -1228,7 +1228,7 @@ impl LlmDriver for OpenAIDriver {
                 }
             };
 
-            let mut usage = oai_response
+            let usage = oai_response
                 .usage
                 .map(|u| {
                     let cached = u
