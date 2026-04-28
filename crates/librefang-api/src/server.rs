@@ -1314,7 +1314,9 @@ pub async fn run_daemon(
             }
             // Stale PID file (process dead or different process reused PID), remove it
             info!("Removing stale daemon info file");
-            let _ = std::fs::remove_file(info_path);
+            if let Err(e) = std::fs::remove_file(info_path) {
+                tracing::warn!("Failed to remove stale daemon info file: {e}");
+            }
         }
 
         let daemon_info = DaemonInfo {
@@ -1325,7 +1327,9 @@ pub async fn run_daemon(
             platform: std::env::consts::OS.to_string(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&daemon_info) {
-            let _ = std::fs::write(info_path, json);
+            if let Err(e) = std::fs::write(info_path, json) {
+                tracing::warn!("Failed to write daemon info file: {e}");
+            }
             // SECURITY: Restrict daemon info file permissions (contains PID and port).
             restrict_permissions(info_path);
         }
@@ -1464,13 +1468,15 @@ pub async fn run_daemon(
         handle.abort();
     }
     for handle in bg_tasks {
-        let _ = handle.await;
+        let _ = handle.await; // JoinError from abort() is expected; ignore it
     }
     info!("Background tasks stopped");
 
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {
-        let _ = std::fs::remove_file(info_path);
+        if let Err(e) = std::fs::remove_file(info_path) {
+            tracing::warn!("Failed to remove daemon info file on shutdown: {e}");
+        }
     }
 
     // Stop channel bridges
@@ -1756,7 +1762,9 @@ mod observability_tests {
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("Failed to restrict permissions on {}: {e}", path.display());
+    }
 }
 
 #[cfg(not(unix))]
@@ -1837,7 +1845,7 @@ fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = pid;
+        let _ = pid; // suppress unused variable warning on unsupported platforms
         false
     }
 }
