@@ -282,10 +282,8 @@ impl A2aTaskStore {
     pub fn with_persistence(max_tasks: usize, db_path: &Path) -> Self {
         match rusqlite::Connection::open(db_path) {
             Ok(conn) => {
-                conn.execute_batch(
-                    "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
-                )
-                .unwrap_or_else(|e| warn!("a2a_tasks: failed to set PRAGMA: {e}"));
+                conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+                    .unwrap_or_else(|e| warn!("a2a_tasks: failed to set PRAGMA: {e}"));
 
                 // Create schema if not present.
                 if let Err(e) = conn.execute_batch(
@@ -367,12 +365,12 @@ impl A2aTaskStore {
 
         let rows: Vec<_> = match stmt.query_map([], |row| {
             Ok((
-                row.get::<_, String>(0)?,  // id
-                row.get::<_, String>(1)?,  // status (JSON)
-                row.get::<_, String>(2)?,  // input (JSON messages)
-                row.get::<_, Option<String>>(3)?,  // output (JSON messages)
-                row.get::<_, Option<String>>(4)?,  // agent_id
-                row.get::<_, Option<String>>(5)?,  // caller_a2a_agent_id
+                row.get::<_, String>(0)?,         // id
+                row.get::<_, String>(1)?,         // status (JSON)
+                row.get::<_, String>(2)?,         // input (JSON messages)
+                row.get::<_, Option<String>>(3)?, // output (JSON messages)
+                row.get::<_, Option<String>>(4)?, // agent_id
+                row.get::<_, Option<String>>(5)?, // caller_a2a_agent_id
             ))
         }) {
             Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
@@ -386,25 +384,23 @@ impl A2aTaskStore {
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
         let mut loaded = 0usize;
         for (id, status_json, input_json, output_json, agent_id, caller_a2a_agent_id) in rows {
-            let status: A2aTaskStatusWrapper =
-                match serde_json::from_str(&status_json) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        match serde_json::from_value(serde_json::Value::String(status_json.clone())) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                warn!("a2a_tasks: skipping task {id} with unrecognized status {status_json:?}: {e}");
-                                continue;
-                            }
+            let status: A2aTaskStatusWrapper = match serde_json::from_str(&status_json) {
+                Ok(s) => s,
+                Err(_) => {
+                    match serde_json::from_value(serde_json::Value::String(status_json.clone())) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            warn!("a2a_tasks: skipping task {id} with unrecognized status {status_json:?}: {e}");
+                            continue;
                         }
                     }
-                };
+                }
+            };
 
             let mut messages: Vec<A2aMessage> =
                 serde_json::from_str(&input_json).unwrap_or_default();
             if let Some(out_json) = output_json {
-                let out_msgs: Vec<A2aMessage> =
-                    serde_json::from_str(&out_json).unwrap_or_default();
+                let out_msgs: Vec<A2aMessage> = serde_json::from_str(&out_json).unwrap_or_default();
                 messages.extend(out_msgs);
             }
 
@@ -566,8 +562,8 @@ impl A2aTaskStore {
 
         match result {
             Ok((id, status_json, input_json, output_json, agent_id, caller_a2a_agent_id)) => {
-                let status: A2aTaskStatusWrapper =
-                    serde_json::from_str(&status_json).unwrap_or_else(|_| {
+                let status: A2aTaskStatusWrapper = serde_json::from_str(&status_json)
+                    .unwrap_or_else(|_| {
                         serde_json::from_value(serde_json::Value::String(status_json.clone()))
                             .unwrap_or(A2aTaskStatusWrapper::Enum(A2aTaskStatus::Failed))
                     });

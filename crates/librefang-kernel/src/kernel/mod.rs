@@ -3711,9 +3711,9 @@ system_prompt = "You are a helpful assistant."
             let stale_timeout_mins = kernel.config.load().workflow_stale_timeout_minutes;
             if stale_timeout_mins > 0 {
                 let stale_timeout = std::time::Duration::from_secs(stale_timeout_mins * 60);
-                let recovered = kernel
-                    .workflows
-                    .recover_stale_running_runs(stale_timeout);
+                let recovered = tokio::task::block_in_place(|| {
+                    kernel.workflows.recover_stale_running_runs(stale_timeout)
+                });
                 if recovered > 0 {
                     info!(
                         "Recovered {recovered} stale workflow run(s) interrupted by daemon restart"

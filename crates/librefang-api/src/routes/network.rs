@@ -334,10 +334,8 @@ pub async fn a2a_send_task(
     let agent_entry = match state.kernel.agent_registry().get(target_agent_id) {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found(format!(
-                "Agent not found: {target_agent_id_str}"
-            ))
-            .into_json_tuple();
+            return ApiErrorResponse::not_found(format!("Agent not found: {target_agent_id_str}"))
+                .into_json_tuple();
         }
     };
 
@@ -374,7 +372,11 @@ pub async fn a2a_send_task(
     state.kernel.a2a_tasks().insert(task);
 
     // Send message to the validated target agent.
-    match state.kernel.send_message(agent_entry.id, &message_text).await {
+    match state
+        .kernel
+        .send_message(agent_entry.id, &message_text)
+        .await
+    {
         Ok(result) => {
             let response_msg = librefang_runtime::a2a::A2aMessage {
                 role: "agent".to_string(),
