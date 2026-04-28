@@ -41,13 +41,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          DISC_NUMBER: ${{ github.event.discussion.number }}
+          DISC_TITLE: ${{ github.event.discussion.title }}
+          DISC_URL: ${{ github.event.discussion.html_url }}
+          DISC_AUTHOR: ${{ github.event.discussion.user.login }}
+          DISC_CATEGORY: ${{ github.event.discussion.category.name }}
         run: |
           bash .github/scripts/discussion-to-issue.sh \
-            "${{ github.event.discussion.number }}" \
-            "${{ github.event.discussion.title }}" \
-            "${{ github.event.discussion.html_url }}" \
-            "${{ github.event.discussion.user.login }}" \
-            "${{ github.event.discussion.category.name }}"
+            "$DISC_NUMBER" "$DISC_TITLE" "$DISC_URL" "$DISC_AUTHOR" "$DISC_CATEGORY"
 
   # ── Manual /to-issue command from maintainers ────────────────────
   manual-promote:
@@ -67,13 +68,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           MANUAL: 'true'
+          DISC_NUMBER: ${{ github.event.discussion.number }}
+          DISC_TITLE: ${{ github.event.discussion.title }}
+          DISC_URL: ${{ github.event.discussion.html_url }}
+          DISC_AUTHOR: ${{ github.event.discussion.user.login }}
+          DISC_CATEGORY: ${{ github.event.discussion.category.name }}
         run: |
           bash .github/scripts/discussion-to-issue.sh \
-            "${{ github.event.discussion.number }}" \
-            "${{ github.event.discussion.title }}" \
-            "${{ github.event.discussion.html_url }}" \
-            "${{ github.event.discussion.user.login }}" \
-            "${{ github.event.discussion.category.name }}"
+            "$DISC_NUMBER" "$DISC_TITLE" "$DISC_URL" "$DISC_AUTHOR" "$DISC_CATEGORY"
 
   # ── Backfill: scheduled + manual ─────────────────────────────────
   backfill:

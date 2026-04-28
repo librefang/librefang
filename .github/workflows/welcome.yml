@@ -17,12 +17,14 @@ jobs:
       - name: Welcome first-time contributors
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.sender.login }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          REPO="${{ github.repository }}"
-          AUTHOR="${{ github.event.sender.login }}"
-
-          if [ "${{ github.event_name }}" = "issues" ]; then
-            NUMBER="${{ github.event.issue.number }}"
+          if [ "$EVENT_NAME" = "issues" ]; then
+            NUMBER="$ISSUE_NUMBER"
             # Check if this is the author's first issue (use listing API, not search — search has secondary rate limits and indexing delays)
             COUNT=$(gh issue list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
             if [ "$COUNT" -lt 2 ]; then
@@ -38,8 +40,8 @@ jobs:
               )"
             fi
 
-          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
-            NUMBER="${{ github.event.pull_request.number }}"
+          elif [ "$EVENT_NAME" = "pull_request_target" ]; then
+            NUMBER="$PR_NUMBER"
             # Check if this is the author's first PR (use listing API, not search — search has secondary rate limits and indexing delays)
             COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
             if [ "$COUNT" -lt 2 ]; then

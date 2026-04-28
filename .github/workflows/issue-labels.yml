@@ -58,12 +58,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE: ${{ github.event.issue.number }}
+          COMMENT_ASSOC: ${{ github.event.comment.author_association }}
         run: |
           set -euo pipefail
 
           LABEL_WAITING="awaiting-response"
           LABEL_ATTENTION="needs-attention"
-          ISSUE="${{ github.event.issue.number }}"
 
           add_label() { gh issue edit "$ISSUE" --repo "$REPO" --add-label "$1" 2>/dev/null || true; }
           remove_label() { gh issue edit "$ISSUE" --repo "$REPO" --remove-label "$1" 2>/dev/null || true; }
@@ -75,12 +77,12 @@ jobs:
             esac
           }
 
-          if [ "${{ github.event_name }}" = "issues" ]; then
+          if [ "$EVENT_NAME" = "issues" ]; then
             # Issue closed — clean up state labels
             remove_label "$LABEL_WAITING"
             remove_label "$LABEL_ATTENTION"
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            ASSOC="${{ github.event.comment.author_association }}"
+          elif [ "$EVENT_NAME" = "issue_comment" ]; then
+            ASSOC="$COMMENT_ASSOC"
             if is_maintainer "$ASSOC"; then
               remove_label "$LABEL_ATTENTION"
               add_label "$LABEL_WAITING"

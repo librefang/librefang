@@ -77,15 +77,17 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Extract tag from PR body and create
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          TAG=$(echo "${{ github.event.pull_request.body }}" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
+          TAG=$(printf '%s' "$PR_BODY" | grep -oP '(?<=<!-- release-tag:)(v[^ ]+)(?= -->)' || true)
           if [ -z "$TAG" ]; then
             echo "No release-tag marker found, skipping"
             exit 0
           fi
           echo "Creating tag $TAG on main"
-          git tag "$TAG"
-          git push origin "$TAG"
+          git tag -- "$TAG"
+          git push origin -- "$TAG"
 
   # ═════════════════════════════════════════════════════════════════════════
   # workflow_dispatch channel=stable/beta/rc/lts → run the same flow as

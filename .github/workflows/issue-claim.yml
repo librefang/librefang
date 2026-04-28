@@ -17,20 +17,19 @@ jobs:
       - name: Assign issue to commenter
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USER: ${{ github.event.comment.user.login }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          USER="${{ github.event.comment.user.login }}"
-          ISSUE="${{ github.event.issue.number }}"
-          REPO="${{ github.repository }}"
-
-          ASSIGNEES=$(gh api repos/$REPO/issues/$ISSUE --jq '.assignees | length')
+          ASSIGNEES=$(gh api "repos/$REPO/issues/$ISSUE" --jq '.assignees | length')
           if [ "$ASSIGNEES" -gt 0 ]; then
-            gh issue comment $ISSUE --repo $REPO \
+            gh issue comment "$ISSUE" --repo "$REPO" \
               --body "@$USER This issue is already assigned. Please check other [good first issues](https://github.com/$REPO/labels/good%20first%20issue)."
             exit 0
           fi
 
-          gh issue edit $ISSUE --repo $REPO --add-assignee "$USER"
-          gh issue comment $ISSUE --repo $REPO \
+          gh issue edit "$ISSUE" --repo "$REPO" --add-assignee "$USER"
+          gh issue comment "$ISSUE" --repo "$REPO" \
             --body "Assigned to @$USER. Welcome! Feel free to ask questions here or in [Discord](https://discord.gg/DzTYqAZZmc). If you can't finish within 14 days, comment \`/unclaim\` so others can pick it up."
 
   unclaim:
@@ -42,11 +41,10 @@ jobs:
       - name: Unassign issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USER: ${{ github.event.comment.user.login }}
+          ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          USER="${{ github.event.comment.user.login }}"
-          ISSUE="${{ github.event.issue.number }}"
-          REPO="${{ github.repository }}"
-
-          gh issue edit $ISSUE --repo $REPO --remove-assignee "$USER"
-          gh issue comment $ISSUE --repo $REPO \
+          gh issue edit "$ISSUE" --repo "$REPO" --remove-assignee "$USER"
+          gh issue comment "$ISSUE" --repo "$REPO" \
             --body "Unassigned @$USER. This issue is now available — comment \`/claim\` to pick it up."

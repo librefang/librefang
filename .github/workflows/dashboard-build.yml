@@ -53,13 +53,16 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
-          case "${{ github.event_name }}" in
+          case "$EVENT_NAME" in
             release)
-              TAG="${{ github.event.release.tag_name }}"
+              TAG="$RELEASE_TAG_NAME"
               ;;
             workflow_dispatch)
-              TAG="${{ github.event.inputs.tag }}"
+              TAG="$INPUT_TAG"
               ;;
             *)
               # push to main — upload to the most recent release

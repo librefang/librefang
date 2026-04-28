@@ -20,11 +20,10 @@ jobs:
       - name: Auto-assign PR author and request review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
         run: |
-          PR="${{ github.event.pull_request.number }}"
-          AUTHOR="${{ github.event.pull_request.user.login }}"
-          REPO="${{ github.repository }}"
-
           # Assign PR to author (skip if author is not a repo collaborator)
           gh pr edit "$PR" --repo "$REPO" --add-assignee "$AUTHOR" 2>/dev/null || true
 
