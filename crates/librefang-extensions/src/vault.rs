@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write as _;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -394,7 +396,21 @@ impl CredentialVault {
         let mut output = Vec::with_capacity(VAULT_MAGIC.len() + content.len());
         output.extend_from_slice(VAULT_MAGIC);
         output.extend_from_slice(content.as_bytes());
-        std::fs::write(&self.path, output)?;
+
+        // Atomic write: write to a sibling .tmp file (same filesystem guarantees
+        // rename is atomic), fsync to flush to disk, then rename over the target.
+        // A crash mid-write leaves only the .tmp file; the vault is never corrupt.
+        let temp_path = self.path.with_extension("tmp");
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            f.write_all(&output)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&temp_path, &self.path)?;
         Ok(())
     }
 
