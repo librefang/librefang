@@ -110,9 +110,9 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 | **Browser** | Web automation — Playwright-based, mandatory purchase approval gate |
 | **API Tester** | API testing — endpoint discovery, validation, load testing, regression detection |
 | **DevOps** | DevOps automation — CI/CD, infrastructure monitoring, incident response |
-| **devteam** | Software development team Automation — PM triages issues, Engineer implements, QA validates |
-| **creator** | AI media studio — generates images, videos, music, and speech from text prompts |
-| **wiki** | Maintained personal knowledge base — builds an Obsidian-compatible wiki from raw sources with provenance tracking |
+| **DevTeam** | Software development team Automation — PM triages issues, Engineer implements, QA validates |
+| **Creator** | AI media studio — generates images, videos, music, and speech from text prompts |
+| **Wiki** | Maintained personal knowledge base — builds an Obsidian-compatible wiki from raw sources with provenance tracking |
 
 ```bash
 librefang hand activate researcher   # Starts working immediately
@@ -124,7 +124,7 @@ Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https
 
 ## Architecture
 
-24 Rust crates, modular kernel design.
+24 Rust crates + xtask, modular kernel design.
 
 ```
 librefang-kernel            Orchestration, workflows, metering, RBAC, scheduler, budget
@@ -144,8 +144,9 @@ librefang-http              Shared HTTP client builder, proxy, TLS fallback
 librefang-testing           Test infrastructure: mock kernel, mock LLM driver and API route test utilities
 librefang-telemetry         OpenTelemetry + Prometheus metrics instrumentation for LibreFang
 librefang-llm-driver        LLM driver trait and shared types for LibreFang
+librefang-llm-drivers       Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing librefang-llm-driver trait
 librefang-runtime-mcp       MCP (Model Context Protocol) client for LibreFang runtime
-ibrefang-kernel-handle      KernelHandle trait for in-process callers into the LibreFang kernel
+librefang-kernel-handle     KernelHandle trait for in-process callers into the LibreFang kernel
 librefang-runtime-wasm      WASM skill sandbox for LibreFang runtime
 librefang-kernel-router     Hand/Template routing engine for the LibreFang kernel
 librefang-runtime-oauth     OAuth flows (ChatGPT, GitHub Copilot) for LibreFang runtime drivers
@@ -155,7 +156,7 @@ xtask                       Build automation
 
 ## Key Features
 
-**57 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 26 more. [Full list](https://docs.librefang.ai/integrations/channels)
+**57 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 44 more. [Full list](https://docs.librefang.ai/integrations/channels)
 
 **28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](https://docs.librefang.ai/configuration/providers)
 
