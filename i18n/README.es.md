@@ -137,6 +137,12 @@ librefang-kernel-metering   Medición de costos y aplicación de cuotas para el 
 xtask                       Automatización de build
 ```
 
+> **OFP wire es plaintext-by-design.** Autenticación mutua HMAC-SHA256 + HMAC
+> por mensaje + protección contra repetición nonce cubren a los atacantes *activos*, pero los contenidos de los frames
+> no están encriptados. Para cross-network federation, ejecute OFP detrás de un overlay
+> privado (WireGuard, Tailscale, túnel SSH) o una capa mTLS de service-mesh.
+> Detalles: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
+
 ## Características Principales
 
 **57 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky y 44 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
