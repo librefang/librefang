@@ -217,6 +217,28 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
         .collect()
 }
 
+/// Wrap each persisted paired-device api key as an `ApiUserAuth` so the
+/// auth middleware can verify mobile bearers against the same in-memory
+/// table it uses for config-defined users. `device:{id}` namespacing keeps
+/// device entries distinguishable from regular users — `pairing_remove_device`
+/// also keys on this prefix when revoking access.
+pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middleware::ApiUserAuth> {
+    kernel
+        .pairing_ref()
+        .device_api_keys()
+        .into_iter()
+        .map(|(device_id, api_key_hash)| {
+            let name = format!("device:{device_id}");
+            middleware::ApiUserAuth {
+                user_id: librefang_types::agent::UserId::from_name(&name),
+                role: librefang_kernel::auth::UserRole::User,
+                api_key_hash,
+                name,
+            }
+        })
+        .collect()
+}
+
 /// Returns `true` if the request arrived over TLS, either directly or through
 /// a reverse proxy / tunnel that sets `X-Forwarded-Proto: https` (ngrok,
 /// cloudflared, traefik, nginx, …). Used to decide whether cookies should be
@@ -810,9 +832,11 @@ pub async fn build_router(
     // both AppState (mutator) and AuthState (reader) share the same Arc, so
     // the next request after rotation sees the new hash and the old plaintext
     // bearer token immediately fails authentication.
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(configured_user_api_keys(
-        kernel.as_ref(),
-    )));
+    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new({
+        let mut keys = configured_user_api_keys(kernel.as_ref());
+        keys.extend(paired_device_user_keys(kernel.as_ref()));
+        keys
+    }));
 
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
