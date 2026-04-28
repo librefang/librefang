@@ -1655,9 +1655,18 @@ impl McpConnection {
     /// perform hot-reload should call this instead of relying on the implicit
     /// `Drop` path to guarantee the child is reaped before the new connection
     /// is started. (#3800)
-    pub async fn close(self) {
+    pub async fn close(mut self) {
         let name = self.config.name.clone();
-        if let McpInner::Rmcp(mut client) = self.inner {
+        // Use std::mem::replace to avoid E0509 (cannot move out of type that
+        // implements Drop). Swap inner with a no-op sentinel so Drop sees
+        // HttpCompat and skips its async cleanup path.
+        let inner = std::mem::replace(
+            &mut self.inner,
+            McpInner::HttpCompat {
+                client: reqwest::Client::new(),
+            },
+        );
+        if let McpInner::Rmcp(mut client) = inner {
             if let Err(e) = client.close().await {
                 warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
             }
