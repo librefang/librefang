@@ -691,7 +691,7 @@ pub async fn execute_tool_raw(
                                 let after = &command[idx + ps.len()..];
                                 after.is_empty() || after.starts_with('/')
                                     || after.starts_with('"')
-                                    || after.starts_with(''')
+                                    || after.starts_with('\'')
                                     || after.starts_with(' ')
                             } else {
                                 false
