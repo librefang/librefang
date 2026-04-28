@@ -1,4 +1,4 @@
-import { formatCompact, formatCost as formatCostUtil } from "../lib/format";
+import { formatCost as formatCostUtil } from "../lib/format";
 import type { ModelItem, ModelOverrides } from "../api";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -11,41 +11,259 @@ import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { useUIStore } from "../lib/store";
 import {
-  Cpu, Search, Check, X, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2, Sparkles,
-  ChevronDown, ChevronRight, Brain, ArrowUpDown, ChevronsUpDown, Tag, Settings,
+  Cpu, Search, Check, Eye, EyeOff, Wrench, Zap, AlertCircle, Lock, Plus, Trash2, Loader2,
+  Brain, Tag, Settings,
 } from "lucide-react";
 import { modelKey } from "../lib/hiddenModels";
 
-type SortField = "model" | "provider" | "tier" | "context" | "input_cost" | "output_cost";
-type SortDir = "asc" | "desc";
+// ── Helpers ───────────────────────────────────────────────────────
 
-const GRID_COLS = "grid-cols-[minmax(140px,1fr)_90px_70px_70px_70px_70px_40px_40px_40px_40px_70px]";
-const GRID_MIN_W = "min-w-[860px]";
-
-type SortHeaderProps = {
-  field: SortField;
-  active: boolean;
-  dir: SortDir;
-  onToggle: (field: SortField) => void;
-  children: React.ReactNode;
-  className?: string;
+const tierClass = (tier?: string) => {
+  switch (tier) {
+    case "basic": return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+    case "fast": return "bg-cyan-50 text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-400";
+    case "smart": return "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400";
+    case "balanced": return "bg-teal-50 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400";
+    case "standard": return "bg-green-50 text-green-600 dark:bg-green-900/30 dark:text-green-400";
+    case "advanced": return "bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400";
+    case "frontier": return "bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400";
+    case "enterprise": return "bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400";
+    case "local": return "bg-orange-50 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400";
+    case "custom": return "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400";
+    default: return "bg-main text-text-dim";
+  }
 };
 
-function SortHeader({ field, active, dir, onToggle, children, className = "" }: SortHeaderProps) {
+const formatCtx = (tokens?: number) => {
+  if (!tokens) return "—";
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return String(tokens);
+};
+
+// ── ModelCard ─────────────────────────────────────────────────────
+
+type CardProps = {
+  m: ModelItem;
+  hidden: boolean;
+  onOpen: () => void;
+  onSettings: () => void;
+  onToggleHidden: () => void;
+  onDelete: () => void;
+  pendingDelete: boolean;
+};
+
+function ModelCard({ m, hidden, onOpen, onSettings, onToggleHidden, onDelete, pendingDelete }: CardProps) {
+  const { t } = useTranslation();
+  const isCustom = m.tier === "custom";
+  // Treat as free only when both costs are explicitly declared as 0 in the
+  // catalog. `undefined` means "unknown" (e.g. local-model entries that don't
+  // ship pricing) and must NOT render as the green Free badge.
+  const free = m.input_cost_per_m === 0 && m.output_cost_per_m === 0;
+
+  const formatCost = (cost?: number) => {
+    if (cost === undefined || cost === null) return "—";
+    if (cost === 0) return "0";
+    return formatCostUtil(cost);
+  };
+
   return (
-    <button type="button" onClick={() => onToggle(field)}
-      className={`group flex items-center gap-0.5 cursor-pointer hover:text-text transition-colors select-none ${className}`}>
-      {children}
-      {active
-        ? <ArrowUpDown className={`w-3 h-3 text-primary ${dir === "desc" ? "rotate-180" : ""}`} />
-        : <ArrowUpDown className="w-3 h-3 opacity-0 group-hover:opacity-30" />}
-    </button>
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={m.display_name || m.id}
+      onClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      className={`group relative flex flex-col gap-2.5 p-4 rounded-2xl border bg-surface hover:bg-main/40 hover:border-brand/40 focus-visible:outline-none focus-visible:border-brand focus-visible:ring-2 focus-visible:ring-brand/30 transition-colors cursor-pointer min-h-[124px] ${
+        hidden ? "border-warning/30 bg-warning/5" : "border-border-subtle"
+      } ${!m.available ? "opacity-60" : ""}`}
+    >
+      {/* Top row: name + tier */}
+      <div className="flex items-start gap-2 min-w-0">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            {m.available
+              ? <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" title={t("models.available")} />
+              : <Lock className="w-3 h-3 text-text-dim/60 shrink-0" />}
+            <span className="text-sm font-bold text-text truncate">{m.display_name || m.id}</span>
+          </div>
+          <div className="text-[10px] font-mono text-text-dim truncate mt-0.5">{m.provider}/{m.id}</div>
+        </div>
+        {m.tier && (
+          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide shrink-0 ${tierClass(m.tier)}`}>
+            {t(`models.tier_${m.tier}`, { defaultValue: m.tier })}
+          </span>
+        )}
+      </div>
+
+      {/* Middle row: context + cost */}
+      <div className="flex items-center gap-3 text-[11px] text-text-dim">
+        <span className="font-mono" title={t("models.context_window")}>{formatCtx(m.context_window)}</span>
+        <span className="text-border-subtle">·</span>
+        {free
+          ? <span className="font-mono text-success font-bold">{t("models.free")}</span>
+          : (
+            <span className="font-mono">
+              <span className="text-text" title={t("models.col_input")}>${formatCost(m.input_cost_per_m)}</span>
+              <span className="text-text-dim/50"> / </span>
+              <span className="text-text" title={t("models.col_output")}>${formatCost(m.output_cost_per_m)}</span>
+              <span className="text-text-dim/40"> / M</span>
+            </span>
+          )}
+      </div>
+
+      {/* Bottom row: capabilities */}
+      <div className="flex items-center gap-1.5 mt-auto">
+        {[
+          { on: m.supports_tools, Icon: Wrench, label: t("models.col_tools") },
+          { on: m.supports_vision, Icon: Eye, label: t("models.col_vision") },
+          { on: m.supports_streaming, Icon: Zap, label: t("models.col_streaming") },
+          { on: m.supports_thinking, Icon: Brain, label: t("models.col_thinking") },
+        ].map(({ on, Icon, label }, i) => (
+          <span key={i} title={label}
+            className={`flex items-center justify-center w-6 h-6 rounded-md ${
+              on ? "bg-brand/10 text-brand" : "bg-main/40 text-text-dim/30"
+            }`}>
+            <Icon className="w-3 h-3" />
+          </span>
+        ))}
+        {(m.aliases?.length ?? 0) > 0 && (
+          <span className="ml-1 inline-flex items-center gap-1 text-[9px] text-text-dim font-mono" title={(m.aliases ?? []).join(", ")}>
+            <Tag className="w-2.5 h-2.5" />
+            {m.aliases!.length}
+          </span>
+        )}
+
+        {/* Hover-revealed actions */}
+        <div className="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button type="button" title={t("models.settings_title")}
+            onClick={(e) => { e.stopPropagation(); onSettings(); }}
+            className="flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:bg-main hover:text-text transition-colors">
+            <Settings className="w-3 h-3" />
+          </button>
+          <button type="button" title={hidden ? t("models.unhide_model") : t("models.hide_model")}
+            onClick={(e) => { e.stopPropagation(); onToggleHidden(); }}
+            className="flex items-center justify-center w-6 h-6 rounded-md text-text-dim hover:bg-main hover:text-text transition-colors">
+            {hidden ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+          </button>
+          {isCustom && (
+            <button type="button" title={t("models.delete_model")}
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              className={`flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
+                pendingDelete ? "bg-error/15 text-error" : "text-text-dim hover:bg-error/10 hover:text-error"
+              }`}>
+              {pendingDelete ? <Check className="w-3 h-3" /> : <Trash2 className="w-3 h-3" />}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
+
+// ── ModelDetailBody ───────────────────────────────────────────────
+// Body rendered inside the global PushDrawer when a card is opened.
+// Reads hiddenSet from UIStore directly so the toggle button reflects
+// changes without re-pushing the whole drawer body to drawerStore.
+function ModelDetailBody({
+  m,
+  hidden,
+  onOpenSettings,
+  onToggleHidden,
+}: {
+  m: ModelItem;
+  hidden: boolean;
+  onOpenSettings: () => void;
+  onToggleHidden: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="p-5 space-y-4 text-sm">
+      <div>
+        <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_provider")}</div>
+        <div className="font-mono text-xs">{m.provider}/{m.id}</div>
+      </div>
+      {m.aliases && m.aliases.length > 0 && (
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.aliases")}</div>
+          <div className="flex flex-wrap gap-1">
+            {m.aliases.map((a) => (
+              <span key={a} className="px-2 py-0.5 rounded-md bg-main text-[10px] font-mono">{a}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_tier")}</div>
+          {m.tier ? (
+            <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold uppercase ${tierClass(m.tier)}`}>
+              {t(`models.tier_${m.tier}`, { defaultValue: m.tier })}
+            </span>
+          ) : "—"}
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_context")}</div>
+          <span className="font-mono">{formatCtx(m.context_window)}</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_input")}</div>
+          <span className="font-mono">${m.input_cost_per_m ?? 0} / M</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.col_output")}</div>
+          <span className="font-mono">${m.output_cost_per_m ?? 0} / M</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.max_output")}</div>
+          <span className="font-mono">{formatCtx(m.max_output_tokens)}</span>
+        </div>
+        <div>
+          <div className="text-[10px] font-bold text-text-dim uppercase mb-1">{t("models.availability")}</div>
+          <span>{m.available ? <span className="text-success font-bold">●</span> : <span className="text-text-dim">○</span>} {m.available ? t("models.available") : t("models.no_key")}</span>
+        </div>
+      </div>
+      <div>
+        <div className="text-[10px] font-bold text-text-dim uppercase mb-1.5">{t("models.capabilities")}</div>
+        <div className="flex flex-wrap gap-2">
+          {([
+            ["tools", m.supports_tools, Wrench] as const,
+            ["vision", m.supports_vision, Eye] as const,
+            ["streaming", m.supports_streaming, Zap] as const,
+            ["thinking", m.supports_thinking, Brain] as const,
+          ]).map(([key, on, Icon]) => (
+            <span key={key} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold ${
+              on ? "border-brand/30 bg-brand/10 text-brand" : "border-border-subtle text-text-dim/40"
+            }`}>
+              <Icon className="w-3 h-3" />
+              {t(`models.col_${key}`)}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="flex gap-2 pt-2 border-t border-border-subtle/50">
+        <Button variant="primary" className="flex-1" onClick={onOpenSettings}>
+          <Settings className="w-4 h-4 mr-1.5" />
+          {t("models.settings_title")}
+        </Button>
+        <Button variant="secondary" onClick={onToggleHidden}>
+          {hidden ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ── ModelsPage ────────────────────────────────────────────────────
 
 export function ModelsPage() {
   const { t } = useTranslation();
@@ -59,24 +277,12 @@ export function ModelsPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   useCreateShortcut(() => setShowAdd(true));
   const [showHidden, setShowHidden] = useState(false);
-  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
-  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
-  const [sortField, setSortField] = useState<SortField>("model");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [isMobile, setIsMobile] = useState(false);
   const hiddenModelKeys = useUIStore((s) => s.hiddenModelKeys);
   const hideModelAction = useUIStore((s) => s.hideModel);
   const unhideModelAction = useUIStore((s) => s.unhideModel);
   const pruneHiddenKeys = useUIStore((s) => s.pruneHiddenKeys);
   const [settingsModel, setSettingsModel] = useState<ModelItem | null>(null);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
-    setIsMobile(mq.matches);
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
-  }, []);
+  const [detailModel, setDetailModel] = useState<ModelItem | null>(null);
 
   const [formId, setFormId] = useState("");
   const [formProvider, setFormProvider] = useState("");
@@ -90,7 +296,6 @@ export function ModelsPage() {
   const [formStreaming, setFormStreaming] = useState(true);
 
   const modelsQuery = useModels();
-
   const addMut = useAddCustomModel();
   const deleteMut = useRemoveCustomModel();
 
@@ -151,7 +356,7 @@ export function ModelsPage() {
     () => [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
       if (a.available && !b.available) return -1;
       if (!a.available && b.available) return 1;
-      return 0;
+      return (a.display_name || a.id).localeCompare(b.display_name || b.id);
     }),
     [modelsQuery.data],
   );
@@ -164,9 +369,10 @@ export function ModelsPage() {
       providerSet.add(m.provider);
       if (m.tier) tierSet.add(m.tier);
     }
-    const providers = ["all", ...Array.from(providerSet).sort()];
-    const tiers = ["all", ...Array.from(tierSet).sort()];
-    return { providers, tiers };
+    return {
+      providers: ["all", ...Array.from(providerSet).sort()],
+      tiers: ["all", ...Array.from(tierSet).sort()],
+    };
   }, [allModels]);
 
   const hiddenSet = useMemo(() => new Set(hiddenModelKeys), [hiddenModelKeys]);
@@ -195,282 +401,34 @@ export function ModelsPage() {
 
   const hiddenCount = useMemo(() => allModels.filter(m => hiddenSet.has(modelKey(m))).length, [allModels, hiddenSet]);
 
-  const sortedFiltered = useMemo(() => {
-    const sorted = [...filtered];
-    const dir = sortDir === "asc" ? 1 : -1;
-    sorted.sort((a, b) => {
-      let cmp = 0;
-      switch (sortField) {
-        case "model": cmp = (a.display_name || a.id).localeCompare(b.display_name || b.id); break;
-        case "provider": cmp = a.provider.localeCompare(b.provider); break;
-        case "tier": cmp = (a.tier || "").localeCompare(b.tier || ""); break;
-        case "context": cmp = (a.context_window ?? 0) - (b.context_window ?? 0); break;
-        case "input_cost": cmp = (a.input_cost_per_m ?? 0) - (b.input_cost_per_m ?? 0); break;
-        case "output_cost": cmp = (a.output_cost_per_m ?? 0) - (b.output_cost_per_m ?? 0); break;
-      }
-      return cmp * dir;
-    });
-    return sorted;
-  }, [filtered, sortField, sortDir]);
-
+  // Always group by provider — no toggle, sticky headers do the work.
   const grouped = useMemo(() => {
-    if (providerFilter !== "all") return null;
     const map = new Map<string, ModelItem[]>();
-    for (const m of sortedFiltered) {
+    for (const m of filtered) {
       const list = map.get(m.provider);
       if (list) list.push(m);
       else map.set(m.provider, [m]);
     }
     return new Map([...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
-  }, [sortedFiltered, providerFilter]);
+  }, [filtered]);
 
-  const allGroupedProviders = useMemo(() => grouped ? Array.from(grouped.keys()) : [], [grouped]);
-  const allExpanded = allGroupedProviders.length > 0 && allGroupedProviders.every(p => expandedProviders.has(p));
-
-  const toggleSort = (field: SortField) => {
-    if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
-    else { setSortField(field); setSortDir("asc"); }
-  };
-
-  const tierColor = (tier?: string) => {
-    switch (tier) {
-      case "basic": return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
-      case "fast": return "bg-cyan-50 text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-400";
-      case "smart": return "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400";
-      case "balanced": return "bg-teal-50 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400";
-      case "standard": return "bg-green-50 text-green-600 dark:bg-green-900/30 dark:text-green-400";
-      case "advanced": return "bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400";
-      case "frontier": return "bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400";
-      case "enterprise": return "bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400";
-      case "local": return "bg-orange-50 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400";
-      case "custom": return "bg-violet-50 text-violet-600 dark:bg-violet-900/30 dark:text-violet-400";
-      default: return "bg-main text-text-dim";
-    }
-  };
-
-  const formatCost = (cost?: number) => {
-    if (cost === undefined || cost === null) return "-";
-    if (cost === 0) return t("models.free");
-    return formatCostUtil(cost);
-  };
-
-  const formatCtx = (tokens?: number) => {
-    if (!tokens) return "-";
-    return formatCompact(tokens);
-  };
-
-
-
-  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-primary";
-
-  const providerSummary = (models: ModelItem[]) => {
-    const tierSet = new Set<string>();
-    let minCost: number | null = null;
-    for (const m of models) {
-      if (m.tier) tierSet.add(m.tier);
-      const cost = m.input_cost_per_m ?? 0;
-      if (cost > 0 && (minCost === null || cost < minCost)) {
-        minCost = cost;
-      }
-    }
-    const tiers = Array.from(tierSet).sort();
-    return (
-      <div className="flex items-center gap-1.5 ml-auto mr-2">
-        {tiers.slice(0, 4).map(tier => (
-          <span key={tier} className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${tierColor(tier)}`}>{tier}</span>
-        ))}
-        {tiers.length > 4 && <span className="text-[9px] text-text-dim">+{tiers.length - 4}</span>}
-        {minCost !== null && (
-          <span className="text-[10px] text-text-dim font-mono ml-1">{t("models.cost_range")} {formatCostUtil(minCost)}+</span>
-        )}
-      </div>
-    );
-  };
-
-  const renderMobileCard = (m: ModelItem) => {
-    const isCustom = m.tier === "custom";
-    const mKey = `${m.provider}:${m.id}`;
-    const isExpanded = expandedModelId === mKey;
-    return (
-      <div key={mKey} className={`rounded-xl border border-border-subtle p-3 space-y-2 ${!m.available ? "opacity-40" : ""}`}>
-        <div className="flex items-start justify-between gap-2">
-          <button type="button" onClick={() => setExpandedModelId(isExpanded ? null : mKey)} className="text-left min-w-0 flex-1">
-            <div className="flex items-center gap-1.5">
-              <p className="text-sm font-bold truncate">{m.display_name || m.id}</p>
-              {m.available ? <span className="w-2 h-2 rounded-full bg-success shrink-0" /> : <Lock className="w-3 h-3 text-text-dim/60 shrink-0" />}
-              {isCustom && <Sparkles className="w-3 h-3 text-violet-500 shrink-0" />}
-            </div>
-            {m.display_name && m.display_name !== m.id && (
-              <p className="text-[10px] text-text-dim/40 font-mono truncate">{m.id}</p>
-            )}
-          </button>
-          <div className="flex items-center gap-1 shrink-0">
-            <button onClick={() => setSettingsModel(m)}
-              className="p-1 rounded text-text-dim/40 hover:text-primary" title={t("models.settings_title")}><Settings className="w-3.5 h-3.5" /></button>
-            {showHidden ? (
-              <button onClick={() => { unhideModelAction(modelKey(m)); addToast(t("models.model_unhidden"), "success"); }}
-                className="p-1 rounded text-text-dim/40 hover:text-success" title={t("models.unhide_model")}><Eye className="w-3.5 h-3.5" /></button>
-            ) : (
-              <button onClick={() => { hideModelAction(modelKey(m)); addToast(t("models.model_hidden"), "success"); }}
-                className="p-1 rounded text-text-dim/40 hover:text-warning" title={t("models.hide_model")}><EyeOff className="w-3.5 h-3.5" /></button>
-            )}
-            {isCustom && !showHidden && (
-              confirmDeleteId === m.id
-                ? <button onClick={() => handleDelete(m.id)} className="px-1.5 py-0.5 rounded bg-error text-white text-[9px] font-bold">{t("common.confirm")}</button>
-                : <button onClick={() => handleDelete(m.id)} className="p-1 rounded text-text-dim/20 hover:text-error" title={t("models.delete_model")}><Trash2 className="w-3.5 h-3.5" /></button>
-            )}
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-1.5 items-center">
-          <span className="text-[10px] font-semibold text-text-dim bg-surface px-1.5 py-0.5 rounded">{m.provider}</span>
-          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${tierColor(m.tier)}`}>{m.tier === "custom" ? t("models.custom") : m.tier || "-"}</span>
-          <span className="text-[10px] font-mono text-text-dim">{formatCtx(m.context_window)}</span>
-          <span className="text-[10px] font-mono text-text">{formatCost(m.input_cost_per_m)}/{formatCost(m.output_cost_per_m)}</span>
-        </div>
-        <div className="flex gap-2 items-center">
-          {m.supports_tools && <Wrench className="w-3 h-3 text-success" />}
-          {m.supports_vision && <Eye className="w-3 h-3 text-success" />}
-          {m.supports_streaming && <Zap className="w-3 h-3 text-success" />}
-          {m.supports_thinking && <Brain className="w-3 h-3 text-success" />}
-        </div>
-        {isExpanded && (
-          <div className="pt-2 border-t border-border-subtle/50 space-y-1 text-[11px] text-text-dim">
-            <p><span className="font-bold">{t("models.model_id")}:</span> <span className="font-mono">{m.id}</span></p>
-            <p><span className="font-bold">{t("models.max_output_tokens")}:</span> {formatCtx(m.max_output_tokens)}</p>
-            {(m.aliases ?? []).length > 0 && (
-              <div className="flex items-center gap-1 flex-wrap">
-                <Tag className="w-3 h-3" />
-                <span className="font-bold">{t("models.aliases")}:</span>
-                {m.aliases!.map(a => <span key={a} className="font-mono bg-surface px-1 rounded">{a}</span>)}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const renderRow = (m: ModelItem, i: number) => {
-    const isCustom = m.tier === "custom";
-    const mKey = `${m.provider}:${m.id}`;
-    const isExpanded = expandedModelId === mKey;
-    return (
-      <div key={mKey}>
-        <div
-          className={`grid ${GRID_COLS} ${GRID_MIN_W} gap-3 px-5 py-3 items-center border-t border-border-subtle/50 hover:bg-surface transition-colors cursor-pointer ${
-            !m.available ? "opacity-40" : ""
-          } ${i % 2 === 0 ? "" : "bg-main/30"}`}
-          onClick={() => setExpandedModelId(isExpanded ? null : mKey)}
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5">
-              <p className="text-sm font-bold truncate">{m.display_name || m.id}</p>
-              {m.available ? (
-                <span className="w-2 h-2 rounded-full bg-success shrink-0" />
-              ) : (
-                <span className="flex items-center gap-0.5 text-[9px] text-text-dim/60 shrink-0">
-                  <Lock className="w-3 h-3" /> {t("models.no_key")}
-                </span>
-              )}
-              {isCustom && <Sparkles className="w-3 h-3 text-violet-500 shrink-0" />}
-            </div>
-            {m.display_name && m.display_name !== m.id && (
-              <p className="text-[10px] text-text-dim/40 font-mono truncate">{m.id}</p>
-            )}
-          </div>
-          <span className="text-xs font-semibold text-text truncate">{m.provider}</span>
-          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md w-fit ${tierColor(m.tier)}`}>
-            {m.tier === "custom" ? t("models.custom") : m.tier || "-"}
-          </span>
-          <span className="text-xs font-mono text-text">{formatCtx(m.context_window)}</span>
-          <span className="text-xs font-mono text-text">{formatCost(m.input_cost_per_m)}</span>
-          <span className="text-xs font-mono text-text">{formatCost(m.output_cost_per_m)}</span>
-          <span className="text-center">{m.supports_tools ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
-          <span className="text-center">{m.supports_vision ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
-          <span className="text-center">{m.supports_streaming ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
-          <span className="text-center">{m.supports_thinking ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
-          <span className="flex items-center justify-center gap-1" onClick={e => e.stopPropagation()}>
-            <button onClick={() => setSettingsModel(m)}
-              className="p-1 rounded text-text-dim/40 hover:text-primary hover:bg-primary/10 transition-colors" title={t("models.settings_title")} aria-label={t("models.settings_title")}>
-              <Settings className="w-3.5 h-3.5" />
-            </button>
-            {showHidden ? (
-              <button onClick={() => { unhideModelAction(modelKey(m)); addToast(t("models.model_unhidden"), "success"); }}
-                className="p-1 rounded text-text-dim/40 hover:text-success hover:bg-success/10 transition-colors" title={t("models.unhide_model")} aria-label={t("models.unhide_model")}>
-                <Eye className="w-3.5 h-3.5" />
-              </button>
-            ) : (
-              <button onClick={() => { hideModelAction(modelKey(m)); addToast(t("models.model_hidden"), "success"); }}
-                className="p-1 rounded text-text-dim/40 hover:text-warning hover:bg-warning/10 transition-colors" title={t("models.hide_model")} aria-label={t("models.hide_model")}>
-                <EyeOff className="w-3.5 h-3.5" />
-              </button>
-            )}
-            {isCustom && !showHidden && (
-              confirmDeleteId === m.id ? (
-                <button onClick={() => handleDelete(m.id)} className="px-1.5 py-0.5 rounded bg-error text-white text-[9px] font-bold">{t("common.confirm")}</button>
-              ) : (
-                <button onClick={() => handleDelete(m.id)} className="p-1 rounded text-text-dim/20 hover:text-error hover:bg-error/10 transition-colors" title={t("models.delete_model")}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )
-            )}
-          </span>
-        </div>
-        {/* Inline detail panel */}
-        {isExpanded && (
-          <div className={`px-5 py-3 bg-surface/50 border-t border-border-subtle/30 ${GRID_MIN_W}`}>
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-text-dim">
-              <span><span className="font-bold">{t("models.model_id")}:</span> <span className="font-mono">{m.id}</span></span>
-              <span><span className="font-bold">{t("models.max_output_tokens")}:</span> {formatCtx(m.max_output_tokens)}</span>
-              <span><span className="font-bold">{t("models.col_output")}:</span> {formatCost(m.output_cost_per_m)}</span>
-              {(m.aliases ?? []).length > 0 && (
-                <span className="flex items-center gap-1">
-                  <Tag className="w-3 h-3" />
-                  <span className="font-bold">{t("models.aliases")}:</span>
-                  {m.aliases!.map(a => <span key={a} className="font-mono bg-main px-1 rounded">{a}</span>)}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const toggleProvider = (p: string) => {
-    setExpandedProviders(prev => {
-      const next = new Set(prev);
-      if (next.has(p)) next.delete(p); else next.add(p);
-      return next;
-    });
-  };
-
-  const toggleAllProviders = () => {
-    if (allExpanded) {
-      setExpandedProviders(new Set());
+  const toggleHidden = (m: ModelItem) => {
+    const key = modelKey(m);
+    if (hiddenSet.has(key)) {
+      unhideModelAction(key);
+      addToast(t("models.model_unhidden"), "success");
     } else {
-      setExpandedProviders(new Set(allGroupedProviders));
+      hideModelAction(key);
+      addToast(t("models.model_hidden"), "success");
     }
   };
 
-  const colHeader = (
-    <div className={`grid ${GRID_COLS} ${GRID_MIN_W} gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase`}>
-      <SortHeader field="model" active={sortField === "model"} dir={sortDir} onToggle={toggleSort}>{t("models.col_model")}</SortHeader>
-      <SortHeader field="provider" active={sortField === "provider"} dir={sortDir} onToggle={toggleSort}>{t("models.col_provider")}</SortHeader>
-      <SortHeader field="tier" active={sortField === "tier"} dir={sortDir} onToggle={toggleSort}>{t("models.col_tier")}</SortHeader>
-      <SortHeader field="context" active={sortField === "context"} dir={sortDir} onToggle={toggleSort}>{t("models.col_context")}</SortHeader>
-      <SortHeader field="input_cost" active={sortField === "input_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_input")}</SortHeader>
-      <SortHeader field="output_cost" active={sortField === "output_cost"} dir={sortDir} onToggle={toggleSort}>{t("models.col_output")}</SortHeader>
-      <span className="text-center" title={t("models.col_tools")}><Wrench className="w-3.5 h-3.5 inline" /></span>
-      <span className="text-center" title={t("models.col_vision")}><Eye className="w-3.5 h-3.5 inline" /></span>
-      <span className="text-center" title={t("models.col_streaming")}><Zap className="w-3.5 h-3.5 inline" /></span>
-      <span className="text-center" title={t("models.col_thinking")}><Brain className="w-3.5 h-3.5 inline" /></span>
-      <span></span>
-    </div>
-  );
+  const detailHidden = detailModel ? hiddenSet.has(modelKey(detailModel)) : false;
+
+  const inputClass = "w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand";
 
   return (
-    <div className="flex flex-col gap-6 transition-colors duration-300">
+    <div className="flex flex-col gap-5 transition-colors duration-300">
       <PageHeader
         badge={t("models.section")}
         title={t("models.title")}
@@ -498,9 +456,9 @@ export function ModelsPage() {
         </div>
       )}
 
-      {/* Filters */}
-      <div className="flex flex-wrap gap-2 sm:gap-3 items-center">
-        <div className="flex-1 min-w-[160px] sm:min-w-[200px] max-w-sm">
+      {/* Filter bar — search + provider + tier + hidden toggle */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex-1 min-w-[200px] max-w-md">
           <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={t("models.search_placeholder")}
             leftIcon={<Search className="h-4 w-4" />}
@@ -508,52 +466,43 @@ export function ModelsPage() {
         </div>
 
         <select value={providerFilter} onChange={e => setProviderFilter(e.target.value)}
-          className="rounded-xl border border-border-subtle bg-surface px-3 py-2.5 text-xs outline-none focus:border-primary">
+          className="rounded-xl border border-border-subtle bg-surface px-3 py-2 text-xs outline-none focus:border-brand cursor-pointer">
           {providers.map(p => <option key={p} value={p}>{p === "all" ? t("models.all_providers") : p}</option>)}
         </select>
 
-        <div className="hidden sm:flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5 flex-wrap overflow-x-auto">
+        <select value={tierFilter} onChange={e => setTierFilter(e.target.value)}
+          className="rounded-xl border border-border-subtle bg-surface px-3 py-2 text-xs outline-none focus:border-brand cursor-pointer">
           {tiers.map(tier => (
-            <button key={tier} onClick={() => setTierFilter(tier || "all")}
-              className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
-                tierFilter === tier ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
-              }`}>
-              {t(`models.tier_${tier}`, { defaultValue: tier })}
-            </button>
+            <option key={tier} value={tier}>
+              {tier === "all" ? t("models.all_tiers") : t(`models.tier_${tier}`, { defaultValue: tier })}
+            </option>
           ))}
-        </div>
+        </select>
 
         <button onClick={() => setAvailableOnly(!availableOnly)}
-          className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-bold transition-colors ${
-            availableOnly ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim hover:border-primary/30"
+          title={t("models.available_only")}
+          className={`flex items-center gap-1 px-2.5 py-2 rounded-xl border text-xs font-bold transition-colors ${
+            availableOnly ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim hover:border-brand/30"
           }`}>
           <Check className="w-3 h-3" />
-          {t("models.available_only")}
+          <span className="hidden sm:inline">{t("models.available_only")}</span>
         </button>
 
-        <button onClick={() => setShowHidden(!showHidden)}
-          className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl border text-xs font-bold transition-colors ${
-            showHidden ? "border-warning bg-warning/10 text-warning" : "border-border-subtle text-text-dim hover:border-primary/30"
-          }`}>
-          <EyeOff className="w-3 h-3" />
-          {t("models.show_hidden")}
-          {hiddenCount > 0 && (
-            <span className="ml-1 px-1.5 py-0.5 rounded-full bg-warning/20 text-warning text-[9px] font-bold">{hiddenCount}</span>
-          )}
-        </button>
-
-        {grouped && allGroupedProviders.length > 1 && (
-          <button onClick={toggleAllProviders}
-            className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-border-subtle text-xs font-bold text-text-dim hover:border-primary/30 transition-colors">
-            <ChevronsUpDown className="w-3 h-3" />
-            {allExpanded ? t("models.collapse_all") : t("models.expand_all")}
+        {hiddenCount > 0 && (
+          <button onClick={() => setShowHidden(!showHidden)}
+            title={t("models.show_hidden")}
+            className={`flex items-center gap-1 px-2.5 py-2 rounded-xl border text-xs font-bold transition-colors ${
+              showHidden ? "border-warning bg-warning/10 text-warning" : "border-border-subtle text-text-dim hover:border-brand/30"
+            }`}>
+            <EyeOff className="w-3 h-3" />
+            <span>{hiddenCount}</span>
           </button>
         )}
+
+        <span className="text-[11px] text-text-dim ml-auto">{filtered.length} {t("models.results")}</span>
       </div>
 
-      <p className="text-xs text-text-dim">{filtered.length} {t("models.results")}</p>
-
-      {/* Model List */}
+      {/* Model grid — always grouped by provider with sticky headers */}
       {modelsQuery.isLoading ? (
         <ListSkeleton rows={5} />
       ) : filtered.length === 0 ? (
@@ -561,110 +510,125 @@ export function ModelsPage() {
           icon={<Cpu className="w-7 h-7" />}
           title={allModels.length === 0 ? t("models.no_models") : t("models.no_results")}
         />
-      ) : isMobile ? (
-        /* Mobile card layout */
-        <div className="flex flex-col gap-2">
-          {sortedFiltered.map(m => renderMobileCard(m))}
-        </div>
-      ) : grouped ? (
-        <div className="flex flex-col gap-3">
+      ) : (
+        <div className="flex flex-col gap-6">
           {Array.from(grouped.entries()).map(([provider, models]) => {
-            const collapsed = !expandedProviders.has(provider);
             const availCount = models.filter(m => m.available).length;
             return (
-              <div key={provider} className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
-                <button
-                  type="button"
-                  onClick={() => toggleProvider(provider)}
-                  className="flex items-center gap-3 w-full px-5 py-3.5 bg-surface hover:bg-main/60 transition-colors cursor-pointer select-none min-w-[780px]"
-                >
-                  {collapsed
-                    ? <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
-                    : <ChevronDown className="w-4 h-4 text-text-dim shrink-0" />}
+              <section key={provider}>
+                <header className="sticky top-0 z-10 flex items-center gap-3 -mx-2 px-2 py-2 mb-2 backdrop-blur-md bg-bg/85 border-b border-border-subtle/40">
                   <span className="text-sm font-bold text-text">{provider}</span>
-                  <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-bold">{models.length}</span>
-                  {availCount > 0 && availCount < models.length && (
-                    <span className="text-[11px] text-text-dim">{availCount} {t("models.available")}</span>
+                  <span className="px-1.5 py-0.5 rounded-md bg-brand/10 text-brand text-[10px] font-bold tabular-nums">{models.length}</span>
+                  {availCount < models.length && (
+                    <span className="text-[10px] text-text-dim">
+                      {availCount} {t("models.available")}
+                    </span>
                   )}
-                  {collapsed && providerSummary(models)}
-                </button>
-                {!collapsed && (
-                  <>
-                    {colHeader}
-                    {models.map((m, i) => renderRow(m, i))}
-                  </>
-                )}
-              </div>
+                </header>
+                <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {models.map(m => (
+                    <ModelCard
+                      key={`${m.provider}:${m.id}`}
+                      m={m}
+                      hidden={hiddenSet.has(modelKey(m))}
+                      onOpen={() => setDetailModel(m)}
+                      onSettings={() => setSettingsModel(m)}
+                      onToggleHidden={() => toggleHidden(m)}
+                      onDelete={() => handleDelete(m.id)}
+                      pendingDelete={confirmDeleteId === m.id}
+                    />
+                  ))}
+                </div>
+              </section>
             );
           })}
         </div>
-      ) : (
-        <div className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
-          {colHeader}
-          {sortedFiltered.map((m, i) => renderRow(m, i))}
-        </div>
       )}
 
+      {/* Detail drawer — pushes content via the global slot, mirroring
+          the sidebar collapse instead of overlaying the page. */}
+      <DrawerPanel
+        isOpen={!!detailModel}
+        onClose={() => setDetailModel(null)}
+        title={detailModel ? (detailModel.display_name || detailModel.id) : undefined}
+        size="md"
+      >
+        {detailModel && (
+          <ModelDetailBody
+            m={detailModel}
+            hidden={detailHidden}
+            onOpenSettings={() => {
+              setSettingsModel(detailModel);
+              setDetailModel(null);
+            }}
+            onToggleHidden={() => {
+              toggleHidden(detailModel);
+              setDetailModel(null);
+            }}
+          />
+        )}
+      </DrawerPanel>
+
       {/* Add Model Modal */}
-      <Modal isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg" variant="panel-right">
+      <DrawerPanel isOpen={showAdd} onClose={resetForm} title={t("models.add_custom_model")} size="lg">
         <form onSubmit={handleAdd} className="p-5 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="sm:col-span-2">
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
-                  <input value={formId} onChange={e => setFormId(e.target.value)} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
-                  <input value={formProvider} onChange={e => setFormProvider(e.target.value)} placeholder={t("models.provider_placeholder")} className={inputClass} required />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
-                  <input value={formDisplayName} onChange={e => setFormDisplayName(e.target.value)} placeholder={t("models.display_name_placeholder")} className={inputClass} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
-                  <input type="number" value={formContextWindow} onChange={e => setFormContextWindow(+e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
-                  <input type="number" value={formMaxOutput} onChange={e => setFormMaxOutput(+e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
-                  <input type="number" step="0.01" value={formInputCost} onChange={e => setFormInputCost(+e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
-                  <input type="number" step="0.01" value={formOutputCost} onChange={e => setFormOutputCost(+e.target.value)} className={inputClass} />
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                {([
-                  ["tools", formTools, setFormTools, t("models.supports_tools")] as const,
-                  ["vision", formVision, setFormVision, t("models.supports_vision")] as const,
-                  ["streaming", formStreaming, setFormStreaming, t("models.supports_streaming")] as const,
-                ]).map(([key, val, setter, label]) => (
-                  <button key={key} type="button" onClick={() => setter(!val)}
-                    className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-colors ${
-                      val ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim"
-                    }`}>
-                    <Check className="w-3 h-3" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {addMut.error && (
-                <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(addMut.error as any)?.message}</div>
-              )}
-              <div className="flex gap-2 pt-2">
-                <Button type="submit" variant="primary" className="flex-1" disabled={addMut.isPending || !formId.trim() || !formProvider.trim()}>
-                  {addMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
-                  {t("models.add_model")}
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => resetForm()}>{t("common.cancel")}</Button>
-              </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="sm:col-span-2">
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.model_id")} *</label>
+              <input value={formId} onChange={e => setFormId(e.target.value)} placeholder={t("models.model_id_placeholder")} className={inputClass} required />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.provider")} *</label>
+              <input value={formProvider} onChange={e => setFormProvider(e.target.value)} placeholder={t("models.provider_placeholder")} className={inputClass} required />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.display_name")}</label>
+              <input value={formDisplayName} onChange={e => setFormDisplayName(e.target.value)} placeholder={t("models.display_name_placeholder")} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.context_window")}</label>
+              <input type="number" value={formContextWindow} onChange={e => setFormContextWindow(+e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.max_output")}</label>
+              <input type="number" value={formMaxOutput} onChange={e => setFormMaxOutput(+e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.input_cost")}</label>
+              <input type="number" step="0.01" value={formInputCost} onChange={e => setFormInputCost(+e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-bold text-text-dim uppercase">{t("models.output_cost")}</label>
+              <input type="number" step="0.01" value={formOutputCost} onChange={e => setFormOutputCost(+e.target.value)} className={inputClass} />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            {([
+              ["tools", formTools, setFormTools, t("models.supports_tools")] as const,
+              ["vision", formVision, setFormVision, t("models.supports_vision")] as const,
+              ["streaming", formStreaming, setFormStreaming, t("models.supports_streaming")] as const,
+            ]).map(([key, val, setter, label]) => (
+              <button key={key} type="button" onClick={() => setter(!val)}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-bold transition-colors ${
+                  val ? "border-success bg-success/10 text-success" : "border-border-subtle text-text-dim"
+                }`}>
+                <Check className="w-3 h-3" />
+                {label}
+              </button>
+            ))}
+          </div>
+          {addMut.error && (
+            <div className="flex items-center gap-2 text-error text-xs"><AlertCircle className="w-4 h-4" /> {(addMut.error as Error)?.message}</div>
+          )}
+          <div className="flex gap-2 pt-2">
+            <Button type="submit" variant="primary" className="flex-1" disabled={addMut.isPending || !formId.trim() || !formProvider.trim()}>
+              {addMut.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+              {t("models.add_model")}
+            </Button>
+            <Button type="button" variant="secondary" onClick={() => resetForm()}>{t("common.cancel")}</Button>
+          </div>
         </form>
-      </Modal>
+      </DrawerPanel>
 
       {/* Model Settings Modal */}
       {settingsModel && (
@@ -693,7 +657,7 @@ function SettingsToggle({ value, onChange, label }: { value: boolean; onChange: 
     <label className="flex items-center justify-between gap-2 py-1.5 cursor-pointer">
       <span className="text-xs text-text">{label}</span>
       <button type="button" onClick={() => onChange(!value)}
-        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-primary" : "bg-border-subtle"}`}>
+        className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${value ? "bg-brand" : "bg-border-subtle"}`}>
         <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${value ? "translate-x-4.5" : "translate-x-0.5"}`} />
       </button>
     </label>
@@ -790,20 +754,20 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
 
   if (overridesQuery.isLoading) {
     return (
-      <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
+      <DrawerPanel isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
         <div className="flex items-center justify-center p-12">
-          <Loader2 className="w-6 h-6 animate-spin text-primary" />
+          <Loader2 className="w-6 h-6 animate-spin text-brand" />
         </div>
-      </Modal>
+      </DrawerPanel>
     );
   }
 
   return (
-    <Modal isOpen onClose={onClose} title={t("models.settings_title")} size="lg" variant="panel-right">
+    <DrawerPanel isOpen onClose={onClose} title={t("models.settings_title")} size="lg">
       <div className="p-5 space-y-5">
         {/* Model header */}
         <div className="flex items-center gap-3">
-          <Cpu className="w-5 h-5 text-primary" />
+          <Cpu className="w-5 h-5 text-brand" />
           <div>
             <p className="text-sm font-bold">{model.display_name || model.id}</p>
             <p className="text-[10px] text-text-dim font-mono">{model.provider}:{model.id}</p>
@@ -817,7 +781,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
             {(["chat", "speech", "embedding"] as const).map((mt) => (
               <button key={mt} type="button" onClick={() => setModelType(mt)}
                 className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${
-                  modelType === mt ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
+                  modelType === mt ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
                 }`}>
                 {t(`models.type_${mt}`)}
               </button>
@@ -901,7 +865,7 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           <div className="space-y-1.5">
             <label className="text-xs font-bold text-text-dim">{t("models.reasoning_effort")}</label>
             <select value={reasoningEffort} onChange={(e) => setReasoningEffort(e.target.value)}
-              className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-primary">
+              className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand">
               <option value="">—</option>
               <option value="low">{t("models.effort_low")}</option>
               <option value="medium">{t("models.effort_medium")}</option>
@@ -932,6 +896,6 @@ function ModelSettingsModal({ model, onClose, onSaved, onReset, onError }: {
           </Button>
         </div>
       </div>
-    </Modal>
+    </DrawerPanel>
   );
 }

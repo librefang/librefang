@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { tabContent } from "../lib/motion";
 import {
   type MediaProvider,
   type MediaImageResult,
@@ -120,18 +122,14 @@ export function MediaPage() {
 
       {/* Active panel */}
       <div className="rounded-2xl border border-border-subtle bg-surface p-5">
-        {activeTab === "image" && (
-          <ImagePanel providers={imageProviders} onToast={addToast} />
-        )}
-        {activeTab === "speech" && (
-          <SpeechPanel providers={speechProviders} onToast={addToast} />
-        )}
-        {activeTab === "video" && (
-          <VideoPanel providers={videoProviders} onToast={addToast} />
-        )}
-        {activeTab === "music" && (
-          <MusicPanel providers={musicProviders} onToast={addToast} />
-        )}
+        <AnimatePresence mode="wait">
+          <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
+            {activeTab === "image" && <ImagePanel providers={imageProviders} onToast={addToast} />}
+            {activeTab === "speech" && <SpeechPanel providers={speechProviders} onToast={addToast} />}
+            {activeTab === "video" && <VideoPanel providers={videoProviders} onToast={addToast} />}
+            {activeTab === "music" && <MusicPanel providers={musicProviders} onToast={addToast} />}
+          </motion.div>
+        </AnimatePresence>
       </div>
     </div>
   );

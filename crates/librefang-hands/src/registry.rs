@@ -126,7 +126,12 @@ pub fn parse_hand_toml_with_agents_dir(
         // resolved during agent construction (before AgentManifest parsing).
         crate::parse_hand_definition(toml_content, agents_dir)
             .or_else(|flat_err| {
-                tracing::warn!("Flat parse failed for hand: {flat_err}");
+                // Flat-vs-wrapped is a try/fallback dispatch, not a fault:
+                // a HAND.toml authored in the wrapped `[hand] base = ...`
+                // form will always fail flat parsing first. Demote to debug
+                // so the only WARN reaches operators when BOTH formats
+                // fail (the .map_err on the outer `?` below).
+                tracing::debug!("Flat parse failed for hand (trying wrapped): {flat_err}");
                 // Try wrapped format: fields under [hand] section.
                 // Extract the [hand] sub-table and re-serialize so that
                 // parse_hand_definition can resolve `base` templates with agents_dir.
@@ -145,7 +150,9 @@ pub fn parse_hand_toml_with_agents_dir(
         // No agents_dir — use standard serde path (no base resolution).
         toml::from_str::<HandDefinition>(toml_content)
             .or_else(|flat_err| {
-                tracing::warn!("Flat parse failed for hand: {flat_err}");
+                // See note above: flat-vs-wrapped is a normal dispatch, not
+                // an error — only the final outer `?` should surface to ops.
+                tracing::debug!("Flat parse failed for hand (trying wrapped): {flat_err}");
                 toml::from_str::<HandTomlWrapper>(toml_content).map(|w| w.hand)
             })
             .map_err(|e| HandError::TomlParse(e.to_string()))?

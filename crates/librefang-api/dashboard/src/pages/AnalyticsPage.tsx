@@ -10,6 +10,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp, Activity, Clock, Gauge, Target, Download } from "lucide-react";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from "recharts";
+import { StaggerList } from "../components/ui/StaggerList";
 
 interface BudgetForm {
   hourly?: string;
@@ -164,13 +165,13 @@ export function AnalyticsPage() {
       />
 
       {isLoading ? (
-        <div className="grid gap-4 grid-cols-2 md:grid-cols-4 stagger-children">
+        <StaggerList className="grid gap-4 grid-cols-2 md:grid-cols-4">
           {[1, 2, 3, 4].map(i => <CardSkeleton key={i} />)}
-        </div>
+        </StaggerList>
       ) : (
         <>
           {/* KPI Cards */}
-          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
+          <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {kpis.map((kpi, i) => (
               <Card key={i} hover padding="md">
                 <div className="flex items-center justify-between">
@@ -180,7 +181,7 @@ export function AnalyticsPage() {
                 <p className={`text-2xl sm:text-3xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
               </Card>
             ))}
-          </div>
+          </StaggerList>
 
           {/* Cost by Agent + Cost by Model */}
           <div className="grid gap-6 md:grid-cols-2">
@@ -257,7 +258,7 @@ export function AnalyticsPage() {
           {modelPerformance.length > 0 && (
             <>
               {/* KPI Cards for Model Performance */}
-              <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
+              <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
                 {modelKpis?.map((kpi, i) => (
                   <Card key={i} hover padding="md">
                     <div className="flex items-center justify-between">
@@ -267,7 +268,7 @@ export function AnalyticsPage() {
                     <p className={`text-xl sm:text-2xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
                   </Card>
                 ))}
-              </div>
+              </StaggerList>
 
               {/* Latency Comparison + Cost Comparison */}
               <div className="grid gap-6 md:grid-cols-2">

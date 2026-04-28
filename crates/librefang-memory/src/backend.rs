@@ -483,6 +483,7 @@ pub trait DeviceBackend: Send + Sync {
     fn load_paired_devices(&self) -> LibreFangResult<Vec<serde_json::Value>>;
 
     /// Upsert a paired-device record.
+    #[allow(clippy::too_many_arguments)]
     fn save_paired_device(
         &self,
         device_id: &str,
@@ -491,6 +492,7 @@ pub trait DeviceBackend: Send + Sync {
         paired_at: &str,
         last_seen: &str,
         push_token: Option<&str>,
+        api_key_hash: &str,
     ) -> LibreFangResult<()>;
 
     /// Remove a paired device by id.
@@ -502,6 +504,7 @@ impl DeviceBackend for MemorySubstrate {
         MemorySubstrate::load_paired_devices(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn save_paired_device(
         &self,
         device_id: &str,
@@ -510,6 +513,7 @@ impl DeviceBackend for MemorySubstrate {
         paired_at: &str,
         last_seen: &str,
         push_token: Option<&str>,
+        api_key_hash: &str,
     ) -> LibreFangResult<()> {
         MemorySubstrate::save_paired_device(
             self,
@@ -519,6 +523,7 @@ impl DeviceBackend for MemorySubstrate {
             paired_at,
             last_seen,
             push_token,
+            api_key_hash,
         )
     }
 

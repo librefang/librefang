@@ -7,6 +7,7 @@ import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { StaggerList } from "../components/ui/StaggerList";
 import { Network, Globe, Server, Wifi, WifiOff, Hash, Clock } from "lucide-react";
 
 export function NetworkPage() {
@@ -44,7 +45,7 @@ export function NetworkPage() {
       ) : (
         <>
           {/* Network status cards */}
-          <div className="grid gap-2 sm:gap-4 md:grid-cols-3 stagger-children">
+          <StaggerList className="grid gap-2 sm:gap-4 md:grid-cols-3">
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
@@ -93,7 +94,7 @@ export function NetworkPage() {
                 <p className="text-[10px] text-text-dim font-mono mt-1">{status.listen_addr}</p>
               ) : null}
             </Card>
-          </div>
+          </StaggerList>
 
           {/* Peers list */}
           <div>
@@ -109,7 +110,7 @@ export function NetworkPage() {
                 description={t("network.no_peers_desc")}
               />
             ) : (
-              <div className="grid gap-2 sm:gap-3 md:grid-cols-2 stagger-children">
+              <StaggerList className="grid gap-2 sm:gap-3 md:grid-cols-2">
                 {peers.map((peer) => (
                   <Card key={peer.id} hover padding="md">
                     <div className="flex items-start justify-between">
@@ -147,7 +148,7 @@ export function NetworkPage() {
                     ) : null}
                   </Card>
                 ))}
-              </div>
+              </StaggerList>
             )}
           </div>
         </>

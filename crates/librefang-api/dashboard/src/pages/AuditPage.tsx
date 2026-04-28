@@ -52,6 +52,7 @@ import { Select } from "../components/ui/Select";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
@@ -59,6 +60,7 @@ import { formatRelativeTime } from "../lib/datetime";
 import type { AuditQueryFilters } from "../lib/http/client";
 import type { AuditQueryEntry } from "../api";
 import { useUIStore } from "../lib/store";
+import { StaggerList } from "../components/ui/StaggerList";
 
 // `<input type="datetime-local">` produces "YYYY-MM-DDTHH:MM" with no
 // timezone. The server parses `from` / `to` as RFC-3339 (offset
@@ -503,6 +505,15 @@ export function AuditPage() {
     setActive(reset);
   };
 
+  // Apply a quick-pick: snap `from` to `now − N`, clear `to`, and push
+  // the change into `active` so the query re-runs without the operator
+  // pressing Apply (matches the comment on DATE_PRESETS above).
+  const applyDatePreset = (preset: DatePreset) => {
+    const next: AuditQueryFilters = { ...draft, from: preset.since(), to: undefined };
+    setDraft(next);
+    setActive(next);
+  };
+
   // Active-filter → URL sync. `replace: true` so each filter tweak
   // doesn't pollute browser history (back button feels broken
   // otherwise — every chip click would be its own entry). `seq` is
@@ -756,12 +767,11 @@ export function AuditPage() {
           live, the operator commits via Apply. The dim backdrop
           signals that and gives Esc / click-outside as the standard
           dismiss paths. */}
-      <Modal
+      <DrawerPanel
         isOpen={filtersOpen}
         onClose={() => setFiltersOpen(false)}
         title={t("audit.filters")}
         size="md"
-        variant="panel-right"
       >
         <form
           onSubmit={(e) => {
@@ -889,7 +899,7 @@ export function AuditPage() {
             </Button>
           </div>
         </form>
-      </Modal>
+      </DrawerPanel>
 
       {isForbidden && (
         <Card padding="lg">
@@ -995,7 +1005,7 @@ export function AuditPage() {
                   <span className="text-text-dim/70">{group.rows.length}</span>
                 </div>
               </div>
-              <div className="space-y-2 stagger-children">
+              <StaggerList className="space-y-2">
                 {group.rows.map((e) => {
                   const variant = outcomeVariant(e.outcome);
                   const fullTimestamp = e.timestamp;
@@ -1141,7 +1151,7 @@ export function AuditPage() {
                     </div>
                   );
                 })}
-              </div>
+              </StaggerList>
             </section>
             );
           })}

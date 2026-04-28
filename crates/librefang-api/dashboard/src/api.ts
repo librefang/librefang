@@ -3954,3 +3954,36 @@ export async function getEffectivePermissions(
     `/api/authz/effective/${encodeURIComponent(name)}`,
   );
 }
+
+// ---------------------------------------------------------------------------
+// Device pairing
+// ---------------------------------------------------------------------------
+
+export interface PairingRequestResult {
+  token: string;
+  qr_uri: string;
+  expires_at: string;
+}
+
+export interface PairedDevice {
+  device_id: string;
+  display_name: string;
+  platform: string;
+  paired_at: string;
+}
+
+// Pairing completion is initiated by the mobile client against an arbitrary
+// daemon URL (cross-origin), so it lives in `lib/mutations/connection.ts`
+// rather than this same-origin api module.
+
+export async function createPairingRequest(): Promise<PairingRequestResult> {
+  return post<PairingRequestResult>("/api/pairing/request", {});
+}
+
+export async function listPairedDevices(): Promise<PairedDevice[]> {
+  return get<PairedDevice[]>("/api/pairing/devices");
+}
+
+export async function removePairedDevice(deviceId: string): Promise<void> {
+  return del<void>(`/api/pairing/devices/${encodeURIComponent(deviceId)}`);
+}

@@ -1483,17 +1483,14 @@ mod tests {
         let manifest = AgentManifest {
             routing: Some(ModelRoutingConfig::default()),
             autonomous: Some(AutonomousConfig::default()),
-            pinned_model: Some("claude-sonnet-4-20250514".into()),
+            pinned_model: Some("sonnet".into()),
             ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let back: AgentManifest = serde_json::from_str(&json).unwrap();
         assert!(back.routing.is_some());
         assert!(back.autonomous.is_some());
-        assert_eq!(
-            back.pinned_model,
-            Some("claude-sonnet-4-20250514".to_string())
-        );
+        assert_eq!(back.pinned_model, Some("sonnet".to_string()));
     }
 
     #[test]

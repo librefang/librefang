@@ -1,7 +1,7 @@
 //! All configuration struct and enum type definitions, including Default impls and associated helper functions.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use super::serde_helpers::{deserialize_string_or_int_vec, OneOrMany};
@@ -211,6 +211,19 @@ pub struct ChannelOverrides {
     /// channel and existing configs keep their current output byte-for-byte.
     #[serde(default)]
     pub prefix_agent_name: PrefixStyle,
+    /// Whether thread-ownership claiming applies to this channel. When set
+    /// to `false`, every routed agent dispatches even if another agent
+    /// already replied in the same thread — useful for "broadcast" channels
+    /// where multiple agents are intended to chime in together. Default
+    /// `true`: a single agent owns each `(channel, thread)` for the
+    /// configured TTL (and an explicit @-mention re-claims for the new
+    /// agent). DMs always bypass the registry. See #3334.
+    #[serde(default = "default_thread_ownership_enabled")]
+    pub thread_ownership_enabled: bool,
+}
+
+fn default_thread_ownership_enabled() -> bool {
+    true
 }
 
 impl Default for ChannelOverrides {
@@ -242,6 +255,7 @@ impl Default for ChannelOverrides {
             auto_route_sticky_bonus: default_auto_route_bonus(),
             auto_route_divergence_count: default_auto_route_divergence(),
             prefix_agent_name: PrefixStyle::Off,
+            thread_ownership_enabled: true,
         }
     }
 }
@@ -987,6 +1001,114 @@ pub struct FallbackProviderConfig {
     pub base_url: Option<String>,
 }
 
+/// Side-task category for the auxiliary LLM client.
+///
+/// Each variant maps to a separate fallback chain in `[llm.auxiliary]` so
+/// users can pick a cheap model per task without polluting the primary
+/// agent's provider list. See `librefang_runtime::aux_client` for the
+/// resolution algorithm and the published default chains.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxTask {
+    /// LLM-driven context compression (history summarisation).
+    Compression,
+    /// Session / trajectory title generation.
+    Title,
+    /// Search-result summarisation.
+    Search,
+    /// Image / video / vision-capable description.
+    Vision,
+    /// Browser-tool vision-driven page understanding.
+    BrowserVision,
+}
+
+impl AuxTask {
+    /// Stable string slug used in TOML and logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuxTask::Compression => "compression",
+            AuxTask::Title => "title",
+            AuxTask::Search => "search",
+            AuxTask::Vision => "vision",
+            AuxTask::BrowserVision => "browser_vision",
+        }
+    }
+}
+
+impl std::fmt::Display for AuxTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Auxiliary LLM client configuration — one cheap-tier fallback chain per
+/// side task.
+///
+/// Each entry is a list of `provider:model` references resolved in order
+/// against the user's already-configured credentials. A task with no entries
+/// (or whose entries cannot be initialised because the relevant API keys are
+/// missing) silently falls back to the primary driver — the auxiliary client
+/// is purely a routing optimisation, never a permission gate.
+///
+/// ```toml
+/// [llm.auxiliary]
+/// compression    = ["openrouter:anthropic/claude-3-5-haiku", "anthropic:haiku"]
+/// title          = ["openrouter:meta-llama/llama-3.1-8b-instruct", "groq:llama-3.1-8b-instant"]
+/// search         = ["openrouter:anthropic/claude-3-5-haiku", "openai:gpt-4o-mini"]
+/// vision         = ["anthropic:sonnet", "openai:gpt-4o-mini"]
+/// browser_vision = ["anthropic:sonnet", "openai:gpt-4o-mini"]
+/// ```
+///
+/// Uses `BTreeMap` rather than `HashMap` so serialised output is
+/// deterministic (see issue #3298).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(transparent)]
+pub struct AuxiliaryConfig {
+    /// Per-task ordered chain of `provider:model` references.
+    pub tasks: BTreeMap<AuxTask, Vec<String>>,
+}
+
+impl AuxiliaryConfig {
+    /// Build an empty config (every task falls back to the primary driver).
+    pub fn empty() -> Self {
+        Self {
+            tasks: BTreeMap::new(),
+        }
+    }
+
+    /// Lookup the configured chain for `task`, if any.
+    pub fn chain_for(&self, task: AuxTask) -> Option<&[String]> {
+        self.tasks.get(&task).map(|v| v.as_slice())
+    }
+
+    /// Whether this config has any user-supplied entries.
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+}
+
+/// Top-level `[llm]` section. Currently only carries `auxiliary` — primary
+/// driver configuration still lives in `[default_model]` / `[[fallback_providers]]`
+/// so this struct exists purely to namespace future LLM-routing knobs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// Per-task auxiliary fallback chains. See [`AuxiliaryConfig`].
+    pub auxiliary: AuxiliaryConfig,
+}
+
 /// Text-to-speech configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -1192,6 +1314,13 @@ pub struct PairingConfig {
     pub max_devices: usize,
     /// Pairing token expiry in seconds. Default: 300 (5 min).
     pub token_expiry_secs: u64,
+    /// Public base URL the QR code points mobile clients at, e.g.
+    /// `https://librefang.example.com`. When set, takes precedence over
+    /// the request `Host` header — required for HTTPS reverse-proxy
+    /// deployments where trusting client-supplied `X-Forwarded-Proto`
+    /// would let any authenticated dashboard caller forge the scheme.
+    /// When `None`, the daemon falls back to `Host` + the runtime scheme.
+    pub public_base_url: Option<String>,
     /// Push notification provider: "none", "ntfy", "gotify".
     pub push_provider: String,
     /// Ntfy server URL (if push_provider = "ntfy").
@@ -1206,6 +1335,7 @@ impl Default for PairingConfig {
             enabled: false,
             max_devices: 10,
             token_expiry_secs: 300,
+            public_base_url: None,
             push_provider: "none".to_string(),
             ntfy_url: None,
             ntfy_topic: None,
@@ -1490,6 +1620,11 @@ impl Default for InboxConfig {
     }
 }
 
+/// Default OTLP gRPC endpoint — matches the port the bundled observability
+/// stack (Tempo / OTel collector) binds when
+/// `auto_start_observability_stack = true`.
+pub const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
 /// Telemetry / observability configuration.
 ///
 /// ```toml
@@ -1526,11 +1661,37 @@ pub struct TelemetryConfig {
     pub auto_start_observability_stack: bool,
 }
 
+impl TelemetryConfig {
+    /// Whether OTLP exporter init should be skipped because no collector is
+    /// reachable. Returns `true` when:
+    ///
+    /// - `otlp_endpoint` is empty (operator opted out), OR
+    /// - `otlp_endpoint` is the default `http://localhost:4317` AND the bundled
+    ///   observability stack is not actually running — either the operator
+    ///   didn't opt in (`auto_start_observability_stack = false`), or they
+    ///   opted in but startup failed (Docker missing, port conflict, compose
+    ///   error). In both cases nothing listens on 4317 and the
+    ///   `BatchSpanProcessor` would spam `ConnectionRefused` every export
+    ///   interval.
+    ///
+    /// `stack_running` reflects the runtime fact, not the config intent — call
+    /// sites pass `Some(handle).is_some()` (or equivalent) after attempting
+    /// startup. Operators with an external collector on the default port
+    /// should set `otlp_endpoint` to the collector's address to opt back in;
+    /// the bundled-stack opt-in only helps when the stack actually comes up.
+    pub fn otlp_export_disabled(&self, stack_running: bool) -> bool {
+        if self.otlp_endpoint.is_empty() {
+            return true;
+        }
+        self.otlp_endpoint == DEFAULT_OTLP_ENDPOINT && !stack_running
+    }
+}
+
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            otlp_endpoint: "http://localhost:4317".to_string(),
+            otlp_endpoint: DEFAULT_OTLP_ENDPOINT.to_string(),
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
             prometheus_enabled: true,
@@ -2534,6 +2695,10 @@ pub struct KernelConfig {
     /// Configure in config.toml as `[[fallback_providers]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_providers: Vec<FallbackProviderConfig>,
+    /// `[llm]` section — currently carries the auxiliary side-task chain
+    /// configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].
+    #[serde(default)]
+    pub llm: LlmConfig,
     /// Browser automation configuration.
     #[serde(default)]
     pub browser: BrowserConfig,
@@ -3554,6 +3719,30 @@ pub struct PluginManifest {
     /// ```
     #[serde(default)]
     pub requires: Vec<PluginSystemRequirement>,
+    /// Per-language translation overrides for `name` and `description`.
+    ///
+    /// Keyed by BCP-47 language tag (`zh`, `zh-TW`, `ja`, `ko`, `de`, `es`,
+    /// `fr`, …). API routes resolve `Accept-Language` against this table and
+    /// fall back to the top-level English fields when no entry matches.
+    ///
+    /// ```toml
+    /// [i18n.zh]
+    /// name = "自动摘要"
+    /// description = "持续维护会话摘要，帮助 Agent 在长对话中不丢失上下文。"
+    /// ```
+    #[serde(default)]
+    pub i18n: std::collections::HashMap<String, PluginI18n>,
+}
+
+/// A per-language override for a plugin's user-facing strings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PluginI18n {
+    /// Localized plugin name. Falls back to the top-level `name`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description. Falls back to the top-level `description`.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A single system-binary requirement declared in `plugin.toml`.
@@ -4573,6 +4762,7 @@ impl Default for KernelConfig {
             stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
+            llm: LlmConfig::default(),
             browser: BrowserConfig::default(),
             extensions: ExtensionsConfig::default(),
             skills: SkillsConfig::default(),
@@ -7697,5 +7887,73 @@ rule_sets = ["browser_handles", "pii_baseline"]
         assert_eq!(nav.default, McpTaintToolAction::Scan);
         assert!(nav.rule_sets.is_empty());
         assert_eq!(nav.paths.len(), 1);
+    }
+
+    // Issue #3136 follow-up: PR #3170 made the bundled observability stack
+    // opt-in but left `otlp_endpoint` defaulting to localhost:4317, so default
+    // installs spammed `ConnectionRefused`. `otlp_export_disabled()` is the
+    // gate that suppresses the exporter when no collector is reachable. The
+    // gate takes the runtime fact `stack_running` rather than just the config
+    // intent — `auto_start_observability_stack = true` only matters when the
+    // stack actually came up, otherwise we'd still spam.
+    #[test]
+    fn otlp_export_disabled_for_default_localhost_without_managed_stack() {
+        let cfg = TelemetryConfig::default();
+        assert!(cfg.enabled, "default still enables tracing wiring");
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "default localhost endpoint with no running stack must skip exporter"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_when_managed_stack_runs() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(true),
+            "running stack on default endpoint; export must run"
+        );
+    }
+
+    // Regression: operator opts in to auto_start but Docker is missing /
+    // compose fails / port conflicts — without this gate, exporter would
+    // still init and spam ConnectionRefused on every export interval.
+    #[test]
+    fn otlp_export_disabled_when_managed_stack_failed_to_start() {
+        let cfg = TelemetryConfig {
+            auto_start_observability_stack: true,
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(false),
+            "auto_start=true but stack startup failed; default endpoint is dead"
+        );
+    }
+
+    #[test]
+    fn otlp_export_enabled_for_custom_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: "http://otel.internal:4317".to_string(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            !cfg.otlp_export_disabled(false),
+            "explicit non-default endpoint signals operator intent regardless of stack"
+        );
+    }
+
+    #[test]
+    fn otlp_export_disabled_for_empty_endpoint() {
+        let cfg = TelemetryConfig {
+            otlp_endpoint: String::new(),
+            ..TelemetryConfig::default()
+        };
+        assert!(
+            cfg.otlp_export_disabled(true),
+            "empty endpoint is the explicit opt-out path even when stack is up"
+        );
     }
 }

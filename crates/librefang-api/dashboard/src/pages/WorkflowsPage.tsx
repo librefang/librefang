@@ -1,5 +1,5 @@
 import { formatDate } from "../lib/datetime";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -157,6 +157,18 @@ export function WorkflowsPage() {
     () => allWorkflows.find(w => w.id === scheduleWorkflowId),
     [allWorkflows, scheduleWorkflowId]
   );
+
+  // First-time visitors with no workflows configured land on the
+  // marketplace tab — instantiating a template is the obvious next
+  // step. Fires once per mount; if the user manually flips back to
+  // "My Workflows", we don't override on the next refetch.
+  const autoSwitchedRef = useRef(false);
+  useEffect(() => {
+    if (autoSwitchedRef.current) return;
+    if (!workflowsQuery.isSuccess) return;
+    autoSwitchedRef.current = true;
+    if ((workflowsQuery.data ?? []).length === 0) setActiveTab("templates");
+  }, [workflowsQuery.isSuccess, workflowsQuery.data]);
 
   useEffect(() => {
     if (!workflowsQuery.isSuccess) return;

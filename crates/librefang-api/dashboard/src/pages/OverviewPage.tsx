@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import type { HealthCheck } from "../api";
 import { Card } from "../components/ui/Card";
@@ -12,6 +13,7 @@ import { getStatusVariant } from "../lib/status";
 import { formatRelativeTime } from "../lib/datetime";
 import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import { useQuickInit } from "../lib/mutations/overview";
+import { StaggerList } from "../components/ui/StaggerList";
 
 function formatUptime(seconds?: number): string {
   if (seconds === undefined || seconds < 0) return "-";
@@ -177,7 +179,7 @@ export function OverviewPage() {
       ) : null}
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4 stagger-children">
+      <StaggerList className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
         {isLoading ? (
           // Loading skeletons
           <>
@@ -213,7 +215,7 @@ export function OverviewPage() {
             </Card>
           ))
         )}
-      </div>
+      </StaggerList>
 
       {/* Main Content Grid */}
       <div className="grid gap-4 sm:gap-6 lg:grid-cols-3">
@@ -224,7 +226,7 @@ export function OverviewPage() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.quick_actions")}</h3>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:gap-3 sm:grid-cols-4 stagger-children">
+            <StaggerList className="grid grid-cols-2 gap-2 sm:gap-3 sm:grid-cols-4">
               {quickActions.map((action) => (
                 <button
                   key={action.to}
@@ -243,7 +245,7 @@ export function OverviewPage() {
                   <span className="text-[10px] sm:text-[11px] font-bold text-center">{action.label}</span>
                 </button>
               ))}
-            </div>
+            </StaggerList>
           </Card>
 
           {/* Recent Agents */}
@@ -260,7 +262,12 @@ export function OverviewPage() {
             {isLoading ? (
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 {[1, 2].map(i => (
-                  <div key={i} className="h-16 rounded-xl bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%] animate-shimmer" />
+                  <motion.div
+                    key={i}
+                    className="h-16 rounded-xl bg-linear-to-r from-main via-surface-hover to-main bg-[length:200%_100%]"
+                    animate={{ backgroundPosition: ["200% 0", "-200% 0"] }}
+                    transition={{ duration: 1.5, ease: "easeInOut", repeat: Infinity }}
+                  />
                 ))}
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (

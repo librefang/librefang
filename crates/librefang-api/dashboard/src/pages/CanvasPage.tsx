@@ -1,6 +1,8 @@
 import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "motion/react";
+import { fadeInScale, APPLE_EASE } from "../lib/motion";
 import {
   ReactFlow,
   Background,
@@ -26,7 +28,7 @@ import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, getWorkflow, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
-import { Modal } from "../components/ui/Modal";
+import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
@@ -332,7 +334,7 @@ function TemplateBrowser({
   };
 
   return (
-    <Modal isOpen onClose={onClose} variant="panel-right" size="2xl" hideCloseButton>
+    <DrawerPanel isOpen onClose={onClose} size="2xl" hideCloseButton>
         {/* Header — matches the existing inline icon + custom X. */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface z-10">
           <div className="flex items-center gap-2">
@@ -447,7 +449,7 @@ function TemplateBrowser({
             )}
           </div>
         )}
-    </Modal>
+    </DrawerPanel>
   );
 }
 
@@ -2215,9 +2217,24 @@ function CanvasPageInner() {
       )}
 
       {/* Shortcut help panel */}
-      {showHelp && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowHelp(false)}>
-          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-140 sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+      <AnimatePresence>
+        {showHelp && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-sm p-0 sm:p-4"
+            onClick={() => setShowHelp(false)}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: APPLE_EASE }}
+          >
+          <motion.div
+            className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-140 sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+            variants={fadeInScale}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
               <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
@@ -2247,9 +2264,10 @@ function CanvasPageInner() {
                 </div>
               ))}
             </div>
-          </div>
-        </div>
-      )}
+          </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Schedule Modal */}
       {showScheduleModal && (

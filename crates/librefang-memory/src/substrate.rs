@@ -453,7 +453,7 @@ impl MemorySubstrate {
             .lock()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let mut stmt = conn.prepare(
-            "SELECT device_id, display_name, platform, paired_at, last_seen, push_token FROM paired_devices"
+            "SELECT device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash FROM paired_devices"
         ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let rows = stmt
             .query_map([], |row| {
@@ -464,6 +464,7 @@ impl MemorySubstrate {
                     "paired_at": row.get::<_, String>(3)?,
                     "last_seen": row.get::<_, String>(4)?,
                     "push_token": row.get::<_, Option<String>>(5)?,
+                    "api_key_hash": row.get::<_, String>(6)?,
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -475,6 +476,7 @@ impl MemorySubstrate {
     }
 
     /// Save a paired device to the database (insert or replace).
+    #[allow(clippy::too_many_arguments)]
     pub fn save_paired_device(
         &self,
         device_id: &str,
@@ -483,14 +485,15 @@ impl MemorySubstrate {
         paired_at: &str,
         last_seen: &str,
         push_token: Option<&str>,
+        api_key_hash: &str,
     ) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         conn.execute(
-            "INSERT OR REPLACE INTO paired_devices (device_id, display_name, platform, paired_at, last_seen, push_token) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![device_id, display_name, platform, paired_at, last_seen, push_token],
+            "INSERT OR REPLACE INTO paired_devices (device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash],
         ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }

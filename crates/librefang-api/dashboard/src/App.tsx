@@ -1,6 +1,8 @@
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { AnimatePresence, motion } from "motion/react";
+import { fadeInScale, pageTransition } from "./lib/motion";
 import {
   Globe,
   Sun,
@@ -41,10 +43,12 @@ import {
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
+import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
+import { OfflineBanner } from "./components/OfflineBanner";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -137,7 +141,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
-      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+      <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
             <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 ring-2 ring-primary/20">
@@ -240,7 +244,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             </button>
           </form>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -311,7 +315,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+      <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
         <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
           <div className="flex items-center justify-between px-6 pt-6 pb-4">
             <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
@@ -402,7 +406,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
             </div>
           </form>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }
@@ -410,12 +414,18 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 // Routes that must fill the remaining viewport height without scrolling.
 const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 
+// Routes that must render even when no daemon credentials are configured.
+// `/connect` is the mobile pairing wizard — by definition the user has
+// no API key yet, so the AuthDialog gate would deadlock the first launch.
+const NO_AUTH_ROUTES = new Set(["/connect"]);
+
 export function App() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
   const { location } = useRouterState();
   const isFullHeightPage = FULL_HEIGHT_ROUTES.has(location.pathname);
+  const isNoAuthRoute = NO_AUTH_ROUTES.has(location.pathname);
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
@@ -442,6 +452,16 @@ export function App() {
   // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
     let cancelled = false;
+
+    // First-run pairing wizard must reach the screen without credentials —
+    // skip the auth probe entirely so the AuthDialog never gates `/connect`.
+    if (NO_AUTH_ROUTES.has(window.location.pathname)) {
+      setAuthNeeded(false);
+      setAuthChecked(true);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     setOnUnauthorized(() => {
       checkDashboardAuthMode().then((mode) => {
@@ -555,7 +575,6 @@ export function App() {
         { to: "/config/security", label: t("config.cat_security"), icon: Shield },
         { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
         { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
-        { to: "/settings", label: t("nav.settings"), icon: Settings },
       ],
     },
     {
@@ -701,7 +720,7 @@ export function App() {
           </div>
         </nav>
 
-        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+        <div className={`border-t border-border-subtle pt-4 px-4 pb-safe-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
           <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">
@@ -810,22 +829,41 @@ export function App() {
           className={`bg-main ${isFullHeightPage ? "flex flex-col flex-1 overflow-hidden" : "flex-1 overflow-y-auto overflow-x-hidden"}`}
           tabIndex={-1}
         >
-          {isFullHeightPage ? (
-            <div className="flex flex-col flex-1 min-h-0">
-              <Outlet />
-            </div>
-          ) : (
-            <div className="w-full p-3 sm:p-4 lg:p-8">
-              <Outlet />
-            </div>
-          )}
+          <AnimatePresence mode="wait" initial={false}>
+            {isFullHeightPage ? (
+              <motion.div
+                key={`full:${location.pathname}`}
+                className="flex flex-col flex-1 min-h-0"
+                variants={pageTransition}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+              >
+                <Outlet />
+              </motion.div>
+            ) : (
+              <motion.div
+                key={`std:${location.pathname}`}
+                className="w-full p-3 sm:p-4 lg:p-8"
+                variants={pageTransition}
+                initial="initial"
+                animate="animate"
+                exit="exit"
+              >
+                <Outlet />
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
       </div>
+
+      {!isNoAuthRoute && <OfflineBanner />}
+      <PushDrawer />
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
-      {authChecked && authNeeded && (
+      {authChecked && authNeeded && !isNoAuthRoute && (
         <AuthDialog mode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
       )}
     </div>

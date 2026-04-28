@@ -526,6 +526,9 @@ pub async fn auth(
             | "/api/auth/dashboard-check"
             // A2A RC v1.0 JSON-RPC endpoint — unauthenticated per spec §5
             | "/a2a"
+            // Mobile pairing — phone has no API key yet, needs to exchange
+            // the one-time QR token for the daemon's api_key.
+            | "/api/pairing/complete"
     ) || path.starts_with("/api/providers/github-copilot/oauth/");
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
@@ -604,6 +607,7 @@ pub async fn auth(
             | "/api/mcp/catalog"
             | "/api/mcp/health"
             | "/api/workflows"
+            | "/api/auto-dream/status"
     );
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
         || path.starts_with("/api/approvals/")
@@ -1544,6 +1548,41 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `/api/auto-dream/status` is a dashboard read — same shape as
+    /// `/api/agents` etc.: GET returns the global toggle + per-agent
+    /// state, drives the Settings page's Dream Mode card. Must not 401
+    /// when no auth is configured (default install) so the SPA renders.
+    /// POST endpoints under `/api/auto-dream/agents/*` (trigger / abort /
+    /// enabled) stay write-protected — they are not added to the
+    /// allowlist.
+    #[tokio::test]
+    async fn test_auto_dream_status_get_is_dashboard_read_public() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+        let app = Router::new()
+            .route("/api/auto-dream/status", get(|| async { "status" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/auto-dream/status")
                     .body(Body::empty())
                     .unwrap(),
             )

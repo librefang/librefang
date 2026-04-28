@@ -2,6 +2,10 @@
 //!
 //! Boots the LibreFang kernel, binds to a random localhost port, and runs the
 //! API server on a background thread with its own tokio runtime.
+//!
+//! Desktop-only: this module is not compiled on iOS or Android (mobile is a thin client).
+
+#![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 use librefang_api::server::build_router;
 use librefang_kernel::LibreFangKernel;

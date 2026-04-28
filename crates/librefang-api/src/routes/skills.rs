@@ -5034,11 +5034,29 @@ fn collect_installed_catalog_ids(state: &Arc<AppState>) -> std::collections::Has
 fn render_catalog_entry(
     entry: &librefang_extensions::McpCatalogEntry,
     installed_template_ids: &std::collections::HashSet<String>,
+    lang: &str,
 ) -> serde_json::Value {
+    // Pick the localized override (with `zh-TW` → `zh` soft fallback) and
+    // fall back to the English fields per-string when no entry / field is
+    // present.
+    let i18n_entry = entry.i18n.get(lang).or_else(|| {
+        lang.split_once('-')
+            .and_then(|(base, _)| entry.i18n.get(base))
+    });
+    let name = i18n_entry
+        .and_then(|e| e.name.as_deref())
+        .unwrap_or(&entry.name);
+    let description = i18n_entry
+        .and_then(|e| e.description.as_deref())
+        .unwrap_or(&entry.description);
+    let setup_instructions = i18n_entry
+        .and_then(|e| e.setup_instructions.as_deref())
+        .unwrap_or(&entry.setup_instructions);
+
     serde_json::json!({
         "id": entry.id,
-        "name": entry.name,
-        "description": entry.description,
+        "name": name,
+        "description": description,
         "icon": entry.icon,
         "category": entry.category.to_string(),
         "installed": installed_template_ids.contains(&entry.id),
@@ -5052,7 +5070,7 @@ fn render_catalog_entry(
             "get_url": e.get_url,
         })).collect::<Vec<_>>(),
         "has_oauth": entry.oauth.is_some(),
-        "setup_instructions": entry.setup_instructions,
+        "setup_instructions": setup_instructions,
     })
 }
 
@@ -5065,7 +5083,11 @@ fn render_catalog_entry(
         (status = 200, description = "MCP catalog entries", body = serde_json::Value)
     )
 )]
-pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_mcp_catalog(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
     let catalog = state
@@ -5076,7 +5098,7 @@ pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoRe
     let entries: Vec<serde_json::Value> = catalog
         .list()
         .iter()
-        .map(|e| render_catalog_entry(e, &installed_ids))
+        .map(|e| render_catalog_entry(e, &installed_ids, lang))
         .collect();
     Json(serde_json::json!({
         "entries": entries,
@@ -5098,7 +5120,9 @@ pub async fn list_mcp_catalog(State(state): State<Arc<AppState>>) -> impl IntoRe
 pub async fn get_mcp_catalog_entry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let lang = super::resolve_lang(lang.as_ref());
     let installed_ids = collect_installed_catalog_ids(&state);
 
     let catalog = state
@@ -5109,7 +5133,7 @@ pub async fn get_mcp_catalog_entry(
     match catalog.get(&id) {
         Some(entry) => (
             StatusCode::OK,
-            Json(render_catalog_entry(entry, &installed_ids)),
+            Json(render_catalog_entry(entry, &installed_ids, lang)),
         ),
         None => ApiErrorResponse::not_found(format!("MCP catalog entry '{}' not found", id))
             .into_json_tuple(),

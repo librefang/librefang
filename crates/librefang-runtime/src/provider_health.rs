@@ -179,7 +179,15 @@ fn format_request_error(err: &reqwest::Error) -> String {
 static PROBE_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Return the shared probe HTTP client, building it on first call.
-fn probe_client() -> &'static reqwest::Client {
+///
+/// Exposed publicly so on-demand `/api/providers/{name}/test` handlers
+/// can reuse the same connection-pooled client instead of paying a fresh
+/// TLS handshake (~80 ms over the Pacific) on every dashboard click.
+/// Before this was public, that endpoint was rebuilding a `reqwest::Client`
+/// per call and reporting the rebuilt-client + cold-handshake cost as the
+/// "provider latency", roughly doubling what operators saw vs. the steady-
+/// state probe cycle.
+pub fn probe_client() -> &'static reqwest::Client {
     PROBE_CLIENT.get_or_init(|| {
         crate::http_client::proxied_client_builder()
             .connect_timeout(Duration::from_secs(PROBE_REMOTE_CONNECT_TIMEOUT_SECS))
@@ -352,16 +360,27 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
         }
     }
 
-    // Non-ollama: single OpenAI-compatible probe.
-    let openai_url = format!("{}/models", base_url.trim_end_matches('/'));
-    match try_probe_endpoint(
-        &openai_url,
-        EndpointShape::OpenAiModels,
-        api_key,
-        is_loopback,
-    )
-    .await
-    {
+    // Non-ollama: dispatch on the registered API format. Anthropic-protocol
+    // providers (anthropic, byteplus_coding, volcengine_coding, …) don't
+    // serve `{base}/models` and answer requests with `Authorization: Bearer`
+    // with a 4xx — which the old probe reported as "unreachable" while
+    // *also* counting the 4xx round-trip in `latency_ms`, doubly misleading
+    // the dashboard. Pick the right path + auth headers per format.
+    let shape = match librefang_llm_drivers::drivers::provider_api_format(provider) {
+        Some(librefang_llm_drivers::drivers::ApiFormat::Anthropic) => {
+            EndpointShape::AnthropicModels
+        }
+        // OpenAI-compat is the historical default for everything else and
+        // remains correct for OpenAI/Groq/DeepSeek/Mistral/etc. Unknown
+        // providers also fall through here (matches pre-PR behaviour).
+        _ => EndpointShape::OpenAiModels,
+    };
+    let probe_path = match shape {
+        EndpointShape::AnthropicModels => "/v1/models",
+        _ => "/models",
+    };
+    let probe_url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
+    match try_probe_endpoint(&probe_url, shape, api_key, is_loopback).await {
         EndpointOutcome::Ok { models, model_info } => ProbeResult {
             reachable: true,
             latency_ms: start.elapsed().as_millis() as u64,
@@ -383,8 +402,17 @@ pub async fn probe_provider(provider: &str, base_url: &str, api_key: Option<&str
 enum EndpointShape {
     /// Ollama native: `{ "models": [{ "name": "...", "details": {...} }, ...] }`
     OllamaTags,
-    /// OpenAI-compatible: `{ "data": [{ "id": "...", ... }, ...] }`
+    /// OpenAI-compatible: `{ "data": [{ "id": "...", ... }, ...] }`. Auth via
+    /// `Authorization: Bearer <key>`.
     OpenAiModels,
+    /// Anthropic-compatible `/v1/models`. Same response shape as OpenAI
+    /// (`{ "data": [...] }`) but auth is `x-api-key` + `anthropic-version`.
+    /// 401/403 here is treated as reachable: it's a positive signal that
+    /// the server speaks the Anthropic wire protocol — only the key is
+    /// rejected, which is a *configured-but-unauthenticated* state, not
+    /// network failure. Otherwise a misconfigured provider would burn ~RTT
+    /// on every probe and report inflated latency to the dashboard.
+    AnthropicModels,
 }
 
 /// Internal result of one probe attempt — used to drive the ollama→openai
@@ -419,7 +447,14 @@ async fn try_probe_endpoint(
     if let Some(key) = api_key {
         let trimmed = key.trim();
         if !trimmed.is_empty() {
-            req = req.header("Authorization", format!("Bearer {trimmed}"));
+            req = match shape {
+                EndpointShape::AnthropicModels => req
+                    .header("x-api-key", trimmed)
+                    .header("anthropic-version", "2023-06-01"),
+                EndpointShape::OllamaTags | EndpointShape::OpenAiModels => {
+                    req.header("Authorization", format!("Bearer {trimmed}"))
+                }
+            };
         }
     }
 
@@ -432,9 +467,25 @@ async fn try_probe_endpoint(
         }
     };
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
+        // Anthropic-protocol endpoints often answer GET /v1/models with 401
+        // ("API key invalid for this scope") or 404 ("listing not exposed
+        // for this plan") even when the chat path works fine. Treat those
+        // as *reachable but no model list* rather than failing the probe —
+        // a fail flips the dashboard provider tile to "broken" and reports
+        // the round-trip latency on a path nobody actually uses for
+        // inference. Real outages still surface as 5xx / connection errors.
+        if matches!(shape, EndpointShape::AnthropicModels)
+            && (status.as_u16() == 401 || status.as_u16() == 403 || status.as_u16() == 404)
+        {
+            return EndpointOutcome::Ok {
+                models: Vec::new(),
+                model_info: Vec::new(),
+            };
+        }
         return EndpointOutcome::Failed {
-            error: format!("HTTP {}", resp.status()),
+            error: format!("HTTP {status}"),
         };
     }
 
@@ -449,7 +500,9 @@ async fn try_probe_endpoint(
 
     match shape {
         EndpointShape::OllamaTags => parse_ollama_tags(&body),
-        EndpointShape::OpenAiModels => parse_openai_models(&body),
+        // Anthropic /v1/models returns the same `{ "data": [{ "id": ... }] }`
+        // shape OpenAI does, so the OpenAI parser handles both.
+        EndpointShape::OpenAiModels | EndpointShape::AnthropicModels => parse_openai_models(&body),
     }
 }
 

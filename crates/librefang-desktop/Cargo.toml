@@ -20,17 +20,29 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+# Shared: works on desktop and mobile.
+# `tauri` appears again in the desktop target block below with extra features —
+# Cargo merges features from both entries; mobile gets the base crate only.
+tauri = { version = "2" }
 tauri-plugin-notification = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-updater = "2"
 serde = { workspace = true }
 toml = { workspace = true }
 open = "5"
+
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+# Desktop-only: adds tray-icon + image-png features on top of the shared `tauri` entry above.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-shell = "2"
+
+[target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
+# Mobile-only plugins
+tauri-plugin-barcode-scanner = "2"
+keyring = "3"
 
 [features]
 default = ["librefang-api/default", "custom-protocol"]
@@ -38,6 +50,8 @@ all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 # Tauri uses custom-protocol in production builds
 custom-protocol = ["tauri/custom-protocol"]
+# Documents the mobile build path (no-op flag, mobile targets are cfg-gated)
+mobile = []
 
 [[bin]]
 name = "librefang-desktop"

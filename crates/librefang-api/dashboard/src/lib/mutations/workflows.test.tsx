@@ -86,7 +86,11 @@ describe.each([
     name: "useDeleteWorkflow",
     hook: useDeleteWorkflow,
     arg: "wf-1",
-    expectedKeys: [workflowKeys.lists(), workflowKeys.detail("wf-1"), workflowKeys.runs("wf-1")],
+    // detail(workflowId) is evicted via removeQueries (see separate test
+    // below) — the deleted workflow has no row to refetch, so an
+    // invalidate would just trigger a 404 on next read. Only lists()
+    // and runs() go through invalidateQueries here.
+    expectedKeys: [workflowKeys.lists(), workflowKeys.runs("wf-1")],
   },
   {
     name: "useCreateWorkflow",
@@ -124,5 +128,20 @@ describe.each([
     for (const queryKey of expectedKeys) {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey });
     }
+  });
+});
+
+describe("useDeleteWorkflow detail eviction", () => {
+  it("removes the deleted workflow's detail query instead of refetching", async () => {
+    const { queryClient, wrapper } = createQueryClientWrapper();
+    const removeSpy = vi.spyOn(queryClient, "removeQueries");
+
+    const { result } = renderHook(() => useDeleteWorkflow(), { wrapper });
+
+    await result.current.mutateAsync("wf-1");
+
+    expect(removeSpy).toHaveBeenCalledWith({
+      queryKey: workflowKeys.detail("wf-1"),
+    });
   });
 });

@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Keyboard, X } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { G_NAV_SHORTCUTS } from "../../lib/useKeyboardShortcuts";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { fadeInScale, APPLE_EASE } from "../../lib/motion";
 
 interface ShortcutsHelpProps {
   isOpen: boolean;
@@ -39,18 +41,30 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
     return () => window.removeEventListener("keydown", handleKey);
   }, [isOpen]);
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" aria-hidden="true" onClick={onClose} />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="shortcuts-help-title"
-        className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale"
-      >
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-100 flex items-end sm:items-start justify-center sm:pt-[10vh] p-0 sm:p-4">
+          <motion.div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+            aria-hidden="true"
+            onClick={onClose}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: APPLE_EASE }}
+          />
+          <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="shortcuts-help-title"
+            className="relative w-full sm:max-w-2xl rounded-t-2xl sm:rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden"
+            variants={fadeInScale}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
         <div className="flex items-center justify-between border-b border-border-subtle px-5 py-4">
           <div className="flex items-center gap-2.5">
             <div className="h-8 w-8 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
@@ -107,7 +121,9 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
             </div>
           </section>
         </div>
-      </div>
-    </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }

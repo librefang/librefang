@@ -591,6 +591,17 @@
         }
       ]
     },
+    "llm": {
+      "description": "`[llm]` section — currently carries the auxiliary side-task chain configuration. See [`LlmConfig`] / [`AuxiliaryConfig`].",
+      "default": {
+        "auxiliary": {}
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/LlmConfig"
+        }
+      ]
+    },
     "local_probe_interval_secs": {
       "description": "Interval in seconds between reachability probes of local providers (Ollama, vLLM, LM Studio, lemonade).\n\nLower values make the dashboard react faster to `brew services start/stop ollama` at the cost of extra HTTP calls to `/api/tags`. 60 s is the default — it keeps the UI responsive without noticeably loading a local Ollama daemon. Dev machines flipping Ollama on/off frequently can drop to 10; long-lived production boxes can raise to 300+ since the state rarely changes.\n\nZero or values below the probe timeout (2 s) are treated as 60.",
       "default": 60,
@@ -775,6 +786,7 @@
         "enabled": false,
         "max_devices": 10,
         "token_expiry_secs": 300,
+        "public_base_url": null,
         "push_provider": "none",
         "ntfy_url": null,
         "ntfy_topic": null
@@ -1929,7 +1941,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -2344,6 +2357,11 @@
             "string",
             "null"
           ]
+        },
+        "thread_ownership_enabled": {
+          "description": "Whether thread-ownership claiming applies to this channel. When set to `false`, every routed agent dispatches even if another agent already replied in the same thread — useful for \"broadcast\" channels where multiple agents are intended to chime in together. Default `true`: a single agent owns each `(channel, thread)` for the configured TTL (and an explicit @-mention re-claims for the new agent). DMs always bypass the registry. See #3334.",
+          "default": true,
+          "type": "boolean"
         },
         "threading": {
           "description": "Enable thread replies.",
@@ -3479,7 +3497,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -3640,7 +3659,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -3735,7 +3755,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4025,7 +4046,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4386,7 +4408,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4474,7 +4497,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4539,7 +4563,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4607,7 +4632,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4703,7 +4729,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -4804,7 +4831,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5140,7 +5168,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5295,7 +5324,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5373,7 +5403,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5480,13 +5511,31 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
               "$ref": "#/definitions/ChannelOverrides"
             }
           ]
+        }
+      }
+    },
+    "LlmConfig": {
+      "description": "Top-level `[llm]` section. Currently only carries `auxiliary` — primary driver configuration still lives in `[default_model]` / `[[fallback_providers]]` so this struct exists purely to namespace future LLM-routing knobs.",
+      "type": "object",
+      "properties": {
+        "auxiliary": {
+          "description": "Per-task auxiliary fallback chains. See [`AuxiliaryConfig`].",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         }
       }
     },
@@ -5548,7 +5597,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5643,7 +5693,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -5728,7 +5779,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6324,7 +6376,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6409,7 +6462,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6563,7 +6617,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6631,7 +6686,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6758,7 +6814,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -6964,7 +7021,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7052,7 +7110,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7204,7 +7263,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7295,7 +7355,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7391,7 +7452,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7506,7 +7568,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7604,7 +7667,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7679,7 +7743,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7757,7 +7822,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7863,7 +7929,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -7941,7 +8008,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8044,7 +8112,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8145,7 +8214,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8233,7 +8303,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8318,7 +8389,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8396,7 +8468,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8501,7 +8574,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8596,7 +8670,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8674,7 +8749,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8769,7 +8845,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8862,7 +8939,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -8940,7 +9018,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9021,7 +9100,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9109,7 +9189,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9202,7 +9283,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9280,7 +9362,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9384,7 +9467,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9465,7 +9549,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9561,7 +9646,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9681,7 +9767,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9775,7 +9862,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9892,7 +9980,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -9975,7 +10064,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10068,7 +10158,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10164,7 +10255,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10237,7 +10329,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10336,7 +10429,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10446,7 +10540,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10536,7 +10631,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10637,7 +10733,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10733,7 +10830,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10831,7 +10929,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -10929,7 +11028,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -11032,7 +11132,8 @@
                 "auto_route_confidence_threshold": 6,
                 "auto_route_sticky_bonus": 4,
                 "auto_route_divergence_count": 2,
-                "prefix_agent_name": "off"
+                "prefix_agent_name": "off",
+                "thread_ownership_enabled": true
               },
               "allOf": [
                 {
@@ -11122,6 +11223,14 @@
         },
         "ntfy_url": {
           "description": "Ntfy server URL (if push_provider = \"ntfy\").",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_base_url": {
+          "description": "Public base URL the QR code points mobile clients at, e.g. `https://librefang.example.com`. When set, takes precedence over the request `Host` header — required for HTTPS reverse-proxy deployments where trusting client-supplied `X-Forwarded-Proto` would let any authenticated dashboard caller forge the scheme. When `None`, the daemon falls back to `Host` + the runtime scheme.",
           "default": null,
           "type": [
             "string",
@@ -11536,7 +11645,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -11619,7 +11729,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -11832,7 +11943,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -12037,7 +12149,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -12108,7 +12221,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -12516,7 +12630,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -12680,7 +12795,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -13025,7 +13141,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -13132,7 +13249,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -13341,7 +13459,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -13767,7 +13886,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -13853,7 +13973,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14280,7 +14401,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14369,7 +14491,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14469,7 +14592,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14549,7 +14673,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14811,7 +14936,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -14897,7 +15023,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -15015,7 +15142,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -15103,7 +15231,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {
@@ -15196,7 +15325,8 @@
             "auto_route_confidence_threshold": 6,
             "auto_route_sticky_bonus": 4,
             "auto_route_divergence_count": 2,
-            "prefix_agent_name": "off"
+            "prefix_agent_name": "off",
+            "thread_ownership_enabled": true
           },
           "allOf": [
             {

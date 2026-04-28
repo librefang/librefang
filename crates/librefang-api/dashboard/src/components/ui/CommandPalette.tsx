@@ -3,7 +3,9 @@ import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot, Clock, CheckCircle, Database, Activity, Hand, Puzzle, Cpu, Radio, Terminal, ExternalLink } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { fadeInScale, APPLE_EASE } from "../../lib/motion";
 
 interface CommandItem {
   id: string;
@@ -125,8 +127,6 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen) return null;
-
   const groupedCommands = filteredCommands.reduce((acc, cmd) => {
     const key = t(cmd.categoryKey);
     if (!acc[key]) acc[key] = [];
@@ -135,15 +135,28 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   }, {} as Record<string, CommandItem[]>);
 
   return (
-    <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh]">
-      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t("command_palette.search_placeholder")}
-        className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden animate-fade-in-scale"
-      >
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-100 flex items-start justify-center pt-[15vh]">
+          <motion.div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={onClose}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: APPLE_EASE }}
+          />
+          <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("command_palette.search_placeholder")}
+            className="relative w-full max-w-xl max-w-[90vw] rounded-2xl border border-border-subtle bg-surface shadow-2xl overflow-hidden"
+            variants={fadeInScale}
+            initial="initial"
+            animate="animate"
+            exit="exit"
+          >
         <div className="flex items-center gap-3 border-b border-border-subtle px-4 py-4">
           <Search className="h-5 w-5 text-text-dim shrink-0" />
           <input
@@ -187,8 +200,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             ))
           )}
         </div>
-      </div>
-    </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }
 

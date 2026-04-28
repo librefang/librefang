@@ -10,6 +10,7 @@ pub use librefang_llm_driver::FailoverReason;
 pub mod credential_pool;
 pub mod drivers;
 pub mod rate_limit_tracker;
+pub mod shared_rate_guard;
 pub mod think_filter;
 
 pub use credential_pool::{

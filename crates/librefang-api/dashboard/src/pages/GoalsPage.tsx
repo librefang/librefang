@@ -10,6 +10,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, ChevronDown, ChevronRight } from "lucide-react";
+import { StaggerList } from "../components/ui/StaggerList";
 
 const TEMPLATE_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   rocket: Rocket,
@@ -222,7 +223,7 @@ export function GoalsPage() {
             <h3 className="text-lg font-black tracking-tight mb-1">{t("goals.pick_template")}</h3>
             <p className="text-sm text-text-dim">{t("goals.pick_template_desc")}</p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 stagger-children">
+          <StaggerList className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
             {templates.map((tpl) => {
               const Icon = TEMPLATE_ICONS[tpl.icon] ?? Target;
               const isApplying = applyingTemplate === tpl.id;
@@ -258,12 +259,12 @@ export function GoalsPage() {
                 </Card>
               );
             })}
-          </div>
+          </StaggerList>
         </div>
       ) : (
         <>
           {/* KPI row */}
-          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
+          <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {[
               { label: t("goals.total"), value: stats.total, color: "text-primary", bg: "bg-primary/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Clock },
@@ -280,7 +281,7 @@ export function GoalsPage() {
                 <div className="mt-2"><strong className={`text-3xl font-black tracking-tight ${s.color}`}>{s.value}</strong></div>
               </Card>
             ))}
-          </div>
+          </StaggerList>
 
           {/* Overall progress */}
           <Card padding="md">
