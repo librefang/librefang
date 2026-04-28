@@ -11,7 +11,7 @@ services:
   - type: web
     runtime: docker
     name: librefang
-    dockerfilePath: deploy/Dockerfile
+    dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /api/health
     envVars:
