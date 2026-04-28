@@ -128,14 +128,8 @@ fn item_kind_for_path(rel: &Path) -> ItemKind {
 fn should_rewrite(path: &Path) -> bool {
     // Guard: never rewrite env or key files regardless of extension match.
     // These files carry secrets whose values must be preserved verbatim.
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    if file_name == "secrets.env"
-        || file_name.ends_with(".env")
-        || file_name.ends_with(".key")
-    {
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if file_name == "secrets.env" || file_name.ends_with(".env") || file_name.ends_with(".key") {
         return false;
     }
 
