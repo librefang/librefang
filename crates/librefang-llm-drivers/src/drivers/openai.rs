@@ -949,8 +949,7 @@ impl LlmDriver for OpenAIDriver {
                 .timeout_secs
                 .or(self.request_timeout_secs)
                 .unwrap_or(300);
-            req_builder =
-                req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
+            req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()
@@ -1363,8 +1362,7 @@ impl LlmDriver for OpenAIDriver {
                 .timeout_secs
                 .or(self.request_timeout_secs)
                 .unwrap_or(300);
-            req_builder =
-                req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
+            req_builder = req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()

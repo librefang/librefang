@@ -1267,8 +1267,7 @@ pub async fn run_daemon(
     // Track background task handles for graceful shutdown.
     // `bg_shutdown_tx` is broadcast to all looping bg_tasks so they can exit
     // cleanly before we resort to abort().
-    let (bg_shutdown_tx, _bg_shutdown_rx) =
-        tokio::sync::watch::channel::<bool>(false);
+    let (bg_shutdown_tx, _bg_shutdown_rx) = tokio::sync::watch::channel::<bool>(false);
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     let (app, state) = build_router(kernel.clone(), addr).await;

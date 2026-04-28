@@ -600,8 +600,7 @@ impl WorkflowEngine {
         }
         let engine = self.clone();
         match tokio::task::spawn_blocking(move || engine.persist_runs()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => warn!("workflow persist error: {e}"),
+            Ok(()) => {}
             Err(e) => warn!("workflow persist task panicked: {e}"),
         }
     }
