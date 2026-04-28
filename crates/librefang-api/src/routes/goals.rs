@@ -397,8 +397,6 @@ pub async fn delete_goal(
         return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
     }
 
-    let removed = before - goals.len();
-
     if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         GOALS_KEY,
