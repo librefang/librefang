@@ -3,7 +3,7 @@
   "identifier": "ai.librefang.app",
   "bundle": {
     "iOS": {
-      "minimumSystemVersion": "14.0"
+      "minimumSystemVersion": "16.0"
     }
   }
 }
