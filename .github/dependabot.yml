@@ -33,6 +33,10 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    ignore:
+      # @librefang/cli-* versions in package.json are "0.0.0" placeholders
+      # replaced by CI at publish time, not real dependencies.
+      - dependency-name: "@librefang/cli-*"
 
   # JavaScript SDK
   - package-ecosystem: "npm"
