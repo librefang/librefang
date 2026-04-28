@@ -550,7 +550,8 @@ impl ClawHubClient {
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
 
-        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref()).await
+        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref())
+            .await
     }
 
     /// Install a skill from raw bytes (zip or SKILL.md).
@@ -565,7 +566,8 @@ impl ClawHubClient {
         target_dir: &Path,
         bytes: &[u8],
     ) -> Result<ClawHubInstallResult, SkillError> {
-        self.install_with_expected_sha256(slug, target_dir, bytes, None).await
+        self.install_with_expected_sha256(slug, target_dir, bytes, None)
+            .await
     }
 
     /// Install a skill from raw bytes with optional SHA256 checksum validation.

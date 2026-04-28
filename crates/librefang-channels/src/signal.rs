@@ -55,8 +55,8 @@ fn is_private_or_loopback(addr: IpAddr) -> bool {
 ///
 /// Returns `Ok(())` on success, `Err(message)` on violation.
 fn validate_api_url(api_url: &str, allow_local: bool) -> Result<(), String> {
-    let url = url::Url::parse(api_url)
-        .map_err(|e| format!("Signal api_url is not a valid URL: {e}"))?;
+    let url =
+        url::Url::parse(api_url).map_err(|e| format!("Signal api_url is not a valid URL: {e}"))?;
 
     match url.scheme() {
         "http" | "https" => {}
@@ -793,13 +793,27 @@ mod tests {
     #[test]
     fn test_is_private_or_loopback() {
         use std::net::Ipv4Addr;
-        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
-        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
-        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            127, 0, 0, 1
+        ))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            192, 168, 1, 1
+        ))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            10, 0, 0, 1
+        ))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            172, 16, 0, 1
+        ))));
+        assert!(is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            169, 254, 1, 1
+        ))));
         // Public addresses must NOT be blocked.
-        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
-        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            1, 1, 1, 1
+        ))));
+        assert!(!is_private_or_loopback(IpAddr::V4(Ipv4Addr::new(
+            8, 8, 8, 8
+        ))));
     }
 }

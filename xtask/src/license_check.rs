@@ -93,13 +93,19 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
 
             // Flag crates with no declared license for manual review.
             if license_opt.is_none() || license == "UNKNOWN" || license.is_empty() {
-                unverified.push(format!("  {} — no license declared (manual review needed)", name));
+                unverified.push(format!(
+                    "  {} — no license declared (manual review needed)",
+                    name
+                ));
                 continue;
             }
 
             // Check for "Commons Clause" rider (often appended to Apache-2.0 etc.).
             if has_commons_clause(license) {
-                violations.push(format!("  {} ({}) — Commons Clause rider detected", name, license));
+                violations.push(format!(
+                    "  {} ({}) — Commons Clause rider detected",
+                    name, license
+                ));
             }
 
             // Check against the explicit deny list.

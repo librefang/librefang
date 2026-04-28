@@ -8216,6 +8216,11 @@
                 "null"
               ]
             },
+            "allow_local": {
+              "default": false,
+              "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.\nDefaults to `false`; set to `true` only when signal-cli runs on localhost.",
+              "type": "boolean"
+            },
             "allowed_users": {
               "default": [],
               "description": "Allowed phone numbers (empty = allow all).",
@@ -8223,6 +8228,14 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            "api_key": {
+              "default": null,
+              "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request.\nIf absent, requests are sent without an Authorization header.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "api_url": {
               "default": "http://localhost:8080",
@@ -11167,6 +11180,11 @@
             "null"
           ]
         },
+        "allow_local": {
+          "default": false,
+          "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.\nDefaults to `false`; set to `true` only when signal-cli runs on localhost.",
+          "type": "boolean"
+        },
         "allowed_users": {
           "default": [],
           "description": "Allowed phone numbers (empty = allow all).",
@@ -11174,6 +11192,14 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "api_key": {
+          "default": null,
+          "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request.\nIf absent, requests are sent without an Authorization header.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "api_url": {
           "default": "http://localhost:8080",
