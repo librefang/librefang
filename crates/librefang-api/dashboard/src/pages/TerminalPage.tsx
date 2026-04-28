@@ -16,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
-import { buildAuthenticatedWebSocketUrl } from "../api";
+import { buildAuthenticatedWebSocket } from "../api";
 import { Button } from "../components/ui/Button";
 import { TerminalTabs } from "../components/TerminalTabs";
 import { useTerminalHealth } from "../lib/queries/terminal";
@@ -156,7 +156,9 @@ export function TerminalPage() {
     setError(null);
     setIsConnecting(true);
     setIsRoot(false);
-    const url = new URL(buildAuthenticatedWebSocketUrl("/api/terminal/ws"));
+    const { url: wsUrl, protocols: wsProtocols } =
+      buildAuthenticatedWebSocket("/api/terminal/ws");
+    const url = new URL(wsUrl);
     if (terminalRef.current) {
       const size = clampTermSize(terminalRef.current.cols, terminalRef.current.rows);
       if (size) {
@@ -164,7 +166,10 @@ export function TerminalPage() {
         url.searchParams.set("rows", String(size.rows));
       }
     }
-    const ws = new WebSocket(url.toString());
+    const ws = new WebSocket(
+      url.toString(),
+      wsProtocols.length > 0 ? wsProtocols : undefined,
+    );
     wsRef.current = ws;
 
     ws.onopen = () => {

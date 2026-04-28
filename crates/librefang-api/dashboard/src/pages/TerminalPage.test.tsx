@@ -110,7 +110,10 @@ vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
   return {
     ...actual,
-    buildAuthenticatedWebSocketUrl: () => "ws://localhost/api/terminal/ws",
+    buildAuthenticatedWebSocket: () => ({
+      url: "ws://localhost/api/terminal/ws",
+      protocols: [],
+    }),
   };
 });
 

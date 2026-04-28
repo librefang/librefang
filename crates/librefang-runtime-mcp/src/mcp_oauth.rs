@@ -212,6 +212,26 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     false
 }
 
+/// Validate a full URL string against the SSRF block list (#3623).
+///
+/// Parses the URL, extracts the host, and delegates to [`is_ssrf_blocked_host`].
+/// Returns `Ok(())` when the URL is safe, or `Err(reason)` when blocked.
+///
+/// Public so callers outside this module (e.g. the kernel OAuth provider's
+/// `try_refresh`) can re-validate stored endpoint URLs before making outbound
+/// requests against values written before policy tightened.
+pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
+    let parsed = Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+    if is_ssrf_blocked_host(host) {
+        return Err(format!("host '{host}' is a blocked address"));
+    }
+    Ok(())
+}
+
+
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
@@ -380,12 +400,45 @@ struct AuthorizationServerMetadata {
 ///
 /// Expects the body to be a valid OAuth Authorization Server Metadata document
 /// (RFC 8414). Extracts the required endpoints and converts to our internal type.
+///
+/// SECURITY (#3623): All discovered endpoint URLs are validated through the
+/// SSRF guard (`is_ssrf_blocked_host`) before being returned.  A malicious
+/// MCP server could otherwise point any of these endpoints at loopback,
+/// link-local, or RFC 1918 addresses to trigger server-side requests to
+/// internal services.
 pub fn parse_authorization_server_metadata(
     body: &str,
     server_url: &str,
 ) -> Result<OAuthMetadata, String> {
     let raw: AuthorizationServerMetadata =
         serde_json::from_str(body).map_err(|e| format!("Failed to parse metadata JSON: {e}"))?;
+
+    // SSRF guard — validate every discovered endpoint URL.
+    for (label, url_str) in [
+        ("authorization_endpoint", raw.authorization_endpoint.as_str()),
+        ("token_endpoint", raw.token_endpoint.as_str()),
+    ] {
+        let parsed =
+            Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| format!("{label} has no host"))?;
+        if is_ssrf_blocked_host(host) {
+            return Err(format!("SSRF: {label} host '{host}' is a blocked address"));
+        }
+    }
+    if let Some(reg_ep) = raw.registration_endpoint.as_deref() {
+        let parsed = Url::parse(reg_ep)
+            .map_err(|e| format!("registration_endpoint is not a valid URL: {e}"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "registration_endpoint has no host".to_string())?;
+        if is_ssrf_blocked_host(host) {
+            return Err(format!(
+                "SSRF: registration_endpoint host '{host}' is a blocked address"
+            ));
+        }
+    }
 
     Ok(OAuthMetadata {
         authorization_endpoint: raw.authorization_endpoint,

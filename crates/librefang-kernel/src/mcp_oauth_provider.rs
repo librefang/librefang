@@ -107,6 +107,16 @@ impl KernelOAuthProvider {
             .vault_get(&Self::vault_key(server_url, "token_endpoint"))
             .ok_or_else(|| "No token_endpoint stored for refresh".to_string())?;
 
+        // SSRF guard (#3623): re-validate the stored token_endpoint before
+        // POSTing.  The stored value may predate policy tightening or have
+        // been written by a compromised flow — always re-check before making
+        // outbound requests.
+        if let Err(reason) =
+            librefang_runtime::mcp_oauth::is_ssrf_blocked_url(&token_endpoint)
+        {
+            return Err(format!("SSRF: token_endpoint rejected for refresh: {reason}"));
+        }
+
         let client_id = self.vault_get(&Self::vault_key(server_url, "client_id"));
 
         let client = reqwest::Client::new();
