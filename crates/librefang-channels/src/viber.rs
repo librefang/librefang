@@ -18,6 +18,27 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+/// Verify the `X-Viber-Content-Signature` header (HMAC-SHA256 with the auth token).
+///
+/// The header contains the raw hex digest (no prefix).
+fn verify_viber_signature(auth_token: &[u8], body: &[u8], signature_hex: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let Ok(claimed) = hex::decode(signature_hex) else {
+        return false;
+    };
+
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(auth_token) else {
+        warn!("Viber: failed to create HMAC-SHA256 instance");
+        return false;
+    };
+    mac.update(body);
+    let result = mac.finalize().into_bytes();
+
+    crate::http_client::ct_eq(&result, &claimed)
+}
+
 /// Viber set webhook endpoint.
 const VIBER_SET_WEBHOOK_URL: &str = "https://chatapi.viber.com/pa/set_webhook";
 
@@ -331,15 +352,38 @@ impl ChannelAdapter for ViberAdapter {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let tx = Arc::new(tx);
         let account_id = Arc::new(self.account_id.clone());
+        let auth_token = Arc::new(self.auth_token.clone());
 
         let router = axum::Router::new().route(
             "/webhook",
             axum::routing::post({
                 let tx = Arc::clone(&tx);
-                move |body: axum::extract::Json<serde_json::Value>| {
+                let auth_token = Arc::clone(&auth_token);
+                let account_id = Arc::clone(&account_id);
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
+                    let auth_token = Arc::clone(&auth_token);
+                    let account_id = Arc::clone(&account_id);
                     async move {
-                        if let Some(mut msg) = parse_viber_event(&body.0) {
+                        // Verify X-Viber-Content-Signature (HMAC-SHA256 with auth_token).
+                        let Some(sig) = headers
+                            .get("x-viber-content-signature")
+                            .and_then(|v| v.to_str().ok())
+                        else {
+                            warn!("Viber: missing X-Viber-Content-Signature header");
+                            return axum::http::StatusCode::BAD_REQUEST;
+                        };
+                        if !verify_viber_signature(auth_token.as_bytes(), &body, sig) {
+                            warn!("Viber: invalid X-Viber-Content-Signature");
+                            return axum::http::StatusCode::UNAUTHORIZED;
+                        }
+
+                        let json_body: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return axum::http::StatusCode::BAD_REQUEST,
+                        };
+
+                        if let Some(mut msg) = parse_viber_event(&json_body) {
                             // Inject account_id for multi-bot routing
                             if let Some(ref aid) = *account_id {
                                 msg.metadata
@@ -435,6 +479,31 @@ impl ChannelAdapter for ViberAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_verify_viber_signature_valid() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let token = b"my-viber-auth-token";
+        let body = b"viber webhook payload";
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(token).unwrap();
+        mac.update(body);
+        let result = mac.finalize().into_bytes();
+        let hex_sig = hex::encode(result);
+
+        assert!(verify_viber_signature(token, body, &hex_sig));
+    }
+
+    #[test]
+    fn test_verify_viber_signature_invalid() {
+        let token = b"my-viber-auth-token";
+        let body = b"viber webhook payload";
+        assert!(!verify_viber_signature(token, body, "deadbeef"));
+        assert!(!verify_viber_signature(token, body, ""));
+        assert!(!verify_viber_signature(token, body, "not-hex!@#$"));
+    }
 
     #[test]
     fn test_viber_adapter_creation() {

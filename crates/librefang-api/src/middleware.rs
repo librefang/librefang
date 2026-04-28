@@ -162,10 +162,17 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
 }
 
 /// Pull a caller-provided token from the standard locations the auth path
-/// understands: `Authorization: Bearer <x>`, `X-API-Key: <x>`, then
-/// `?token=<x>` (percent-decoded). Headers win over query, Bearer wins
+/// understands: `Authorization: Bearer <x>` or `X-API-Key: <x>`. Bearer wins
 /// over X-API-Key — same precedence as the non-loopback flow at
 /// `auth(...)` line ~528. Returns `None` if no shape is present.
+///
+/// SECURITY: `?token=` query-string auth is intentionally NOT supported here.
+/// Query parameters appear in server access logs, browser history, and HTTP
+/// Referer headers forwarded to third parties, making them unsuitable for
+/// carrying credentials on regular HTTP routes. WebSocket upgrades are the
+/// sole exception — browsers cannot set custom headers on WebSocket
+/// connections — and they handle `?token=` in `crate::ws::ws_auth_token`
+/// rather than going through this middleware path.
 fn extract_request_token(request: &Request<Body>) -> Option<String> {
     let bearer = request
         .headers()
@@ -176,19 +183,11 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
     if bearer.is_some() {
         return bearer;
     }
-    let header_alt = request
+    request
         .headers()
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    if header_alt.is_some() {
-        return header_alt;
-    }
-    request
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
-        .map(crate::percent_decode)
+        .map(str::to_string)
 }
 
 /// Request ID header name (standard).
@@ -700,32 +699,23 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let header_auth = api_token.map(&matches_any);
 
-    // Also check ?token= query parameter (for EventSource/SSE clients that
-    // cannot set custom headers, same approach as WebSocket auth).
-    //
-    // Percent-decode (but NOT form-urlencoded) so literal `+` characters in
-    // base64-derived tokens are preserved instead of being turned into spaces.
-    // See issue #962 (ported from openfang).
-    let query_token_decoded = request
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-        .map(crate::percent_decode);
+    // SECURITY: ?token= query-string auth is deliberately NOT checked here.
+    // Query parameters are written to server access logs, retained in browser
+    // history, and forwarded in HTTP Referer headers to third parties. Tokens
+    // must only arrive via Authorization: Bearer or X-API-Key headers, or via
+    // the session cookie. WebSocket upgrades are the sole exception (browsers
+    // cannot set custom headers on WebSocket connections); they authenticate
+    // via crate::ws::ws_auth_token, which never passes through this middleware.
 
-    // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let query_auth = query_token_decoded.as_deref().map(&matches_any);
-
-    // Accept if either auth method matches a static API key or legacy token
-    if header_auth == Some(true) || query_auth == Some(true) {
+    // Accept if header auth matches a static API key or legacy token
+    if header_auth == Some(true) {
         return next.run(request).await;
     }
 
     // Check the active session store for randomly generated dashboard tokens.
     // Also prune expired sessions opportunistically. Cookie token is only
     // consulted for `/dashboard/*` navigation (filtered upstream).
-    let provided_token = api_token
-        .or(query_token_decoded.as_deref())
-        .or(cookie_session_token.as_deref());
+    let provided_token = api_token.or(cookie_session_token.as_deref());
     if let Some(token_str) = provided_token {
         let mut sessions = auth_state.active_sessions.write().await;
         // Remove expired sessions while we hold the lock
@@ -820,7 +810,7 @@ pub async fn auth(
         .unwrap_or(i18n::DEFAULT_LANGUAGE);
     let translator = i18n::ErrorTranslator::new(lang);
 
-    let credential_provided = header_auth.is_some() || query_auth.is_some();
+    let credential_provided = header_auth.is_some();
     let error_msg = if credential_provided {
         translator.t("api-error-auth-invalid-key")
     } else {
