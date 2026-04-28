@@ -187,6 +187,56 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     crate::updater::download_and_install_update(&app).await
 }
 
+// ── Credential storage (mobile only — keyring) ───────────────────────────
+
+const KEYRING_SERVICE: &str = "librefang-mobile";
+const KEYRING_ACCOUNT: &str = "daemon-credentials";
+
+/// Store daemon credentials in the OS keyring.
+///
+/// JSON-encodes `{"base_url": ..., "api_key": ...}` as the secret.
+/// Falls back gracefully on platforms where keyring is unavailable.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[tauri::command]
+pub fn store_credentials(base_url: String, api_key: String) -> Result<(), String> {
+    let creds = serde_json::json!({ "base_url": base_url, "api_key": api_key }).to_string();
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| format!("Keyring init failed: {e}"))?
+        .set_password(&creds)
+        .map_err(|e| format!("Failed to store credentials: {e}"))
+}
+
+/// Retrieve daemon credentials from the OS keyring.
+///
+/// Returns `null` if no credentials are stored.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[tauri::command]
+pub fn get_credentials() -> Result<Option<serde_json::Value>, String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| format!("Keyring init failed: {e}"))?;
+    match entry.get_password() {
+        Ok(secret) => {
+            let val: serde_json::Value =
+                serde_json::from_str(&secret).map_err(|e| format!("Invalid stored creds: {e}"))?;
+            Ok(Some(val))
+        }
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("Failed to read credentials: {e}")),
+    }
+}
+
+/// Remove daemon credentials from the OS keyring.
+#[cfg(any(target_os = "ios", target_os = "android"))]
+#[tauri::command]
+pub fn clear_credentials() -> Result<(), String> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|e| format!("Keyring init failed: {e}"))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!("Failed to clear credentials: {e}")),
+    }
+}
+
 /// Open the LibreFang config directory (`~/.librefang/`) in the OS file manager.
 #[tauri::command]
 pub fn open_config_dir() -> Result<(), String> {
