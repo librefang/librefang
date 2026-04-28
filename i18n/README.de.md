@@ -106,7 +106,7 @@ Eigene Hands erstellen: `HAND.toml` + System-Prompt + `SKILL.md` definieren. [An
 
 ## Architektur
 
-24 Rust-Crates, modulares Kernel-Design.
+24 Rust-Crates + xtask, modulares Kernel-Design.
 
 ```
 librefang-kernel            Orchestrierung, Workflows, Metering, RBAC, Scheduler, Budget
