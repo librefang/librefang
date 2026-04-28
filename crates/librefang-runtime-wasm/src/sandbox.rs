@@ -69,7 +69,7 @@ impl wasmtime::ResourceLimiter for MemoryLimiter {
         _current: usize,
         desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         Ok(desired <= self.max_bytes)
     }
 
@@ -78,7 +78,7 @@ impl wasmtime::ResourceLimiter for MemoryLimiter {
         _current: usize,
         _desired: usize,
         _maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> Result<bool, wasmtime::Error> {
         // No table-element cap — only memory is bounded here.
         Ok(true)
     }
