@@ -178,44 +178,47 @@ function AuditLogTab() {
     );
   }
 
-  const auditColumns: ResponsiveTableColumn<ApprovalAuditEntry>[] = [
-    {
-      key: "tool_name",
-      label: t("approvals.auditLog.tool"),
-      tdClass: "px-4 py-3 font-medium",
-      render: (e) => e.tool_name,
-    },
-    {
-      key: "agent_id",
-      label: t("approvals.auditLog.agent"),
-      tdClass: "px-4 py-3 text-text-dim",
-      render: (e) => e.agent_id,
-    },
-    {
-      key: "decision",
-      label: t("approvals.auditLog.decision"),
-      tdClass: "px-4 py-3",
-      render: (e) => decisionBadge(e.decision, t),
-    },
-    {
-      key: "decided_by",
-      label: t("approvals.auditLog.decidedBy"),
-      tdClass: "px-4 py-3 text-text-dim",
-      render: (e) => e.decided_by ?? "—",
-    },
-    {
-      key: "decided_at",
-      label: t("approvals.auditLog.decidedAt"),
-      tdClass: "px-4 py-3 text-text-dim text-xs",
-      render: (e) => (e.decided_at ? new Date(e.decided_at).toLocaleString() : "—"),
-    },
-    {
-      key: "feedback",
-      label: t("approvals.auditLog.feedback"),
-      tdClass: "px-4 py-3 text-text-dim text-xs max-w-48 truncate",
-      render: (e) => e.feedback ?? "—",
-    },
-  ];
+  const auditColumns = useMemo<ResponsiveTableColumn<ApprovalAuditEntry>[]>(
+    () => [
+      {
+        key: "tool_name",
+        label: t("approvals.auditLog.tool"),
+        tdClass: "px-4 py-3 font-medium",
+        render: (e) => e.tool_name,
+      },
+      {
+        key: "agent_id",
+        label: t("approvals.auditLog.agent"),
+        tdClass: "px-4 py-3 text-text-dim",
+        render: (e) => e.agent_id,
+      },
+      {
+        key: "decision",
+        label: t("approvals.auditLog.decision"),
+        tdClass: "px-4 py-3",
+        render: (e) => decisionBadge(e.decision, t),
+      },
+      {
+        key: "decided_by",
+        label: t("approvals.auditLog.decidedBy"),
+        tdClass: "px-4 py-3 text-text-dim",
+        render: (e) => e.decided_by ?? "—",
+      },
+      {
+        key: "decided_at",
+        label: t("approvals.auditLog.decidedAt"),
+        tdClass: "px-4 py-3 text-text-dim text-xs",
+        render: (e) => (e.decided_at ? new Date(e.decided_at).toLocaleString() : "—"),
+      },
+      {
+        key: "feedback",
+        label: t("approvals.auditLog.feedback"),
+        tdClass: "px-4 py-3 text-text-dim text-xs max-w-48 truncate",
+        render: (e) => e.feedback ?? "—",
+      },
+    ],
+    [t],
+  );
 
   return (
     <div className="flex flex-col gap-4">

@@ -7,7 +7,7 @@
  *     columns={[{ key: "name", label: "Name" }, ...]}
  *     rows={items}
  *     rowKey={(row) => row.id}
- *     renderCell={(col, row) => row[col.key]}
+ *     columns={[{ key: "name", label: "Name", render: (row) => row.name }, ...]}
  *   />
  */
 
@@ -81,7 +81,7 @@ export function ResponsiveTable<T>({
                     key={col.key}
                     className={col.tdClass ?? "px-4 py-3 text-sm"}
                   >
-                    {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? "")}
+                    {col.render ? col.render(row) : String((row as Record<string, unknown>)[col.key] ?? "—")}
                   </td>
                 ))}
               </tr>
