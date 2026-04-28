@@ -23,9 +23,9 @@ jobs:
 
           if [ "${{ github.event_name }}" = "issues" ]; then
             NUMBER="${{ github.event.issue.number }}"
-            # Check if this is the author's first issue
-            COUNT=$(gh api "search/issues?q=repo:${REPO}+author:${AUTHOR}+is:issue" --jq '.total_count')
-            if [ "$COUNT" -le 1 ]; then
+            # Check if this is the author's first issue (use listing API, not search — search has secondary rate limits and indexing delays)
+            COUNT=$(gh issue list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
+            if [ "$COUNT" -lt 2 ]; then
               gh issue comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
           Thanks for opening your first issue! 🎉
 
@@ -40,9 +40,9 @@ jobs:
 
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             NUMBER="${{ github.event.pull_request.number }}"
-            # Check if this is the author's first PR
-            COUNT=$(gh api "search/issues?q=repo:${REPO}+author:${AUTHOR}+is:pr" --jq '.total_count')
-            if [ "$COUNT" -le 1 ]; then
+            # Check if this is the author's first PR (use listing API, not search — search has secondary rate limits and indexing delays)
+            COUNT=$(gh pr list --repo "$REPO" --author "$AUTHOR" --state all --limit 2 --json number --jq 'length')
+            if [ "$COUNT" -lt 2 ]; then
               gh pr comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
           Thanks for your first pull request! 🎉
 
