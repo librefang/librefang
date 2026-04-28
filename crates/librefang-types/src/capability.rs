@@ -186,15 +186,117 @@ pub fn validate_capability_inheritance(
     Ok(())
 }
 
-/// Simple glob pattern matching supporting '*' as wildcard.
+/// Simple glob pattern matching supporting `*` and `**` wildcards.
 ///
-/// Pattern rules:
-/// - `"*"` matches anything
-/// - `"prefix*"` matches values starting with `prefix`
-/// - `"*suffix"` matches values ending with `suffix`
-/// - `"prefix*suffix"` matches values starting with `prefix` and ending with `suffix`
-/// - Exact string matches itself
+/// # Separator-aware semantics (security-critical)
+///
+/// For values that look like **file paths** (contain `/`) or **hostnames**
+/// (contain `.`), a single `*` is treated as **literal-separator** — it will
+/// NOT match across the separator character.  This prevents a capability like
+/// `FileRead("/tmp/*")` from matching `/tmp/../etc/passwd` (path traversal) or
+/// `NetConnect("*.example.com")` from matching
+/// `evil.com?host=good.example.com`.
+///
+/// Use `**` to match across separators when that is intentional (e.g., a
+/// recursive directory grant).
+///
+/// For values that contain **neither** `/` **nor** `.` (plain identifiers such
+/// as tool names, agent names, env-var names), `*` retains its traditional
+/// "match anything" behaviour so existing patterns like `"file_*"` or `"mcp_*"`
+/// continue to work unchanged.
+///
+/// # Pattern rules
+/// - `"*"` — matches any **single-component** value (no `/` or `.` in result)
+///   when the value is path/host-like; matches anything for plain identifiers
+/// - `"prefix*"` — matches values whose first component starts with `prefix`
+/// - `"*suffix"` — matches values whose last component ends with `suffix`
+/// - `"prefix*suffix"` — combined
+/// - `"**"` / `"**/*"` style — not yet supported; reserved for future use
+/// - Exact string always matches itself
+///
+/// # Examples
+/// ```
+/// use librefang_types::capability::glob_matches;
+///
+/// // File paths: * does NOT cross /
+/// assert!(glob_matches("/tmp/*", "/tmp/foo"));
+/// assert!(!glob_matches("/tmp/*", "/tmp/foo/bar"));
+/// assert!(!glob_matches("/tmp/*", "/tmp/../etc/passwd"));
+///
+/// // Hostnames: * does NOT cross .
+/// assert!(glob_matches("*.example.com:443", "api.example.com:443"));
+/// assert!(!glob_matches("*.example.com", "evil.com?host=good.example.com"));
+///
+/// // Plain identifiers: * matches freely
+/// assert!(glob_matches("file_*", "file_read"));
+/// assert!(glob_matches("mcp_*", "mcp_server_tool"));
+/// ```
 pub fn glob_matches(pattern: &str, value: &str) -> bool {
+    // Determine whether this is a "structured" value (path or hostname).
+    // For structured values we enable literal-separator mode so that a single
+    // `*` cannot jump across `/` or `.` boundaries.
+    let is_path = value.contains('/');
+    // Only apply dot-separator mode when the pattern itself contains dots.
+    // Inferring "is host" from the value alone misclassifies file names like
+    // "readme.txt" as hostnames, causing `glob_matches("*", "readme.txt")` to
+    // incorrectly return false.
+    let is_host = !is_path && pattern.contains('.');
+    let separator: Option<char> = if is_path {
+        Some('/')
+    } else if is_host {
+        Some('.')
+    } else {
+        None
+    };
+
+    // Fast path: `*` with no separator context keeps backward-compatible
+    // behaviour (matches anything).
+    if pattern == "*" {
+        if let Some(sep) = separator {
+            // For structured values `*` must not cross the separator.
+            // A lone `*` therefore only matches a single component (no sep in value).
+            return !value.contains(sep);
+        }
+        return true;
+    }
+
+    // Exact match always wins.
+    if pattern == value {
+        return true;
+    }
+
+    // For structured values, delegate to a component-aware matcher.
+    if let Some(sep) = separator {
+        return glob_matches_with_separator(pattern, value, sep);
+    }
+
+    // Plain-identifier matching: original behaviour.
+    glob_matches_plain(pattern, value)
+}
+
+/// Glob matching where `*` must not cross `separator`.
+///
+/// Splits both the pattern and value on `separator` and matches segment by
+/// segment.  A `*` segment matches exactly one value segment; a `*` inside a
+/// segment matches within that segment only.
+fn glob_matches_with_separator(pattern: &str, value: &str, separator: char) -> bool {
+    let pat_parts: Vec<&str> = pattern.split(separator).collect();
+    let val_parts: Vec<&str> = value.split(separator).collect();
+
+    if pat_parts.len() != val_parts.len() {
+        return false;
+    }
+
+    pat_parts
+        .iter()
+        .zip(val_parts.iter())
+        .all(|(p, v)| glob_matches_plain(p, v))
+}
+
+/// Original glob logic for plain (non-path, non-host) values.
+///
+/// `*` matches any substring within the component (no separator awareness).
+fn glob_matches_plain(pattern: &str, value: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -207,7 +309,7 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix('*') {
         return value.starts_with(prefix);
     }
-    // Check for middle wildcard: "prefix*suffix"
+    // Middle wildcard: "prefix*suffix"
     if let Some(star_pos) = pattern.find('*') {
         let prefix = &pattern[..star_pos];
         let suffix = &pattern[star_pos + 1..];
@@ -300,12 +402,15 @@ mod tests {
 
     #[test]
     fn test_capability_inheritance_subset_ok() {
+        // Parent grants broad access; child requests a strict subset.
+        // FileRead("/data/*") covers a specific file under /data.
+        // NetConnect("*.example.com:443") covers a concrete host.
         let parent = vec![
-            Capability::FileRead("*".to_string()),
+            Capability::FileRead("/data/*".to_string()),
             Capability::NetConnect("*.example.com:443".to_string()),
         ];
         let child = vec![
-            Capability::FileRead("/data/*".to_string()),
+            Capability::FileRead("/data/output.txt".to_string()),
             Capability::NetConnect("api.example.com:443".to_string()),
         ];
         assert!(validate_capability_inheritance(&parent, &child).is_ok());
@@ -394,5 +499,88 @@ mod tests {
             .filter(|(p, _)| glob_matches(p, tool))
             .max_by_key(|(p, _)| p.len());
         assert!(best.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug #3863 — separator-aware glob: * must not cross / or .
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_glob_file_star_does_not_cross_directory_separator() {
+        // /tmp/* should match /tmp/foo but NOT /tmp/foo/bar
+        assert!(
+            glob_matches("/tmp/*", "/tmp/foo"),
+            "/tmp/* must match /tmp/foo"
+        );
+        assert!(
+            !glob_matches("/tmp/*", "/tmp/foo/bar"),
+            "/tmp/* must NOT match /tmp/foo/bar"
+        );
+    }
+
+    #[test]
+    fn test_glob_file_star_does_not_allow_path_traversal() {
+        // A malicious guest must not be able to escape /tmp/ via ../
+        assert!(
+            !glob_matches("/tmp/*", "/tmp/../etc/passwd"),
+            "/tmp/* must NOT match /tmp/../etc/passwd"
+        );
+        assert!(
+            !glob_matches("/tmp/*", "/tmp/../../root/.ssh/id_rsa"),
+            "/tmp/* must NOT cross directory separators"
+        );
+    }
+
+    #[test]
+    fn test_glob_file_star_single_component_ok() {
+        assert!(glob_matches("/data/*", "/data/file.txt"));
+        assert!(glob_matches("/var/log/*", "/var/log/app.log"));
+        assert!(!glob_matches("/var/log/*", "/var/log/sub/app.log"));
+    }
+
+    #[test]
+    fn test_glob_host_star_does_not_cross_dot_separator() {
+        // *.example.com:443 must match api.example.com:443 but not
+        // evil.com?host=good.example.com (which has no '.' structure match)
+        assert!(
+            glob_matches("*.example.com:443", "api.example.com:443"),
+            "*.example.com:443 must match api.example.com:443"
+        );
+        assert!(
+            !glob_matches("*.example.com", "evil.org.example.com"),
+            "*.example.com must NOT match evil.org.example.com (two-level prefix)"
+        );
+    }
+
+    #[test]
+    fn test_glob_host_star_single_label_only() {
+        // *.example.com should NOT match sub.sub.example.com
+        assert!(!glob_matches("*.example.com", "sub.sub.example.com"));
+        assert!(glob_matches("*.example.com", "sub.example.com"));
+    }
+
+    #[test]
+    fn test_glob_plain_identifier_star_unchanged() {
+        // Plain identifiers (no / or .) — original behaviour preserved
+        assert!(glob_matches("file_*", "file_read"));
+        assert!(glob_matches("file_*", "file_write"));
+        assert!(!glob_matches("file_*", "shell_exec"));
+        assert!(glob_matches("mcp_*", "mcp_server1_tool_a"));
+        assert!(glob_matches("*", "anything_plain"));
+    }
+
+    #[test]
+    fn test_glob_star_alone_on_path_matches_only_single_component() {
+        // A bare "*" capability on a path value only matches a value with no /
+        // (i.e., a single-component relative path)
+        assert!(glob_matches("*", "readme.txt"));
+        assert!(!glob_matches("*", "/etc/passwd"));
+        assert!(!glob_matches("*", "foo/bar"));
+    }
+
+    #[test]
+    fn test_glob_exact_path_always_matches() {
+        assert!(glob_matches("/etc/passwd", "/etc/passwd"));
+        assert!(!glob_matches("/etc/passwd", "/etc/shadow"));
     }
 }

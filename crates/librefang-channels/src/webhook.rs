@@ -73,15 +73,26 @@ impl WebhookAdapter {
     /// * `secret` - Shared secret for HMAC-SHA256 signature verification.
     /// * `listen_port` - Port to listen for incoming webhook POST requests.
     /// * `callback_url` - Optional URL to POST outbound messages to.
-    pub fn new(secret: String, _listen_port: u16, callback_url: Option<String>) -> Self {
-        Self {
+    ///
+    /// Returns an error if `callback_url` is present but points to a private/
+    /// loopback/metadata-service host (SSRF guard).
+    pub fn new(
+        secret: String,
+        _listen_port: u16,
+        callback_url: Option<String>,
+    ) -> Result<Self, String> {
+        if let Some(ref url) = callback_url {
+            crate::http_client::validate_url_for_fetch(url)
+                .map_err(|e| format!("WebhookAdapter: callback_url rejected by SSRF guard: {e}"))?;
+        }
+        Ok(Self {
             secret: Zeroizing::new(secret),
             callback_url,
             client: crate::http_client::new_client(),
             account_id: None,
             deliver_only: false,
             deliver_target: None,
-        }
+        })
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -456,7 +467,8 @@ mod tests {
             "my-secret".to_string(),
             9000,
             Some("https://example.com/callback".to_string()),
-        );
+        )
+        .expect("public URL should be accepted");
         assert_eq!(adapter.name(), "webhook");
         assert_eq!(
             adapter.channel_type(),
@@ -467,8 +479,42 @@ mod tests {
 
     #[test]
     fn test_webhook_no_callback() {
-        let adapter = WebhookAdapter::new("secret".to_string(), 9000, None);
+        let adapter = WebhookAdapter::new("secret".to_string(), 9000, None).unwrap();
         assert!(!adapter.has_callback());
+    }
+
+    #[test]
+    fn test_webhook_rejects_private_callback_url() {
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://127.0.0.1/hook".to_string()),
+        )
+        .is_err());
+
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://192.168.1.1/hook".to_string()),
+        )
+        .is_err());
+
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://169.254.169.254/latest/meta-data/".to_string()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_webhook_accepts_public_callback_url() {
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("https://hooks.example.com/receiver".to_string()),
+        )
+        .is_ok());
     }
 
     #[test]

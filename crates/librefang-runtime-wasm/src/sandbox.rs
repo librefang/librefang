@@ -56,6 +56,34 @@ impl Default for SandboxConfig {
     }
 }
 
+/// `ResourceLimiter` implementation that caps WASM linear-memory growth at a
+/// configured byte ceiling. Attached to every `Store` so that WASM plugins
+/// cannot allocate unbounded host memory regardless of their fuel budget.
+struct MemoryLimiter {
+    max_bytes: usize,
+}
+
+impl wasmtime::ResourceLimiter for MemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        Ok(desired <= self.max_bytes)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        // No table-element cap — only memory is bounded here.
+        Ok(true)
+    }
+}
+
 /// State carried in each WASM Store, accessible by host functions.
 pub struct GuestState {
     /// Capabilities granted to this guest — checked before every host call.
@@ -66,6 +94,8 @@ pub struct GuestState {
     pub agent_id: String,
     /// Tokio runtime handle for async operations in sync host functions.
     pub tokio_handle: tokio::runtime::Handle,
+    /// Memory limiter enforcing `SandboxConfig::max_memory_bytes`.
+    limiter: MemoryLimiter,
 }
 
 /// Result of executing a WASM module.
@@ -157,7 +187,7 @@ impl WasmSandbox {
         let module = Module::new(engine, wasm_bytes)
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
-        // Create store with guest state
+        // Create store with guest state (includes the memory limiter)
         let mut store = Store::new(
             engine,
             GuestState {
@@ -165,8 +195,15 @@ impl WasmSandbox {
                 kernel,
                 agent_id: agent_id.to_string(),
                 tokio_handle,
+                limiter: MemoryLimiter {
+                    max_bytes: config.max_memory_bytes,
+                },
             },
         );
+
+        // Enforce the memory cap: every memory.grow call from the guest goes
+        // through MemoryLimiter::memory_growing before any allocation happens.
+        store.limiter(|state| &mut state.limiter);
 
         // Set fuel budget (deterministic metering)
         if config.fuel_limit > 0 {
@@ -383,6 +420,20 @@ impl WasmSandbox {
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
         // host_log: lightweight logging — no capability check required.
+        //
+        // SECURITY (Bug #3865): two hardening measures are applied before the
+        // message reaches the log pipeline:
+        //
+        // 1. **Length cap** — only the first `MAX_HOST_LOG_BYTES` bytes are
+        //    read from guest memory.  Without this a malicious plugin can write
+        //    gigabytes of data, saturating disk I/O and exhausting the
+        //    structured-logging pipeline (log-pipeline DoS).
+        //
+        // 2. **Newline stripping** — CR and LF characters are replaced with a
+        //    space before the message is handed to `tracing`.  Without this a
+        //    plugin can embed fake log lines and forge audit-trail entries (log
+        //    injection), because most log shippers split on newlines and treat
+        //    each line as an independent event.
         linker
             .func_wrap(
                 "librefang",
@@ -391,10 +442,19 @@ impl WasmSandbox {
                  level: i32,
                  msg_ptr: i32,
                  msg_len: i32| {
+                    // Cap the number of bytes read from the guest to prevent
+                    // log-pipeline DoS.
+                    const MAX_HOST_LOG_BYTES: usize = 4096;
+                    let capped_len = (msg_len as usize).min(MAX_HOST_LOG_BYTES) as i32;
+
                     let mut caller = caller;
-                    match Self::read_guest_bytes(&mut caller, msg_ptr, msg_len, "host_log") {
+                    match Self::read_guest_bytes(&mut caller, msg_ptr, capped_len, "host_log") {
                         Ok(bytes) => {
-                            let msg = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            // Strip newlines to prevent log injection — a WASM
+                            // guest must not be able to forge additional log
+                            // lines by embedding CR/LF in its message.
+                            let raw = String::from_utf8_lossy(&bytes);
+                            let msg = raw.replace(['\n', '\r'], " ");
                             let agent_id = &caller.data().agent_id;
 
                             match level {
@@ -577,6 +637,33 @@ mod tests {
         let sandbox = WasmSandbox::new().unwrap();
         // Engine should be created successfully
         drop(sandbox);
+    }
+
+    /// Regression: max_memory_bytes must be enforced at runtime, not just
+    /// declared. A guest module that requests more memory than the cap should
+    /// be rejected — before this fix the cap was a no-op comment.
+    #[test]
+    fn test_memory_limiter_blocks_excess_growth() {
+        let mut limiter = MemoryLimiter {
+            // 1 MiB cap
+            max_bytes: 1024 * 1024,
+        };
+        // Within limit → allowed
+        assert_eq!(
+            limiter
+                .memory_growing(0, 64 * 1024, None)
+                .expect("should not error"),
+            true,
+            "growth within cap must be permitted"
+        );
+        // Exceeds limit → denied
+        assert_eq!(
+            limiter
+                .memory_growing(0, 2 * 1024 * 1024, None)
+                .expect("should not error"),
+            false,
+            "growth beyond cap must be denied"
+        );
     }
 
     #[tokio::test]
