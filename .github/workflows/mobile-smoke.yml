@@ -93,14 +93,17 @@ jobs:
 
   ios_smoke:
     name: iOS (simulator, unsigned)
-    runs-on: macos-14
+    # macos-15 ships Xcode 16, which understands the objectVersion=77
+    # pbxproj that `tauri ios init` (cargo-mobile2) emits. macos-14 + Xcode
+    # 15.4 fails with "future Xcode project file format (77)".
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1
         with:
-          xcode-version: "15.4"
+          xcode-version: "16.2"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
