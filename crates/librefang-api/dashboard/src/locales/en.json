@@ -3006,5 +3006,51 @@
     "bindings_unset": "No platform IDs bound. Inbound from any channel will be unrecognised.",
     "channel_rules_title": "Per-channel tool overrides",
     "channel_rules_unset": "No per-channel overrides. The global ApprovalPolicy.channel_rules still applies."
+  },
+  "offline_banner": {
+    "label": "Daemon unreachable",
+    "retry": "Retry"
+  },
+  "connect_wizard": {
+    "title": "Connect to Daemon",
+    "subtitle": "Enter your daemon URL and API key, or scan a pairing QR code.",
+    "tab_manual": "Manual",
+    "tab_qr": "Scan QR",
+    "field_url": "Daemon URL",
+    "field_api_key": "API Key",
+    "field_device_name": "Device name",
+    "device_name_placeholder": "My iPhone",
+    "device_name_help": "Shown on the desktop so you can revoke this device later.",
+    "qr_card_title": "Open the desktop dashboard",
+    "qr_card_body": "Go to <strong>Settings → Mobile Pairing</strong> and tap <strong>Scan QR</strong> below.",
+    "btn_connect": "Connect",
+    "btn_connecting": "Connecting…",
+    "btn_scan": "Scan QR Code",
+    "btn_scanning": "Scanning…",
+    "btn_pairing": "Pairing…",
+    "done_title": "Connected!",
+    "done_subtitle": "Opening dashboard…",
+    "error_title": "Connection failed",
+    "error_url_scheme": "URL must start with http:// or https://",
+    "error_default_connect": "Connection failed",
+    "error_default_pairing": "Pairing failed",
+    "btn_try_again": "Try again",
+    "device_name_default": "LibreFang Mobile"
+  },
+  "mobile_pairing": {
+    "title": "Mobile Pairing",
+    "subtitle": "Open the LibreFang mobile app and tap <strong>Scan QR</strong> to connect to this daemon.",
+    "expired_message": "QR code expired — refresh to get a new one.",
+    "refresh": "Refresh",
+    "expired_label": "Expired",
+    "paired_devices_heading": "Paired Devices",
+    "paired_at": "{{platform}} · paired {{date}}",
+    "remove_title": "Remove device",
+    "remove_failed": "Failed to remove device: {{reason}}",
+    "remove_unknown_error": "unknown error",
+    "error_disabled_title": "Device pairing is disabled",
+    "error_disabled_body": "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
+    "error_generic_title": "Failed to generate pairing code",
+    "btn_try_again": "Try again"
   }
 }

@@ -42,6 +42,7 @@ tauri-plugin-shell = "2"
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 # Mobile-only plugins
 tauri-plugin-barcode-scanner = "2"
+keyring = "3"
 
 [features]
 default = ["librefang-api/default"]
