@@ -4634,6 +4634,36 @@ fn dummy_sender(channel: &str, chat_id: Option<&str>) -> SenderContext {
     SenderContext {
         channel: channel.to_string(),
         chat_id: chat_id.map(str::to_string),
+// ── session_mode_override resolution + trigger concurrency caps (#3754, #3755) ──
+
+/// Helper: boot a minimal kernel in a temp directory.
+fn minimal_kernel(test_name: &str) -> (LibreFangKernel, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join(test_name);
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+    let k = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+    (k, dir)
+}
+
+/// Helper: minimal agent manifest with a specific session_mode and
+/// max_concurrent_invocations.
+fn concurrency_manifest(
+    name: &str,
+    session_mode: librefang_types::agent::SessionMode,
+    max_concurrent: Option<u32>,
+) -> AgentManifest {
+    AgentManifest {
+        name: name.to_string(),
+        description: "concurrency test agent".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        session_mode,
+        max_concurrent_invocations: max_concurrent,
         ..Default::default()
     }
 }
@@ -4794,4 +4824,264 @@ fn resolve_dispatch_session_id_session_mode_override_beats_manifest() {
         None,
     );
     assert_eq!(got, Some(entry_sid));
+// -- #3754: session_mode_override resolution via agent_concurrency_for --------
+
+/// An agent with `session_mode = "new"` and `max_concurrent_invocations = 3`
+/// must produce a semaphore with capacity 3 — no clamping should occur.
+#[test]
+fn agent_concurrency_new_session_allows_cap_above_one() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("concurrency-new-session");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("new-agent", SessionMode::New, Some(3)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+    assert_eq!(
+        sem.available_permits(),
+        3,
+        "session_mode=new with max_concurrent_invocations=3 must produce a semaphore with 3 permits"
+    );
+
+    kernel.shutdown();
+}
+
+/// An agent with `session_mode = "persistent"` and
+/// `max_concurrent_invocations = 4` must be clamped to 1 — parallel writes
+/// to a single session's history are undefined, so the resolver silently
+/// enforces serialisation.
+#[test]
+fn agent_concurrency_persistent_session_clamps_cap_to_one() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("concurrency-persistent-clamp");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("persistent-agent", SessionMode::Persistent, Some(4)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+    assert_eq!(
+        sem.available_permits(),
+        1,
+        "session_mode=persistent with max_concurrent_invocations=4 must be clamped to 1"
+    );
+
+    kernel.shutdown();
+}
+
+/// An agent with `session_mode = "persistent"` and
+/// `max_concurrent_invocations = 1` (i.e. the cap already equals 1) must
+/// produce a capacity-1 semaphore with no spurious WARN.
+#[test]
+fn agent_concurrency_persistent_session_with_cap_one_is_fine() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("concurrency-persistent-cap-one");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("persistent-cap-one", SessionMode::Persistent, Some(1)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+    assert_eq!(sem.available_permits(), 1);
+
+    kernel.shutdown();
+}
+
+/// When `max_concurrent_invocations` is absent the resolver must fall back to
+/// `queue.concurrency.default_per_agent` (default: 1) regardless of
+/// session_mode.
+#[test]
+fn agent_concurrency_falls_back_to_config_default_when_unset() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("concurrency-default-fallback");
+    // default_per_agent = 1 (KernelConfig default)
+    let expected = kernel
+        .config
+        .load()
+        .queue
+        .concurrency
+        .default_per_agent;
+
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("default-fallback-agent", SessionMode::New, None),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+    assert_eq!(
+        sem.available_permits(),
+        expected,
+        "absent max_concurrent_invocations must use default_per_agent config value"
+    );
+
+    kernel.shutdown();
+}
+
+// -- #3755: three-layer concurrency caps joint integration --------------------
+
+/// Verify that the global `Lane::Trigger` semaphore correctly limits total
+/// concurrent trigger fires across the whole kernel.  We use a capacity-2
+/// queue and prove that the third caller cannot acquire a permit immediately.
+#[tokio::test]
+async fn trigger_lane_global_semaphore_limits_total_concurrency() {
+    use librefang_runtime::command_lane::{CommandQueue, Lane};
+
+    let queue = CommandQueue::with_capacities(3, 2, 3, 2); // trigger capacity = 2
+    let trigger_sem = queue.semaphore_for_lane(Lane::Trigger);
+
+    let p1 = trigger_sem.clone().try_acquire_owned().unwrap();
+    let p2 = trigger_sem.clone().try_acquire_owned().unwrap();
+
+    // Third acquire must fail because both permits are held.
+    assert!(
+        trigger_sem.clone().try_acquire_owned().is_err(),
+        "global trigger lane must block when all permits are held"
+    );
+
+    // Release one permit — now a third caller can proceed.
+    drop(p1);
+    assert!(
+        trigger_sem.clone().try_acquire_owned().is_ok(),
+        "releasing a permit must allow the next waiter to proceed"
+    );
+
+    drop(p2);
+}
+
+/// Verify that the per-agent semaphore enforces `max_concurrent_invocations`
+/// independently from the global lane semaphore.  Two agents each get their
+/// own semaphore; exhausting one must not affect the other.
+#[test]
+fn per_agent_semaphore_is_isolated_per_agent() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("per-agent-semaphore-isolation");
+
+    let agent_a = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("agent-a", SessionMode::New, Some(2)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn agent-a");
+
+    let agent_b = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("agent-b", SessionMode::New, Some(1)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn agent-b");
+
+    let sem_a = kernel.agent_concurrency_for(agent_a);
+    let sem_b = kernel.agent_concurrency_for(agent_b);
+
+    // Exhaust agent-a's 2 permits.
+    let _pa1 = sem_a.clone().try_acquire_owned().unwrap();
+    let _pa2 = sem_a.clone().try_acquire_owned().unwrap();
+    assert!(
+        sem_a.clone().try_acquire_owned().is_err(),
+        "agent-a semaphore must be exhausted after 2 acquires"
+    );
+
+    // agent-b still has its own capacity — exhausting agent-a must not affect it.
+    let _pb1 = sem_b.clone().try_acquire_owned().unwrap();
+    assert!(
+        sem_b.clone().try_acquire_owned().is_err(),
+        "agent-b semaphore must be exhausted after 1 acquire"
+    );
+
+    kernel.shutdown();
+}
+
+/// `session_mode = "new"` + `max_concurrent_invocations = 2` must produce a
+/// semaphore with 2 permits and each permit must be independently acquirable,
+/// meaning two concurrent trigger fires on the same agent can actually run in
+/// parallel (different sessions, no serialisation needed).
+#[test]
+fn session_mode_new_with_cap_two_allows_two_concurrent_fires() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("new-session-parallel-fires");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("parallel-trigger-agent", SessionMode::New, Some(2)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+
+    // Both permits must be acquirable simultaneously, representing two
+    // concurrent trigger dispatches each running in its own fresh session.
+    let p1 = sem.clone().try_acquire_owned();
+    let p2 = sem.clone().try_acquire_owned();
+    assert!(p1.is_ok(), "first concurrent fire must acquire a permit");
+    assert!(p2.is_ok(), "second concurrent fire must acquire a permit");
+
+    // A third concurrent fire must wait.
+    assert!(
+        sem.clone().try_acquire_owned().is_err(),
+        "third concurrent fire must block once both permits are taken"
+    );
+
+    kernel.shutdown();
+}
+
+/// `session_mode = "persistent"` + `max_concurrent_invocations = 2` gets
+/// clamped to 1: a second concurrent fire on the same persistent session
+/// must NOT be able to run in parallel (would corrupt session history).
+/// The per-agent semaphore acts as the enforcement mechanism.
+#[test]
+fn session_mode_persistent_plus_cap_two_is_clamped_preventing_parallel_fires() {
+    use librefang_types::agent::SessionMode;
+
+    let (kernel, _dir) = minimal_kernel("persistent-session-no-parallel");
+    let agent_id = kernel
+        .spawn_agent_inner(
+            concurrency_manifest("persistent-parallel-agent", SessionMode::Persistent, Some(2)),
+            None,
+            None,
+            None,
+        )
+        .expect("spawn failed");
+
+    let sem = kernel.agent_concurrency_for(agent_id);
+
+    // After clamping, capacity = 1: only one concurrent fire is allowed.
+    let p1 = sem.clone().try_acquire_owned();
+    assert!(p1.is_ok(), "first fire must acquire the single permit");
+
+    // A second concurrent fire must be blocked — not a second permit to take.
+    assert!(
+        sem.clone().try_acquire_owned().is_err(),
+        "persistent-session agent must serialize fires even when cap=2 was requested"
+    );
+
+    kernel.shutdown();
 }
