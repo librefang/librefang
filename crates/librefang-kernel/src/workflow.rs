@@ -811,13 +811,21 @@ impl WorkflowEngine {
     ///
     /// Called once at boot. Any run whose `started_at` age exceeds `stale_timeout` is
     /// transitioned to `Failed` with a "Interrupted by daemon restart" error message.
-    /// Returns the number of runs recovered.
+    /// Returns the number of runs recovered. A `stale_timeout` of zero is
+    /// treated as "feature disabled" and returns `0` without inspecting any
+    /// runs — kernel boot guards on this anyway, but keeping the no-op here
+    /// means a future direct caller can't accidentally fail every run.
     pub fn recover_stale_running_runs(&self, stale_timeout: std::time::Duration) -> usize {
+        if stale_timeout.is_zero() {
+            return 0;
+        }
         let now = Utc::now();
         let stale_secs = stale_timeout.as_secs() as i64;
-        let mut map = self.runs.blocking_write();
         let mut recovered = 0usize;
-        for run in map.values_mut() {
+        // DashMap's `iter_mut` takes a per-shard write lock as the iterator
+        // visits each entry — no global write lock and no awaiting required.
+        for mut entry in self.runs.iter_mut() {
+            let run = entry.value_mut();
             if !matches!(
                 run.state,
                 WorkflowRunState::Running | WorkflowRunState::Pending
