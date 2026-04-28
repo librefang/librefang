@@ -3653,7 +3653,7 @@ pub async fn update_agent(
     }
 
     // Parse the new manifest
-    let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
+    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -3665,15 +3665,21 @@ pub async fn update_agent(
         }
     };
 
-    // Note: Full manifest update requires kill + respawn. For now, acknowledge receipt.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "acknowledged",
-            "agent_id": id,
-            "note": "Full manifest update requires agent restart. Use DELETE + POST to apply.",
-        })),
-    )
+    drop(t);
+
+    match state.kernel.update_manifest(agent_id, manifest) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "agent_id": id,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 #[utoipa::path(

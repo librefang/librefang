@@ -8795,6 +8795,56 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Apply a caller-supplied manifest to a running agent and persist it to
+    /// disk.  This is the in-memory counterpart of `reload_agent_from_disk`:
+    /// instead of reading the TOML file it accepts a pre-parsed manifest,
+    /// replaces the registry entry, refreshes capabilities / quota / memory,
+    /// invalidates the tool cache, and then persists the new state to
+    /// `agent.toml` so the change survives a restart.
+    ///
+    /// The same invariants as `reload_agent_from_disk` are enforced:
+    /// - `name` and `tags` are locked to the current values (use the rename /
+    ///   tag APIs to change them)
+    /// - `workspace` is preserved when the incoming manifest leaves it unset
+    pub fn update_manifest(
+        &self,
+        agent_id: AgentId,
+        mut new_manifest: librefang_types::agent::AgentManifest,
+    ) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Preserve invariants that the registry indices depend on.
+        if new_manifest.workspace.is_none() {
+            new_manifest.workspace = entry.manifest.workspace.clone();
+        }
+        new_manifest.name = entry.manifest.name.clone();
+        new_manifest.tags = entry.manifest.tags.clone();
+
+        self.registry
+            .replace_manifest(agent_id, new_manifest)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(refreshed) = self.registry.get(agent_id) {
+            let caps = manifest_to_capabilities(&refreshed.manifest);
+            self.capabilities.grant(agent_id, caps);
+            self.scheduler
+                .update_quota(agent_id, refreshed.manifest.resources.clone());
+            let _ = self.memory.save_agent(&refreshed);
+        }
+
+        // Invalidate the per-agent tool cache so skill/MCP allowlist changes
+        // take effect on the next message.
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        // Persist to disk so the change survives a daemon restart.
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, "Applied and persisted updated agent manifest");
+        Ok(())
+    }
+
     /// Update an agent's skill allowlist. Empty = all skills (backward compat).
     pub fn set_agent_skills(&self, agent_id: AgentId, skills: Vec<String>) -> KernelResult<()> {
         // Validate skill names if allowlist is non-empty
