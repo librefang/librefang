@@ -1238,18 +1238,46 @@ function CanvasPageInner() {
     setErrorMsg(null);
   }, [setNodes, setEdges, queryClient]);
 
+  // Snapshot the polling-driven agents/workflows lists into refs so the
+  // load-route effect below doesn't depend on their reference identity.
+  // useAgents() / useWorkflows() refetch every 30s, which produces fresh
+  // array references on every poll cycle even when no row actually
+  // changed.  Including them in the effect deps re-runs the loader and
+  // calls setNodes/setEdges/setWorkflowName mid-edit — clobbering the
+  // user's unsaved canvas every 30 seconds (#3958 follow-up).
+  const agentsRef = useRef(agents);
+  const workflowsRef = useRef(workflows);
+  useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
+  useEffect(() => {
+    workflowsRef.current = workflows;
+  }, [workflows]);
+
+  // Track which (timestamp, workflowId) tuple has already been loaded so
+  // even unrelated dep changes can't re-trigger the load.
+  const loadedRouteKeyRef = useRef<string | null>(null);
+
   // Load template or workflow from URL once agent/workflow data is available
   useEffect(() => {
     if (agentsQuery.isLoading || workflowsQuery.isLoading) return;
+    const routeKey = `${routeTimestamp ?? ""}|${routeWorkflowId ?? ""}`;
+    if (loadedRouteKeyRef.current === routeKey) {
+      return;
+    }
+    loadedRouteKeyRef.current = routeKey;
     const run = async () => {
         const draft = readCanvasDraft();
         // 1. Try loading from sessionStorage template
-        const templateState = loadTemplate(agents);
+        const templateState = loadTemplate(agentsRef.current);
         if (templateState !== "missing") return;
         // 2. Try loading from URL ?wf= parameter
         if (routeWorkflowId) {
           try {
-            await loadWorkflowIntoCanvas(routeWorkflowId, workflows.find((item) => item.id === routeWorkflowId) ?? null);
+            await loadWorkflowIntoCanvas(
+              routeWorkflowId,
+              workflowsRef.current.find((item) => item.id === routeWorkflowId) ?? null,
+            );
             return;
           } catch (e: unknown) {
             showError(toErrorMessage(e, t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" })));
@@ -1267,7 +1295,7 @@ function CanvasPageInner() {
         }
     };
     run().catch((e: unknown) => { showError(toErrorMessage(e, t("canvas.load_error", { defaultValue: "Failed to load data" }))); });
-  }, [routeTimestamp, routeWorkflowId, agents, workflows, agentsQuery.isLoading, workflowsQuery.isLoading, applyCanvasState, loadTemplate, loadWorkflowIntoCanvas, showError, t, toErrorMessage, setNodes, setEdges]);
+  }, [routeTimestamp, routeWorkflowId, agentsQuery.isLoading, workflowsQuery.isLoading, applyCanvasState, loadTemplate, loadWorkflowIntoCanvas, showError, t, toErrorMessage, setNodes, setEdges]);
 
   // Persist only unsaved blank-canvas drafts. Saved workflows should reload from backend.
   useEffect(() => {
