@@ -327,26 +327,27 @@ pub async fn auth_start(
         }
     }
 
-    // Generate PKCE challenge and state.
-    // Embed the MCP server name in the state so the callback can verify the state
-    // was issued for exactly this server — prevents cross-flow CSRF where state
-    // from server A is replayed against server B's callback.
-    // Format: "{url-safe-server-name}:{random-nonce}"
+    // Generate PKCE challenge, state, and a unique flow ID.
+    //
+    // #3727: Per-flow vault keys prevent concurrent auth flows to the same
+    // server from clobbering each other's PKCE state.  The flow_id is embedded
+    // in the OAuth `state` parameter as `{flow_id}.{random_state}` so the
+    // callback can look up the correct vault entry.
+    //
+    // This supersedes the earlier per-server `{server_name}:{random}` binding
+    // (#3911) — per-flow IDs subsume the per-server protection while also
+    // allowing multiple concurrent flows against the same server.
+    let flow_id = mcp_oauth::generate_flow_id();
     let (pkce_verifier, pkce_challenge) = mcp_oauth::generate_pkce();
-    let pkce_state = format!(
-        "{}:{}",
-        percent_encode_param(&name),
-        mcp_oauth::generate_state()
-    );
+    let pkce_random = mcp_oauth::generate_state();
+    // Combined state sent to the OAuth server: "{flow_id}.{random_state}"
+    let pkce_state = format!("{flow_id}.{pkce_random}");
 
-    // Wipe any abandoned prior-flow state before storing new PKCE values.
-    for field in &["pkce_verifier", "pkce_state", "redirect_uri"] {
-        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&server_url, field));
-    }
-
-    // Store PKCE state in vault for the callback to retrieve
+    // Store PKCE state in vault under per-flow keys for the callback to retrieve.
+    let flow_vault_key =
+        |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
     let store = |field: &str, value: &str| -> Result<(), String> {
-        provider.vault_set(&KernelOAuthProvider::vault_key(&server_url, field), value)
+        provider.vault_set(&flow_vault_key(field), value)
     };
     if let Err(e) = store("pkce_verifier", &pkce_verifier) {
         tracing::error!(error = %e, "Failed to store PKCE verifier in vault");
@@ -435,30 +436,30 @@ pub async fn auth_callback(
     Path(name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<AuthCallbackParams>,
 ) -> Response {
-    // Handle error response from authorization server
-    if let Some(ref error) = params.error {
-        let desc = params.error_description.as_deref().unwrap_or("");
-        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
-        auth_states.insert(
-            name.clone(),
-            McpAuthState::Error {
-                message: format!("{error}: {desc}"),
-            },
-        );
-        return auth_failed(format!("{error}: {desc}"));
-    }
-
-    let code = match params.code {
-        Some(ref c) => c.clone(),
-        None => {
-            return auth_failed("Missing authorization code.");
-        }
-    };
-
+    // #3730: Validate the `state` parameter before doing anything else.
+    //
+    // The state must be present and in the form "{flow_id}.{random_nonce}".
+    // This proves the caller initiated a flow via auth_start — the nonce is
+    // stored in the vault keyed by flow_id and is never sent over any
+    // side-channel.  Validating here prevents unauthenticated callers from
+    // probing the endpoint or mutating server-side auth state.
     let received_state = match params.state {
         Some(ref s) => s.clone(),
         None => {
             return auth_failed("Missing state parameter.");
+        }
+    };
+
+    // #3727: Extract the flow_id from the state parameter.
+    // The state format set by auth_start is "{flow_id}.{random_state}".
+    // A missing dot means this callback was not initiated by this daemon.
+    let flow_id = match received_state.split_once('.') {
+        Some((fid, _)) if !fid.is_empty() => fid.to_string(),
+        _ => {
+            return auth_failed(
+                "Malformed state parameter — no valid flow ID found. \
+                 This callback may not have been initiated by this server.",
+            );
         }
     };
 
@@ -477,10 +478,12 @@ pub async fn auth_callback(
         }
     };
 
-    // Load stored PKCE state from vault
+    // Load stored PKCE state from vault using the per-flow key (#3727).
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
-    let load =
-        |field: &str| provider.vault_get(&KernelOAuthProvider::vault_key(&server_url, field));
+    let flow_key_prefix = format!("{server_url}:{flow_id}");
+    let load = |field: &str| {
+        provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field))
+    };
 
     let stored_state = match load("pkce_state") {
         Some(s) => s,
@@ -488,30 +491,30 @@ pub async fn auth_callback(
             tracing::error!(
                 server = %name,
                 server_url = %server_url,
-                "PKCE state not found in vault — vault may not be initialized or \
-                 LIBREFANG_VAULT_KEY not set"
+                flow_id = %flow_id,
+                "PKCE state not found in vault — vault may not be initialized, \
+                 LIBREFANG_VAULT_KEY not set, or unknown flow_id"
             );
             return auth_failed(
-                "No pending auth flow found (PKCE state missing from vault). \
+                "No pending auth flow found for this flow ID (PKCE state missing from vault). \
                  Check that LIBREFANG_VAULT_KEY is set in your environment.",
             );
         }
     };
 
-    // Validate state using constant-time comparison to prevent timing attacks.
-    // The state format is "{url-safe-server-name}:{random-nonce}" — the prefix
-    // binds the callback to the MCP server that initiated the flow.
-    let expected_prefix = format!("{}:", percent_encode_param(&name));
-    let prefix_ok = received_state.starts_with(&expected_prefix);
+    // #3730: The stored state encodes the flow_id and a random nonce; the
+    // received state must match exactly, which proves the caller initiated this
+    // specific flow.  This subsumes the earlier server-name prefix binding
+    // (#3911) — the per-flow vault key + exact-match state already binds each
+    // callback to one specific in-flight authorization.
+    // Use constant-time comparison to prevent timing attacks.
     let received_bytes = received_state.as_bytes();
     let stored_bytes = stored_state.as_bytes();
     let nonce_match = received_bytes.len() == stored_bytes.len()
         && bool::from(received_bytes.ct_eq(stored_bytes));
-    if !prefix_ok || !nonce_match {
+    if !nonce_match {
         tracing::warn!(
             server = %name,
-            prefix_ok,
-            nonce_match,
             "OAuth state validation failed — possible CSRF or cross-flow replay"
         );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
@@ -523,6 +526,29 @@ pub async fn auth_callback(
         );
         return auth_failed("State parameter mismatch. This may indicate a CSRF attack.");
     }
+
+    // State is valid — now safe to inspect the OAuth response from the provider.
+    // Handling the `error` param here (after state validation) prevents
+    // unauthenticated callers from injecting arbitrary error messages into
+    // auth state (#3730).
+    if let Some(ref error) = params.error {
+        let desc = params.error_description.as_deref().unwrap_or("");
+        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+        auth_states.insert(
+            name.clone(),
+            McpAuthState::Error {
+                message: format!("{error}: {desc}"),
+            },
+        );
+        return auth_failed(format!("{error}: {desc}"));
+    }
+
+    let code = match params.code {
+        Some(ref c) => c.clone(),
+        None => {
+            return auth_failed("Missing authorization code.");
+        }
+    };
 
     let pkce_verifier = match load("pkce_verifier") {
         Some(v) => v,
@@ -637,9 +663,9 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to store OAuth tokens");
     }
 
-    // Clean up one-time PKCE values from vault
-    for field in &["pkce_verifier", "pkce_state", "redirect_uri"] {
-        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&server_url, field));
+    // Clean up one-time PKCE values from vault (per-flow key — #3727).
+    for field in &["pkce_verifier", "pkce_state", "redirect_uri", "token_endpoint", "client_id"] {
+        let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
     }
 
     // Retry the MCP connection now that we have tokens.
