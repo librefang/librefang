@@ -804,8 +804,13 @@ export function ChannelsPage() {
 
       {/* Tabs */}
       <div className="flex items-center gap-4 flex-wrap overflow-x-auto">
-        <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
+        <div role="tablist" aria-label={t("nav.channels", { defaultValue: "Channels" })} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
+            id="channels-tab-configured"
+            role="tab"
+            aria-selected={activeTab === "configured"}
+            aria-controls="channels-panel"
+            tabIndex={activeTab === "configured" ? 0 : -1}
             onClick={() => handleTabChange("configured")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
@@ -818,6 +823,11 @@ export function ChannelsPage() {
             </span>
           </button>
           <button
+            id="channels-tab-unconfigured"
+            role="tab"
+            aria-selected={activeTab === "unconfigured"}
+            aria-controls="channels-panel"
+            tabIndex={activeTab === "unconfigured" ? 0 : -1}
             onClick={() => handleTabChange("unconfigured")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
               activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
@@ -832,6 +842,7 @@ export function ChannelsPage() {
         </div>
       </div>
 
+      <div id="channels-panel" role="tabpanel" aria-labelledby={`channels-tab-${activeTab}`}>
       {channelsQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3].map((i) => <CardSkeleton key={i} />)}
@@ -872,6 +883,7 @@ export function ChannelsPage() {
           </div>
         </>
       )}
+      </div>
 
       {/* Details Modal */}
       {detailsChannel && (

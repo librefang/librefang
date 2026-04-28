@@ -1727,11 +1727,27 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
         </div>
         
-        <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
-          <button onClick={() => setActiveTab("versions")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+        <div role="tablist" aria-label="Prompts &amp; Experiments" className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
+          <button
+            id="agents-tab-versions"
+            role="tab"
+            aria-selected={activeTab === "versions"}
+            aria-controls="agents-panel-versions"
+            tabIndex={activeTab === "versions" ? 0 : -1}
+            onClick={() => setActiveTab("versions")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
             <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
           </button>
-          <button onClick={() => setActiveTab("experiments")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+          <button
+            id="agents-tab-experiments"
+            role="tab"
+            aria-selected={activeTab === "experiments"}
+            aria-controls="agents-panel-experiments"
+            tabIndex={activeTab === "experiments" ? 0 : -1}
+            onClick={() => setActiveTab("experiments")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
             <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
           </button>
         </div>
@@ -1740,7 +1756,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
           <AnimatePresence mode="wait">
           <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
           {activeTab === "versions" && (
-            <div className="space-y-4">
+            <div id="agents-panel-versions" role="tabpanel" aria-labelledby="agents-tab-versions" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateVersion(true)}>
                   <Plus className="w-3 h-3 mr-1" /> New Version
@@ -1796,8 +1812,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim()}>
-                        Create
+                      <Button variant="primary" className="flex-1" isLoading={createVersionMutation.isPending} onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim() || createVersionMutation.isPending}>
+                        {createVersionMutation.isPending ? "Creating..." : "Create"}
                       </Button>
                       <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
                     </div>
@@ -1808,7 +1824,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
           )}
 
           {activeTab === "experiments" && (
-            <div className="space-y-4">
+            <div id="agents-panel-experiments" role="tabpanel" aria-labelledby="agents-tab-experiments" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateExperiment(true)}>
                   <Plus className="w-3 h-3 mr-1" /> New Experiment
@@ -1913,8 +1929,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
-                        Create ({selectedVariantIds.length} variants)
+                      <Button variant="primary" className="flex-1" isLoading={createExperimentMutation.isPending} onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2 || createExperimentMutation.isPending}>
+                        {createExperimentMutation.isPending ? "Creating..." : `Create (${selectedVariantIds.length} variants)`}
                       </Button>
                       <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
                     </div>

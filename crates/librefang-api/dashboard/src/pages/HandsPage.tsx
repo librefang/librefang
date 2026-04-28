@@ -421,12 +421,17 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
   return (
     <div>
       {/* Tab bar — all children are text-only so height is determined purely by padding + line-height */}
-      <div className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
+      <div role="tablist" aria-label="Hand details" className="flex border-b border-border-subtle mb-4 overflow-x-auto scrollbar-thin">
         {visibleTabs.map(tab => {
           const isActive = activeTab === tab.id;
           return (
             <button
               key={tab.id}
+              id={`hands-tab-${tab.id}`}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`hands-panel-${tab.id}`}
+              tabIndex={isActive ? 0 : -1}
               onClick={() => setActiveTab(tab.id)}
               className={`shrink-0 flex items-baseline gap-1.5 px-3 py-3 -mb-px border-b-2 text-xs font-bold leading-none whitespace-nowrap transition-colors ${
                 isActive
@@ -446,7 +451,7 @@ function DetailTabs({ hand, instance, isActive, settings, settingsQuery }: {
       </div>
 
       {/* Tab content */}
-      <div>
+      <div id={`hands-panel-${activeTab}`} role="tabpanel" aria-labelledby={`hands-tab-${activeTab}`}>
         <AnimatePresence mode="wait">
         <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
 
