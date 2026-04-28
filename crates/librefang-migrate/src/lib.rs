@@ -79,4 +79,11 @@ pub enum MigrateError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("Unsupported source: {0}")]
     UnsupportedSource(String),
+    /// #3794 — agent id contains path traversal components.
+    #[error("Invalid agent id: {0}")]
+    InvalidId(String),
+    /// #3797 — openclaw.json declares a schema version this migrator does not
+    /// understand.
+    #[error("Unsupported openclaw.json schema version {0}; supported versions are 1 and 2")]
+    UnsupportedVersion(u32),
 }
