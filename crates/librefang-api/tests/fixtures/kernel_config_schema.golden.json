@@ -4936,6 +4936,11 @@
             "null"
           ]
         },
+        "app_secret_env": {
+          "default": "",
+          "description": "Env var name holding the Facebook App Secret. Used for HMAC-SHA1 verification of incoming webhook POST requests via `X-Hub-Signature`. If absent or empty, verification is skipped with a warning (backwards compatibility).",
+          "type": "string"
+        },
         "default_agent": {
           "default": null,
           "description": "Default agent name to route messages to.",
@@ -7309,6 +7314,11 @@
                 "null"
               ]
             },
+            "app_secret_env": {
+              "default": "",
+              "description": "Env var name holding the Facebook App Secret. Used for HMAC-SHA1 verification of incoming webhook POST requests via `X-Hub-Signature`. If absent or empty, verification is skipped with a warning (backwards compatibility).",
+              "type": "string"
+            },
             "default_agent": {
               "default": null,
               "description": "Default agent name to route messages to.",
@@ -8466,6 +8476,11 @@
                 "usage_footer": null
               },
               "description": "Per-channel behavior overrides."
+            },
+            "security_token_env": {
+              "default": "",
+              "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. If the env var is absent or empty, verification is skipped with a warning.",
+              "type": "string"
             },
             "webhook_port": {
               "default": 3978,
@@ -9820,6 +9835,14 @@
         "ntfy_url": {
           "default": null,
           "description": "Ntfy server URL (if push_provider = \"ntfy\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_base_url": {
+          "default": null,
+          "description": "Public base URL the QR code points mobile clients at, e.g. `https://librefang.example.com`. When set, takes precedence over the request `Host` header — required for HTTPS reverse-proxy deployments where trusting client-supplied `X-Forwarded-Proto` would let any authenticated dashboard caller forge the scheme. When `None`, the daemon falls back to `Host` + the runtime scheme.",
           "type": [
             "string",
             "null"
@@ -11595,6 +11618,11 @@
             "usage_footer": null
           },
           "description": "Per-channel behavior overrides."
+        },
+        "security_token_env": {
+          "default": "",
+          "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. If the env var is absent or empty, verification is skipped with a warning.",
+          "type": "string"
         },
         "webhook_port": {
           "default": 3978,
@@ -14542,6 +14570,7 @@
         "max_devices": 10,
         "ntfy_topic": null,
         "ntfy_url": null,
+        "public_base_url": null,
         "push_provider": "none",
         "token_expiry_secs": 300
       },

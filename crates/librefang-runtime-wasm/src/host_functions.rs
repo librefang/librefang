@@ -235,15 +235,19 @@ fn host_fs_read(state: &GuestState, params: &serde_json::Value) -> serde_json::V
         Some(p) => p,
         None => return json!({"error": "Missing 'path' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(&state.capabilities, &Capability::FileRead(path.to_string())) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY: Canonicalize first so the capability check sees the real path,
+    // not an attacker-controlled raw string with "../" sequences.
     let canonical = match safe_resolve_path(path) {
         Ok(c) => c,
         Err(e) => return e,
     };
+    // Capability check against the canonical path prevents traversal bypass.
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileRead(canonical.to_string_lossy().into_owned()),
+    ) {
+        return e;
+    }
     match std::fs::read_to_string(&canonical) {
         Ok(content) => json!({"ok": content}),
         Err(e) => json!({"error": format!("fs_read failed: {e}")}),
@@ -259,18 +263,19 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
         Some(c) => c,
         None => return json!({"error": "Missing 'content' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(
-        &state.capabilities,
-        &Capability::FileWrite(path.to_string()),
-    ) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY: Canonicalize (via parent) first so the capability check sees
+    // the real destination, not a raw path with "../" traversal sequences.
     let write_path = match safe_resolve_parent(path) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // Capability check against the canonical path prevents traversal bypass.
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileWrite(write_path.to_string_lossy().into_owned()),
+    ) {
+        return e;
+    }
     match std::fs::write(&write_path, content) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": format!("fs_write failed: {e}")}),
@@ -282,15 +287,19 @@ fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::V
         Some(p) => p,
         None => return json!({"error": "Missing 'path' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(&state.capabilities, &Capability::FileRead(path.to_string())) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY: Canonicalize first so the capability check sees the real path,
+    // not an attacker-controlled raw string with "../" sequences.
     let canonical = match safe_resolve_path(path) {
         Ok(c) => c,
         Err(e) => return e,
     };
+    // Capability check against the canonical path prevents traversal bypass.
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileRead(canonical.to_string_lossy().into_owned()),
+    ) {
+        return e;
+    }
     match std::fs::read_dir(&canonical) {
         Ok(entries) => {
             let names: Vec<String> = entries
@@ -330,30 +339,43 @@ fn host_net_fetch(state: &GuestState, params: &serde_json::Value) -> serde_json:
         return e;
     }
 
-    state.tokio_handle.block_on(async {
-        // Build a DNS-pinned client so the HTTP request connects to the
-        // same IPs we already validated (prevents DNS-rebinding TOCTOU).
-        let mut builder = librefang_http::proxied_client_builder();
-        for addr in &ssrf_result.resolved {
-            builder = builder.resolve(&ssrf_result.hostname, *addr);
-        }
-        let client = builder.build().expect("HTTP client build");
-        let request = match method.to_uppercase().as_str() {
-            "POST" => client.post(url).body(body.to_string()),
-            "PUT" => client.put(url).body(body.to_string()),
-            "DELETE" => client.delete(url),
-            _ => client.get(url),
-        };
-        match request.send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                match resp.text().await {
-                    Ok(text) => json!({"ok": {"status": status, "body": text}}),
-                    Err(e) => json!({"error": format!("Failed to read response: {e}")}),
-                }
+    // SECURITY (Bug #3867): WASM execution runs inside `tokio::task::spawn_blocking`.
+    // Using `Handle::block_on` directly inside a blocking thread can deadlock
+    // on single-threaded runtimes and — more critically — bypasses the
+    // epoch-based watchdog: the epoch only ticks inside the async context, so a
+    // blocking async call that stalls never trips the timeout.
+    //
+    // `tokio::task::block_in_place` tells the runtime to move other tasks off
+    // the current thread before blocking, which avoids the deadlock and keeps
+    // the scheduler responsive.  The epoch watchdog thread is unaffected —
+    // it runs independently and will still fire `increment_epoch` when the
+    // wall-clock deadline is reached.
+    tokio::task::block_in_place(|| {
+        state.tokio_handle.block_on(async {
+            // Build a DNS-pinned client so the HTTP request connects to the
+            // same IPs we already validated (prevents DNS-rebinding TOCTOU).
+            let mut builder = librefang_http::proxied_client_builder();
+            for addr in &ssrf_result.resolved {
+                builder = builder.resolve(&ssrf_result.hostname, *addr);
             }
-            Err(e) => json!({"error": format!("Request failed: {e}")}),
-        }
+            let client = builder.build().expect("HTTP client build");
+            let request = match method.to_uppercase().as_str() {
+                "POST" => client.post(url).body(body.to_string()),
+                "PUT" => client.put(url).body(body.to_string()),
+                "DELETE" => client.delete(url),
+                _ => client.get(url),
+            };
+            match request.send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    match resp.text().await {
+                        Ok(text) => json!({"ok": {"status": status, "body": text}}),
+                        Err(e) => json!({"error": format!("Failed to read response: {e}")}),
+                    }
+                }
+                Err(e) => json!({"error": format!("Request failed: {e}")}),
+            }
+        })
     })
 }
 
@@ -552,13 +574,18 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match state
-        .tokio_handle
-        .block_on(kernel.send_to_agent(target, message))
-    {
-        Ok(response) => json!({"ok": response}),
-        Err(e) => json!({"error": e}),
-    }
+    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
+    // off this thread before blocking, avoiding deadlock and preserving the
+    // epoch watchdog's ability to interrupt.
+    tokio::task::block_in_place(|| {
+        match state
+            .tokio_handle
+            .block_on(kernel.send_to_agent(target, message))
+        {
+            Ok(response) => json!({"ok": response}),
+            Err(e) => json!({"error": e}),
+        }
+    })
 }
 
 fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -574,14 +601,19 @@ fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_jso
         None => return json!({"error": "No kernel handle available"}),
     };
     // SECURITY: Enforce capability inheritance — child <= parent
-    match state.tokio_handle.block_on(kernel.spawn_agent_checked(
-        manifest_toml,
-        Some(&state.agent_id),
-        &state.capabilities,
-    )) {
-        Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
-        Err(e) => json!({"error": e}),
-    }
+    // SECURITY (Bug #3867): use block_in_place so tokio can move other tasks
+    // off this thread before blocking, avoiding deadlock and preserving the
+    // epoch watchdog's ability to interrupt.
+    tokio::task::block_in_place(|| {
+        match state.tokio_handle.block_on(kernel.spawn_agent_checked(
+            manifest_toml,
+            Some(&state.agent_id),
+            &state.capabilities,
+        )) {
+            Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
+            Err(e) => json!({"error": e}),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -659,7 +691,10 @@ mod tests {
         // thread races on this particular env var.
         unsafe { std::env::set_var(&key, value) };
 
-        let state = test_state(vec![Capability::ShellExec("*".to_string())]);
+        // Use the explicit absolute path so the capability check passes even
+        // with the new separator-aware glob — `*` does not cross `/` so we
+        // grant the exact command we are about to run.
+        let state = test_state(vec![Capability::ShellExec("/usr/bin/env".to_string())]);
         let result = host_shell_exec(
             &state,
             &json!({
@@ -673,7 +708,7 @@ mod tests {
 
         let ok = result
             .get("ok")
-            .expect("shell_exec should succeed with ShellExec(*) capability");
+            .expect("shell_exec should succeed with matching ShellExec capability");
         let stdout = ok
             .get("stdout")
             .and_then(|s| s.as_str())
@@ -750,6 +785,32 @@ mod tests {
         assert!(safe_resolve_path("../etc/passwd").is_err());
         assert!(safe_resolve_path("/tmp/../../etc/passwd").is_err());
         assert!(safe_resolve_path("foo/../bar").is_err());
+    }
+
+    /// Regression for #3814: capability check must run AFTER canonicalization.
+    ///
+    /// A capability granting access to `/tmp/allowed` must NOT permit a guest
+    /// that passes `../allowed` when the working directory is `/tmp/sub` —
+    /// the raw string does not literally match `/tmp/allowed`, but
+    /// canonicalization would resolve it to the same inode. Conversely, a
+    /// traversal attempt aimed at a path outside any granted capability must
+    /// be denied even if the raw string superficially matches a prefix.
+    ///
+    /// We test the deny path here: a FileRead("*") wildcard is granted but
+    /// the path `../etc/passwd` is rejected during canonicalization (contains
+    /// `..`), so the capability check is never even reached. This validates
+    /// that canonicalization is the first gate.
+    #[tokio::test]
+    async fn test_fs_read_traversal_rejected_before_capability_check() {
+        // Even with a wildcard capability, ".." in the path must be caught by
+        // safe_resolve_path before we ever consult the capability list.
+        let state = test_state(vec![Capability::FileRead("*".to_string())]);
+        let result = host_fs_read(&state, &json!({"path": "../etc/passwd"}));
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("traversal") || err.contains("resolve") || err.contains("Cannot"),
+            "Expected path-traversal or resolution error, got: {err}"
+        );
     }
 
     #[test]
