@@ -88,15 +88,128 @@ impl ApprovalManager {
     }
 
     /// Create an approval manager with persistent audit logging.
+    ///
+    /// Also restores any `pending_approvals` rows that survived across the
+    /// restart (issue #3611). Restored entries have no live `oneshot::Sender`,
+    /// so they cannot be auto-resolved by the agent loop — they surface in
+    /// the dashboard / API as pending items that require operator action.
     pub fn new_with_db(policy: ApprovalPolicy, conn: Arc<StdMutex<Connection>>) -> Self {
         let failures = Self::load_totp_lockout(&conn);
+        let pending: DashMap<Uuid, PendingRequest> = DashMap::new();
+        // Restore pending approvals from the previous session.
+        Self::restore_pending_approvals(&conn, &pending);
         Self {
-            pending: DashMap::new(),
+            pending,
             recent: std::sync::Mutex::new(VecDeque::new()),
             policy: std::sync::RwLock::new(policy),
             audit_db: Some(conn),
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
+        }
+    }
+
+    /// Restore pending approvals from the database into the in-memory map.
+    ///
+    /// Each restored entry has no `oneshot::Sender` (the agent loop that
+    /// submitted the original request is gone) and no `deferred` payload.
+    /// They show up in the API as "needs resubmission" so an operator can
+    /// take action rather than losing them silently.
+    fn restore_pending_approvals(
+        conn: &Arc<StdMutex<Connection>>,
+        pending: &DashMap<Uuid, PendingRequest>,
+    ) {
+        let Ok(guard) = conn.lock() else { return };
+        let Ok(mut stmt) = guard.prepare(
+            "SELECT id, agent_id, session_id, tool_name, tool_input, created_at, expires_at \
+             FROM pending_approvals",
+        ) else {
+            return;
+        };
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+            ))
+        });
+        let Ok(rows) = rows else { return };
+        for row in rows.filter_map(|r| r.ok()) {
+            let (id_str, agent_id, session_id, tool_name, tool_input, created_at_unix, _expires_at) =
+                row;
+            let Ok(id) = id_str.parse::<Uuid>() else {
+                warn!(id = %id_str, "pending_approvals: skipping row with invalid UUID");
+                continue;
+            };
+            let requested_at = chrono::DateTime::from_timestamp(created_at_unix, 0)
+                .unwrap_or_else(chrono::Utc::now);
+            let request = ApprovalRequest {
+                id,
+                agent_id,
+                tool_name: tool_name.clone(),
+                description: format!("Restored pending approval (daemon restarted): {tool_name}"),
+                action_summary: tool_input,
+                risk_level: RiskLevel::High,
+                requested_at,
+                // Use a long timeout — operator must resolve manually.
+                timeout_secs: 86400,
+                sender_id: None,
+                channel: None,
+                route_to: Vec::new(),
+                escalation_count: 0,
+                session_id,
+            };
+            info!(
+                request_id = %id,
+                tool = %tool_name,
+                "Restored pending approval from database after restart"
+            );
+            pending.insert(
+                id,
+                PendingRequest {
+                    request,
+                    sender: None,
+                    deferred: None,
+                    submitted_at: requested_at,
+                },
+            );
+        }
+    }
+
+    /// Persist a new pending approval to the database so it survives restarts.
+    fn db_insert_pending(&self, req: &ApprovalRequest) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let created_unix = req.requested_at.timestamp();
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO pending_approvals \
+             (id, agent_id, session_id, tool_name, tool_input, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                req.id.to_string(),
+                req.agent_id,
+                req.session_id,
+                req.tool_name,
+                &req.action_summary,
+                created_unix,
+            ],
+        ) {
+            warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
+        }
+    }
+
+    /// Remove a resolved/expired pending approval from the database.
+    fn db_delete_pending(&self, id: Uuid) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        if let Err(e) = conn.execute(
+            "DELETE FROM pending_approvals WHERE id = ?1",
+            rusqlite::params![id.to_string()],
+        ) {
+            warn!(request_id = %id, error = %e, "Failed to delete pending approval from database");
         }
     }
 
@@ -275,6 +388,9 @@ impl ApprovalManager {
             let req_for_timeout = current_req.clone();
 
             let (tx, rx) = tokio::sync::oneshot::channel();
+            // Persist before inserting into the in-memory map so the entry
+            // survives a daemon crash/restart (issue #3611).
+            self.db_insert_pending(&req_for_timeout);
             self.pending.insert(
                 id,
                 PendingRequest {
@@ -313,6 +429,8 @@ impl ApprovalManager {
                             .remove(&id)
                             .map(|(_, p)| p.request)
                             .unwrap_or(req_for_timeout);
+                        // Remove from persistent store (issue #3611).
+                        self.db_delete_pending(id);
                         self.push_recent(request, decision.clone(), None, Utc::now(), false);
                         warn!(request_id = %id, decision = %decision.as_str(), "Approval timed out");
                         return decision;
@@ -350,6 +468,8 @@ impl ApprovalManager {
         }
 
         let id = req.id;
+        // Persist before inserting so the entry survives a daemon restart (issue #3611).
+        self.db_insert_pending(&req);
         self.pending.insert(
             id,
             PendingRequest {
@@ -416,6 +536,8 @@ impl ApprovalManager {
                         });
                     }
                     ExpiryOutcome::Resolve(decision) => {
+                        // Remove from persistent store (issue #3611).
+                        self.db_delete_pending(id);
                         self.push_recent(
                             pending.request.clone(),
                             decision.clone(),
@@ -480,6 +602,9 @@ impl ApprovalManager {
 
         match self.pending.remove(&request_id) {
             Some((_, pending)) => {
+                // Remove from persistent store now that it is resolved (issue #3611).
+                self.db_delete_pending(request_id);
+
                 // Record TOTP grace on successful approval with TOTP.
                 if decision.is_approved() && totp_verified {
                     if let Some(uid) = user_id {

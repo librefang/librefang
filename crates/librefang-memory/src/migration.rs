@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 25;
+const SCHEMA_VERSION: u32 = 26;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -63,6 +63,8 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(23, migrate_v23);
     run_step!(24, migrate_v24);
     run_step!(25, migrate_v25);
+
+    run_step!(26, migrate_v26);
 
     Ok(())
 }
@@ -767,6 +769,34 @@ fn migrate_v25(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (25, datetime('now'), 'Add totp_used_codes table for TOTP replay prevention')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 26: Persistent pending approvals table (issue #3611).
+///
+/// Stores approval requests that are waiting for human operator action so
+/// they survive daemon restarts. On boot the `ApprovalManager` reads this
+/// table and re-populates its in-memory DashMap. Rows are deleted when the
+/// request is resolved (approved / denied / expired / timed-out).
+fn migrate_v26(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS pending_approvals (
+            id         TEXT    PRIMARY KEY,
+            agent_id   TEXT    NOT NULL,
+            session_id TEXT,
+            tool_name  TEXT    NOT NULL,
+            tool_input TEXT    NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_approvals_agent
+            ON pending_approvals(agent_id);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (26, datetime('now'), 'Add pending_approvals table for cross-restart persistence (issue #3611)')",
         [],
     )?;
     Ok(())

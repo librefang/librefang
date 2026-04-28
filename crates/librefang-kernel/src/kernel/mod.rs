@@ -8694,6 +8694,13 @@ system_prompt = "You are a helpful assistant."
 
         // Phase 4: BeforeUser-position injections (appended; they logically
         // precede user messages that haven't arrived yet).
+        //
+        // Track message count before injection so we can roll back the
+        // in-memory state if the persist fails (issue #3672). Without a
+        // rollback, the next pass sees the injected messages in-memory but
+        // not on-disk, re-injects them, and silently invalidates the prompt
+        // cache.
+        let pre_before_user_len = session.messages.len();
         for inj in &all_injections {
             if inj.position == InjectionPosition::BeforeUser && condition_met(&inj.condition) {
                 session.messages.push(Message::system(inj.content.clone()));
@@ -8707,7 +8714,24 @@ system_prompt = "You are a helpful assistant."
 
         // Persist if anything was injected.
         if !session.messages.is_empty() {
-            let _ = self.memory.save_session(session);
+            if let Err(e) = self.memory.save_session(session) {
+                // Persist failed — roll back the Phase 4 BeforeUser injections
+                // from the in-memory session so the next call does not
+                // re-inject the same items (which would cause duplicate
+                // context and invalidate the prompt cache).
+                let after_len = session.messages.len();
+                if after_len > pre_before_user_len {
+                    session.messages.truncate(pre_before_user_len);
+                }
+                tracing::error!(
+                    session_id = %session.id.0,
+                    error = %e,
+                    rolled_back = after_len.saturating_sub(pre_before_user_len),
+                    "Failed to persist session after before_user injection; \
+                     rolled back in-memory mutations to prevent duplicate injection \
+                     and prompt-cache invalidation"
+                );
+            }
         }
 
         // Run on_session_start_script if configured (fire-and-forget).
@@ -12523,7 +12547,21 @@ system_prompt = "You are a helpful assistant."
                                 //     every fire back to the persistent
                                 //     `(agent, "cron")` session — see
                                 //     CLAUDE.md note on cron + session_mode.
-                                let wants_new_session = job.session_mode
+                                //
+                                // Resolution order (#3597): per-job override >
+                                // agent manifest default > historical persistent.
+                                // When the job has no per-job `session_mode` set
+                                // (`None`), we fall back to the agent manifest's
+                                // `session_mode` so that agents with
+                                // `session_mode = "new"` in agent.toml get
+                                // per-fire isolation for cron jobs as well.
+                                let effective_session_mode = job.session_mode.or_else(|| {
+                                    kernel
+                                        .registry
+                                        .get(agent_id)
+                                        .map(|entry| entry.manifest.session_mode)
+                                });
+                                let wants_new_session = effective_session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 let cron_sender = SenderContext {
                                     channel: SYSTEM_CHANNEL_CRON.to_string(),
@@ -12540,7 +12578,7 @@ system_prompt = "You are a helpful assistant."
                                 let (mode_override, fire_session_override) =
                                     crate::cron::cron_fire_session_override(
                                         agent_id,
-                                        job.session_mode,
+                                        effective_session_mode,
                                         job.id,
                                         chrono::Utc::now(),
                                     );
