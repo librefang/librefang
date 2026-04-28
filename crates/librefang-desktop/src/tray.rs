@@ -1,4 +1,8 @@
 //! System tray setup for the LibreFang desktop app.
+//!
+//! Desktop-only: system tray is not available on iOS or Android.
+
+#![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 use librefang_kernel::config::librefang_home;
 use tauri::{
