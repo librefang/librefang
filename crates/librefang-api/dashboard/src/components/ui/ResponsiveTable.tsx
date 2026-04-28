@@ -4,10 +4,9 @@
  *
  * Usage:
  *   <ResponsiveTable
- *     columns={[{ key: "name", label: "Name" }, ...]}
+ *     columns={[{ key: "name", label: "Name", render: (row) => row.name }, ...]}
  *     rows={items}
  *     rowKey={(row) => row.id}
- *     columns={[{ key: "name", label: "Name", render: (row) => row.name }, ...]}
  *   />
  */
 
