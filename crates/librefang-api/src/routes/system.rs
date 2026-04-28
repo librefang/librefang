@@ -2985,6 +2985,9 @@ pub async fn pairing_complete(
             .into_json_tuple()
             .into_response();
     }
+    // ErrorTranslator is !Send; drop before the .await on user_api_keys below
+    // so the handler future remains Send.
+    drop(t);
     let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
     let display_name = body
         .get("display_name")
@@ -2998,30 +3001,68 @@ pub async fn pairing_complete(
         .get("push_token")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // Mint a fresh per-device bearer token. The plaintext is returned
+    // to the mobile client exactly once below; only the Argon2 hash is
+    // persisted, so this token cannot be reconstructed from a database
+    // dump and cannot be re-used by anyone except the holder.
+    let plaintext_key = {
+        let bytes: [u8; 32] = rand::random();
+        hex::encode(bytes)
+    };
+    let api_key_hash = match crate::password_hash::hash_password(&plaintext_key) {
+        Ok(h) => h,
+        Err(e) => {
+            return ApiErrorResponse::internal(format!("hash failed: {e}"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+
+    let device_id = uuid::Uuid::new_v4().to_string();
     let device_info = librefang_kernel::pairing::PairedDevice {
-        device_id: uuid::Uuid::new_v4().to_string(),
+        device_id: device_id.clone(),
         display_name: display_name.to_string(),
         platform: platform.to_string(),
         paired_at: chrono::Utc::now(),
         last_seen: chrono::Utc::now(),
         push_token,
+        api_key_hash: api_key_hash.clone(),
     };
-    let api_key = state.kernel.config_ref().api_key.clone();
+
     match state
         .kernel
         .pairing_ref()
         .complete_pairing(token, device_info)
     {
-        Ok(device) => Json(serde_json::json!({
-            "device_id": device.device_id,
-            // Return the daemon api_key so the mobile app can authenticate
-            // subsequent requests. The token is single-use so this is safe.
-            "api_key": api_key,
-            "display_name": device.display_name,
-            "platform": device.platform,
-            "paired_at": device.paired_at.to_rfc3339(),
-        }))
-        .into_response(),
+        Ok(device) => {
+            // Register this device's bearer with the live auth table so
+            // the next request from the mobile app actually authenticates.
+            // Devices are mapped to UserRole::User (chat with agents but no
+            // admin-level mutations) — promote per-device privileges via a
+            // future config knob if required.
+            let device_user_name = format!("device:{}", device.device_id);
+            let auth = crate::middleware::ApiUserAuth {
+                name: device_user_name.clone(),
+                role: librefang_kernel::auth::UserRole::User,
+                api_key_hash,
+                user_id: librefang_types::agent::UserId::from_name(&device_user_name),
+            };
+            state.user_api_keys.write().await.push(auth);
+
+            Json(serde_json::json!({
+                "device_id": device.device_id,
+                // Plaintext bearer — the mobile client must store this; it
+                // is never returned again. Replaces the daemon master
+                // `api_key` that earlier revisions handed out, so revoking
+                // a device via DELETE /api/pairing/devices/{id} now
+                // genuinely cuts off its access.
+                "api_key": plaintext_key,
+                "display_name": device.display_name,
+                "platform": device.platform,
+                "paired_at": device.paired_at.to_rfc3339(),
+            }))
+            .into_response()
+        }
         Err(e) => {
             // Return 410 Gone for used/expired tokens to let the client
             // distinguish "token consumed" from a generic 400 input error.
@@ -3077,8 +3118,24 @@ pub async fn pairing_remove_device(
             .into_json_tuple()
             .into_response();
     }
-    match state.kernel.pairing_ref().remove_device(&device_id) {
-        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+    let result = state.kernel.pairing_ref().remove_device(&device_id);
+    // ErrorTranslator is !Send; drop before any .await below.
+    drop(t);
+    match result {
+        Ok(()) => {
+            // Drop this device's bearer from the live auth table so a
+            // revoked device's stored key stops authenticating immediately
+            // — the persisted device row was just deleted, but without
+            // this the in-memory `Vec<ApiUserAuth>` would keep accepting
+            // the token until the next process restart.
+            let device_user_name = format!("device:{device_id}");
+            state
+                .user_api_keys
+                .write()
+                .await
+                .retain(|u| u.name != device_user_name);
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
         Err(e) => ApiErrorResponse::not_found(e)
             .into_json_tuple()
             .into_response(),

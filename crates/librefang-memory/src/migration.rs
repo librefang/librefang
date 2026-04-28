@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 23;
+const SCHEMA_VERSION: u32 = 24;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -101,6 +101,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 23 {
         migrate_v23(conn)?;
+    }
+
+    if current_version < 24 {
+        migrate_v24(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -751,6 +755,29 @@ fn migrate_v23(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (23, datetime('now'), 'Add user_id and channel columns to usage_events for RBAC M5 per-user spend rollup')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 24: Add `api_key_hash` column to `paired_devices`.
+///
+/// Each pairing now mints its own bearer token (Argon2-hashed at rest)
+/// instead of handing the daemon's master `api_key` back to the mobile
+/// device. Existing rows from before this migration get an empty hash —
+/// those devices must re-pair to obtain a token; until they do, the
+/// auth middleware will simply not find a match for any bearer they
+/// present.
+fn migrate_v24(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "paired_devices", "api_key_hash") {
+        conn.execute(
+            "ALTER TABLE paired_devices ADD COLUMN api_key_hash TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (24, datetime('now'), 'Add api_key_hash column to paired_devices for per-device bearer tokens')",
         [],
     )?;
     Ok(())

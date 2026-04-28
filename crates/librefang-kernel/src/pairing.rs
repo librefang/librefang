@@ -21,6 +21,12 @@ pub struct PairedDevice {
     pub last_seen: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing)]
     pub push_token: Option<String>,
+    /// Argon2 hash of this device's bearer token. The plaintext is
+    /// returned to the device exactly once during `complete_pairing`
+    /// and never stored — comparison happens via `verify_password`.
+    /// Skipped in serialization so it cannot leak through API responses.
+    #[serde(skip_serializing, default)]
+    pub api_key_hash: String,
 }
 
 /// Pairing request (short-lived, for QR code flow).
@@ -165,6 +171,29 @@ impl PairingManager {
     /// List paired devices.
     pub fn list_devices(&self) -> Vec<PairedDevice> {
         self.devices.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Snapshot `(device_id, api_key_hash)` pairs for every device that
+    /// has minted a bearer token. Pre-v24 rows (re-loaded from disk
+    /// before they have re-paired) are filtered out — a device with an
+    /// empty hash cannot authenticate, so the auth layer should not see
+    /// it as a valid bearer.
+    ///
+    /// Used by the API layer at boot to populate the live
+    /// `user_api_keys` table the auth middleware verifies bearers
+    /// against.
+    pub fn device_api_keys(&self) -> Vec<(String, String)> {
+        self.devices
+            .iter()
+            .filter_map(|entry| {
+                let d = entry.value();
+                if d.api_key_hash.is_empty() {
+                    None
+                } else {
+                    Some((d.device_id.clone(), d.api_key_hash.clone()))
+                }
+            })
+            .collect()
     }
 
     /// Remove a paired device.
