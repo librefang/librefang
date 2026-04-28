@@ -3710,10 +3710,7 @@ pub async fn delete_backup(
     }
 
     tracing::info!("Backup deleted: {filename}");
-    (
-        StatusCode::NO_CONTENT,
-        Json(serde_json::json!(null)),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// POST /api/restore — Restore kernel state from a backup archive.
@@ -5341,7 +5338,7 @@ mod event_webhook_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let resp = app
             .oneshot(

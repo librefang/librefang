@@ -155,7 +155,7 @@ async fn users_create_then_get_then_delete_round_trips() {
 
     // DELETE
     let (status, _) = json_request(&h, Method::DELETE, "/api/users/Alice", None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

@@ -3764,7 +3764,7 @@ async fn test_user_budget_put_get_delete_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del_resp.status(), 200, "DELETE should clear the cap");
+    assert_eq!(del_resp.status(), 204, "DELETE should clear the cap");
 
     // GET again — back to limit = 0.
     let after_delete: serde_json::Value = client
