@@ -302,24 +302,42 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         builder = builder.manage(holder);
     }
 
+    // `generate_handler!` does not support cfg attributes inside the macro, so we
+    // build two separate lists and select the right one at compile time.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let invoke_handler = tauri::generate_handler![
+        commands::get_port,
+        commands::get_status,
+        commands::get_agent_count,
+        commands::import_agent_toml,
+        commands::import_skill_file,
+        commands::get_autostart,
+        commands::set_autostart,
+        commands::check_for_updates,
+        commands::install_update,
+        commands::open_config_dir,
+        commands::open_logs_dir,
+        commands::uninstall_app,
+        connection::test_connection,
+        connection::connect_remote,
+        connection::start_local,
+    ];
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let invoke_handler = tauri::generate_handler![
+        commands::get_port,
+        commands::get_status,
+        commands::get_agent_count,
+        commands::import_agent_toml,
+        commands::import_skill_file,
+        commands::open_config_dir,
+        commands::open_logs_dir,
+        commands::uninstall_app,
+        connection::test_connection,
+        connection::connect_remote,
+    ];
+
     builder
-        .invoke_handler(tauri::generate_handler![
-            commands::get_port,
-            commands::get_status,
-            commands::get_agent_count,
-            commands::import_agent_toml,
-            commands::import_skill_file,
-            commands::get_autostart,
-            commands::set_autostart,
-            commands::check_for_updates,
-            commands::install_update,
-            commands::open_config_dir,
-            commands::open_logs_dir,
-            commands::uninstall_app,
-            connection::test_connection,
-            connection::connect_remote,
-            connection::start_local,
-        ])
+        .invoke_handler(invoke_handler)
         .setup(move |app| {
             if show_connection_screen {
                 let _window = WebviewWindowBuilder::new(

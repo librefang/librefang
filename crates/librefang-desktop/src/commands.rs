@@ -150,12 +150,14 @@ pub fn import_skill_file(
 }
 
 /// Check whether auto-start on login is enabled.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 pub fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 /// Enable or disable auto-start on login.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     let manager = app.autolaunch();
@@ -168,6 +170,7 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, Strin
 }
 
 /// Perform an on-demand update check.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 pub async fn check_for_updates(
     app: tauri::AppHandle,
@@ -178,6 +181,7 @@ pub async fn check_for_updates(
 /// Download and install the latest update, then restart the app.
 /// Returns Ok(()) which triggers an app restart — the command will not return
 /// if the update succeeds (the app restarts). On error, returns Err(message).
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
     crate::updater::download_and_install_update(&app).await
@@ -290,5 +294,11 @@ pub async fn uninstall_app(app: tauri::AppHandle) -> Result<(), String> {
             "use your distro's package manager to remove librefang"
         };
         Err(format!("To uninstall, run in a terminal: {hint}"))
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        // Mobile: uninstall through the platform app store / system settings.
+        Err("Uninstall via the platform app store or system settings.".to_string())
     }
 }
