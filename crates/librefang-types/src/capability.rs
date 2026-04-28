@@ -257,8 +257,8 @@ fn glob_matches_simple(pattern: &str, value: &str) -> bool {
         // Recursively handle the suffix in case it contains more wildcards.
         if suffix.contains('*') {
             // For simplicity, only support one level of recursion here.
-            if value.starts_with(prefix) {
-                return glob_matches_simple(suffix, &value[prefix.len()..]);
+            if let Some(rest) = value.strip_prefix(prefix) {
+                return glob_matches_simple(suffix, rest);
             }
             return false;
         }
