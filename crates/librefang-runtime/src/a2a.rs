@@ -463,10 +463,18 @@ pub struct A2aClient {
 
 impl A2aClient {
     /// Create a new A2A client.
+    ///
+    /// Redirects are disabled (`Policy::none`) to prevent SSRF bypass via
+    /// server-side redirects. The SSRF check in the API layer validates the
+    /// *original* URL before the request is made; if the remote server
+    /// responds with a 3xx redirect to a private IP the client would
+    /// silently follow it, bypassing the check. Refusing all redirects and
+    /// returning an error prevents this class of attack. (#3563)
     pub fn new() -> Self {
         Self {
             client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client build"),
         }

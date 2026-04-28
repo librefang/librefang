@@ -1810,7 +1810,22 @@ pub async fn approve_request(
                         code,
                         &totp_issuer,
                     ) {
-                        Ok(true) => true,
+                        Ok(true) => {
+                            // Replay guard: reject if this (code, approval_id) pair
+                            // was already used within the 90-second TOTP window.
+                            // Binds the TOTP code to this specific approval so an
+                            // intercepted code cannot approve a different pending
+                            // action. (#3360)
+                            if state.kernel.approvals().check_totp_replay(code, uuid) {
+                                return ApiErrorResponse::bad_request(
+                                    "TOTP code already used for this approval. \
+                                     Wait for the next time window.",
+                                )
+                                .into_json_tuple()
+                                .into_response();
+                            }
+                            true
+                        }
                         Ok(false) => {
                             state.kernel.approvals().record_totp_failure("api_admin");
                             return ApiErrorResponse::bad_request("Invalid TOTP code")

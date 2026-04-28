@@ -482,7 +482,63 @@ pub async fn auth(
         }
     }
 
-    // Public endpoints that don't require auth (dashboard needs these).
+    // -----------------------------------------------------------------------
+    // Public-endpoint allowlist
+    //
+    // SECURITY: KEEP THIS IN SYNC WITH server.rs public routes.
+    //
+    // Any route that should be reachable without a bearer token (static
+    // assets, OAuth entry points, liveness probes) MUST appear in one of
+    // the sets below.  Any route added to server.rs that does NOT appear
+    // here will be auth-protected by default — that is the correct default.
+    //
+    // The canonical list of always-public endpoints (method-free) is:
+    //   /                        — dashboard SPA shell HTML
+    //   /logo.png                — branding asset
+    //   /favicon.ico             — branding asset
+    //   /api/versions            — API version enumeration
+    //   /api/health              — liveness probe (minimal payload)
+    //   /api/version             — alias for /api/versions
+    //   /api/auth/callback       — OAuth redirect-back target
+    //   /api/auth/dashboard-login — credential login POST
+    //   /api/auth/dashboard-check — session validity check
+    //   /api/providers/github-copilot/oauth/ prefix
+    //
+    // GET-only always-public:
+    //   /.well-known/agent.json  — A2A agent card
+    //   /api/config/schema       — JSON schema (no sensitive data)
+    //   /api/auth/providers      — available auth providers list
+    //   /api/auth/login          — OAuth login entry points (prefix)
+    //   /dashboard/*             — SPA assets (when auth_enabled, shell is gated)
+    //   /dashboard/assets/*      — bundled JS/CSS (always public)
+    //   /locales/*               — i18n bundles
+    //   /a2a/*                   — A2A server-side protocol
+    //   /api/uploads/*           — uploaded media
+    //   /api/mcp/servers/*/auth/callback — MCP OAuth callback (GET)
+    //
+    // Dashboard reads (public unless require_auth_for_reads is enabled):
+    //   /api/agents, /api/profiles, /api/config, /api/status, /api/models,
+    //   /api/models/aliases, /api/providers, /api/budget, /api/budget/agents,
+    //   /api/network/status, /api/a2a/agents, /api/approvals,
+    //   /api/channels, /api/hands, /api/hands/active, /api/skills,
+    //   /api/sessions, /api/mcp/servers, /api/mcp/catalog, /api/mcp/health,
+    //   /api/workflows, /api/auto-dream/status,
+    //   /api/budget/agents/* (prefix), /api/approvals/* (prefix),
+    //   /api/hands/* (prefix), /api/cron/* (prefix),
+    //   /api/logs/stream (SSE read-only)
+    //
+    // Intentionally NOT public (always require auth):
+    //   /api/health/detail       — exposes panic counts, agent counts, config warnings
+    //   /api/status              — full agent listing with home_dir + api_listen
+    //                              (note: /api/status IS in dashboard_read_exact above —
+    //                               it is locked down when require_auth_for_reads is on)
+    //
+    // DRIFT HAZARD: if you add a new public route in server.rs and forget to
+    // update this allowlist you will accidentally auth-protect it.  The test
+    // `public_allowlist_audit` in this file's #[cfg(test)] block covers the
+    // paths listed above and will fail if the contract is broken. (#3712)
+    // -----------------------------------------------------------------------
+    //
     // SECURITY: /api/agents is GET-only (listing). POST (spawn) requires auth.
     // SECURITY: Public endpoints are GET-only unless explicitly noted.
     // POST/PUT/DELETE to any endpoint ALWAYS requires auth to prevent
@@ -1964,5 +2020,152 @@ mod tests {
             StatusCode::OK,
             "loopback with a valid bearer token must still be allowed through"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // #3712 — Public-allowlist audit
+    //
+    // This test documents every path that is expected to bypass auth.  If the
+    // middleware logic changes and a path that should be public starts returning
+    // 401, this test catches the regression.  If a path that should be private
+    // is accidentally added to the allowlist the test name makes the intent
+    // explicit enough for a reviewer to notice.
+    //
+    // The test drives the `auth` middleware directly with `require_auth_for_reads
+    // = false` (the default), which is the mode where all "dashboard read"
+    // endpoints are public.  A separate test covers `require_auth_for_reads =
+    // true`.
+    // -------------------------------------------------------------------------
+
+    fn audit_auth_state_with_key() -> AuthState {
+        AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("test-key".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        }
+    }
+
+    /// Helper: build a router with a single GET route at `path` and the auth
+    /// middleware, then fire an unauthenticated GET.  Returns the HTTP status.
+    async fn probe_public(path: &str) -> StatusCode {
+        let state = audit_auth_state_with_key();
+        let app = Router::new()
+            .route(path, get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state, auth));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    /// These paths MUST return 200 without any auth token when
+    /// `require_auth_for_reads = false` (the default install mode). (#3712)
+    #[tokio::test]
+    async fn public_allowlist_audit_always_public() {
+        let always_public = [
+            "/",
+            "/logo.png",
+            "/favicon.ico",
+            "/api/versions",
+            "/api/health",
+            "/api/version",
+            "/api/auth/callback",
+            "/api/auth/dashboard-login",
+            "/api/auth/dashboard-check",
+            // GET-only always-public
+            "/.well-known/agent.json",
+            "/api/config/schema",
+            "/api/auth/providers",
+        ];
+        for path in always_public {
+            let status = probe_public(path).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "Path {path} should be always-public (no token required) but got {status}"
+            );
+        }
+    }
+
+    /// Dashboard-read paths MUST return 200 without a token when
+    /// `require_auth_for_reads = false`. (#3712)
+    #[tokio::test]
+    async fn public_allowlist_audit_dashboard_reads() {
+        let dashboard_reads = [
+            "/api/agents",
+            "/api/profiles",
+            "/api/config",
+            "/api/models",
+            "/api/models/aliases",
+            "/api/providers",
+            "/api/budget",
+            "/api/budget/agents",
+            "/api/network/status",
+            "/api/a2a/agents",
+            "/api/approvals",
+            "/api/channels",
+            "/api/hands",
+            "/api/hands/active",
+            "/api/skills",
+            "/api/sessions",
+            "/api/mcp/servers",
+            "/api/mcp/catalog",
+            "/api/mcp/health",
+            "/api/workflows",
+            "/api/auto-dream/status",
+        ];
+        for path in dashboard_reads {
+            let status = probe_public(path).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "Dashboard-read path {path} should be public by default but got {status}"
+            );
+        }
+    }
+
+    /// These paths MUST require auth (return 401) even when
+    /// `require_auth_for_reads = false`. (#3712)
+    #[tokio::test]
+    async fn public_allowlist_audit_always_private() {
+        let always_private = [
+            "/api/health/detail",
+            "/api/config/set",
+            "/api/shutdown",
+            "/api/auth/change-password",
+        ];
+        for path in always_private {
+            let state = audit_auth_state_with_key();
+            let app = Router::new()
+                .route(path, get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(state, auth));
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "Path {path} should always require auth but returned {}",
+                resp.status()
+            );
+        }
     }
 }

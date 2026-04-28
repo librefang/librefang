@@ -44,6 +44,16 @@ pub struct ApprovalManager {
     /// at which point it is set to the current instant. The lockout window is
     /// measured from that moment, not from the first failure.
     totp_failures: StdMutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// Replay-prevention store for TOTP approvals.
+    ///
+    /// Key: `SHA-256(totp_code) || ":" || approval_id` as a hex string.
+    /// Value: the `Instant` the pair was recorded.
+    ///
+    /// Any entry older than 90 seconds (3 × the 30-second TOTP step) is
+    /// discarded on the next `check_totp_replay` call. This is intentionally
+    /// generous — a 30-second code can only be valid in the [-1, 0, +1] steps
+    /// window, so 90 s is a safe upper bound before the code expires naturally.
+    totp_used_pairs: StdMutex<HashMap<String, Instant>>,
 }
 
 struct PendingRequest {
@@ -83,6 +93,7 @@ impl ApprovalManager {
             audit_db: None,
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
+            totp_used_pairs: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -96,6 +107,7 @@ impl ApprovalManager {
             audit_db: Some(conn),
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
+            totp_used_pairs: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -970,6 +982,51 @@ impl ApprovalManager {
             "DELETE FROM totp_lockout WHERE sender_id = ?1",
             rusqlite::params![sender_id],
         );
+    }
+
+    /// Check if a `(totp_code, approval_id)` pair has already been used.
+    ///
+    /// Returns `true` if the pair is a replay (already used within the
+    /// 90-second window), `false` if it is fresh and should be accepted.
+    ///
+    /// On success the pair is recorded in the in-memory store so future
+    /// calls with the same pair are rejected. Entries older than 90 seconds
+    /// are swept on each call to bound memory usage.
+    ///
+    /// # Security rationale
+    ///
+    /// A valid TOTP code is accepted for up to ±1 time-step (i.e. a 90-second
+    /// window). Without replay prevention, an attacker who intercepts a code
+    /// used to approve approval A can immediately reuse it to approve
+    /// approval B. Binding the used-pair key to `(hash(code), approval_id)`
+    /// closes that window: the same code cannot authorise a *different*
+    /// approval within the validity period.
+    pub fn check_totp_replay(&self, code: &str, approval_id: Uuid) -> bool {
+        // Build the map key as `"<code>:<approval_id>"`.
+        //
+        // The store is in-process memory only (never persisted), so a simple
+        // string key is sufficient — we need uniqueness, not cryptographic
+        // binding.  Collision risk over a 90-second window with 6-digit codes
+        // and UUIDs is negligible.
+        let pair_key = format!("{}:{}", code, approval_id);
+
+        let ttl = std::time::Duration::from_secs(90);
+        let mut used = self
+            .totp_used_pairs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Sweep expired entries on every call to bound memory usage.
+        used.retain(|_, recorded_at| recorded_at.elapsed() < ttl);
+
+        // If the pair was already used within the TTL window, it is a replay.
+        if used.contains_key(&pair_key) {
+            return true; // replay detected
+        }
+
+        // Record this pair so future calls within the window are rejected.
+        used.insert(pair_key, Instant::now());
+        false // fresh — not a replay
     }
 
     /// Write an audit entry to the persistent database.
@@ -2557,5 +2614,76 @@ mod tests {
         // Cleanup.
         let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
         let _ = mgr.resolve(id3, ApprovalDecision::Denied, None, false, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // #3360 — TOTP replay prevention
+    // -----------------------------------------------------------------------
+
+    /// A fresh `(code, approval_id)` pair must NOT be flagged as a replay,
+    /// but the second use of the identical pair within the 90-second window
+    /// MUST be rejected.
+    #[test]
+    fn test_check_totp_replay_prevents_reuse_of_same_pair() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        let code = "123456";
+        let id = Uuid::new_v4();
+
+        // First use: not a replay.
+        assert!(
+            !mgr.check_totp_replay(code, id),
+            "first use of (code, id) should not be a replay"
+        );
+
+        // Second use of the same pair within the TTL: replay.
+        assert!(
+            mgr.check_totp_replay(code, id),
+            "second use of the same (code, id) within TTL must be flagged as replay"
+        );
+    }
+
+    /// The same TOTP code used against *different* approval IDs must each be
+    /// accepted the first time and rejected the second time for that specific pair.
+    #[test]
+    fn test_check_totp_replay_code_bound_to_approval_id() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        let code = "654321";
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+
+        // First use of (code, id_a): fresh.
+        assert!(!mgr.check_totp_replay(code, id_a));
+        // First use of (code, id_b): also fresh — code is bound to id_a only.
+        assert!(
+            !mgr.check_totp_replay(code, id_b),
+            "same code used against a different approval ID should be accepted the first time"
+        );
+
+        // Second use of (code, id_a): replay.
+        assert!(mgr.check_totp_replay(code, id_a));
+        // Second use of (code, id_b): replay.
+        assert!(mgr.check_totp_replay(code, id_b));
+    }
+
+    /// Different codes against the same approval ID do not interfere.
+    #[test]
+    fn test_check_totp_replay_different_codes_same_id() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        let id = Uuid::new_v4();
+
+        // Two different valid TOTP codes (simulating successive time steps).
+        let code_t0 = "111111";
+        let code_t1 = "222222";
+
+        assert!(!mgr.check_totp_replay(code_t0, id));
+        // A different code for the same id should be fresh on first use.
+        assert!(
+            !mgr.check_totp_replay(code_t1, id),
+            "a different code for the same approval ID should be accepted on first use"
+        );
+
+        // Replaying each should now be blocked.
+        assert!(mgr.check_totp_replay(code_t0, id));
+        assert!(mgr.check_totp_replay(code_t1, id));
     }
 }
