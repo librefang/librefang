@@ -1757,6 +1757,9 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # OIDC trusted publishing to PyPI
+      contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     defaults:
       run:
         working-directory: sdk/python
@@ -1782,10 +1785,11 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
+        # OIDC trusted publishing — configure at:
+        # pypi.org/manage/project/librefang-sdk/settings/publishing
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:
           packages-dir: sdk/python/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
 
       - name: Output publish link
