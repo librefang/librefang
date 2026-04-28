@@ -1,0 +1,138 @@
+# LibreFang Mobile (iOS & Android)
+
+LibreFang mobile is a **thin-client dashboard** for iOS and Android built with [Tauri 2](https://v2.tauri.app/). The mobile app connects to a remote `librefang` daemon running on your home server, VPS, NAS, or desktop — it does not embed the daemon itself.
+
+<Note>
+  Mobile support is under active development (Epic [#3351](https://github.com/librefang/librefang/issues/3351)). The scaffold and connection wizard are the first milestones.
+</Note>
+
+---
+
+## Architecture
+
+```
+iPhone / Android phone
+        │
+        │  HTTP / WebSocket  (API key auth)
+        ▼
+librefang daemon  ──  home server / VPS / NAS / desktop
+```
+
+This is intentional. LibreFang runs cron jobs, autodream, channel adapters, and triggers 24 × 7. iOS and Android impose strict background-execution limits that make continuous daemon uptime impossible on a phone.
+
+**What the mobile app provides:**
+
+- Full dashboard UI (agents, chat, skills, workflows, audit log)
+- First-run connection wizard with manual entry and QR-code pairing
+- Secure credential storage via platform keychain
+- Offline banner + automatic reconnect on foreground resume
+
+**What the mobile app does NOT include:**
+
+- Embedded kernel or daemon
+- Background channel adapters
+- Push notifications (deferred — requires a relay service)
+- mDNS / Bonjour daemon discovery (deferred to a follow-up)
+
+---
+
+## Connecting to a Daemon
+
+### Manual entry
+
+On first launch the connection wizard asks for two values:
+
+| Field | Example |
+|-------|---------|
+| Daemon URL | `https://librefang.yourserver.com` or `http://192.168.1.10:4545` |
+| API key | 64-character key from your daemon's `config.toml` or the Settings page |
+
+### QR pairing
+
+On the desktop dashboard, open **Settings → Mobile Pairing** to generate a one-time QR code. Scan it with the mobile app to connect without typing the API key manually. The QR code expires after 5 minutes and is single-use.
+
+---
+
+## Minimum OS Versions
+
+| Platform | Minimum |
+|----------|---------|
+| iOS | 14.0 |
+| Android | API 26 (Android 8.0) |
+
+---
+
+## Building from Source
+
+### Prerequisites
+
+**Android:**
+- Android NDK 26+
+- Android SDK (API 26+ target)
+- Java 17
+- Rust target: `aarch64-linux-android`
+
+**iOS (macOS only):**
+- Xcode 15+
+- iOS Simulator runtime
+- Rust target: `aarch64-apple-ios`
+
+### Generate mobile scaffolds (first time only)
+
+```bash
+cd crates/librefang-desktop
+
+# Android
+cargo tauri android init
+
+# iOS (macOS only)
+cargo tauri ios init
+```
+
+Commit the generated `gen/android/` and `gen/apple/` directories.
+
+### Dev loop
+
+```bash
+cd crates/librefang-desktop
+
+# Android emulator
+cargo tauri android dev
+
+# iOS Simulator (macOS only)
+cargo tauri ios dev
+```
+
+### Release build
+
+```bash
+# Android (.aab)
+cargo tauri android build --apk
+
+# iOS (.ipa, macOS only)
+cargo tauri ios build
+```
+
+---
+
+## Comparison: Mobile vs Desktop
+
+| Feature | Desktop | Mobile |
+|---------|---------|--------|
+| Embedded daemon | Yes | No — connects remotely |
+| System tray | Yes | No |
+| Auto-start on login | Yes | No |
+| Global shortcuts | Yes | No |
+| Auto-updater | Yes | No |
+| Dashboard UI | Yes | Yes |
+| Chat with agents | Yes | Yes |
+| Skills / Workflows | Yes | Yes |
+| QR pairing | N/A — is the server side | Yes — scans the QR |
+
+---
+
+## Related
+
+- [Desktop App](/integrations/desktop) — the embedded-daemon desktop experience
+- [Android via Termux](/integrations/android-termux) — running the full daemon on an Android device
+- Epic [#3351](https://github.com/librefang/librefang/issues/3351) — mobile client roadmap
