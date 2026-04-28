@@ -271,7 +271,7 @@ impl SkillhubClient {
         // Step 3: Delegate to ClawHub client for extraction + security scan
         let result = self
             .inner
-            .install_from_bytes(slug, target_dir, &bytes)
+            .install_from_bytes(slug, target_dir, &bytes, None)
             .await?;
 
         // Step 4: Patch source provenance to Skillhub

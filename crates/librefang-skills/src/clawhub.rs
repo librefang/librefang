@@ -15,7 +15,6 @@ use crate::openclaw_compat;
 use crate::verify::{SkillVerifier, SkillWarning, WarningSeverity};
 use crate::SkillError;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
@@ -534,7 +533,7 @@ impl ClawHubClient {
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
 
-        self.install_from_bytes(slug, target_dir, &bytes).await
+        self.install_from_bytes(slug, target_dir, &bytes, None).await
     }
 
     /// Install a skill from raw bytes (zip or SKILL.md).
@@ -546,16 +545,29 @@ impl ClawHubClient {
         slug: &str,
         target_dir: &Path,
         bytes: &[u8],
+        expected_sha256: Option<&str>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
 
-        // Step 1: SHA256 of downloaded content
-        let sha256 = {
-            let mut hasher = Sha256::new();
-            hasher.update(bytes);
-            hex::encode(hasher.finalize())
-        };
+        // Step 1: SHA256 of downloaded content — verify against expected hash when
+        // provided, or warn that integrity checking was skipped when not.
+        let sha256 = SkillVerifier::sha256_hex(bytes);
         info!(slug, sha256 = %sha256, "Downloaded skill");
+        match expected_sha256 {
+            Some(expected) => {
+                if !SkillVerifier::verify_checksum(bytes, expected) {
+                    return Err(SkillError::SecurityBlocked(format!(
+                        "SHA256 mismatch for '{slug}': expected {expected}, got {sha256}"
+                    )));
+                }
+            }
+            None => {
+                warn!(
+                    slug,
+                    "No expected SHA256 provided by registry; integrity check skipped"
+                );
+            }
+        }
 
         // Create skill directory
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
