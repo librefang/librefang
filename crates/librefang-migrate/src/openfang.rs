@@ -121,12 +121,46 @@ fn should_rewrite(path: &Path) -> bool {
     matches!(ext, "toml" | "env")
 }
 
-/// Rewrite openfang references in file content.
-fn rewrite_content(content: &str) -> String {
+/// Rewrite openfang references in TOML file content.
+///
+/// Replaces all occurrences of "openfang", "OPENFANG", and "OpenFang" with
+/// their LibreFang equivalents. Safe for TOML because TOML values are
+/// structured config, not secrets.
+fn rewrite_toml_content(content: &str) -> String {
     content
         .replace("openfang", "librefang")
         .replace("OPENFANG", "LIBREFANG")
         .replace("OpenFang", "LibreFang")
+}
+
+/// Rewrite openfang references in env file content.
+///
+/// Only rewrites the KEY side of each `KEY=VALUE` line. Values are left
+/// untouched to prevent accidental corruption of secret values that happen to
+/// contain the string "openfang" (e.g. `API_TOKEN=tok_openfang_xyz`).
+/// Lines that are comments (`#`-prefixed) or do not contain `=` are passed
+/// through unchanged.
+fn rewrite_env_content(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            // Pass through comment lines and blank lines unchanged.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || !line.contains('=') {
+                return line.to_string();
+            }
+            // Split on the first `=` only — values may themselves contain `=`.
+            let (key, value) = line.split_once('=').expect("line contains '='");
+            let rewritten_key = key
+                .replace("openfang", "librefang")
+                .replace("OPENFANG", "LIBREFANG")
+                .replace("OpenFang", "LibreFang");
+            format!("{rewritten_key}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        // Preserve a trailing newline if the original had one.
+        + if content.ends_with('\n') { "\n" } else { "" }
 }
 
 /// Run the OpenFang → LibreFang migration.
@@ -200,7 +234,15 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
 
         if should_rewrite(abs_source) {
             let content = std::fs::read_to_string(abs_source)?;
-            let rewritten = rewrite_content(&content);
+            let ext = abs_source
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let rewritten = if ext == "env" {
+                rewrite_env_content(&content)
+            } else {
+                rewrite_toml_content(&content)
+            };
             std::fs::write(&dest_path, rewritten)?;
             info!(
                 "Copied (rewritten) {} -> {}",
@@ -433,13 +475,33 @@ mod tests {
     }
 
     #[test]
-    fn test_rewrite_content() {
+    fn test_rewrite_toml_content() {
         let input = "home = \"~/.openfang\"\nOPENFANG_KEY=foo\nWelcome to OpenFang\n";
-        let output = rewrite_content(input);
+        let output = rewrite_toml_content(input);
         assert_eq!(
             output,
             "home = \"~/.librefang\"\nLIBREFANG_KEY=foo\nWelcome to LibreFang\n"
         );
+    }
+
+    #[test]
+    fn test_rewrite_env_content_renames_keys_preserves_values() {
+        // Key-side references should be renamed; value-side must be untouched
+        // even when the value happens to contain "openfang".
+        let input =
+            "OPENFANG_API_KEY=secret_openfang_token\nOPENFANG_HOME=~/.openfang\n# comment\nOTHER=value\n";
+        let output = rewrite_env_content(input);
+        assert_eq!(
+            output,
+            // Keys renamed, but values left exactly as-is.
+            "LIBREFANG_API_KEY=secret_openfang_token\nLIBREFANG_HOME=~/.openfang\n# comment\nOTHER=value\n"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_env_content_preserves_trailing_newline() {
+        assert!(rewrite_env_content("KEY=val\n").ends_with('\n'));
+        assert!(!rewrite_env_content("KEY=val").ends_with('\n'));
     }
 
     #[test]

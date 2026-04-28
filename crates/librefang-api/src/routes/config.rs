@@ -272,7 +272,7 @@ api_key_env = "{api_key_env}"
 "#
     );
 
-    if let Err(e) = std::fs::write(&config_path, &config_content) {
+    if let Err(e) = crate::atomic_write(&config_path, config_content.as_bytes()) {
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to write config: {e}")
@@ -2042,7 +2042,7 @@ pub async fn config_set(
     }
 
     // Write back — preserves comments, whitespace, and key ordering
-    if let Err(e) = std::fs::write(&config_path, &new_toml_str) {
+    if let Err(e) = crate::atomic_write(&config_path, new_toml_str.as_bytes()) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"status": "error", "error": format!("write failed: {e}")})),

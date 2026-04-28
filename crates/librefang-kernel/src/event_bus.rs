@@ -2,7 +2,7 @@
 
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
-use librefang_types::event::{Event, EventTarget};
+use librefang_types::event::{Event, EventPayload, EventTarget};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -20,16 +20,35 @@ pub struct EventBus {
     agent_channels: DashMap<AgentId, broadcast::Sender<Event>>,
     /// Event history ring buffer.
     history: Arc<RwLock<VecDeque<Event>>>,
-    /// Count of events dropped due to full channels.
+    /// Count of events dropped because the per-agent channel had no active receiver.
     dropped_count: AtomicU64,
     /// Timestamp of the last drop warning log (for rate-limiting).
     last_drop_warn: std::sync::Mutex<std::time::Instant>,
 }
 
+/// Maps an `EventPayload` variant to a short label for drop-warning log fields.
+fn payload_kind(payload: &EventPayload) -> &'static str {
+    match payload {
+        EventPayload::Message(_) => "Message",
+        EventPayload::ToolResult(_) => "ToolResult",
+        EventPayload::MemoryUpdate(_) => "MemoryUpdate",
+        EventPayload::Lifecycle(_) => "Lifecycle",
+        EventPayload::Network(_) => "Network",
+        EventPayload::System(_) => "System",
+        EventPayload::ApprovalRequested(_) => "ApprovalRequested",
+        EventPayload::ApprovalResolved(_) => "ApprovalResolved",
+        EventPayload::Custom(_) => "Custom",
+    }
+}
+
 impl EventBus {
     /// Create a new event bus.
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(1024);
+        // 4 096-event capacity for the global broadcast channel (up from 1 024).
+        // Burst-publishing scenarios (e.g. mass trigger evaluation) can spike far
+        // above 1 024 events between scheduler ticks, causing RecvError::Lagged
+        // and silently dropping trigger-driving events (issue #3630).
+        let (sender, _) = broadcast::channel(4096);
         Self {
             sender,
             agent_channels: DashMap::new(),
@@ -44,6 +63,7 @@ impl EventBus {
         debug!(
             event_id = %event.id,
             source = %event.source,
+            kind = payload_kind(&event.payload),
             "Publishing event"
         );
 
@@ -57,58 +77,89 @@ impl EventBus {
         }
 
         // Route to target
-        let mut drops: u64 = 0;
         match &event.target {
             EventTarget::Agent(agent_id) => {
                 if let Some(sender) = self.agent_channels.get(agent_id) {
                     if sender.send(event.clone()).is_err() {
-                        drops += 1;
+                        let total = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Ok(mut last) = self.last_drop_warn.lock() {
+                            if last.elapsed() >= std::time::Duration::from_secs(10) {
+                                warn!(
+                                    agent_id = %agent_id,
+                                    event_id = %event.id,
+                                    event_kind = payload_kind(&event.payload),
+                                    total_dropped = total,
+                                    "Event bus: agent has no active receiver, event dropped — check agent health",
+                                );
+                                *last = std::time::Instant::now();
+                            }
+                        }
                     }
                 }
             }
             EventTarget::Broadcast => {
                 if self.sender.send(event.clone()).is_err() {
-                    drops += 1;
+                    debug!(
+                        event_id = %event.id,
+                        event_kind = payload_kind(&event.payload),
+                        "Broadcast event: no global subscribers"
+                    );
                 }
+                let mut agent_drops: u64 = 0;
                 for entry in self.agent_channels.iter() {
                     if entry.value().send(event.clone()).is_err() {
-                        drops += 1;
+                        agent_drops += 1;
+                    }
+                }
+                if agent_drops > 0 {
+                    let total =
+                        self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed) + agent_drops;
+                    if let Ok(mut last) = self.last_drop_warn.lock() {
+                        if last.elapsed() >= std::time::Duration::from_secs(10) {
+                            warn!(
+                                dropped = agent_drops,
+                                total_dropped = total,
+                                event_kind = payload_kind(&event.payload),
+                                "Event bus: broadcast reached agents with no active receivers, events dropped",
+                            );
+                            *last = std::time::Instant::now();
+                        }
                     }
                 }
             }
             EventTarget::Pattern(_pattern) => {
-                // Phase 1: broadcast to all for pattern matching
                 if self.sender.send(event.clone()).is_err() {
-                    drops += 1;
+                    debug!(
+                        event_id = %event.id,
+                        event_kind = payload_kind(&event.payload),
+                        "Pattern event: no global subscribers"
+                    );
                 }
             }
             EventTarget::System => {
                 if self.sender.send(event.clone()).is_err() {
-                    drops += 1;
-                }
-            }
-        }
-
-        if drops > 0 {
-            let total = self.dropped_count.fetch_add(drops, Ordering::Relaxed) + drops;
-            // Rate-limit warning logs to once per 10 seconds.
-            if let Ok(mut last) = self.last_drop_warn.lock() {
-                if last.elapsed() >= std::time::Duration::from_secs(10) {
-                    warn!(
-                        dropped = drops,
-                        total_dropped = total,
-                        "Event bus: channel full, events dropped"
+                    debug!(
+                        event_id = %event.id,
+                        event_kind = payload_kind(&event.payload),
+                        "System event: no global subscribers"
                     );
-                    *last = std::time::Instant::now();
                 }
             }
         }
     }
 
     /// Subscribe to events for a specific agent.
+    ///
+    /// **Lagged handling**: callers must match `RecvError::Lagged(n)` and log a
+    /// warning, then `continue` — the skipped events are already lost but future
+    /// events can still be received.  Exiting on `Lagged` turns a transient
+    /// slow-consumer condition into a permanent trigger miss (issue #3630).
     pub fn subscribe_agent(&self, agent_id: AgentId) -> broadcast::Receiver<Event> {
         let entry = self.agent_channels.entry(agent_id).or_insert_with(|| {
-            let (tx, _) = broadcast::channel(256);
+            // 2 048-event buffer per agent (up from 256).  Trigger-driving events
+            // are published in bursts; a deeper queue keeps slow consumers from
+            // lagging and silently missing events (issue #3630).
+            let (tx, _) = broadcast::channel(2048);
             tx
         });
         entry.subscribe()
@@ -125,7 +176,7 @@ impl EventBus {
         history.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Return the total number of events dropped due to full channels.
+    /// Return the total number of events dropped due to no active receivers.
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
     }

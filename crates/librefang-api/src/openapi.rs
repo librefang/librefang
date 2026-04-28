@@ -398,21 +398,68 @@ use crate::types;
 pub struct ApiDoc;
 
 /// GET /api/openapi.json — Serve the auto-generated OpenAPI specification.
+///
+/// The spec includes paths for both `/api/*` (unversioned) and `/api/v1/*`
+/// (explicit version) since v1 routes are mounted at both prefixes.
 pub async fn openapi_spec() -> impl IntoResponse {
     let doc = ApiDoc::openapi();
-    match doc.to_json() {
-        Ok(json) => (
+    let json_str = match doc.to_json() {
+        Ok(j) => j,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to generate OpenAPI spec: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse the generated spec so we can inject /api/v1/* path copies.
+    let mut spec: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to parse generated spec: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    // Duplicate every /api/* path as /api/v1/* so clients can discover both
+    // the unversioned and explicitly-versioned routes from the single spec.
+    if let Some(paths) = spec.get("paths").and_then(|p| p.as_object()).cloned() {
+        let mut v1_entries: Vec<(String, serde_json::Value)> = Vec::new();
+        for (path, ops) in &paths {
+            if let Some(suffix) = path.strip_prefix("/api/") {
+                let v1_path = format!("/api/v1/{suffix}");
+                if !paths.contains_key(&v1_path) {
+                    v1_entries.push((v1_path, ops.clone()));
+                }
+            }
+        }
+        if !v1_entries.is_empty() {
+            if let Some(paths_obj) = spec.get_mut("paths").and_then(|p| p.as_object_mut()) {
+                for (k, v) in v1_entries {
+                    paths_obj.insert(k, v);
+                }
+            }
+        }
+    }
+
+    match serde_json::to_string(&spec) {
+        Ok(output) => (
             StatusCode::OK,
             [(
                 axum::http::header::CONTENT_TYPE,
                 "application/json; charset=utf-8",
             )],
-            json,
+            output,
         )
             .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to generate OpenAPI spec: {e}"),
+            format!("Failed to serialize spec: {e}"),
         )
             .into_response(),
     }

@@ -147,7 +147,9 @@ walkdir = "2"
 
 # Security
 sha2 = { version = "0.10", features = ["oid"] }
-sha1 = "0.11"
+# sha1 0.10 is paired with hmac 0.12 via digest 0.10. sha1 0.11+ moved to
+# digest 0.11 and is incompatible with our hmac version.
+sha1 = "0.10"
 aes = "0.9"
 cbc = "0.2"
 hmac = "0.12"

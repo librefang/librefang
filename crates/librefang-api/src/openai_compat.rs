@@ -543,7 +543,7 @@ async fn stream_response(
 }
 
 /// GET /v1/models — List available agents as OpenAI model objects.
-#[utoipa::path(get, path = "/v1/models", tag = "openai", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
     let created = std::time::SystemTime::now()

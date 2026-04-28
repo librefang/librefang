@@ -292,10 +292,7 @@ pub async fn delete_alias(
             .into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed"})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
@@ -413,7 +410,7 @@ pub async fn delete_model_overrides(
     if let Err(e) = catalog.save_overrides(&overrides_path) {
         tracing::warn!("Failed to persist model overrides: {e}");
     }
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
@@ -963,10 +960,7 @@ pub async fn remove_custom_model(
             .into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed"})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
@@ -1008,8 +1002,18 @@ pub async fn set_provider_key(
             .into_json_tuple();
     }
 
-    // Set env var in current process so detect_auth picks it up
-    std::env::set_var(&env_var, &key);
+    // Set env var in current process so detect_auth picks it up.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid undefined behaviour in the tokio runtime.
+    {
+        let env_var_clone = env_var.clone();
+        let key_clone = key.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_var_clone, &key_clone) };
+        })
+        .await;
+    }
 
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
@@ -1229,10 +1233,7 @@ pub async fn delete_provider_key(
         catalog.detect_auth();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed", "provider": name})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
@@ -1776,7 +1777,8 @@ fn persist_default_model(
     };
     let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
     root.insert("default_model".to_string(), toml::Value::Table(dm_table));
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 
@@ -1912,7 +1914,8 @@ fn upsert_provider_url(
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 
@@ -1956,7 +1959,8 @@ fn upsert_provider_proxy_url(
         );
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 
@@ -2063,8 +2067,17 @@ pub async fn copilot_oauth_poll(
                 );
             }
 
-            // Set in current process
-            std::env::set_var("GITHUB_TOKEN", access_token.as_str());
+            // Set in current process.
+            // `std::env::set_var` is not thread-safe inside async; push to a
+            // blocking thread to avoid UB in the multithreaded tokio runtime.
+            {
+                let token = access_token.to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // SAFETY: single mutation on a dedicated blocking thread.
+                    unsafe { std::env::set_var("GITHUB_TOKEN", &token) };
+                })
+                .await;
+            }
 
             // Refresh auth detection
             state

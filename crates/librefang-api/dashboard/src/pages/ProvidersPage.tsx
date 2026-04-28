@@ -1254,14 +1254,26 @@ export function ProvidersPage() {
 
       {/* Tabs & Filter */}
       <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
-        <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
-          <button onClick={() => handleTabChange("configured")}
+        <div role="tablist" aria-label={t("providers.title", { defaultValue: "Providers" })} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
+          <button
+            id="providers-tab-configured"
+            role="tab"
+            aria-selected={activeTab === "configured"}
+            aria-controls="providers-panel"
+            tabIndex={activeTab === "configured" ? 0 : -1}
+            onClick={() => handleTabChange("configured")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"}`}>
             <CheckCircle2 className="w-4 h-4" />
             {t("providers.configured")}
             <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>{configuredCount}</span>
           </button>
-          <button onClick={() => handleTabChange("unconfigured")}
+          <button
+            id="providers-tab-unconfigured"
+            role="tab"
+            aria-selected={activeTab === "unconfigured"}
+            aria-controls="providers-panel"
+            tabIndex={activeTab === "unconfigured" ? 0 : -1}
+            onClick={() => handleTabChange("unconfigured")}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"}`}>
             <XCircle className="w-4 h-4" />
             {t("providers.unconfigured")}
@@ -1282,7 +1294,7 @@ export function ProvidersPage() {
       </div>
 
       <AnimatePresence mode="wait">
-      <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
+      <motion.div key={activeTab} id="providers-panel" role="tabpanel" aria-labelledby={`providers-tab-${activeTab}`} variants={tabContent} initial="initial" animate="animate" exit="exit" className="flex flex-col gap-4">
       {providersQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}

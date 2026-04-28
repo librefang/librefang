@@ -1912,6 +1912,7 @@
     "standby": "待机中",
     "end_history": "历史记录末尾",
     "welcome_system": "连接已建立。",
+    "load_earlier_messages": "加载更早的 {{count}} 条消息",
     "input_placeholder_with_agent": "向 {{name}} 发送消息...",
     "generating": "生成中...",
     "clear_chat": "清空对话",

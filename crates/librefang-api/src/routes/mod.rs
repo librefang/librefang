@@ -146,6 +146,11 @@ pub struct AppState {
     /// Mutex for serializing config file writes — prevents concurrent config_set
     /// calls from reading the same file and overwriting each other's changes.
     pub config_write_lock: tokio::sync::Mutex<()>,
+    /// Pending A2A agents awaiting operator approval (Bug #3786).
+    /// Maps discovery URL → AgentCard. Agents here are NOT trusted yet and
+    /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
+    /// them into the kernel's trusted external-agent list.
+    pub pending_a2a_agents: DashMap<String, librefang_runtime::a2a::AgentCard>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

@@ -58,7 +58,9 @@ fn boot(users: Vec<UserConfig>, groups: Vec<ToolGroup>) -> std::sync::Arc<LibreF
     // The default driver only initialises lazily; api_key_env doesn't need
     // to resolve for the kernel to boot. This is enough for our purposes —
     // we never call the LLM.
-    std::env::set_var("RBAC_M3_TEST_KEY", "fake-key-for-boot");
+    // SAFETY: this integration test runs in its own process (each test binary
+    // is single-threaded by default here); no other thread races on this var.
+    unsafe { std::env::set_var("RBAC_M3_TEST_KEY", "fake-key-for-boot") };
     std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("kernel boot"))
 }
 

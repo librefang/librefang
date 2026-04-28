@@ -1194,8 +1194,10 @@ echo '{"greeting": "hello from shell"}'
         // SAFETY: serialized via `serial_test::serial(env)` against the
         // workspace-wide `env` key; values are scoped to this test's
         // subprocess and removed before assertions run.
-        std::env::set_var(allowed_var, "hello-from-host");
-        std::env::set_var(blocked_var, "should-not-leak");
+        unsafe {
+            std::env::set_var(allowed_var, "hello-from-host");
+            std::env::set_var(blocked_var, "should-not-leak");
+        }
 
         let dir = TempDir::new().unwrap();
         let script = format!(

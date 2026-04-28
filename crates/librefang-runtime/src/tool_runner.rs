@@ -537,6 +537,26 @@ pub async fn execute_tool_raw(
                 };
             };
 
+            // FIXME(#3822): shell_exec does not enforce readonly_workspace_prefixes.
+            // Named workspaces declared with `mode = "r"` are exposed to the shell
+            // environment via TOOLS.md, but nothing prevents the spawned process from
+            // writing to those directories.  A proper sandbox (e.g. Linux mount
+            // namespaces, macOS sandbox-exec, or a chroot) is required to close this
+            // gap.  Until then we emit a warning whenever readonly prefixes exist so
+            // the issue is visible in daemon logs.
+            // Track: https://github.com/librefang/librefang/issues/3822
+            if let (Some(k), Some(aid)) = (kernel, caller_agent_id) {
+                let ro = k.readonly_workspace_prefixes(aid);
+                if !ro.is_empty() {
+                    tracing::warn!(
+                        agent_id = %aid,
+                        readonly_prefixes = ?ro,
+                        "shell_exec: readonly_workspace_prefixes are not enforced for shell \
+                         commands — the spawned process may write to read-only named workspaces"
+                    );
+                }
+            }
+
             let is_full_exec = exec_policy
                 .is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
 
@@ -623,6 +643,75 @@ pub async fn execute_tool_raw(
                         is_error: true,
                         ..Default::default()
                     };
+                }
+            }
+
+            // SECURITY (fix #3822): enforce named workspace read-only restrictions for
+            // shell_exec. The shell tool runs commands that can write arbitrary paths,
+            // so we scan the command string (and any explicit args array) for references
+            // to read-only workspace paths and block execution if any are found.
+            // This mirrors the read-only enforcement already applied to file_write and
+            // apply_patch (see the "file_write" arm above).
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let ro_prefixes = k.readonly_workspace_prefixes(agent_id);
+                if !ro_prefixes.is_empty() {
+                    // Collect the command string and all argument strings as a single
+                    // list of tokens to scan. We look for any token that starts with
+                    // (or equals) a read-only workspace prefix, which indicates the
+                    // shell command is targeting a read-only workspace path.
+                    let mut tokens: Vec<&str> = vec![command];
+                    if let Some(args_arr) = input.get("args").and_then(|a| a.as_array()) {
+                        for v in args_arr {
+                            if let Some(s) = v.as_str() {
+                                tokens.push(s);
+                            }
+                        }
+                    }
+                    for ro_prefix in &ro_prefixes {
+                        let prefix_str = ro_prefix.to_string_lossy();
+                        // A token references a read-only workspace if it starts with the
+                        // prefix path. We also check that the match is at a path boundary
+                        // (next char is '/' or the token equals the prefix exactly) to
+                        // avoid false-positives on shared prefixes like /data vs /data2.
+                        let blocked = tokens.iter().any(|token| {
+                            if let Some(rest) = token.strip_prefix(prefix_str.as_ref()) {
+                                rest.is_empty() || rest.starts_with('/')
+                            } else {
+                                false
+                            }
+                        });
+                        // Also check if the prefix path string appears as a contiguous
+                        // substring within the full command (handles redirect operators,
+                        // quoted paths, etc.). This is a best-effort heuristic — the
+                        // primary check is the token scan above.
+                        let in_command = {
+                            let ps = prefix_str.as_ref();
+                            if let Some(idx) = command.find(ps) {
+                                // Verify path boundary after the match
+                                let after = &command[idx + ps.len()..];
+                                after.is_empty()
+                                    || after.starts_with('/')
+                                    || after.starts_with('"')
+                                    || after.starts_with('\'')
+                                    || after.starts_with(' ')
+                            } else {
+                                false
+                            }
+                        };
+                        if blocked || in_command {
+                            // Find the workspace name for the error message. The name is
+                            // not stored in the prefix list, so we report the path.
+                            return ToolResult {
+                                tool_use_id: tool_use_id.to_string(),
+                                content: format!(
+                                    "shell_exec blocked: path '{}' is in a read-only workspace (mode = r). Writes are not allowed.",
+                                    prefix_str
+                                ),
+                                is_error: true,
+                                ..Default::default()
+                            };
+                        }
+                    }
                 }
             }
 
@@ -2640,6 +2729,10 @@ async fn tool_shell_exec(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
+    // Ensure the child is terminated when the Child handle is dropped (e.g.
+    // on timeout or session cancellation) rather than becoming an orphan.
+    cmd.kill_on_drop(true);
+
     // Spawn the child process so we hold a handle that can be killed if the
     // session interrupt fires while the command is running.  Using `output()`
     // instead would block until the process *completes*, meaning cancel() would
@@ -2743,6 +2836,15 @@ async fn tool_agent_send(
     let message = input["message"]
         .as_str()
         .ok_or("Missing 'message' parameter")?;
+
+    // Self-send guard: sending a message to oneself would attempt to acquire
+    // `agent_msg_locks[id]` while that lock is already held by the current
+    // turn, causing an unrecoverable deadlock (issue #3613).
+    if let Some(caller) = caller_agent_id {
+        if caller == agent_id {
+            return Err("agent_send: an agent cannot send a message to itself".to_string());
+        }
+    }
 
     // Taint check: refuse to pass obvious credential payloads across
     // the agent boundary. `tool_agent_send` is the entry point for
@@ -5081,6 +5183,7 @@ async fn convert_to_ogg_opus(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn();
 
     let mut child = match spawn_result {
@@ -7384,6 +7487,129 @@ mod tests {
         assert!(!target.exists(), "file should not have been written");
     }
 
+    // ── Bug #3822: shell_exec must respect named workspace read-only mode ────
+
+    /// Regression for #3822: `shell_exec` must be blocked when the command
+    /// string references a path that falls inside a read-only named workspace.
+    /// Previously the shell tool had no such check; a plugin could bypass the
+    /// read-only restriction by issuing a shell command that writes to the
+    /// supposedly read-only workspace path.
+    #[tokio::test]
+    async fn test_shell_exec_blocked_for_readonly_workspace_path() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+
+        // Configure the shared workspace as read-only.
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        // Construct a command string that references the read-only path.
+        let ro_path = shared_canon.to_str().unwrap();
+        let command = format!("touch {ro_path}/evil.txt");
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": command}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000008"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_error,
+            "shell_exec referencing a read-only workspace path must be blocked; got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("read-only"),
+            "error must mention read-only; got: {}",
+            result.content
+        );
+        // Verify the file was NOT created.
+        assert!(!shared_canon.join("evil.txt").exists());
+    }
+
+    /// Read-only workspace enforcement must NOT block commands that do not
+    /// reference the read-only workspace path.
+    #[tokio::test]
+    async fn test_shell_exec_allowed_when_not_targeting_readonly_workspace() {
+        use librefang_types::agent::WorkspaceMode;
+
+        let primary = tempfile::tempdir().expect("primary");
+        let shared = tempfile::tempdir().expect("shared");
+        let shared_canon = shared.path().canonicalize().unwrap();
+
+        // Read-only shared workspace — but the command targets the primary workspace.
+        let kernel = make_named_ws_kernel(vec![(shared_canon.clone(), WorkspaceMode::ReadOnly)]);
+
+        // A command that does NOT reference the read-only path should go through
+        // (it may still fail for other reasons — e.g., exec policy — but it must
+        // not be blocked by the workspace read-only check).
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo hello"}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000009"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        // Must NOT be blocked by read-only check. It may be blocked by exec policy
+        // (if one is set) but should not contain "read-only" in the error.
+        if result.is_error {
+            assert!(
+                !result.content.contains("read-only"),
+                "must not be blocked by read-only check; got: {}",
+                result.content
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_web_search() {
         let result = execute_tool(
@@ -8022,6 +8248,8 @@ mod tests {
     async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("LIBREFANG_TEST_ALLOWED_ENV").ok();
+        // SAFETY: test captures and restores the previous value; unique enough
+        // name to avoid clashing with other tests running in parallel.
         unsafe {
             std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", "present");
         }

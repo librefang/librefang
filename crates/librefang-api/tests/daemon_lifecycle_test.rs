@@ -130,6 +130,7 @@ async fn test_full_daemon_lifecycle() {
         user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
@@ -272,6 +273,7 @@ async fn test_server_immediate_responsiveness() {
         user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let app = Router::new()

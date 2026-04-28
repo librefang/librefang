@@ -8,6 +8,7 @@ use librefang_types::approval::{
 };
 use librefang_types::capability::glob_matches;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -1065,6 +1066,69 @@ impl ApprovalManager {
         let _ = conn.execute(
             "DELETE FROM totp_lockout WHERE sender_id = ?1",
             rusqlite::params![sender_id],
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TOTP replay prevention (issue #3359)
+    // -----------------------------------------------------------------------
+
+    /// Hash a TOTP code for replay-prevention storage.
+    ///
+    /// Stores `sha256(code)` in hex so the raw digit string is never persisted.
+    fn totp_code_hash(code: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(code.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Check whether a TOTP code has already been used within the replay window.
+    ///
+    /// The window is 60 seconds (two 30-second TOTP steps) to cover both the
+    /// current step and the immediately preceding one.
+    pub fn is_totp_code_used(&self, code: &str) -> bool {
+        let Some(db) = &self.audit_db else {
+            return false;
+        };
+        let Ok(conn) = db.lock() else { return false };
+        let hash = Self::totp_code_hash(code);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let window_start = now_unix - 60;
+        conn.query_row(
+            "SELECT COUNT(*) FROM totp_used_codes WHERE code_hash = ?1 AND used_at >= ?2",
+            rusqlite::params![hash, window_start],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    }
+
+    /// Record a successfully-verified TOTP code to prevent replay.
+    ///
+    /// Also prunes entries older than 120 seconds from the table to keep it small.
+    pub fn record_totp_code_used(&self, code: &str) {
+        let Some(db) = &self.audit_db else { return };
+        let Ok(conn) = db.lock() else { return };
+        let hash = Self::totp_code_hash(code);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        // Upsert the used-code entry.
+        let _ = conn.execute(
+            "INSERT INTO totp_used_codes (code_hash, used_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(code_hash) DO UPDATE SET used_at = excluded.used_at",
+            rusqlite::params![hash, now_unix],
+        );
+        // Prune entries older than 120 seconds.
+        let prune_before = now_unix - 120;
+        let _ = conn.execute(
+            "DELETE FROM totp_used_codes WHERE used_at < ?1",
+            rusqlite::params![prune_before],
         );
     }
 
@@ -2399,6 +2463,50 @@ mod tests {
         assert!(policy2.tool_requires_totp("shell_exec"));
         assert!(policy2.tool_requires_totp("file_write"));
         assert!(policy2.tool_requires_totp("anything"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TOTP replay prevention (#3359)
+    // -----------------------------------------------------------------------
+
+    fn make_manager_with_db() -> ApprovalManager {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let conn = Arc::new(StdMutex::new(conn));
+        ApprovalManager::new_with_db(ApprovalPolicy::default(), conn)
+    }
+
+    #[test]
+    fn test_totp_replay_prevention_code_not_used_initially() {
+        let mgr = make_manager_with_db();
+        // A fresh code should not be marked as used.
+        assert!(!mgr.is_totp_code_used("123456"));
+    }
+
+    #[test]
+    fn test_totp_replay_prevention_code_rejected_after_use() {
+        let mgr = make_manager_with_db();
+        mgr.record_totp_code_used("123456");
+        // The same code must now be detected as already used.
+        assert!(mgr.is_totp_code_used("123456"));
+    }
+
+    #[test]
+    fn test_totp_replay_prevention_different_code_not_blocked() {
+        let mgr = make_manager_with_db();
+        mgr.record_totp_code_used("123456");
+        // A different code must not be blocked.
+        assert!(!mgr.is_totp_code_used("654321"));
+    }
+
+    #[test]
+    fn test_totp_code_hash_does_not_store_plaintext() {
+        // The hash of "123456" must not equal "123456".
+        let hash = ApprovalManager::totp_code_hash("123456");
+        assert_ne!(hash, "123456");
+        // It must be a 64-character hex string (SHA-256 output).
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     // -----------------------------------------------------------------------

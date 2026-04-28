@@ -370,8 +370,16 @@ export function ApprovalsPage() {
       />
 
       {/* Tab toggle */}
-      <div className="flex gap-2">
-        <button className={tabClass("pending", activeTab === "pending")} onClick={() => setActiveTab("pending")}>
+      <div role="tablist" aria-label={t("approvals.title")} className="flex gap-2">
+        <button
+          id="approvals-tab-pending"
+          role="tab"
+          aria-selected={activeTab === "pending"}
+          aria-controls="approvals-panel-pending"
+          tabIndex={activeTab === "pending" ? 0 : -1}
+          className={tabClass("pending", activeTab === "pending")}
+          onClick={() => setActiveTab("pending")}
+        >
           {t("approvals.tabPending")}
           {pendingApprovals.length > 0 && (
             <span className="ml-2 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-warning/20 px-1.5 text-[10px] font-bold text-warning">
@@ -379,15 +387,25 @@ export function ApprovalsPage() {
             </span>
           )}
         </button>
-        <button className={tabClass("audit", activeTab === "audit")} onClick={() => setActiveTab("audit")}>
+        <button
+          id="approvals-tab-audit"
+          role="tab"
+          aria-selected={activeTab === "audit"}
+          aria-controls="approvals-panel-audit"
+          tabIndex={activeTab === "audit" ? 0 : -1}
+          className={tabClass("audit", activeTab === "audit")}
+          onClick={() => setActiveTab("audit")}
+        >
           {t("approvals.tabAuditLog")}
         </button>
       </div>
 
       {activeTab === "audit" ? (
-        <AuditLogTab />
+        <div id="approvals-panel-audit" role="tabpanel" aria-labelledby="approvals-tab-audit">
+          <AuditLogTab />
+        </div>
       ) : (
-        <>
+        <div id="approvals-panel-pending" role="tabpanel" aria-labelledby="approvals-tab-pending">
           {/* Batch action bar */}
           {pendingApprovals.length > 0 && (
             <div className="flex items-center gap-3 flex-wrap">
@@ -531,7 +549,7 @@ export function ApprovalsPage() {
               })}
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

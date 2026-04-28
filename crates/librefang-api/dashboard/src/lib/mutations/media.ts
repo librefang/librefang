@@ -1,5 +1,6 @@
 import {
   useMutation,
+  useQueryClient,
   type UseMutationOptions,
 } from "@tanstack/react-query";
 import {
@@ -12,6 +13,7 @@ import {
   type MediaVideoSubmitResult,
   type MediaMusicResult,
 } from "../http/client";
+import { budgetKeys } from "../queries/keys";
 
 export function useGenerateImage(
   options?: Partial<
@@ -22,9 +24,14 @@ export function useGenerateImage(
     >
   >,
 ) {
+  const queryClient = useQueryClient();
   return useMutation({
     ...options,
     mutationFn: generateImage,
+    onSettled: (...args) => {
+      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      options?.onSettled?.(...args);
+    },
   });
 }
 
@@ -37,9 +44,14 @@ export function useSynthesizeSpeech(
     >
   >,
 ) {
+  const queryClient = useQueryClient();
   return useMutation({
     ...options,
     mutationFn: synthesizeSpeech,
+    onSettled: (...args) => {
+      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      options?.onSettled?.(...args);
+    },
   });
 }
 
@@ -52,9 +64,14 @@ export function useSubmitVideo(
     >
   >,
 ) {
+  const queryClient = useQueryClient();
   return useMutation({
     ...options,
     mutationFn: submitVideo,
+    onSettled: (...args) => {
+      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      options?.onSettled?.(...args);
+    },
   });
 }
 
@@ -67,8 +84,13 @@ export function useGenerateMusic(
     >
   >,
 ) {
+  const queryClient = useQueryClient();
   return useMutation({
     ...options,
     mutationFn: generateMusic,
+    onSettled: (...args) => {
+      queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      options?.onSettled?.(...args);
+    },
   });
 }

@@ -109,6 +109,7 @@ async function downloadExport(
   const token = localStorage.getItem("librefang-api-key") || "";
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  // lint-disable-next-line dashboard/no-inline-fetch -- blob download requires raw fetch
   const resp = await fetch(url, { headers });
   if (!resp.ok) {
     throw await ApiError.fromResponse(resp);

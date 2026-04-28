@@ -32,7 +32,11 @@ use super::screens::{
 /// Lightweight reference to the active backend, for passing to spawn functions.
 #[derive(Clone)]
 pub enum BackendRef {
-    Daemon(String),
+    Daemon {
+        base_url: String,
+        /// API key for `Authorization: Bearer` auth, if the daemon requires it.
+        api_key: Option<String>,
+    },
     InProcess(Arc<LibreFangKernel>),
 }
 
@@ -336,15 +340,13 @@ pub fn spawn_daemon_stream(
     base_url: String,
     agent_id: String,
     message: String,
+    api_key: Option<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Read};
 
-        let client = crate::http_client::client_builder()
-            .timeout(Duration::from_secs(300))
-            .build()
-            .unwrap();
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(300));
 
         let url = format!("{base_url}/api/agents/{agent_id}/message/stream");
         let resp = client
@@ -355,7 +357,7 @@ pub fn spawn_daemon_stream(
         let resp = match resp {
             Ok(r) if r.status().is_success() => r,
             Ok(_) => {
-                let fallback = daemon_fallback(&base_url, &agent_id, &message);
+                let fallback = daemon_fallback(&base_url, &agent_id, &message, api_key.as_deref());
                 let _ = tx.send(AppEvent::StreamDone(fallback));
                 return;
             }
@@ -467,11 +469,9 @@ fn daemon_fallback(
     base_url: &str,
     agent_id: &str,
     message: &str,
+    api_key: Option<&str>,
 ) -> Result<AgentLoopResult, String> {
-    let client = crate::http_client::client_builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = make_daemon_client_with_timeout(api_key, Duration::from_secs(120));
 
     let resp = client
         .post(format!("{base_url}/api/agents/{agent_id}/message"))
@@ -516,12 +516,14 @@ fn daemon_fallback(
 }
 
 /// Spawn a background thread that spawns an agent on the daemon.
-pub fn spawn_daemon_agent(base_url: String, toml_content: String, tx: mpsc::Sender<AppEvent>) {
+pub fn spawn_daemon_agent(
+    base_url: String,
+    toml_content: String,
+    api_key: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
     std::thread::spawn(move || {
-        let client = crate::http_client::client_builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap();
+        let client = make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(30));
 
         let resp = client
             .post(format!("{base_url}/api/agents"))
@@ -558,11 +560,8 @@ pub fn spawn_daemon_agent(base_url: String, toml_content: String, tx: mpsc::Send
 /// Fetch dashboard data in background.
 pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/status")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -706,11 +705,8 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch channel list in background.
 pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/channels")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -759,11 +755,9 @@ pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Test a channel in background.
 pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/channels/{channel}/test"))
@@ -807,11 +801,8 @@ pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender
 /// Fetch workflow list in background.
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/workflows")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -846,11 +837,8 @@ pub fn spawn_fetch_workflow_runs(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/workflows/{workflow_id}/runs"))
@@ -888,11 +876,9 @@ pub fn spawn_run_workflow(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(60))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(60));
 
             match client
                 .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
@@ -929,11 +915,9 @@ pub fn spawn_create_workflow(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/workflows"))
@@ -965,11 +949,8 @@ pub fn spawn_create_workflow(
 /// Fetch triggers in background.
 pub fn spawn_fetch_triggers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/triggers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -1008,11 +989,9 @@ pub fn spawn_create_trigger(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(10));
 
             match client
                 .post(format!("{base_url}/api/triggers"))
@@ -1046,11 +1025,8 @@ pub fn spawn_create_trigger(
 /// Delete a trigger in background.
 pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             match client
                 .delete(format!("{base_url}/api/triggers/{trigger_id}"))
@@ -1077,11 +1053,8 @@ pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::S
 /// Kill an agent in background (for detail view action).
 pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
 
             match client
                 .delete(format!("{base_url}/api/agents/{agent_id}"))
@@ -1121,11 +1094,8 @@ pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<
 /// Fetch skill assignment for an agent.
 pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/agents/{agent_id}/skills"))
                 .send()
@@ -1185,11 +1155,8 @@ pub fn spawn_fetch_agent_mcp_servers(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
                 .send()
@@ -1266,11 +1233,8 @@ pub fn spawn_update_agent_skills(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .put(format!("{base_url}/api/agents/{agent_id}/skills"))
                 .json(&serde_json::json!({"skills": skills}))
@@ -1308,11 +1272,8 @@ pub fn spawn_update_agent_mcp_servers(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .put(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
                 .json(&serde_json::json!({"mcp_servers": servers}))
@@ -1346,9 +1307,31 @@ pub fn spawn_update_agent_mcp_servers(
 
 // ── New screen spawn functions ───────────────────────────────────────────────
 
-fn daemon_client() -> reqwest::blocking::Client {
-    crate::http_client::client_builder()
-        .timeout(Duration::from_secs(5))
+/// Build a blocking reqwest client for daemon calls.
+///
+/// When `api_key` is `Some`, attaches an `Authorization: Bearer <key>` default
+/// header so every request through this client is authenticated.
+fn make_daemon_client(api_key: Option<&str>) -> reqwest::blocking::Client {
+    make_daemon_client_with_timeout(api_key, Duration::from_secs(5))
+}
+
+/// Build a blocking reqwest client for daemon calls with a custom timeout.
+///
+/// When `api_key` is `Some`, attaches an `Authorization: Bearer <key>` default
+/// header so every request through this client is authenticated.
+fn make_daemon_client_with_timeout(
+    api_key: Option<&str>,
+    timeout: Duration,
+) -> reqwest::blocking::Client {
+    let mut builder = crate::http_client::client_builder().timeout(timeout);
+    if let Some(key) = api_key {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
+            headers.insert(reqwest::header::AUTHORIZATION, val);
+        }
+        builder = builder.default_headers(headers);
+    }
+    builder
         .build()
         .unwrap_or_else(|_| crate::http_client::new_client())
 }
@@ -1356,8 +1339,8 @@ fn daemon_client() -> reqwest::blocking::Client {
 /// Fetch sessions list.
 pub fn spawn_fetch_sessions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/sessions")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let sessions: Vec<SessionInfo> = body
@@ -1387,8 +1370,8 @@ pub fn spawn_fetch_sessions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Delete a session.
 pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .delete(format!("{base_url}/api/sessions/{session_id}"))
                 .send()
@@ -1414,8 +1397,8 @@ pub fn spawn_delete_session(backend: BackendRef, session_id: String, tx: mpsc::S
 /// Fetch agents for memory screen agent selector.
 pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let agents: Vec<AgentEntry> = body
@@ -1451,8 +1434,8 @@ pub fn spawn_fetch_memory_agents(backend: BackendRef, tx: mpsc::Sender<AppEvent>
 /// Fetch KV pairs for an agent.
 pub fn spawn_fetch_memory_kv(backend: BackendRef, agent_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/memory/agents/{agent_id}/kv"))
                 .send()
@@ -1487,8 +1470,8 @@ pub fn spawn_save_memory_kv(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .put(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
                 .json(&serde_json::json!({"value": value}))
@@ -1518,8 +1501,8 @@ pub fn spawn_delete_memory_kv(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .delete(format!("{base_url}/api/memory/agents/{agent_id}/kv/{key}"))
                 .send()
@@ -1543,8 +1526,8 @@ pub fn spawn_delete_memory_kv(
 /// Fetch installed skills.
 pub fn spawn_fetch_skills(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/skills")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let skills: Vec<SkillInfo> = body
@@ -1576,8 +1559,8 @@ pub fn spawn_fetch_skills(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Search ClawHub marketplace.
 pub fn spawn_search_clawhub(backend: BackendRef, query: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             let encoded: String = query
                 .chars()
                 .map(|c| {
@@ -1605,8 +1588,8 @@ pub fn spawn_search_clawhub(backend: BackendRef, query: String, tx: mpsc::Sender
 /// Browse ClawHub marketplace.
 pub fn spawn_browse_clawhub(backend: BackendRef, sort: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             let url = format!("{base_url}/api/clawhub/browse?sort={sort}");
             if let Ok(resp) = client.get(&url).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -1646,8 +1629,8 @@ fn parse_clawhub_results(body: &serde_json::Value) -> Vec<ClawHubResult> {
 /// Install a skill from ClawHub.
 pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/clawhub/install"))
                 .json(&serde_json::json!({"slug": slug}))
@@ -1672,8 +1655,8 @@ pub fn spawn_install_skill(backend: BackendRef, slug: String, tx: mpsc::Sender<A
 /// Uninstall a skill.
 pub fn spawn_uninstall_skill(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/skills/uninstall"))
                 .json(&serde_json::json!({"name": name}))
@@ -1698,8 +1681,8 @@ pub fn spawn_uninstall_skill(backend: BackendRef, name: String, tx: mpsc::Sender
 /// Fetch MCP servers.
 pub fn spawn_fetch_mcp_servers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/mcp/servers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let servers: Vec<McpServerInfo> = body
@@ -1727,8 +1710,8 @@ pub fn spawn_fetch_mcp_servers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) 
 /// Fetch provider auth status for templates screen.
 pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/providers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     // API returns { "providers": [...], "total": N }
@@ -1759,8 +1742,8 @@ pub fn spawn_fetch_template_providers(backend: BackendRef, tx: mpsc::Sender<AppE
 /// Fetch security status.
 pub fn spawn_fetch_security(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/security")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let features: Vec<SecurityFeature> = body
@@ -1802,8 +1785,8 @@ pub fn spawn_fetch_security(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Verify audit chain.
 pub fn spawn_verify_chain(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client.get(format!("{base_url}/api/audit/verify")).send() {
                 Ok(resp) => {
                     let body: serde_json::Value = resp.json().unwrap_or_default();
@@ -1835,8 +1818,8 @@ pub fn spawn_verify_chain(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch audit entries (for dedicated audit screen).
 pub fn spawn_fetch_audit(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/audit/recent?n=200"))
                 .send()
@@ -1869,8 +1852,8 @@ pub fn spawn_fetch_audit(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch usage summary.
 pub fn spawn_fetch_usage(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             // Summary
             if let Ok(resp) = client.get(format!("{base_url}/api/usage/summary")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -1934,8 +1917,8 @@ pub fn spawn_fetch_usage(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch settings providers.
 pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/providers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     // API returns { "providers": [...], "total": N }
@@ -1985,8 +1968,8 @@ pub fn spawn_fetch_providers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch settings models.
 pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let models: Vec<ModelInfo> = body
@@ -2017,8 +2000,8 @@ pub fn spawn_fetch_models(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch settings tools.
 pub fn spawn_fetch_tools(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/tools")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let tools: Vec<ToolInfo> = body
@@ -2053,8 +2036,8 @@ pub fn spawn_save_provider_key(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/providers/{name}/key"))
                 .json(&serde_json::json!({"key": api_key}))
@@ -2081,8 +2064,8 @@ pub fn spawn_save_provider_key(
 /// Delete a provider API key.
 pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .delete(format!("{base_url}/api/providers/{name}/key"))
                 .send()
@@ -2108,11 +2091,9 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 /// Test a provider connection.
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = crate::http_client::client_builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .unwrap_or_else(|_| crate::http_client::new_client());
+        BackendRef::Daemon { base_url, api_key } => {
+            let client =
+                make_daemon_client_with_timeout(api_key.as_deref(), Duration::from_secs(15));
             let start = std::time::Instant::now();
             match client
                 .post(format!("{base_url}/api/providers/{name}/test"))
@@ -2161,8 +2142,8 @@ pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<A
 /// Fetch peers.
 pub fn spawn_fetch_peers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/peers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let peers: Vec<PeerInfo> = body
@@ -2196,8 +2177,8 @@ pub fn spawn_fetch_peers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch log entries (uses audit endpoint, polled frequently).
 pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/audit/recent?n=200"))
                 .send()
@@ -2241,8 +2222,8 @@ pub fn spawn_fetch_logs(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch hand definitions (marketplace).
 pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/hands")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let hands: Vec<HandInfo> = body["hands"]
@@ -2297,8 +2278,8 @@ pub fn spawn_fetch_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch active hand instances.
 pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/hands/active")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let instances: Vec<HandInstanceInfo> = body["instances"]
@@ -2348,8 +2329,8 @@ pub fn spawn_fetch_active_hands(backend: BackendRef, tx: mpsc::Sender<AppEvent>)
 /// Activate a hand.
 pub fn spawn_activate_hand(backend: BackendRef, hand_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/hands/{hand_id}/activate"))
                 .json(&serde_json::json!({}))
@@ -2387,8 +2368,8 @@ pub fn spawn_activate_hand(backend: BackendRef, hand_id: String, tx: mpsc::Sende
 /// Deactivate a hand instance.
 pub fn spawn_deactivate_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .delete(format!("{base_url}/api/hands/instances/{instance_id}"))
                 .send()
@@ -2422,8 +2403,8 @@ pub fn spawn_deactivate_hand(backend: BackendRef, instance_id: String, tx: mpsc:
 /// Pause a hand instance.
 pub fn spawn_pause_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!(
                     "{base_url}/api/hands/instances/{instance_id}/pause"
@@ -2459,8 +2440,8 @@ pub fn spawn_pause_hand(backend: BackendRef, instance_id: String, tx: mpsc::Send
 /// Resume a hand instance.
 pub fn spawn_resume_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!(
                     "{base_url}/api/hands/instances/{instance_id}/resume"
@@ -2498,8 +2479,8 @@ pub fn spawn_resume_hand(backend: BackendRef, instance_id: String, tx: mpsc::Sen
 /// Fetch all extensions (available + installed).
 pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/mcp/catalog")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let extensions: Vec<ExtensionInfo> = body["entries"]
@@ -2583,8 +2564,8 @@ pub fn spawn_fetch_extensions(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 /// Fetch extension health data.
 pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             if let Ok(resp) = client.get(format!("{base_url}/api/mcp/health")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
                     let entries: Vec<ExtensionHealthInfo> = body["health"]
@@ -2640,8 +2621,8 @@ pub fn spawn_fetch_extension_health(backend: BackendRef, tx: mpsc::Sender<AppEve
 /// Install an extension.
 pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/mcp/servers"))
                 .json(&serde_json::json!({"template_id": id}))
@@ -2680,8 +2661,8 @@ pub fn spawn_install_extension(backend: BackendRef, id: String, tx: mpsc::Sender
 /// resolves either form; the MCP endpoint only accepts the exact name.
 pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/extensions/uninstall"))
                 .json(&serde_json::json!({ "name": id }))
@@ -2706,8 +2687,8 @@ pub fn spawn_remove_extension(backend: BackendRef, id: String, tx: mpsc::Sender<
 /// Reconnect an extension's MCP server.
 pub fn spawn_reconnect_extension(backend: BackendRef, id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             match client
                 .post(format!("{base_url}/api/mcp/servers/{id}/reconnect"))
                 .send()
@@ -2738,8 +2719,8 @@ pub fn spawn_fetch_comms(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     use super::screens::comms::{CommsEdge, CommsEventItem, CommsNode};
 
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             // Fetch topology
             if let Ok(resp) = client.get(format!("{base_url}/api/comms/topology")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -2821,8 +2802,8 @@ pub fn spawn_comms_send(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             let body = serde_json::json!({
                 "from_agent_id": from,
                 "to_agent_id": to,
@@ -2867,8 +2848,8 @@ pub fn spawn_comms_task(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || match backend {
-        BackendRef::Daemon(base_url) => {
-            let client = daemon_client();
+        BackendRef::Daemon { base_url, api_key } => {
+            let client = make_daemon_client(api_key.as_deref());
             let mut body = serde_json::json!({
                 "title": title,
                 "description": desc,

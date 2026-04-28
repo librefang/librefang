@@ -1975,6 +1975,7 @@
     "standby": "Standby",
     "end_history": "End of history",
     "welcome_system": "Neural bridge established.",
+    "load_earlier_messages": "Load {{count}} earlier messages",
     "input_placeholder_with_agent": "Transmit command to {{name}}...",
     "generating": "Generating...",
     "clear_chat": "Clear Chat",

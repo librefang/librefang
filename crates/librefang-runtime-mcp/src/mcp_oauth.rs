@@ -215,10 +215,64 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
+/// Returns `None` if the origin resolves to a private/loopback/link-local
+/// host (SSRF guard — see `is_ssrf_blocked_host`).
 pub fn well_known_url(server_url: &str) -> Option<String> {
     let parsed = Url::parse(server_url).ok()?;
+    // Block SSRF before constructing the well-known URL.
+    let host = parsed.host_str()?;
+    if is_ssrf_blocked_host(host) {
+        return None;
+    }
     let origin = parsed.origin().unicode_serialization();
     Some(format!("{}/.well-known/oauth-authorization-server", origin))
+}
+
+/// Verify that every OAuth endpoint URL returned by a metadata document
+/// shares the same scheme and host (origin) as `server_url`.
+///
+/// This prevents a rogue metadata document from redirecting the token
+/// exchange or authorization flow to an attacker-controlled host.
+pub fn validate_metadata_endpoints(
+    metadata: &OAuthMetadata,
+    server_url: &str,
+) -> Result<(), String> {
+    let server_parsed = Url::parse(server_url).map_err(|e| format!("Invalid server URL: {e}"))?;
+    let server_origin = server_parsed.origin();
+
+    let check = |endpoint: &str, label: &str| -> Result<(), String> {
+        let parsed =
+            Url::parse(endpoint).map_err(|e| format!("Invalid {label} URL '{endpoint}': {e}"))?;
+        if parsed.origin() != server_origin {
+            return Err(format!(
+                "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
+                 does not share the same scheme+host as the MCP server '{server_url}'"
+            ));
+        }
+        Ok(())
+    };
+
+    check(&metadata.authorization_endpoint, "authorization_endpoint")?;
+    check(&metadata.token_endpoint, "token_endpoint")?;
+    if let Some(ref reg) = metadata.registration_endpoint {
+        check(reg, "registration_endpoint")?;
+    }
+    Ok(())
+}
+
+/// Generate a unique OAuth flow ID.
+///
+/// Returns 12 random bytes encoded as lowercase hex (24 chars), which is
+/// short enough to fit comfortably in a URL `state` parameter while providing
+/// ~96 bits of entropy — sufficient to prevent cross-flow confusion.
+pub fn generate_flow_id() -> String {
+    let mut buf = [0u8; 12];
+    rand::fill(&mut buf);
+    buf.iter().fold(String::with_capacity(24), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -372,12 +426,17 @@ pub async fn discover_oauth_metadata(
                     if let Ok(body) = resp.text().await {
                         match parse_authorization_server_metadata(&body, server_url) {
                             Ok(meta) => {
-                                let meta = if let Some(cfg) = config {
-                                    merge_metadata_with_config(meta, cfg)
+                                // #3713: Verify discovered endpoints share the server's origin.
+                                if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
+                                    warn!(error = %e, "Tier 1: endpoint domain mismatch — rejecting metadata");
                                 } else {
-                                    meta
-                                };
-                                return Ok(meta);
+                                    let meta = if let Some(cfg) = config {
+                                        merge_metadata_with_config(meta, cfg)
+                                    } else {
+                                        meta
+                                    };
+                                    return Ok(meta);
+                                }
                             }
                             Err(e) => {
                                 warn!(error = %e, "Tier 1: failed to parse metadata");
@@ -396,6 +455,7 @@ pub async fn discover_oauth_metadata(
     }
 
     // Tier 2: .well-known URL
+    // well_known_url() already guards against SSRF (private/loopback hosts) — #3592.
     if let Some(wk_url) = well_known_url(server_url) {
         debug!(url = %wk_url, "Tier 2: fetching .well-known metadata");
         match client.get(&wk_url).send().await {
@@ -403,12 +463,17 @@ pub async fn discover_oauth_metadata(
                 if let Ok(body) = resp.text().await {
                     match parse_authorization_server_metadata(&body, server_url) {
                         Ok(meta) => {
-                            let meta = if let Some(cfg) = config {
-                                merge_metadata_with_config(meta, cfg)
+                            // #3713: Verify discovered endpoints share the server's origin.
+                            if let Err(e) = validate_metadata_endpoints(&meta, server_url) {
+                                warn!(error = %e, "Tier 2: endpoint domain mismatch — rejecting metadata");
                             } else {
-                                meta
-                            };
-                            return Ok(meta);
+                                let meta = if let Some(cfg) = config {
+                                    merge_metadata_with_config(meta, cfg)
+                                } else {
+                                    meta
+                                };
+                                return Ok(meta);
+                            }
                         }
                         Err(e) => {
                             warn!(error = %e, "Tier 2: failed to parse .well-known metadata");
@@ -640,10 +705,10 @@ mod tests {
 
     #[test]
     fn test_well_known_url_http() {
-        let url = well_known_url("http://localhost:3000/mcp").unwrap();
+        let url = well_known_url("http://mcp.example.com:3000/mcp").unwrap();
         assert_eq!(
             url,
-            "http://localhost:3000/.well-known/oauth-authorization-server"
+            "http://mcp.example.com:3000/.well-known/oauth-authorization-server"
         );
     }
 
@@ -772,5 +837,150 @@ mod tests {
     fn test_parse_authorization_server_metadata_invalid_json() {
         let result = parse_authorization_server_metadata("not json", "https://server.com/mcp");
         assert!(result.is_err());
+    }
+
+    // -- #3592: well_known_url SSRF guard tests --
+
+    #[test]
+    fn well_known_url_blocks_loopback_ipv4() {
+        // A server_url pointing to 127.x must not yield a well-known fetch URL.
+        assert!(well_known_url("http://127.0.0.1:8080/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_private_10_range() {
+        assert!(well_known_url("http://10.0.0.1/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_private_172_range() {
+        assert!(well_known_url("http://172.16.0.1/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_private_192_168_range() {
+        assert!(well_known_url("http://192.168.1.1/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_link_local() {
+        assert!(well_known_url("http://169.254.169.254/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_blocks_localhost_hostname() {
+        assert!(well_known_url("http://localhost/mcp").is_none());
+    }
+
+    #[test]
+    fn well_known_url_allows_public_host() {
+        let url = well_known_url("https://my-mcp-server.example.com/mcp").unwrap();
+        assert_eq!(
+            url,
+            "https://my-mcp-server.example.com/.well-known/oauth-authorization-server"
+        );
+    }
+
+    // -- #3713: validate_metadata_endpoints domain-mismatch tests --
+
+    #[test]
+    fn validate_metadata_endpoints_accepts_same_origin() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://example.com/auth".to_string(),
+            token_endpoint: "https://example.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: Some("https://example.com/register".to_string()),
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        assert!(validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok());
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_rejects_cross_domain_token_endpoint() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://example.com/auth".to_string(),
+            token_endpoint: "https://evil.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        let err = validate_metadata_endpoints(&meta, "https://example.com/mcp").unwrap_err();
+        assert!(
+            err.contains("domain mismatch"),
+            "error should mention domain mismatch: {err}"
+        );
+        assert!(
+            err.contains("token_endpoint"),
+            "error should name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_rejects_cross_domain_auth_endpoint() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://evil.com/auth".to_string(),
+            token_endpoint: "https://example.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        let err = validate_metadata_endpoints(&meta, "https://example.com/mcp").unwrap_err();
+        assert!(err.contains("domain mismatch"), "{err}");
+        assert!(err.contains("authorization_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_rejects_cross_domain_registration_endpoint() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://example.com/auth".to_string(),
+            token_endpoint: "https://example.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: Some("https://attacker.net/register".to_string()),
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        let err = validate_metadata_endpoints(&meta, "https://example.com/mcp").unwrap_err();
+        assert!(err.contains("domain mismatch"), "{err}");
+        assert!(err.contains("registration_endpoint"), "{err}");
+    }
+
+    #[test]
+    fn validate_metadata_endpoints_no_registration_endpoint_ok() {
+        let meta = OAuthMetadata {
+            authorization_endpoint: "https://example.com/auth".to_string(),
+            token_endpoint: "https://example.com/token".to_string(),
+            client_id: None,
+            registration_endpoint: None,
+            scopes: Vec::new(),
+            user_scopes: Vec::new(),
+            server_url: "https://example.com/mcp".to_string(),
+        };
+        assert!(validate_metadata_endpoints(&meta, "https://example.com/mcp").is_ok());
+    }
+
+    // -- #3727: generate_flow_id tests --
+
+    #[test]
+    fn generate_flow_id_is_24_hex_chars() {
+        let id = generate_flow_id();
+        assert_eq!(id.len(), 24, "expected 24 hex chars, got {id}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit()),
+            "expected all hex digits: {id}"
+        );
+    }
+
+    #[test]
+    fn generate_flow_id_is_unique() {
+        let ids: Vec<String> = (0..10).map(|_| generate_flow_id()).collect();
+        let unique: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(unique.len(), ids.len(), "duplicate flow IDs generated");
     }
 }

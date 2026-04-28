@@ -55,7 +55,10 @@ impl OpenAIDriver {
         request_timeout_secs: Option<u64>,
     ) -> Self {
         let client = match proxy_url {
-            Some(url) => librefang_http::proxied_client_with_override(url),
+            Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
+                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
+                librefang_http::proxied_client()
+            }),
             None => librefang_http::proxied_client(),
         };
         Self {
@@ -96,7 +99,10 @@ impl OpenAIDriver {
             deployment
         );
         let client = match proxy_url {
-            Some(url) => librefang_http::proxied_client_with_override(url),
+            Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
+                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
+                librefang_http::proxied_client()
+            }),
             None => librefang_http::proxied_client(),
         };
         Self {
@@ -968,7 +974,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: 5000,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1006,10 +1012,17 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping temperature for this model");
                     oai_request.temperature = None;
+                    // Small backoff before retrying so we don't tight-loop on a
+                    // misconfigured request (100 ms × attempt, max ~300 ms).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
-                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens
+                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens.
+                // Add a small backoff to avoid a tight retry loop (#3758).
                 if status == 400
                     && body.contains("max_tokens")
                     && (body.contains("unsupported_parameter")
@@ -1021,6 +1034,12 @@ impl LlmDriver for OpenAIDriver {
                     warn!(model = %oai_request.model, "Switching to max_completion_tokens for this model");
                     oai_request.max_tokens = None;
                     oai_request.max_completion_tokens = Some(val);
+                    // Backoff before retry: 100 ms × attempt number (capped by max_retries=3
+                    // so the total extra wait is at most ~300 ms per switch attempt).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1041,6 +1060,11 @@ impl LlmDriver for OpenAIDriver {
                     } else {
                         oai_request.max_tokens = Some(cap);
                     }
+                    // Small backoff to prevent a tight retry loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1063,6 +1087,11 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.tools.clear();
                     oai_request.tool_choice = None;
+                    // Small backoff to prevent a tight retry loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1220,7 +1249,7 @@ impl LlmDriver for OpenAIDriver {
                 }
             };
 
-            let mut usage = oai_response
+            let usage = oai_response
                 .usage
                 .map(|u| {
                     let cached = u
@@ -1237,16 +1266,10 @@ impl LlmDriver for OpenAIDriver {
                 })
                 .unwrap_or_default();
 
-            // Guard: if the model returned content but usage is missing/zero
-            // (common with local LLMs like LM Studio, Ollama), set a synthetic
-            // non-zero output_tokens so the agent loop doesn't misclassify
-            // this as a "silent failure" and loop unnecessarily.
-            if !content.is_empty() && usage.input_tokens == 0 && usage.output_tokens == 0 {
-                debug!(
-                    "Response has content but no usage stats — setting synthetic output_tokens=1"
-                );
-                usage.output_tokens = 1;
-            }
+            // Note: if the model returned content but usage is missing/zero
+            // (common with local LLMs like LM Studio, Ollama), we leave
+            // output_tokens as 0 to accurately reflect unknown usage rather
+            // than reporting a fake count that would corrupt cost tracking.
 
             debug!(
                 prompt_tokens = usage.input_tokens,
@@ -1355,7 +1378,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: 5000,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1496,9 +1519,16 @@ impl LlmDriver for OpenAIDriver {
             let mut cached_prompt_tokens: u64 = 0;
             let mut chunk_count: u32 = 0;
             let mut sse_line_count: u32 = 0;
+            let mut receiver_dropped = false;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
+                if receiver_dropped {
+                    tracing::debug!(
+                        "streaming receiver dropped; cancelling OpenAI-compatible LLM stream"
+                    );
+                    break;
+                }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 chunk_count += 1;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -1566,15 +1596,24 @@ impl LlmDriver for OpenAIDriver {
                                 for action in think_filter.process(text) {
                                     match action {
                                         FilterAction::EmitText(t) => {
-                                            let _ =
-                                                tx.send(StreamEvent::TextDelta { text: t }).await;
+                                            if tx
+                                                .send(StreamEvent::TextDelta { text: t })
+                                                .await
+                                                .is_err()
+                                            {
+                                                receiver_dropped = true;
+                                            }
                                         }
                                         FilterAction::EmitThinking(t) => {
                                             // Route think content the same way as
                                             // reasoning_content deltas.
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ThinkingDelta { text: t })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                receiver_dropped = true;
+                                            }
                                         }
                                     }
                                 }
@@ -1585,22 +1624,30 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(reasoning) = delta["reasoning_content"].as_str() {
                             if !reasoning.is_empty() {
                                 reasoning_content.push_str(reasoning);
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: reasoning.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         } else if let Some(reasoning) = delta["reasoning"].as_str() {
                             // Fallback: Ollama and some local servers expose the reasoning
                             // field instead of reasoning_content.
                             if !reasoning.is_empty() {
                                 reasoning_content.push_str(reasoning);
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: reasoning.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
 
@@ -1623,23 +1670,31 @@ impl LlmDriver for OpenAIDriver {
                                     // Name (sent in first chunk)
                                     if let Some(name) = func["name"].as_str() {
                                         tool_accum[idx].1 = name.to_string();
-                                        let _ = tx
+                                        if tx
                                             .send(StreamEvent::ToolUseStart {
                                                 id: tool_accum[idx].0.clone(),
                                                 name: name.to_string(),
                                             })
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            receiver_dropped = true;
+                                        }
                                     }
 
                                     // Arguments delta
                                     if let Some(args) = func["arguments"].as_str() {
                                         tool_accum[idx].2.push_str(args);
                                         if !args.is_empty() {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ToolInputDelta {
                                                     text: args.to_string(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                receiver_dropped = true;
+                                            }
                                         }
                                     }
                                 }
@@ -1656,13 +1711,26 @@ impl LlmDriver for OpenAIDriver {
 
             // Flush any remaining buffered content from the think filter
             // (e.g. partial tag at stream end, or unclosed think block).
-            for action in think_filter.flush() {
-                match action {
-                    FilterAction::EmitText(t) => {
-                        let _ = tx.send(StreamEvent::TextDelta { text: t }).await;
-                    }
-                    FilterAction::EmitThinking(t) => {
-                        let _ = tx.send(StreamEvent::ThinkingDelta { text: t }).await;
+            // The receiver may have already disconnected mid-stream; if so we
+            // skip the flush. We don't update `receiver_dropped` again here
+            // because nothing after this block reads it.
+            if !receiver_dropped {
+                for action in think_filter.flush() {
+                    match action {
+                        FilterAction::EmitText(t) => {
+                            if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
+                                break;
+                            }
+                        }
+                        FilterAction::EmitThinking(t) => {
+                            if tx
+                                .send(StreamEvent::ThinkingDelta { text: t })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -1794,6 +1862,8 @@ impl LlmDriver for OpenAIDriver {
                     input: input.clone(),
                 });
 
+                // Receiver-drop here is non-recoverable but we still build the
+                // final response below so the caller (if present) gets it.
                 let _ = tx
                     .send(StreamEvent::ToolUseEnd {
                         id: id.clone(),
@@ -1821,15 +1891,6 @@ impl LlmDriver for OpenAIDriver {
                 }
             };
 
-            // Guard: if the model returned content but usage is missing/zero
-            // (common with local LLMs like LM Studio, Ollama), set a synthetic
-            // non-zero output_tokens so the agent loop doesn't misclassify
-            // this as a "silent failure" and loop unnecessarily.
-            if !content.is_empty() && usage.input_tokens == 0 && usage.output_tokens == 0 {
-                debug!("Stream has content but no usage stats — setting synthetic output_tokens=1");
-                usage.output_tokens = 1;
-            }
-
             debug!(
                 prompt_tokens = usage.input_tokens,
                 completion_tokens = usage.output_tokens,
@@ -1837,6 +1898,9 @@ impl LlmDriver for OpenAIDriver {
                 "OpenAI-compatible usage (stream)"
             );
 
+            // Best-effort: send ContentComplete even if the receiver dropped
+            // mid-stream — the caller still needs the usage data to update
+            // cost tracking.
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })
                 .await;

@@ -117,6 +117,7 @@ async fn start_test_server_with_provider(
         user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
@@ -1633,6 +1634,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let api_key_state = middleware::AuthState {
@@ -2805,6 +2807,7 @@ async fn start_test_server_with_rbac_users(
         user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let api_key_state = middleware::AuthState {
@@ -3107,6 +3110,7 @@ async fn start_test_server_with_full_user_configs(
         user_api_keys: user_api_keys_lock.clone(),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let api_key_state = middleware::AuthState {
@@ -3764,7 +3768,7 @@ async fn test_user_budget_put_get_delete_round_trip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(del_resp.status(), 200, "DELETE should clear the cap");
+    assert_eq!(del_resp.status(), 204, "DELETE should clear the cap");
 
     // GET again — back to limit = 0.
     let after_delete: serde_json::Value = client

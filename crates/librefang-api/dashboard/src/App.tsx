@@ -142,12 +142,12 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/70 backdrop-blur-md">
       <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
-        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
+        <div role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title" className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
           <div className="flex flex-col items-center mb-6">
-            <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 ring-2 ring-primary/20">
-              {isCredentials ? <User className="h-7 w-7 text-primary" /> : <Lock className="h-7 w-7 text-primary" />}
+            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
+              {isCredentials ? <User className="h-7 w-7 text-brand" /> : <Lock className="h-7 w-7 text-brand" />}
             </div>
-            <h2 className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
+            <h2 id="auth-dialog-title" className="text-xl font-black tracking-tight">{t(isCredentials ? "auth.credentials_title" : "auth.title")}</h2>
             <p className="text-sm text-text-dim mt-1">{t(isCredentials ? "auth.credentials_description" : "auth.description")}</p>
           </div>
           {isHybrid && (
@@ -156,7 +156,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                 type="button"
                 onClick={() => { setAuthMethod("credentials"); setErrorKey(null); setKey(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                  isCredentials ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-primary"
+                  isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
               >
                 {t("auth.credentials_tab")}
@@ -165,7 +165,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                 type="button"
                 onClick={() => { setAuthMethod("api_key"); setErrorKey(null); setUsername(""); setPassword(""); setTotpRequired(false); setTotpCode(""); }}
                 className={`rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                  !isCredentials ? "bg-primary text-white shadow-sm" : "text-text-dim hover:text-primary"
+                  !isCredentials ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-brand"
                 }`}
               >
                 {t("auth.api_key_tab")}
@@ -188,7 +188,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                   className={`w-full rounded-xl border px-4 py-3 text-center text-2xl font-mono tracking-[0.5em] focus:ring-2 outline-none transition-colors ${
                     errorKey === "invalid_totp"
                       ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-primary focus:ring-primary/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
                   }`}
                 />
               </>
@@ -203,7 +203,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                   className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
                     errorKey
                       ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-primary focus:ring-primary/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
                   }`}
                 />
                 <input
@@ -214,7 +214,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                   className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
                     errorKey
                       ? "border-error focus:border-error focus:ring-error/10"
-                      : "border-border-subtle bg-main focus:border-primary focus:ring-primary/10"
+                      : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
                   }`}
                 />
               </>
@@ -228,7 +228,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
                 className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-colors ${
                   errorKey
                     ? "border-error focus:border-error focus:ring-error/10"
-                    : "border-border-subtle bg-main focus:border-primary focus:ring-primary/10"
+                    : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
                 }`}
               />
             )}
@@ -238,7 +238,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
             <button
               type="submit"
               disabled={submitting || (isCredentials ? (totpRequired ? totpCode.length !== 6 : !username.trim() || !password) : !key.trim())}
-              className="w-full rounded-xl bg-primary py-3 text-sm font-bold text-white hover:bg-primary/90 transition-colors shadow-lg shadow-brand/20"
+              className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-colors shadow-lg shadow-brand/20"
             >
               {totpRequired ? t("auth.verify_totp") : t("auth.submit")}
             </button>
@@ -249,7 +249,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
   );
 }
 
-const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none transition-colors placeholder:text-text-dim/40";
+const INPUT_CLASS = "w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors placeholder:text-text-dim/40";
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
@@ -316,12 +316,13 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-200 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <motion.div className="w-full max-w-md mx-4" variants={fadeInScale} initial="initial" animate="animate">
-        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
+        <div role="dialog" aria-modal="true" aria-labelledby="change-credentials-dialog-title" className="rounded-2xl border border-border-subtle bg-surface shadow-2xl">
           <div className="flex items-center justify-between px-6 pt-6 pb-4">
-            <h2 className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
+            <h2 id="change-credentials-dialog-title" className="text-base font-black tracking-tight">{t("settings.change_credentials")}</h2>
             <button
               onClick={onClose}
-              className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
+              aria-label={t("common.close", { defaultValue: "Close dialog" })}
+              className="h-7 w-7 flex items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -399,7 +400,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               <button
                 type="submit"
                 disabled={submitting || !currentPassword}
-                className="flex-1 rounded-xl bg-primary py-2.5 text-sm font-bold text-white hover:bg-primary/90 transition-colors disabled:opacity-50"
+                className="flex-1 rounded-xl bg-brand py-2.5 text-sm font-bold text-white hover:bg-brand/90 transition-colors disabled:opacity-50"
               >
                 {submitting ? t("common.saving") : t("common.save")}
               </button>
@@ -525,10 +526,10 @@ export function App() {
     }
   }, [theme]);
 
-  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-primary group ${
+  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
     isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0" : "px-3 gap-3"
   }`;
-  const navActive = "border-primary/20 bg-primary/10 text-primary font-semibold shadow-sm shadow-brand/5";
+  const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
   const navGroups = useMemo(() => {
     const advancedItems = [
@@ -608,7 +609,7 @@ export function App() {
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
       <a
         href="#main-content"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[200] focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-white focus:shadow-lg focus:outline-none"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[200] focus:rounded-lg focus:bg-brand focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-white focus:shadow-lg focus:outline-none"
       >
         {t("nav.skip_to_content", { defaultValue: "Skip to content" })}
       </a>
@@ -630,19 +631,17 @@ export function App() {
           isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-4"
         }`}>
           <div className={`flex items-center gap-3 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
-            <img
-              src={`${import.meta.env.BASE_URL}boss-libre.png`}
-              alt="BossFang"
-              className="h-8 w-8 rounded-lg object-contain shrink-0"
-            />
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 shadow-[0_0_15px_rgba(14,165,233,0.3)] ring-1 ring-brand/40 shrink-0">
+              <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
+            </div>
             <div className="flex flex-col">
-              <strong className="text-sm font-bold tracking-tight whitespace-nowrap">BossFang</strong>
+              <strong className="text-sm font-bold tracking-tight whitespace-nowrap">LibreFang</strong>
               <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
             </div>
           </div>
           <button
             onClick={toggleSidebar}
-            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
+            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             title={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-label={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-expanded={!isSidebarCollapsed}
@@ -654,7 +653,7 @@ export function App() {
         <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin max-h-[calc(100vh-160px)]">
           <button
             onClick={() => setPaletteOpen(true)}
-            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-primary/30 hover:text-primary ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
             title={`${t("common.search")} (⌘K)`}
             aria-label={`${t("common.search")} (⌘K)`}
           >
@@ -671,7 +670,7 @@ export function App() {
                   <>
                     <button
                       onClick={() => toggleNavGroup(group.key)}
-                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 hover:text-primary transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
                     >
                       {group.label}
                       <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
@@ -686,7 +685,7 @@ export function App() {
                           onClick={() => setMobileMenuOpen(false)}
                           title={isSidebarCollapsed ? item.label : undefined}
                         >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-primary shrink-0" />}
+                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
                           <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
                         </Link>
                       ))}
@@ -708,7 +707,7 @@ export function App() {
                           onClick={() => setMobileMenuOpen(false)}
                           title={isSidebarCollapsed ? item.label : undefined}
                         >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-primary shrink-0" />}
+                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
                           <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
                         </Link>
                       ))}
@@ -745,26 +744,24 @@ export function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors duration-200 lg:hidden"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
               aria-label={t("nav.open_menu", { defaultValue: "Open navigation menu" })}
               aria-expanded={isMobileMenuOpen}
             >
               <Menu className="h-5 w-5" />
             </button>
             <div className="flex items-center gap-2 lg:hidden">
-              <img
-                src={`${import.meta.env.BASE_URL}boss-libre.png`}
-                alt="BossFang"
-                className="h-7 w-7 rounded-lg object-contain shrink-0"
-              />
-              <strong className="text-sm font-bold tracking-tight">BossFang</strong>
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
+                <div className="h-2.5 w-2.5 rounded-full bg-brand animate-pulse" />
+              </div>
+              <strong className="text-sm font-bold tracking-tight">LibreFang</strong>
             </div>
           </div>
           <div className="flex items-center gap-1">
             <NotificationCenter />
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors duration-200"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.change_language")}
               aria-label={t("common.change_language")}
             >
@@ -772,7 +769,7 @@ export function App() {
             </button>
             <button
               onClick={toggleTheme}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors duration-200"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
               title={t("common.toggle_theme")}
               aria-label={t("common.toggle_theme")}
             >
@@ -781,7 +778,7 @@ export function App() {
             <div className="relative">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-primary hover:bg-surface-hover transition-colors duration-200"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}
@@ -796,14 +793,14 @@ export function App() {
                     <Link
                       to="/settings"
                       onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
+                      className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     >
                       <Settings className="h-3.5 w-3.5" />
                       {t("nav.settings")}
                     </Link>
                     <button
                       onClick={() => { setUserMenuOpen(false); setShowChangePassword(true); }}
-                      className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-primary hover:bg-surface-hover transition-colors"
+                      className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     >
                       <Lock className="h-3.5 w-3.5" />
                       {t("settings.change_password")}

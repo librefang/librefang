@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
     Json, Router,
@@ -114,7 +115,7 @@ async fn delete_prompt_version(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.delete_prompt_version(&id) {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),

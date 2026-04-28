@@ -45,6 +45,7 @@ cron = "0.16"
 totp-rs = { workspace = true }
 zeroize = { workspace = true }
 surrealdb = { workspace = true, optional = true }
+sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -76,3 +77,4 @@ path = "bin/purge_sentinels.rs"
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+serial_test = "3"

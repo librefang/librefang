@@ -23,7 +23,9 @@ use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::Manager;
+#[cfg(desktop)]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
@@ -118,11 +120,20 @@ enum StartupMode {
     ConnectionScreen,
 }
 
+/// Mobile entry point. `tauri::mobile_entry_point` requires a 0-arg
+/// function, so on iOS/Android we wrap `run()` and pass defaults — the
+/// CLI flags it normally consumes don't apply when the OS launches the
+/// app via the bundled binary.
+#[cfg(mobile)]
+#[tauri::mobile_entry_point]
+fn mobile_main() {
+    run(None, false);
+}
+
 /// Entry point for the Tauri application.
 ///
 /// `server_url` — CLI `--server-url` override (remote mode).
 /// `force_local` — CLI `--local` flag (skip connection screen, start local).
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(server_url: Option<String>, force_local: bool) {
     // Init tracing
     tracing_subscriber::fmt()
@@ -349,35 +360,42 @@ pub fn run(server_url: Option<String>, force_local: bool) {
 
     builder
         .setup(move |app| {
-            if show_connection_screen {
-                let _window = WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    WebviewUrl::CustomProtocol(
-                        "lfconnect://localhost/"
-                            .parse()
-                            .expect("lfconnect URL must parse"),
-                    ),
-                )
-                .title("BossFang — Connect")
-                .inner_size(1280.0, 800.0)
-                .min_inner_size(800.0, 600.0)
-                .center()
-                .visible(true)
-                .build()?;
-            } else {
-                // Direct mode — navigate to the resolved URL
-                let _window = WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    WebviewUrl::External(initial_url.parse().expect("Invalid server URL")),
-                )
-                .title("BossFang")
-                .inner_size(1280.0, 800.0)
-                .min_inner_size(800.0, 600.0)
-                .center()
-                .visible(true)
-                .build()?;
+            // Window creation is desktop-only. On iOS/Android the host OS
+            // manages the main window via tauri.conf.json's "app.windows"
+            // entry, and WebviewWindowBuilder does not expose .title() /
+            // .inner_size() / .center() on mobile.
+            #[cfg(desktop)]
+            {
+                if show_connection_screen {
+                    let _window = WebviewWindowBuilder::new(
+                        app,
+                        "main",
+                        WebviewUrl::CustomProtocol(
+                            "lfconnect://localhost/"
+                                .parse()
+                                .expect("lfconnect URL must parse"),
+                        ),
+                    )
+                    .title("LibreFang — Connect")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(800.0, 600.0)
+                    .center()
+                    .visible(true)
+                    .build()?;
+                } else {
+                    // Direct mode — navigate to the resolved URL
+                    let _window = WebviewWindowBuilder::new(
+                        app,
+                        "main",
+                        WebviewUrl::External(initial_url.parse().expect("Invalid server URL")),
+                    )
+                    .title("LibreFang")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(800.0, 600.0)
+                    .center()
+                    .visible(true)
+                    .build()?;
+                }
             }
 
             // Set up system tray (desktop only)

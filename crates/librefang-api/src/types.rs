@@ -39,6 +39,33 @@ impl IntoResponse for ApiErrorResponse {
     }
 }
 
+/// Convenience free function — constructs a standard `ApiErrorResponse` and
+/// immediately converts it to a `Response`.
+///
+/// Prefer this over ad-hoc `(StatusCode, Json(json!({"error": ...})))` tuples
+/// so clients always receive machine-readable `code` and `type` fields.
+///
+/// ```
+/// use librefang_api::types::api_error;
+/// use axum::http::StatusCode;
+///
+/// let resp = api_error(StatusCode::NOT_FOUND, "agent_not_found", "Agent 42 not found");
+/// ```
+pub fn api_error(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    ApiErrorResponse {
+        error: message.into(),
+        code: Some(code.to_string()),
+        r#type: Some(code.to_string()),
+        details: None,
+        status,
+    }
+    .into_response()
+}
+
 impl ApiErrorResponse {
     /// 400 Bad Request.
     pub fn bad_request(msg: impl Into<String>) -> Self {
@@ -428,6 +455,10 @@ pub struct AgentListQuery {
     pub order: Option<String>,
     /// Include hand agents in the response (default: false).
     pub include_hands: Option<bool>,
+    /// Filter agents by owner (matches manifest.author). When the authenticated
+    /// caller is a plain User role, this is auto-populated with their username
+    /// so that non-admin users only see agents they authored.
+    pub owner: Option<String>,
 }
 
 /// Paginated list response wrapper.

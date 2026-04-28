@@ -336,14 +336,21 @@ mod tests {
         // hang or incorrectly skip.
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("LIBREFANG_VAULT_KEY").ok();
-        match value {
-            Some(v) => std::env::set_var("LIBREFANG_VAULT_KEY", v),
-            None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
+        // SAFETY: guarded by env_lock() mutex; no concurrent thread reads/writes
+        // LIBREFANG_VAULT_KEY while the lock is held.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("LIBREFANG_VAULT_KEY", v),
+                None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
+            }
         }
         let result = f();
-        match prev {
-            Some(p) => std::env::set_var("LIBREFANG_VAULT_KEY", p),
-            None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match prev {
+                Some(p) => std::env::set_var("LIBREFANG_VAULT_KEY", p),
+                None => std::env::remove_var("LIBREFANG_VAULT_KEY"),
+            }
         }
         result
     }

@@ -1255,21 +1255,51 @@ pub async fn clawhub_cn_install(
 
     match client.install(&req.slug, &skills_dir).await {
         Ok(result) => {
-            // Patch source provenance to ClawHubCn
+            // Patch source provenance to ClawHubCn so the skill registry knows
+            // this skill was installed from ClawHub and can surface update/version info.
             let skill_dir = skills_dir.join(&req.slug);
             let manifest_path = skill_dir.join("skill.toml");
             if manifest_path.exists() {
-                if let Ok(toml_str) = std::fs::read_to_string(&manifest_path) {
-                    if let Ok(mut manifest) =
-                        toml::from_str::<librefang_skills::SkillManifest>(&toml_str)
-                    {
-                        manifest.source = Some(librefang_skills::SkillSource::ClawHubCn {
-                            slug: req.slug.clone(),
-                            version: result.version.clone(),
-                        });
-                        if let Ok(updated) = toml::to_string_pretty(&manifest) {
-                            let _ = std::fs::write(&manifest_path, updated);
+                match std::fs::read_to_string(&manifest_path) {
+                    Ok(toml_str) => {
+                        match toml::from_str::<librefang_skills::SkillManifest>(&toml_str) {
+                            Ok(mut manifest) => {
+                                manifest.source = Some(librefang_skills::SkillSource::ClawHubCn {
+                                    slug: req.slug.clone(),
+                                    version: result.version.clone(),
+                                });
+                                match toml::to_string_pretty(&manifest) {
+                                    Ok(updated) => {
+                                        if let Err(e) = std::fs::write(&manifest_path, updated) {
+                                            tracing::warn!(
+                                                slug = %req.slug,
+                                                path = %manifest_path.display(),
+                                                "Failed to write provenance to skill.toml: {e}"
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            slug = %req.slug,
+                                            "Failed to serialize skill manifest for provenance patch: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    slug = %req.slug,
+                                    "Failed to parse skill.toml for provenance patch: {e}"
+                                );
+                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            slug = %req.slug,
+                            path = %manifest_path.display(),
+                            "Failed to read skill.toml for provenance patch: {e}"
+                        );
                     }
                 }
             }
@@ -2192,13 +2222,6 @@ pub async fn install_hand_deps(
             }
         };
 
-        // Execute the install command
-        let (shell, flag) = if cfg!(windows) {
-            ("cmd", "/C")
-        } else {
-            ("sh", "-c")
-        };
-
         // For winget on Windows, add --accept flags to avoid interactive prompts
         let final_cmd = if cfg!(windows) && cmd.starts_with("winget ") {
             format!("{cmd} --accept-source-agreements --accept-package-agreements")
@@ -2206,13 +2229,45 @@ pub async fn install_hand_deps(
             cmd.to_string()
         };
 
+        // Guard against shell injection: reject commands that contain shell
+        // metacharacters that are never needed in legitimate package-manager
+        // install strings (semicolons, pipes, backticks, redirects, etc.).
+        if final_cmd.contains(|c: char| {
+            matches!(
+                c,
+                ';' | '|' | '&' | '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '\n' | '\r'
+            )
+        }) {
+            results.push(serde_json::json!({
+                "key": req.key,
+                "status": "error",
+                "command": final_cmd,
+                "message": "Install command contains disallowed shell metacharacters and was rejected for security reasons",
+            }));
+            continue;
+        }
+
+        // Split into program + arguments and exec directly — no shell involved.
+        // This eliminates the sh -c / cmd /C injection vector entirely.
+        let parts: Vec<&str> = final_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            results.push(serde_json::json!({
+                "key": req.key,
+                "status": "error",
+                "command": final_cmd,
+                "message": "Install command is empty",
+            }));
+            continue;
+        }
+        let program = parts[0];
+        let args = &parts[1..];
+
         tracing::info!(hand = %hand_id, dep = %req.key, cmd = %final_cmd, "Auto-installing dependency");
 
         let output = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
-            tokio::process::Command::new(shell)
-                .arg(flag)
-                .arg(&final_cmd)
+            tokio::process::Command::new(program)
+                .args(args)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .stdin(std::process::Stdio::null())
@@ -2323,7 +2378,14 @@ pub async fn install_hand_deps(
                 if !extra_paths.is_empty() {
                     let current_path = std::env::var("PATH").unwrap_or_default();
                     let new_path = format!("{};{}", extra_paths.join(";"), current_path);
-                    std::env::set_var("PATH", &new_path);
+                    // `std::env::set_var` is not thread-safe in an async context;
+                    // push to a blocking thread to avoid UB in the tokio runtime.
+                    let new_path_clone = new_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // SAFETY: single mutation on a dedicated blocking thread.
+                        unsafe { std::env::set_var("PATH", &new_path_clone) };
+                    })
+                    .await;
                     tracing::info!(
                         added = extra_paths.len(),
                         "Refreshed PATH with winget/pip directories"
@@ -2642,10 +2704,17 @@ pub async fn set_hand_secret(
             .into_json_tuple();
     }
 
-    // Set in current process
-    // SAFETY: single-threaded secret writes during user-initiated config
-    unsafe {
-        std::env::set_var(&env_key, &value);
+    // Set in current process.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid UB in the multithreaded tokio runtime.
+    {
+        let env_key_clone = env_key.clone();
+        let value_clone = value.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_key_clone, &value_clone) };
+        })
+        .await;
     }
 
     (
@@ -4831,8 +4900,22 @@ pub(crate) fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Escape a value for safe storage in a `.env` file.
+///
+/// If a value contains literal newlines the raw `KEY=value\nEXTRA=junk` text
+/// would be parsed as two separate keys by every dotenv reader. Backslashes
+/// must be doubled so they are not misread as escape sequences on read-back.
+fn escape_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\") // must come first to avoid double-escaping
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
+/// Values containing newlines or backslashes are escaped so they stay on a
+/// single line and round-trip correctly through dotenv parsers.
 pub(crate) fn write_secret_env(
     path: &std::path::Path,
     key: &str,
@@ -4840,6 +4923,18 @@ pub(crate) fn write_secret_env(
 ) -> Result<(), std::io::Error> {
     validate_static_file_path(path, "secrets.env")
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    if key.contains('\n') || key.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret key must not contain newline characters",
+        ));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain newline characters",
+        ));
+    }
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -4852,8 +4947,10 @@ pub(crate) fn write_secret_env(
     // Remove existing line for this key
     lines.retain(|l| !l.starts_with(&format!("{key}=")));
 
-    // Add new line
-    lines.push(format!("{key}={value}"));
+    // Add new line — escape the value so embedded newlines/backslashes cannot
+    // corrupt the file structure.
+    let escaped = escape_env_value(value);
+    lines.push(format!("{key}={escaped}"));
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -5830,6 +5927,65 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         assert!(
             !raw.contains("[channels.discord]"),
             "channel section should have been removed — got:\n{raw}"
+        );
+    }
+
+    // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
+
+    #[test]
+    fn escape_env_value_plain_value_unchanged() {
+        assert_eq!(escape_env_value("hello"), "hello");
+        assert_eq!(escape_env_value("sk-abc123"), "sk-abc123");
+    }
+
+    #[test]
+    fn escape_env_value_newline_becomes_backslash_n() {
+        let raw = "line1\nline2";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "line1\\nline2");
+        // Must not contain a literal newline character.
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_carriage_return_becomes_backslash_r() {
+        let raw = "val\r\nend";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "val\\r\\nend");
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_backslash_is_doubled() {
+        let raw = r"C:\Users\secret";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, r"C:\\Users\\secret");
+    }
+
+    #[test]
+    fn escape_env_value_backslash_before_newline_double_escapes_correctly() {
+        // "\\\n" → the backslash must be doubled before the newline is escaped,
+        // producing "\\\\n" (a literal backslash-backslash-n), not "\\n".
+        let raw = "\\\n";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "\\\\\\n");
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn write_secret_env_value_with_newline_stays_single_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Must not inject additional key-looking lines.
+        let key_lines: Vec<&str> = content.lines().filter(|l| l.contains('=')).collect();
+        assert_eq!(key_lines.len(), 1, "expected 1 key line, got: {content:?}");
+        assert!(
+            key_lines[0].starts_with("API_KEY="),
+            "wrong key line: {}",
+            key_lines[0]
         );
     }
 }

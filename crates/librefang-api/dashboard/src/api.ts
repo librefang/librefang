@@ -269,6 +269,14 @@ export interface AgentItem {
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
+  /** UUID of the parent agent that spawned this one, if any. */
+  parent_agent_id?: string;
+  /** UUIDs of child agents spawned by this agent. */
+  children?: string[];
+  /** Active session UUID. */
+  session_id?: string;
+  /** Categorisation tags. */
+  tags?: string[];
 }
 
 export interface PaginatedResponse<T> {
@@ -1136,7 +1144,7 @@ export async function listAgents(
   opts: { includeHands?: boolean } = {},
 ): Promise<AgentItem[]> {
   const params = new URLSearchParams({
-    limit: "200",
+    limit: "500",
     sort: "last_active",
     order: "desc",
   });

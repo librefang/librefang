@@ -477,11 +477,7 @@ pub async fn delete_user(
     })
     .await
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status":"ok","deleted":name})),
-        )
-            .into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),
@@ -1009,7 +1005,7 @@ where
     // concurrent requests with the old key SHOULD fail).
     let mut user_keys_guard = state.user_api_keys.write().await;
 
-    std::fs::write(&config_path, &new_toml)
+    crate::atomic_write(&config_path, new_toml.as_bytes())
         .map_err(|e| PersistError::Internal(format!("write failed: {e}")))?;
 
     if let Err(e) = state.kernel.reload_config().await {

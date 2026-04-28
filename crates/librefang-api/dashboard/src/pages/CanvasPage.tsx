@@ -25,7 +25,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, getWorkflow, createSchedule, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
+import { type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
@@ -50,7 +50,10 @@ import {
   useSaveWorkflowAsTemplate,
   useUpdateWorkflow as useUpdateWorkflowMutation,
 } from "../lib/mutations/workflows";
-import { useWorkflowTemplates } from "../lib/queries/workflows";
+import { useCreateSchedule } from "../lib/mutations/schedules";
+import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
+import { useAgents } from "../lib/queries/agents";
+import { useQueryClient } from "@tanstack/react-query";
 
 type CanvasDraft = {
   nodes: Node[];
@@ -676,8 +679,11 @@ function CanvasPageInner() {
   const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [agents, setAgents] = useState<AgentItem[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
+  const queryClient = useQueryClient();
+  const agentsQuery = useAgents();
+  const agents = agentsQuery.data ?? [];
+  const workflowsQuery = useWorkflows();
+  const workflows = workflowsQuery.data ?? [];
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowItem | null>(null);
   const [workflowName, setWorkflowName] = useState("");
   const [workflowDescription, setWorkflowDescription] = useState("");
@@ -708,6 +714,7 @@ function CanvasPageInner() {
   const updateWorkflowMutation = useUpdateWorkflowMutation();
   const deleteWorkflowMutation = useDeleteWorkflow();
   const runWorkflowMutation = useRunWorkflow();
+  const createScheduleMutation = useCreateSchedule();
   const dryRunWorkflowMutation = useDryRunWorkflow();
   const saveWorkflowAsTemplateMutation = useSaveWorkflowAsTemplate();
 
@@ -1177,7 +1184,7 @@ function CanvasPageInner() {
   }, [t, setNodes, setEdges, showError, toErrorMessage]);
 
   const loadWorkflowIntoCanvas = useCallback(async (workflowId: string, fallback?: WorkflowItem | null) => {
-    const detail = await getWorkflow(workflowId);
+    const detail = await queryClient.fetchQuery(workflowQueries.detail(workflowId));
     let wfNodes: Node[];
     let wfEdges: Edge[];
     const layout = detail.layout as { nodes?: Node[]; edges?: Edge[] } | undefined;
@@ -1229,22 +1236,20 @@ function CanvasPageInner() {
       description: detail.description || fallback?.description || "",
     } as WorkflowItem);
     setErrorMsg(null);
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, queryClient]);
 
-  // Load agents, workflows, then load template or workflow from URL
+  // Load template or workflow from URL once agent/workflow data is available
   useEffect(() => {
-    Promise.all([listAgents(), listWorkflows()])
-      .then(async ([a, w]) => {
-        setAgents(a);
-        setWorkflows(w);
+    if (agentsQuery.isLoading || workflowsQuery.isLoading) return;
+    const run = async () => {
         const draft = readCanvasDraft();
         // 1. Try loading from sessionStorage template
-        const templateState = loadTemplate(a);
+        const templateState = loadTemplate(agents);
         if (templateState !== "missing") return;
         // 2. Try loading from URL ?wf= parameter
         if (routeWorkflowId) {
           try {
-            await loadWorkflowIntoCanvas(routeWorkflowId, w.find((item) => item.id === routeWorkflowId) ?? null);
+            await loadWorkflowIntoCanvas(routeWorkflowId, workflows.find((item) => item.id === routeWorkflowId) ?? null);
             return;
           } catch (e: unknown) {
             showError(toErrorMessage(e, t("canvas.workflow_load_error", { defaultValue: "Failed to load workflow" })));
@@ -1260,9 +1265,9 @@ function CanvasPageInner() {
         if (draft) {
           applyCanvasState(draft);
         }
-      })
-      .catch((e: unknown) => { showError(toErrorMessage(e, t("canvas.load_error", { defaultValue: "Failed to load data" }))); });
-  }, [routeTimestamp, routeWorkflowId, applyCanvasState, loadTemplate, loadWorkflowIntoCanvas, showError, t, toErrorMessage]);
+    };
+    run().catch((e: unknown) => { showError(toErrorMessage(e, t("canvas.load_error", { defaultValue: "Failed to load data" }))); });
+  }, [routeTimestamp, routeWorkflowId, agents, workflows, agentsQuery.isLoading, workflowsQuery.isLoading, applyCanvasState, loadTemplate, loadWorkflowIntoCanvas, showError, t, toErrorMessage, setNodes, setEdges]);
 
   // Persist only unsaved blank-canvas drafts. Saved workflows should reload from backend.
   useEffect(() => {
@@ -1519,9 +1524,6 @@ function CanvasPageInner() {
         description: workflowDescription,
       } as WorkflowItem;
       setSelectedWorkflow(updatedWorkflow);
-      setWorkflows((prev) => prev.map((workflow) => workflow.id === workflowId
-        ? { ...workflow, name: resolvedName, description: workflowDescription }
-        : workflow));
       setWorkflowName(resolvedName);
       navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
       clearDraft();
@@ -1546,7 +1548,6 @@ function CanvasPageInner() {
       created_at: created.created_at,
     } as WorkflowItem;
     setSelectedWorkflow(createdWorkflow);
-    setWorkflows((prev) => [createdWorkflow, ...prev.filter((workflow) => workflow.id !== createdId)]);
     setWorkflowName(resolvedName);
     navigate({ to: "/canvas", search: { t: undefined, wf: createdId }, replace: true });
     clearDraft();
@@ -1691,7 +1692,6 @@ function CanvasPageInner() {
   const handleDeleteConfirmed = useCallback(async (id: string) => {
     try {
       await deleteWorkflowMutation.mutateAsync(id);
-      setWorkflows(prev => prev.filter(w => w.id !== id));
       if (selectedWorkflow?.id === id) {
         setSelectedWorkflow(null);
         setNodes([]); setEdges([]);
@@ -1730,17 +1730,15 @@ function CanvasPageInner() {
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
     setShowTemplateBrowser(false);
     try {
-      const updatedList = await listWorkflows();
-      setWorkflows(updatedList);
-      const created = updatedList.find(w => w.id === workflowId);
-      if (created) {
-        await loadWorkflowIntoCanvas(created.id, created);
-        navigate({ to: "/canvas", search: { t: undefined, wf: created.id }, replace: true });
-      }
+      // Invalidate the workflows cache so the list refreshes
+      await queryClient.invalidateQueries({ queryKey: workflowQueries.list().queryKey });
+      const created = workflows.find(w => w.id === workflowId);
+      await loadWorkflowIntoCanvas(workflowId, created ?? null);
+      navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
     } catch (e: unknown) {
       showError(toErrorMessage(e, t("canvas.template_instantiate_error")));
     }
-  }, [loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
+  }, [queryClient, workflows, loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
 
   // Valid agent step count
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
@@ -2228,6 +2226,9 @@ function CanvasPageInner() {
             transition={{ duration: 0.18, ease: APPLE_EASE }}
           >
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="canvas-shortcuts-dialog-title"
             className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-140 sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
             variants={fadeInScale}
@@ -2236,8 +2237,8 @@ function CanvasPageInner() {
             exit="exit"
           >
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
-              <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <h3 id="canvas-shortcuts-dialog-title" className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
+              <button onClick={() => setShowHelp(false)} aria-label={t("common.close", { defaultValue: "Close dialog" })} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-1 text-xs">
               {[
@@ -2279,7 +2280,7 @@ function CanvasPageInner() {
           onSave={async (cron, tz) => {
             if (!selectedWorkflow?.id) return;
             try {
-              await createSchedule({ name: `${workflowName || "workflow"} schedule`, cron, tz, workflow_id: selectedWorkflow.id, enabled: true });
+              await createScheduleMutation.mutateAsync({ name: `${workflowName || "workflow"} schedule`, cron, tz, workflow_id: selectedWorkflow.id, enabled: true });
               setShowScheduleModal(false);
               showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
             } catch (e: any) { showError(e?.message || String(e)); }

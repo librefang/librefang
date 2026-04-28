@@ -343,13 +343,28 @@ async fn dashboard_login(
                         }))
                         .into_response();
                     }
+                    // Replay-prevention check (#3359): reject a code already used
+                    // in the last 60 seconds.
+                    if state.kernel.approvals().is_totp_code_used(totp_code) {
+                        return (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            axum::response::Json(serde_json::json!({
+                                "ok": false,
+                                "error": "TOTP code has already been used. Wait for the next 30-second window.",
+                            })),
+                        )
+                            .into_response();
+                    }
                     // Verify TOTP code
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
                     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret, totp_code, &issuer,
                     ) {
-                        Ok(true) => { /* TOTP valid, proceed to session creation */ }
+                        Ok(true) => {
+                            // Mark code as used so it cannot be replayed.
+                            state.kernel.approvals().record_totp_code_used(totp_code);
+                        }
                         Ok(false) => {
                             return (
                                 axum::http::StatusCode::UNAUTHORIZED,
@@ -769,6 +784,9 @@ fn load_sessions(
 }
 
 /// Persist active sessions to disk so they survive daemon restarts.
+///
+/// SECURITY: The file is written with owner-only permissions (0600) so that
+/// bearer tokens stored in it cannot be read by other local users (#3589/#3725).
 fn save_sessions(
     home_dir: &std::path::Path,
     sessions: &std::collections::HashMap<String, crate::password_hash::SessionToken>,
@@ -778,6 +796,10 @@ fn save_sessions(
         Ok(content) => {
             if let Err(e) = std::fs::write(&path, content) {
                 tracing::warn!("Failed to persist sessions: {e}");
+            } else {
+                // Restrict to owner-read/write only so bearer tokens are not
+                // world-readable on multi-user systems.
+                restrict_permissions(&path);
             }
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
@@ -862,6 +884,7 @@ pub async fn build_router(
         ),
         webhook_router,
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -950,20 +973,27 @@ pub async fn build_router(
     // address with no authentication configured. The middleware enforces
     // fail-closed for non-loopback traffic; this warning makes the
     // operator-facing posture explicit at boot.
+    //
+    // The default bind address is 127.0.0.1:4545 (loopback-only). Operators
+    // who change api_listen to 0.0.0.0 or a public IP without configuring auth
+    // get a security warning here (#3572).
     let bind_is_loopback = listen_addr.ip().is_loopback();
     if !any_auth && !bind_is_loopback {
         if allow_no_auth {
-            tracing::warn!(
-                "LIBREFANG_ALLOW_NO_AUTH=1 is set. Running WITHOUT authentication on {}. \
-                 Anyone reachable at this address can read/write agents, channels, and keys.",
+            // LIBREFANG_ALLOW_NO_AUTH=1 means the operator knowingly accepted
+            // the risk. Use error! so the message stands out in logs regardless
+            // of the configured log level.
+            tracing::error!(
+                "SECURITY WARNING: librefang is listening on {} with no authentication. \
+                 Set api_key in config.toml or use 127.0.0.1:4545 for local-only access. \
+                 (LIBREFANG_ALLOW_NO_AUTH=1 — operator accepted risk; running open.)",
                 listen_addr
             );
         } else {
             tracing::warn!(
-                "No api_key configured and server is bound to {} (non-loopback). \
-                 Non-loopback requests will be rejected with 401. \
-                 Set api_key in config.toml, bind to 127.0.0.1, \
-                 or set LIBREFANG_ALLOW_NO_AUTH=1 to explicitly run open.",
+                "SECURITY WARNING: librefang is listening on {} with no authentication. \
+                 Set api_key in config.toml or use 127.0.0.1:4545 for local-only access. \
+                 Non-loopback requests will be rejected with 401 until an api_key is set.",
                 listen_addr
             );
         }
@@ -990,6 +1020,19 @@ pub async fn build_router(
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
     // compatibility. Future versions (v2, v3) can be added as separate routers.
     let v1_routes = api_v1_routes();
+
+    // Upload routes are defined separately so they can share the auth/rate-limit
+    // layers but bypass RequestBodyLimitLayer — the handler enforces its own
+    // configurable max_upload_size_bytes (default 10 MB).
+    let upload_routes = Router::new()
+        .route(
+            "/api/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        )
+        .route(
+            "/api/v1/agents/{id}/upload",
+            axum::routing::post(routes::agents::upload_file),
+        );
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
@@ -1019,8 +1062,19 @@ pub async fn build_router(
         // Webhook trigger endpoints (not versioned — external callers use fixed URLs)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
-        // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned)
-        .merge(routes::network::protocol_router())
+        // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned).
+        // Apply an explicit body limit (1 MB) to inbound A2A task payloads so
+        // that external callers cannot exhaust server memory via oversized JSON
+        // bodies. This is a defence-in-depth companion to the global
+        // RequestBodyLimitLayer applied further down — the global limit uses the
+        // operator-configurable max_request_body_bytes value, which may be
+        // raised for other endpoints (e.g. file uploads). Pinning A2A separately
+        // ensures memory exhaustion DoS attacks via /a2a/tasks/send are always
+        // bounded (Bug #3785).
+        .merge(
+            routes::network::protocol_router()
+                .layer(RequestBodyLimitLayer::new(1024 * 1024)),
+        )
         // UAR / A2A RC v1.0 root endpoints — `/.well-known/agent.json` and `/a2a`
         // must live at the root per the spec, NOT under `/api`.
         .merge(routes::uar::root_router())
@@ -1035,6 +1089,11 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
+        // Upload routes must be merged BEFORE the layer calls so that auth and
+        // rate-limit middleware apply to them.  They are intentionally excluded
+        // from RequestBodyLimitLayer (applied below) because the handler
+        // enforces its own configurable limit.
+        .merge(upload_routes)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth,
@@ -1063,24 +1122,15 @@ pub async fn build_router(
         )
         .layer(cors);
 
-    // Split body-limit application: apply the global limit to the main app,
-    // then merge the upload route WITHOUT the limit.  The handler enforces its
-    // own configurable max_upload_size_bytes (default 10 MB).
-    let upload_routes = Router::new()
-        .route(
-            "/api/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        )
-        .route(
-            "/api/v1/agents/{id}/upload",
-            axum::routing::post(routes::agents::upload_file),
-        );
-
-    let app = app
-        .layer(RequestBodyLimitLayer::new(
-            kernel.config_ref().max_request_body_bytes,
-        ))
-        .merge(upload_routes);
+    // Apply the global request body size limit to the full app.  Upload routes
+    // were merged before the security layers above and therefore covered by
+    // auth/rate-limit, but they are NOT wrapped by this layer — Axum layers
+    // only apply to routes registered before the layer call, so routes merged
+    // after this point (channel_routes below) are also exempt.  Upload handler
+    // enforces its own max_upload_size_bytes cap instead.
+    let app = app.layer(RequestBodyLimitLayer::new(
+        kernel.config_ref().max_request_body_bytes,
+    ));
 
     // NOTE: HTTP metrics are recorded inside `request_logging` middleware via
     // `librefang_telemetry::metrics::record_http_request()`.  A separate metrics
@@ -1090,24 +1140,34 @@ pub async fn build_router(
     // These bypass auth/rate-limit layers since external platforms (Feishu,
     // Teams, etc.) handle their own signature verification.
     // The router is dynamic (behind RwLock) so hot-reload can swap routes.
+    //
+    // SECURITY: Apply a per-route body-size cap *before* merging so that
+    // webhook handlers are not exempt from the global RequestBodyLimitLayer
+    // (which was applied above to `app`). Tower layers wrap the router they
+    // are attached to; a layer added to `app` after `.nest()` would not
+    // cover the nested router. 1 MiB is generous for any webhook payload
+    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks.
+    const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
     let channel_webhook_state = state.webhook_router.clone();
-    let channel_routes = Router::new().fallback(move |req: axum::extract::Request| {
-        let wr = channel_webhook_state.clone();
-        async move {
-            use tower::ServiceExt;
-            let guard = wr.read().await;
-            let router: Arc<axum::Router> = Arc::clone(&guard);
-            drop(guard);
-            // Unwrap the Arc — if we hold the only reference we avoid a clone,
-            // otherwise Router::clone is needed (only during hot-reload overlap).
-            Arc::try_unwrap(router)
-                .unwrap_or_else(|arc| (*arc).clone())
-                .into_service()
-                .oneshot(req)
-                .await
-                .unwrap_or_else(|e: std::convert::Infallible| match e {})
-        }
-    });
+    let channel_routes = Router::new()
+        .fallback(move |req: axum::extract::Request| {
+            let wr = channel_webhook_state.clone();
+            async move {
+                use tower::ServiceExt;
+                let guard = wr.read().await;
+                let router: Arc<axum::Router> = Arc::clone(&guard);
+                drop(guard);
+                // Unwrap the Arc — if we hold the only reference we avoid a clone,
+                // otherwise Router::clone is needed (only during hot-reload overlap).
+                Arc::try_unwrap(router)
+                    .unwrap_or_else(|arc| (*arc).clone())
+                    .into_service()
+                    .oneshot(req)
+                    .await
+                    .unwrap_or_else(|e: std::convert::Infallible| match e {})
+            }
+        })
+        .layer(RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT));
     let app = app.nest("/channels", channel_routes);
 
     let app = app.with_state(state.clone());
@@ -1302,7 +1362,9 @@ pub async fn run_daemon(
             }
             // Stale PID file (process dead or different process reused PID), remove it
             info!("Removing stale daemon info file");
-            let _ = std::fs::remove_file(info_path);
+            if let Err(e) = std::fs::remove_file(info_path) {
+                tracing::warn!("Failed to remove stale daemon info file: {e}");
+            }
         }
 
         let daemon_info = DaemonInfo {
@@ -1313,7 +1375,9 @@ pub async fn run_daemon(
             platform: std::env::consts::OS.to_string(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&daemon_info) {
-            let _ = std::fs::write(info_path, json);
+            if let Err(e) = std::fs::write(info_path, json) {
+                tracing::warn!("Failed to write daemon info file: {e}");
+            }
             // SECURITY: Restrict daemon info file permissions (contains PID and port).
             restrict_permissions(info_path);
         }
@@ -1452,13 +1516,15 @@ pub async fn run_daemon(
         handle.abort();
     }
     for handle in bg_tasks {
-        let _ = handle.await;
+        let _ = handle.await; // JoinError from abort() is expected; ignore it
     }
     info!("Background tasks stopped");
 
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {
-        let _ = std::fs::remove_file(info_path);
+        if let Err(e) = std::fs::remove_file(info_path) {
+            tracing::warn!("Failed to remove daemon info file on shutdown: {e}");
+        }
     }
 
     // Stop channel bridges
@@ -1744,7 +1810,9 @@ mod observability_tests {
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("Failed to restrict permissions on {}: {e}", path.display());
+    }
 }
 
 #[cfg(not(unix))]
@@ -1825,7 +1893,7 @@ fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = pid;
+        let _ = pid; // suppress unused variable warning on unsupported platforms
         false
     }
 }

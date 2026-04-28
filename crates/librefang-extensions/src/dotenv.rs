@@ -79,7 +79,9 @@ fn load_vault() {
     for key in vault.list_keys() {
         if std::env::var(key).is_err() {
             if let Some(val) = vault.get(key) {
-                std::env::set_var(key, val.as_str());
+                // SAFETY: called before the tokio runtime starts (from synchronous
+                // main()); no other threads exist yet.
+                unsafe { std::env::set_var(key, val.as_str()) };
             }
         }
     }
@@ -99,7 +101,9 @@ fn load_env_file(path: &Path) {
 
         if let Some((key, value)) = parse_env_line(trimmed) {
             if std::env::var(&key).is_err() {
-                std::env::set_var(&key, &value);
+                // SAFETY: called before the tokio runtime starts (from synchronous
+                // main()); no other threads exist yet.
+                unsafe { std::env::set_var(&key, &value) };
             }
         }
     }
@@ -142,8 +146,11 @@ pub fn save_env_key(key: &str, value: &str) -> Result<(), String> {
     entries.insert(key.to_string(), value.to_string());
     write_env_file(&path, &entries)?;
 
-    // Also set in current process
-    std::env::set_var(key, value);
+    // Also set in current process.
+    // SAFETY: callers must ensure no concurrent threads are reading the process
+    // environment (i.e. call before the tokio runtime starts, or from a
+    // spawn_blocking context).
+    unsafe { std::env::set_var(key, value) };
 
     Ok(())
 }

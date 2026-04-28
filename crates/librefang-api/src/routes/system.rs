@@ -163,7 +163,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Task queue management
         .route(
             "/tasks",
-            axum::routing::get(task_queue_list_root),
+            axum::routing::get(task_queue_list_root).post(task_queue_post_root),
         )
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
@@ -627,13 +627,14 @@ pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state
@@ -641,13 +642,12 @@ pub async fn delete_agent_kv_key(
         .memory_substrate()
         .structured_delete(agent_id, &key)
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "key": key})),
-        ),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             tracing::warn!("Memory delete failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1235,19 +1235,64 @@ pub async fn invoke_tool(
 // Session listing endpoints
 // ---------------------------------------------------------------------------
 
+/// Pagination query parameters shared by list endpoints.
+#[derive(serde::Deserialize, Default)]
+pub struct PaginationParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl PaginationParams {
+    const DEFAULT_LIMIT: usize = 100;
+    const MAX_LIMIT: usize = 500;
+
+    fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(Self::DEFAULT_LIMIT)
+            .min(Self::MAX_LIMIT)
+    }
+
+    fn effective_offset(&self) -> usize {
+        self.offset.unwrap_or(0)
+    }
+}
+
 /// GET /api/sessions — List all sessions with metadata.
 #[utoipa::path(
     get,
     path = "/api/sessions",
     tag = "sessions",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
+    ),
     responses(
-        (status = 200, description = "List sessions", body = Vec<serde_json::Value>)
+        (status = 200, description = "Paginated list of sessions", body = serde_json::Value)
     )
 )]
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
     match state.kernel.memory_substrate().list_sessions() {
-        Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
-        Err(_) => Json(serde_json::json!({"sessions": []})),
+        Ok(all_sessions) => {
+            let total = all_sessions.len();
+            let offset = pagination.effective_offset();
+            let limit = pagination.effective_limit();
+            let items: Vec<_> = all_sessions.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({
+                "sessions": items,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }))
+        }
+        Err(_) => Json(serde_json::json!({
+            "sessions": [],
+            "total": 0,
+            "offset": 0,
+            "limit": PaginationParams::DEFAULT_LIMIT,
+        })),
     }
 }
 
@@ -1300,24 +1345,23 @@ pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     match state.kernel.memory_substrate().delete_session(session_id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "session_id": id})),
-        ),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1557,8 +1601,20 @@ fn approval_to_json(
 ///
 /// Transforms field names to match the dashboard template expectations:
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
-#[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
-pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[utoipa::path(
+    get,
+    path = "/api/approvals",
+    tag = "approvals",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
+    ),
+    responses((status = 200, description = "Paginated list of pending and recent approvals", body = serde_json::Value))
+)]
+pub async fn list_approvals(
+    State(state): State<Arc<AppState>>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
@@ -1615,8 +1671,16 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
     });
 
     let total = approvals.len();
+    let offset = pagination.effective_offset();
+    let limit = pagination.effective_limit();
+    let items: Vec<_> = approvals.into_iter().skip(offset).take(limit).collect();
 
-    Json(serde_json::json!({"approvals": approvals, "total": total}))
+    Json(serde_json::json!({
+        "approvals": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }))
 }
 
 /// GET /api/approvals/{id} — Get a single approval request by ID.
@@ -1772,7 +1836,11 @@ pub async fn approve_request(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 Ok((false, _)) => {
@@ -1805,12 +1873,26 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
+                    // Replay-prevention check (#3359): reject a code that was
+                    // already used within the last 60 seconds (two TOTP windows).
+                    if state.kernel.approvals().is_totp_code_used(code) {
+                        state.kernel.approvals().record_totp_failure("api_admin");
+                        return ApiErrorResponse::bad_request(
+                            "TOTP code has already been used. Wait for the next 30-second window.",
+                        )
+                        .into_json_tuple()
+                        .into_response();
+                    }
                     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret,
                         code,
                         &totp_issuer,
                     ) {
-                        Ok(true) => true,
+                        Ok(true) => {
+                            // Mark this code as used to prevent replay within the window.
+                            state.kernel.approvals().record_totp_code_used(code);
+                            true
+                        }
                         Ok(false) => {
                             state.kernel.approvals().record_totp_failure("api_admin");
                             return ApiErrorResponse::bad_request("Invalid TOTP code")
@@ -2415,7 +2497,11 @@ pub async fn totp_setup(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 _ => false,
@@ -2424,15 +2510,26 @@ pub async fn totp_setup(
                         None => false,
                     }
                 } else {
-                    // TOTP code
+                    // TOTP code — check replay before verifying (#3359).
+                    if state.kernel.approvals().is_totp_code_used(code) {
+                        state.kernel.approvals().record_totp_failure("api_admin");
+                        return ApiErrorResponse::bad_request(
+                            "TOTP code has already been used. Wait for the next 30-second window.",
+                        )
+                        .into_json_tuple();
+                    }
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
-                            librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                            let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                                 &secret,
                                 code,
                                 &totp_issuer,
                             )
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                            if ok {
+                                state.kernel.approvals().record_totp_code_used(code);
+                            }
+                            ok
                         }
                         None => false,
                     }
@@ -2446,6 +2543,24 @@ pub async fn totp_setup(
                 }
             }
         }
+    }
+
+    // Reject overwrite of a pending (not yet confirmed) TOTP enrollment.
+    // `totp_secret` present but `totp_confirmed` != "true" means a setup
+    // was initiated by a previous call but the confirm step was never completed.
+    // Allowing a second setup call here would silently discard the first QR
+    // code, making the first caller's authenticator app permanently invalid
+    // without any indication.
+    let pending_setup = state.kernel.vault_get("totp_secret").is_some()
+        && state.kernel.vault_get("totp_confirmed").as_deref() != Some("true");
+    if pending_setup {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "TOTP enrollment already in progress — confirm the existing setup or revoke it first",
+                "status": "pending_confirmation",
+            })),
+        );
     }
 
     let (secret_base32, otpauth_uri, qr_base64) =
@@ -2516,12 +2631,21 @@ pub async fn totp_confirm(
         }
     };
 
+    // Replay-prevention check (#3359): reject a code already used in the last 60 s.
+    if state.kernel.approvals().is_totp_code_used(&body.code) {
+        state.kernel.approvals().record_totp_failure("api_admin");
+        return ApiErrorResponse::bad_request(
+            "TOTP code has already been used. Wait for the next 30-second window.",
+        )
+        .into_json_tuple();
+    }
     match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
         &secret,
         &body.code,
         &totp_issuer,
     ) {
         Ok(true) => {
+            state.kernel.approvals().record_totp_code_used(&body.code);
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
             }
@@ -2602,7 +2726,11 @@ pub async fn totp_revoke(
                     &stored, &body.code,
                 ) {
                     Ok((true, updated)) => {
-                        let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                        if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
+                            tracing::warn!(
+                                "Failed to persist updated TOTP recovery codes after use: {e}"
+                            );
+                        }
                         true
                     }
                     _ => false,
@@ -2634,9 +2762,15 @@ pub async fn totp_revoke(
 
     // Remove TOTP data from vault
     // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
-    let _ = state.kernel.vault_set("totp_confirmed", "false");
-    let _ = state.kernel.vault_set("totp_secret", "");
-    let _ = state.kernel.vault_set("totp_recovery_codes", "[]");
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_secret", "") {
+        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
+        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+    }
 
     (
         StatusCode::OK,
@@ -2851,10 +2985,7 @@ pub async fn remove_binding(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.kernel.remove_binding(index) {
-        Some(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "status": "removed" })),
-        ),
+        Some(_) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
@@ -3167,7 +3298,8 @@ pub async fn pairing_remove_device(
                 device_id = %device_id,
                 "revoked paired device — bearer removed from live auth table"
             );
-            Json(serde_json::json!({"ok": true})).into_response()
+            // DELETE returns 204 No Content with no body (#3843).
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => ApiErrorResponse::not_found(e)
             .into_json_tuple()
@@ -3518,10 +3650,12 @@ pub async fn create_backup(
         components: components.clone(),
     };
     if let Ok(manifest_json) = serde_json::to_string_pretty(&manifest) {
-        let _ = zip.start_file("manifest.json", options).and_then(|()| {
+        if let Err(e) = zip.start_file("manifest.json", options).and_then(|()| {
             std::io::Write::write_all(&mut zip, manifest_json.as_bytes())
                 .map_err(zip::result::ZipError::Io)
-        });
+        }) {
+            tracing::warn!("Failed to write manifest.json into export archive: {e}");
+        }
     }
 
     if let Err(e) = zip.finish() {
@@ -3693,10 +3827,7 @@ pub async fn delete_backup(
     }
 
     tracing::info!("Backup deleted: {filename}");
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"deleted": filename})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// POST /api/restore — Restore kernel state from a backup archive.
@@ -4184,10 +4315,7 @@ pub async fn delete_event_webhook(
     };
     let mut store = EVENT_WEBHOOKS.write().await;
     if store.remove(&id).is_some() {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "removed", "id": id})),
-        )
+        (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
     } else {
         ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple()
     }
@@ -4301,10 +4429,7 @@ pub async fn delete_webhook(
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
             if state.webhook_store.delete(wh_id) {
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "deleted"})),
-                )
+                (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
             } else {
                 ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
             }
@@ -4479,10 +4604,7 @@ pub async fn task_queue_delete(
         t.t("api-error-task-not-found")
     };
     match state.kernel.task_delete(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "id": id})),
-        ),
+        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
@@ -4543,6 +4665,53 @@ pub async fn task_queue_list_root(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/tasks — Enqueue a task on behalf of an external caller.
+///
+/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
+///
+/// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
+/// cron scripts, external integrations) can enqueue tasks without a
+/// runtime/agent context. The agent-side `task_post` tool keeps the
+/// caller's agent id automatically; this HTTP form takes `created_by`
+/// as an optional explicit field for provenance.
+pub async fn task_queue_post_root(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let title = match body["title"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'title' field"})),
+            );
+        }
+    };
+    let description = match body["description"].as_str() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'description' field"})),
+            );
+        }
+    };
+    let assigned_to = body["assigned_to"].as_str();
+    let created_by = body["created_by"].as_str();
+    match state
+        .kernel
+        .task_post(title, description, assigned_to, created_by)
+        .await
+    {
+        Ok(task_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": task_id, "status": "pending"})),
+        ),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }
@@ -4828,7 +4997,17 @@ async fn create_registry_content(
             if let Err(e) = write_secret_env(&secrets_path, env_var, key_value) {
                 tracing::warn!("Failed to write API key to secrets.env: {e}");
             }
-            std::env::set_var(env_var, key_value);
+            // `std::env::set_var` is not thread-safe in an async context; delegate
+            // to a blocking thread to avoid UB in the multithreaded tokio runtime.
+            {
+                let env_var_owned = env_var.clone();
+                let key_value_owned = key_value.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // SAFETY: single mutation on a dedicated blocking thread.
+                    unsafe { std::env::set_var(&env_var_owned, &key_value_owned) };
+                })
+                .await;
+            }
         }
 
         let mut catalog = state
@@ -5286,7 +5465,7 @@ mod event_webhook_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let resp = app
             .oneshot(

@@ -253,6 +253,11 @@ impl CreateWebhookRequest {
         }
         validate_webhook_url(&self.url)?;
         if let Some(ref s) = self.secret {
+            if s.is_empty() {
+                return Err(
+                    "secret must not be empty; omit the field entirely to create a webhook without authentication".to_string(),
+                );
+            }
             if s.len() > MAX_SECRET_LEN {
                 return Err(format!(
                     "secret exceeds maximum length of {} chars",
@@ -284,8 +289,26 @@ impl WebhookStore {
     pub fn load(path: PathBuf) -> Self {
         let data = if path.exists() {
             match std::fs::read_to_string(&path) {
-                Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-                Err(_) => StoreData::default(),
+                Ok(contents) => match serde_json::from_str(&contents) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(
+                            path = %path.display(),
+                            error = %e,
+                            "Failed to deserialize webhook store — starting with empty store; \
+                             existing subscriptions may have been lost"
+                        );
+                        StoreData::default()
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %e,
+                        "Failed to read webhook store file — starting with empty store"
+                    );
+                    StoreData::default()
+                }
             }
         } else {
             StoreData::default()
@@ -296,7 +319,7 @@ impl WebhookStore {
         }
     }
 
-    /// Persist current state to disk.
+    /// Persist current state to disk atomically (write tmp → fsync → rename).
     fn persist(&self, data: &StoreData) -> Result<(), String> {
         let json =
             serde_json::to_string_pretty(data).map_err(|e| format!("serialize error: {e}"))?;
@@ -304,8 +327,8 @@ impl WebhookStore {
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Set restrictive permissions on the file (contains secrets)
-        std::fs::write(&self.path, json).map_err(|e| format!("write error: {e}"))?;
+        crate::atomic_write(&self.path, json.as_bytes())
+            .map_err(|e| format!("write error: {e}"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -528,6 +551,18 @@ mod tests {
         req.url = "not a url".to_string();
         let err = store.create(req).unwrap_err();
         assert!(err.contains("not a valid URL"));
+    }
+
+    #[test]
+    fn create_rejects_empty_secret() {
+        let (store, _dir) = temp_store();
+        let mut req = valid_create_req();
+        req.secret = Some(String::new());
+        let err = store.create(req).unwrap_err();
+        assert!(
+            err.contains("secret must not be empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

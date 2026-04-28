@@ -73,6 +73,7 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
         user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
     });
 
     let app = Router::new()
@@ -155,7 +156,7 @@ async fn users_create_then_get_then_delete_round_trips() {
 
     // DELETE
     let (status, _) = json_request(&h, Method::DELETE, "/api/users/Alice", None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, _) = json_request(&h, Method::GET, "/api/users/Alice", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

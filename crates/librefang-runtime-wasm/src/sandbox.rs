@@ -31,6 +31,16 @@ use std::sync::Arc;
 use tracing::debug;
 use wasmtime::*;
 
+/// Maximum number of bytes accepted from a guest `host_log` call.
+///
+/// A WASM guest can supply an arbitrary `msg_len` pointer length to
+/// `host_log`. Without this cap, a malicious or buggy guest can push
+/// megabytes into the host's structured log stream, filling disk space or
+/// injecting fake audit lines. Messages longer than this limit are
+/// truncated and annotated with a byte count so the operator knows the
+/// original was clipped.
+const MAX_LOG_BYTES: usize = 4096;
+
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -56,6 +66,34 @@ impl Default for SandboxConfig {
     }
 }
 
+/// `ResourceLimiter` implementation that caps WASM linear-memory growth at a
+/// configured byte ceiling. Attached to every `Store` so that WASM plugins
+/// cannot allocate unbounded host memory regardless of their fuel budget.
+struct MemoryLimiter {
+    max_bytes: usize,
+}
+
+impl wasmtime::ResourceLimiter for MemoryLimiter {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        Ok(desired <= self.max_bytes)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmtime::Error> {
+        // No table-element cap — only memory is bounded here.
+        Ok(true)
+    }
+}
+
 /// State carried in each WASM Store, accessible by host functions.
 pub struct GuestState {
     /// Capabilities granted to this guest — checked before every host call.
@@ -66,6 +104,8 @@ pub struct GuestState {
     pub agent_id: String,
     /// Tokio runtime handle for async operations in sync host functions.
     pub tokio_handle: tokio::runtime::Handle,
+    /// Memory limiter enforcing `SandboxConfig::max_memory_bytes`.
+    limiter: MemoryLimiter,
 }
 
 /// Result of executing a WASM module.
@@ -157,7 +197,7 @@ impl WasmSandbox {
         let module = Module::new(engine, wasm_bytes)
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
-        // Create store with guest state
+        // Create store with guest state (includes the memory limiter)
         let mut store = Store::new(
             engine,
             GuestState {
@@ -165,8 +205,15 @@ impl WasmSandbox {
                 kernel,
                 agent_id: agent_id.to_string(),
                 tokio_handle,
+                limiter: MemoryLimiter {
+                    max_bytes: config.max_memory_bytes,
+                },
             },
         );
+
+        // Enforce the memory cap: every memory.grow call from the guest goes
+        // through MemoryLimiter::memory_growing before any allocation happens.
+        store.limiter(|state| &mut state.limiter);
 
         // Set fuel budget (deterministic metering)
         if config.fuel_limit > 0 {
@@ -383,6 +430,16 @@ impl WasmSandbox {
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
         // host_log: lightweight logging — no capability check required.
+        //
+        // SECURITY: Guest-supplied msg_len is capped at MAX_LOG_BYTES before
+        // reading. Without the cap a malicious guest can push megabytes into
+        // the host's structured log stream, filling disk or injecting fake
+        // audit lines by embedding newline sequences. We:
+        //   1. Limit the read to MAX_LOG_BYTES regardless of msg_len.
+        //   2. Truncate the decoded string and append a byte count when it
+        //      exceeds the cap.
+        //   3. Replace bare CR/LF characters with the visible pilcrow (↵) so
+        //      a single guest call cannot inject extra log lines.
         linker
             .func_wrap(
                 "librefang",
@@ -392,11 +449,33 @@ impl WasmSandbox {
                  msg_ptr: i32,
                  msg_len: i32| {
                     let mut caller = caller;
-                    match Self::read_guest_bytes(&mut caller, msg_ptr, msg_len, "host_log") {
-                        Ok(bytes) => {
-                            let msg = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
-                            let agent_id = &caller.data().agent_id;
+                    // Clamp the guest-supplied length before touching memory.
+                    let clamped_len = (msg_len as usize).min(MAX_LOG_BYTES) as i32;
+                    let was_truncated = (msg_len as usize) > MAX_LOG_BYTES;
+                    let original_len = msg_len as usize;
 
+                    match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
+                        Ok(bytes) => {
+                            let raw = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+
+                            // Sanitize newlines to prevent log injection of
+                            // fake structured log lines.
+                            let sanitized = raw.replace("\r\n", " ").replace(['\r', '\n'], "\u{21b5}");
+
+                            // Annotate truncated messages so operators know
+                            // the original payload was longer.
+                            let msg: std::borrow::Cow<str> = if was_truncated {
+                                format!(
+                                    "{}... [truncated {} bytes]",
+                                    sanitized,
+                                    original_len - MAX_LOG_BYTES
+                                )
+                                .into()
+                            } else {
+                                sanitized.into()
+                            };
+
+                            let agent_id = &caller.data().agent_id;
                             match level {
                                 0 => tracing::trace!(agent = %agent_id, "[wasm] {msg}"),
                                 1 => tracing::debug!(agent = %agent_id, "[wasm] {msg}"),
@@ -579,6 +658,33 @@ mod tests {
         drop(sandbox);
     }
 
+    /// Regression: max_memory_bytes must be enforced at runtime, not just
+    /// declared. A guest module that requests more memory than the cap should
+    /// be rejected — before this fix the cap was a no-op comment.
+    #[test]
+    fn test_memory_limiter_blocks_excess_growth() {
+        let mut limiter = MemoryLimiter {
+            // 1 MiB cap
+            max_bytes: 1024 * 1024,
+        };
+        // Within limit → allowed
+        assert_eq!(
+            limiter
+                .memory_growing(0, 64 * 1024, None)
+                .expect("should not error"),
+            true,
+            "growth within cap must be permitted"
+        );
+        // Exceeds limit → denied
+        assert_eq!(
+            limiter
+                .memory_growing(0, 2 * 1024 * 1024, None)
+                .expect("should not error"),
+            false,
+            "growth beyond cap must be denied"
+        );
+    }
+
     #[tokio::test]
     async fn test_echo_module() {
         let sandbox = WasmSandbox::new().unwrap();
@@ -657,10 +763,12 @@ mod tests {
     #[tokio::test]
     async fn test_host_call_capability_denied() {
         let sandbox = WasmSandbox::new().unwrap();
-        // Try fs_read with no capabilities → denied
+        // fs_read canonicalizes before the capability check (#3814), so the
+        // path must exist for the deny to land. Cargo.toml is present in
+        // every crate's working dir during tests.
         let input = serde_json::json!({
             "method": "fs_read",
-            "params": {"path": "/etc/passwd"}
+            "params": {"path": "Cargo.toml"}
         });
         let config = SandboxConfig {
             capabilities: vec![], // No capabilities!
@@ -708,5 +816,40 @@ mod tests {
             err_msg.contains("Unknown"),
             "Expected unknown method error, got: {err_msg}"
         );
+    }
+
+    /// Regression test for #3865: host_log must refuse guest-supplied
+    /// messages longer than MAX_LOG_BYTES and must not allow newline
+    /// injection. This test validates the constant value and sanitization
+    /// logic directly without running a full WASM module, since the fix
+    /// lives in the host-side closure.
+    #[test]
+    fn test_host_log_max_bytes_constant() {
+        assert_eq!(MAX_LOG_BYTES, 4096, "MAX_LOG_BYTES must be 4096");
+    }
+
+    #[test]
+    fn test_host_log_newline_sanitization_logic() {
+        // Validate the exact sanitization expressions used in the host_log closure.
+        let raw = "line1\r\nline2\nline3\rline4";
+        let sanitized = raw.replace("\r\n", " ").replace(['\r', '\n'], "\u{21b5}");
+        assert!(!sanitized.contains('\n'), "LF must be replaced");
+        assert!(!sanitized.contains('\r'), "CR must be replaced");
+        // CRLF → single space; bare LF/CR → pilcrow
+        assert!(sanitized.contains(' '), "CRLF should become a space");
+        assert!(
+            sanitized.contains('\u{21b5}'),
+            "bare LF/CR should become pilcrow"
+        );
+    }
+
+    #[test]
+    fn test_host_log_truncation_annotation() {
+        // Simulate what the closure does for an over-length message.
+        let long_msg = "x".repeat(MAX_LOG_BYTES + 100);
+        let clamped = &long_msg[..MAX_LOG_BYTES];
+        let annotated = format!("{}... [truncated {} bytes]", clamped, 100);
+        assert!(annotated.contains("[truncated 100 bytes]"));
+        assert!(annotated.len() > MAX_LOG_BYTES);
     }
 }

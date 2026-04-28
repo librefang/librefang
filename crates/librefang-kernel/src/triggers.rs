@@ -276,10 +276,19 @@ impl TriggerEngine {
         let data = serde_json::to_string_pretty(&triggers).map_err(|e| {
             LibreFangError::Internal(format!("Failed to serialize trigger jobs: {e}"))
         })?;
-        let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
-            LibreFangError::Internal(format!("Failed to write trigger jobs temp file: {e}"))
-        })?;
+        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to create trigger jobs temp file: {e}"))
+            })?;
+            f.write_all(data.as_bytes()).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to write trigger jobs temp file: {e}"))
+            })?;
+            f.sync_all().map_err(|e| {
+                LibreFangError::Internal(format!("Failed to fsync trigger jobs temp file: {e}"))
+            })?;
+        }
         std::fs::rename(&tmp_path, path).map_err(|e| {
             LibreFangError::Internal(format!("Failed to rename trigger jobs file: {e}"))
         })?;
@@ -1688,6 +1697,227 @@ mod tests {
             matches.len(),
             1,
             "assignee_match:self must accept the owner's display name too"
+        );
+    }
+
+    // -- session_mode_override propagation (#3754) ---------------------------------
+
+    /// Per-trigger `session_mode: Some(New)` must surface as `Some(New)` on
+    /// every `TriggerMatch` produced by that trigger — the dispatcher uses this
+    /// to materialise a fresh `SessionId` instead of reusing the canonical one.
+    #[test]
+    fn session_mode_new_override_propagates_to_trigger_match() {
+        use librefang_types::agent::SessionMode;
+
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        let tid = engine.register_with_target(
+            agent_id,
+            TriggerPattern::All,
+            "event: {{event}}".to_string(),
+            0,
+            None,
+            Some(0), // zero cooldown so the trigger fires immediately on every evaluation
+            Some(SessionMode::New),
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+        let (matches, _) = engine.evaluate(&event);
+
+        assert_eq!(matches.len(), 1, "trigger must fire");
+        assert_eq!(
+            matches[0].session_mode_override,
+            Some(SessionMode::New),
+            "session_mode_override must be Some(New) when trigger carries session_mode = New"
+        );
+
+        // Verify the field is preserved through the full round-trip: take the trigger,
+        // restore it under a new agent id, and check it still fires with the same override.
+        let taken = engine.take_agent_triggers(agent_id);
+        let new_agent = AgentId::new();
+        engine.restore_triggers(new_agent, taken);
+
+        let (matches2, _) = engine.evaluate(&event);
+        assert_eq!(matches2.len(), 1, "restored trigger must still fire");
+        assert_eq!(
+            matches2[0].session_mode_override,
+            Some(SessionMode::New),
+            "session_mode_override must survive take/restore"
+        );
+
+        // The trigger should also survive a patch that touches other fields.
+        let restored_triggers = engine.list_agent_triggers(new_agent);
+        let restored_id = restored_triggers[0].id;
+        engine.update(
+            restored_id,
+            TriggerPatch {
+                prompt_template: Some("updated: {{event}}".to_string()),
+                ..Default::default()
+            },
+        );
+        let after_patch = engine.get_trigger(restored_id).unwrap();
+        assert_eq!(
+            after_patch.session_mode,
+            Some(SessionMode::New),
+            "session_mode must not be touched by a patch that only changes prompt_template"
+        );
+
+        let _ = tid; // referenced above
+    }
+
+    /// Per-trigger `session_mode: Some(Persistent)` must produce
+    /// `session_mode_override = Some(Persistent)` — an explicit override wins
+    /// even if the value matches the default.
+    #[test]
+    fn session_mode_persistent_override_propagates_to_trigger_match() {
+        use librefang_types::agent::SessionMode;
+
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        engine.register_with_target(
+            agent_id,
+            TriggerPattern::All,
+            "event: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            Some(SessionMode::Persistent),
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+        let (matches, _) = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].session_mode_override,
+            Some(SessionMode::Persistent),
+            "session_mode_override must be Some(Persistent) for an explicit Persistent trigger"
+        );
+    }
+
+    /// When `Trigger.session_mode` is `None` the dispatcher falls back to the
+    /// agent manifest default.  The trigger engine's job is solely to surface
+    /// `None` on `TriggerMatch.session_mode_override` — the actual resolution
+    /// (`None` → manifest default) happens in the kernel dispatch loop.
+    #[test]
+    fn session_mode_none_trigger_yields_none_override() {
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        engine.register_with_target(
+            agent_id,
+            TriggerPattern::All,
+            "event: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            None, // no per-trigger session mode
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+        let (matches, _) = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].session_mode_override, None,
+            "session_mode_override must be None when the trigger has no override; \
+             the dispatcher should then fall back to the agent manifest default"
+        );
+    }
+
+    /// Model the dispatcher's `effective_mode = mode_override.unwrap_or(manifest_mode)`
+    /// resolution inline so we have a named regression test pinned to exactly
+    /// the four documented cases without needing a full kernel.
+    #[test]
+    fn session_mode_resolution_order_per_trigger_over_manifest() {
+        use librefang_types::agent::SessionMode;
+
+        // Helper that mimics the single line in the kernel dispatch loop.
+        let resolve = |trigger_override: Option<SessionMode>,
+                       manifest: SessionMode|
+         -> SessionMode { trigger_override.unwrap_or(manifest) };
+
+        // Case 1: trigger override = New → New regardless of manifest
+        assert_eq!(
+            resolve(Some(SessionMode::New), SessionMode::Persistent),
+            SessionMode::New,
+            "per-trigger New must beat manifest Persistent"
+        );
+
+        // Case 2: trigger override = Persistent → Persistent regardless of manifest
+        assert_eq!(
+            resolve(Some(SessionMode::Persistent), SessionMode::New),
+            SessionMode::Persistent,
+            "per-trigger Persistent must beat manifest New"
+        );
+
+        // Case 3: no trigger override → fall through to manifest New
+        assert_eq!(
+            resolve(None, SessionMode::New),
+            SessionMode::New,
+            "absent override must yield manifest New"
+        );
+
+        // Case 4: no trigger override → fall through to manifest Persistent
+        assert_eq!(
+            resolve(None, SessionMode::Persistent),
+            SessionMode::Persistent,
+            "absent override must yield manifest Persistent"
+        );
+    }
+
+    /// `update()` with `session_mode: Some(None)` must clear the per-trigger
+    /// session mode override (revert to inheriting the manifest default).
+    #[test]
+    fn patch_session_mode_some_none_clears_override() {
+        use librefang_types::agent::SessionMode;
+
+        let engine = TriggerEngine::new();
+        let agent_id = AgentId::new();
+        let tid = engine.register_with_target(
+            agent_id,
+            TriggerPattern::All,
+            "event: {{event}}".to_string(),
+            0,
+            None,
+            Some(0),
+            Some(SessionMode::New),
+        );
+
+        // Sanity: override is present before the patch.
+        assert_eq!(
+            engine.get_trigger(tid).unwrap().session_mode,
+            Some(SessionMode::New)
+        );
+
+        // Clear the override.
+        engine.update(
+            tid,
+            TriggerPatch {
+                session_mode: Some(None),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            engine.get_trigger(tid).unwrap().session_mode,
+            None,
+            "patching session_mode = Some(None) must clear the per-trigger override"
         );
     }
 }

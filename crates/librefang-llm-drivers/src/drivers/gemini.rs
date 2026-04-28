@@ -8,6 +8,7 @@
 //! - Tool definitions via `functionDeclarations` inside `tools[]`
 //! - Response: `candidates[0].content.parts[]`
 
+use crate::backoff::standard_retry_delay;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -53,7 +54,10 @@ impl GeminiDriver {
         request_timeout_secs: Option<u64>,
     ) -> Self {
         let client = match proxy_url {
-            Some(url) => librefang_http::proxied_client_with_override(url),
+            Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
+                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
+                librefang_http::proxied_client()
+            }),
             None => librefang_http::proxied_client(),
         };
         Self {
@@ -830,6 +834,13 @@ impl LlmDriver for GeminiDriver {
                 // 503 (model overloaded) is a server-capacity issue, not
                 // an account-level rate limit — don't persist a key-wide
                 // lockout for it.
+                let retry_after_ms = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|secs| secs * 1000)
+                    .unwrap_or(5000);
                 if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
@@ -839,20 +850,25 @@ impl LlmDriver for GeminiDriver {
                     );
                 }
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
-                    warn!(status, retry_ms, "Rate limited/overloaded, retrying");
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    let delay = standard_retry_delay(
+                        attempt + 1,
+                        std::time::Duration::from_millis(retry_after_ms),
+                    );
+                    warn!(
+                        status,
+                        delay_ms = delay.as_millis(),
+                        "Rate limited/overloaded, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
@@ -941,6 +957,13 @@ impl LlmDriver for GeminiDriver {
                 // 503 (model overloaded) is a server-capacity issue, not
                 // an account-level rate limit — don't persist a key-wide
                 // lockout for it.
+                let retry_after_ms = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|secs| secs * 1000)
+                    .unwrap_or(5000);
                 if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
@@ -950,23 +973,25 @@ impl LlmDriver for GeminiDriver {
                     );
                 }
                 if attempt < max_retries {
-                    let retry_ms = (attempt + 1) as u64 * 2000;
+                    let delay = standard_retry_delay(
+                        attempt + 1,
+                        std::time::Duration::from_millis(retry_after_ms),
+                    );
                     warn!(
                         status,
-                        retry_ms, "Rate limited/overloaded (stream), retrying"
+                        delay_ms = delay.as_millis(),
+                        "Rate limited/overloaded (stream), retrying"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
@@ -994,9 +1019,14 @@ impl LlmDriver for GeminiDriver {
             let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
+            let mut receiver_dropped = false;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
+                if receiver_dropped {
+                    tracing::debug!("streaming receiver dropped; cancelling Gemini LLM stream");
+                    break;
+                }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -1054,11 +1084,15 @@ impl LlmDriver for GeminiDriver {
                                                 // Internal reasoning from a thinking
                                                 // model — emit as ThinkingDelta.
                                                 thinking_content.push_str(text);
-                                                let _ = tx
+                                                if tx
                                                     .send(StreamEvent::ThinkingDelta {
                                                         text: text.clone(),
                                                     })
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    receiver_dropped = true;
+                                                }
                                                 // Capture thought_signature for the
                                                 // thinking block separately from text.
                                                 if thought_signature.is_some() {
@@ -1067,11 +1101,15 @@ impl LlmDriver for GeminiDriver {
                                                 }
                                             } else {
                                                 text_content.push_str(text);
-                                                let _ = tx
+                                                if tx
                                                     .send(StreamEvent::TextDelta {
                                                         text: text.clone(),
                                                     })
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    receiver_dropped = true;
+                                                }
                                                 // Capture thought_signature for text
                                                 // parts (last one wins across chunks).
                                                 if thought_signature.is_some() {
@@ -1085,24 +1123,36 @@ impl LlmDriver for GeminiDriver {
                                         thought_signature,
                                     } => {
                                         let id = format!("call_{}", uuid::Uuid::new_v4().simple());
-                                        let _ = tx
+                                        if tx
                                             .send(StreamEvent::ToolUseStart {
                                                 id: id.clone(),
                                                 name: function_call.name.clone(),
                                             })
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            receiver_dropped = true;
+                                        }
                                         let args_str = serde_json::to_string(&function_call.args)
                                             .unwrap_or_default();
-                                        let _ = tx
+                                        if tx
                                             .send(StreamEvent::ToolInputDelta { text: args_str })
-                                            .await;
-                                        let _ = tx
+                                            .await
+                                            .is_err()
+                                        {
+                                            receiver_dropped = true;
+                                        }
+                                        if tx
                                             .send(StreamEvent::ToolUseEnd {
                                                 id,
                                                 name: function_call.name.clone(),
                                                 input: function_call.args.clone(),
                                             })
-                                            .await;
+                                            .await
+                                            .is_err()
+                                        {
+                                            receiver_dropped = true;
+                                        }
                                         fn_calls.push((
                                             function_call.name.clone(),
                                             function_call.args.clone(),

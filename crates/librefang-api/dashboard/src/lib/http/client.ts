@@ -106,6 +106,7 @@ export {
   pollVideo,
   // workflows
   listWorkflows,
+  getWorkflow,
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,

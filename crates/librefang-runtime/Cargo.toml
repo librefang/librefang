@@ -57,6 +57,9 @@ pdf-extract = "0.10"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+serial_test = "3"
+
 [features]
 default = ["surreal-backend"]
 landlock-sandbox = ["dep:landlock"]

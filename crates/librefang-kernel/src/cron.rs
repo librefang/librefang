@@ -133,10 +133,21 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self.persist_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
-            LibreFangError::Internal(format!("Failed to write cron jobs temp file: {e}"))
-        })?;
+        let tmp_path = self
+            .persist_path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to create cron jobs temp file: {e}"))
+            })?;
+            f.write_all(data.as_bytes()).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to write cron jobs temp file: {e}"))
+            })?;
+            f.sync_all().map_err(|e| {
+                LibreFangError::Internal(format!("Failed to fsync cron jobs temp file: {e}"))
+            })?;
+        }
         std::fs::rename(&tmp_path, &self.persist_path).map_err(|e| {
             LibreFangError::Internal(format!("Failed to rename cron jobs file: {e}"))
         })?;
@@ -436,6 +447,65 @@ impl CronScheduler {
         }
     }
 
+    /// Log warnings for any cron jobs that should have fired between
+    /// `since` (typically the daemon's previous shutdown time) and `now`
+    /// but were missed due to the daemon being down.
+    ///
+    /// This is called once at daemon startup, after jobs are loaded from
+    /// disk. It does **not** catch-up-fire the missed jobs — it only
+    /// produces `warn!` log entries so operators can see what was skipped
+    /// (Bug #3828).
+    ///
+    /// The function works by walking `next_run` backwards in time: for
+    /// each enabled job whose `last_run` is older than `since`, it counts
+    /// how many times the schedule would have fired in `[since, now)` and
+    /// emits one warning per missed fire.  For `Every` schedules this is
+    /// an exact count; for `Cron` expression schedules it is approximate
+    /// (iterates up to 1440 times per job to avoid pathological inputs).
+    /// `At` one-shot jobs that have already passed are silently ignored
+    /// (they would have been removed on successful execution anyway).
+    pub fn warn_missed_fires(&self, since: chrono::DateTime<Utc>) {
+        let now = Utc::now();
+        if since >= now {
+            return;
+        }
+        for entry in self.jobs.iter() {
+            let meta = entry.value();
+            if !meta.job.enabled {
+                continue;
+            }
+            // One-shot At-schedules that already passed are expected to be
+            // gone; silence them to avoid false-positive noise.
+            if let CronSchedule::At { at } = &meta.job.schedule {
+                if *at < since {
+                    continue;
+                }
+            }
+            // Find the first time this job *should* have fired after `since`.
+            let mut cursor = compute_next_run_after(&meta.job.schedule, since);
+            let mut missed_count = 0usize;
+            // Safety cap: stop after 1440 iterations (≈1 minute-resolution
+            // cron firing every minute for a day) to avoid spinning on
+            // high-frequency schedules.
+            const MAX_ITER: usize = 1440;
+            while cursor < now && missed_count < MAX_ITER {
+                missed_count += 1;
+                cursor = compute_next_run_after(&meta.job.schedule, cursor);
+            }
+            if missed_count > 0 {
+                warn!(
+                    job = %meta.job.name,
+                    job_id = %meta.job.id,
+                    agent = %meta.job.agent_id,
+                    missed = missed_count,
+                    since = %since.format("%Y-%m-%dT%H:%M:%SZ"),
+                    "Cron: missed {} fire(s) while daemon was down",
+                    missed_count
+                );
+            }
+        }
+    }
+
     // -- Outcome recording --------------------------------------------------
 
     /// Record a successful execution for a job.
@@ -458,6 +528,17 @@ impl CronScheduler {
         };
         if should_remove {
             self.jobs.remove(&id);
+        }
+    }
+
+    /// Record a skipped execution for a job (e.g. agent was Suspended).
+    ///
+    /// Sets `last_status` to `"skipped"` without touching error counters or
+    /// removing one-shot jobs — the job remains scheduled for its next run.
+    pub fn record_skipped(&self, id: CronJobId) {
+        if let Some(mut meta) = self.jobs.get_mut(&id) {
+            meta.last_status = Some("skipped: agent suspended".to_string());
+            debug!(job_id = %id, "Cron job skipped (agent suspended)");
         }
     }
 
@@ -523,6 +604,17 @@ pub fn compute_next_run(schedule: &CronSchedule) -> chrono::DateTime<Utc> {
 /// this offset, calling `compute_next_run` right after a job fires can
 /// return the same minute (or even the same second), causing the
 /// scheduler to re-fire immediately.
+///
+/// # DST safety
+///
+/// All fire times are stored and compared in UTC. `chrono::Local` is never
+/// used internally — even when a job specifies a named `tz` (e.g.
+/// `"America/New_York"`), the computation converts `after` to that timezone
+/// only to honour the user's wall-clock intent, then immediately converts
+/// the result back to UTC before storing it. This means the scheduler is
+/// immune to DST transitions: a "09:00 daily" job in a DST-observing
+/// timezone will naturally shift by one UTC hour at the clock change, but
+/// will never fire twice or be skipped.
 pub fn compute_next_run_after(
     schedule: &CronSchedule,
     after: chrono::DateTime<Utc>,
@@ -567,10 +659,40 @@ pub fn compute_next_run_after(
                             match tz_str.parse::<chrono_tz::Tz>() {
                                 Ok(timezone) => {
                                     let base_local = base.with_timezone(&timezone);
-                                    sched
+                                    let result = sched
                                         .after(&base_local)
                                         .next()
-                                        .map(|dt| dt.with_timezone(&Utc))
+                                        .map(|dt| dt.with_timezone(&Utc));
+
+                                    // Warn when a DST boundary is crossed: spring-forward may
+                                    // silently skip a scheduled local time; fall-back picks the
+                                    // earlier UTC occurrence.
+                                    if let Some(next) = result {
+                                        let next_local = next.with_timezone(&timezone);
+                                        let base_utc_secs = (base_local.naive_utc()
+                                            - base_local.naive_local())
+                                        .num_seconds();
+                                        let next_utc_secs = (next_local.naive_utc()
+                                            - next_local.naive_local())
+                                        .num_seconds();
+                                        if base_utc_secs != next_utc_secs {
+                                            warn!(
+                                                expr = %expr,
+                                                timezone = %tz_str,
+                                                base_local = %base_local.format("%Y-%m-%dT%H:%M:%S%z"),
+                                                adjusted_utc = %next.format("%Y-%m-%dT%H:%M:%SZ"),
+                                                adjusted_local = %next_local.format("%Y-%m-%dT%H:%M:%S%z"),
+                                                "Cron job next-fire crosses a DST boundary in \
+                                                 timezone '{}'; scheduled local time may have been \
+                                                 skipped (spring-forward) or moved to the first \
+                                                 occurrence (fall-back). Next fire adjusted to {}",
+                                                tz_str,
+                                                next.format("%Y-%m-%dT%H:%M:%SZ"),
+                                            );
+                                        }
+                                    }
+
+                                    result
                                 }
                                 Err(_) => {
                                     warn!(

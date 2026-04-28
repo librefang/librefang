@@ -305,7 +305,7 @@ async fn resolve_manifest(
     let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
-            let _ = e;
+            tracing::warn!("Failed to parse agent manifest TOML: {e}");
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-invalid-format"),
@@ -347,16 +347,23 @@ pub async fn spawn_agent(
         Ok(r) => r,
         Err(e) => {
             // Map specific errors to appropriate HTTP status codes
-            let status = if e.message.contains("too large") {
-                StatusCode::PAYLOAD_TOO_LARGE
+            let (status, code) = if e.message.contains("too large") {
+                (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
             } else if e.message.contains("not found") && e.message.contains("Template") {
-                StatusCode::NOT_FOUND
+                (StatusCode::NOT_FOUND, "template_not_found")
             } else if e.message.contains("signature verification failed") {
-                StatusCode::FORBIDDEN
+                (StatusCode::FORBIDDEN, "signature_invalid")
             } else {
-                StatusCode::BAD_REQUEST
+                (StatusCode::BAD_REQUEST, "invalid_manifest")
             };
-            return (status, Json(serde_json::json!({"error": e.message})));
+            return ApiErrorResponse {
+                error: e.message,
+                code: Some(code.to_string()),
+                r#type: Some(code.to_string()),
+                details: None,
+                status,
+            }
+            .into_response();
         }
     };
 
@@ -367,22 +374,25 @@ pub async fn spawn_agent(
                 agent_id: id.to_string(),
                 name: resolved.name,
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
-            let status = match &e {
+            let (status, code) = match &e {
                 librefang_kernel::error::KernelError::LibreFang(
                     librefang_types::error::LibreFangError::AgentAlreadyExists(_),
-                ) => StatusCode::CONFLICT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
+                ) => (StatusCode::CONFLICT, "agent_already_exists"),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
-            (
+            ApiErrorResponse {
+                error: t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
+                code: Some(code.to_string()),
+                r#type: Some(code.to_string()),
+                details: None,
                 status,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-error", &[("error", &e.to_string())])}),
-                ),
-            )
+            }
+            .into_response()
         }
     }
 }
@@ -790,6 +800,10 @@ pub(crate) fn enrich_agent_json(
             "color": e.identity.color,
         },
         "web_search_augmentation": e.manifest.web_search_augmentation,
+        "parent_agent_id": e.parent.as_ref().map(|p| p.to_string()),
+        "children": e.children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "session_id": e.session_id.0.to_string(),
+        "tags": e.tags,
     })
 }
 
@@ -827,8 +841,21 @@ pub(crate) fn effective_default_model(
 pub async fn list_agents(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Query(params): Query<AgentListQuery>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Query(mut params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
+    // Scope agents by authenticated user: non-admin/owner callers can only
+    // list agents they authored.  If the caller already supplied an explicit
+    // ?owner= filter we respect it as-is; otherwise we inject the caller's
+    // username automatically.
+    if params.owner.is_none() {
+        if let Some(ref user) = api_user {
+            use librefang_kernel::auth::UserRole;
+            if user.0.role < UserRole::Admin {
+                params.owner = Some(user.0.name.clone());
+            }
+        }
+    }
     let catalog = state.kernel.model_catalog_ref().read().ok();
     let dm = {
         let dm_override = state
@@ -861,6 +888,13 @@ pub async fn list_agents(
     if let Some(ref status) = params.status {
         let status_lower = status.to_lowercase();
         agents.retain(|e| format!("{:?}", e.state).to_lowercase() == status_lower);
+    }
+
+    // Filter by owner (matches manifest.author). For non-admin callers this
+    // is injected automatically above so they only see their own agents.
+    if let Some(ref owner) = params.owner {
+        let owner_lower = owner.to_lowercase();
+        agents.retain(|e| e.manifest.author.to_lowercase() == owner_lower);
     }
 
     let total = agents.len();
@@ -907,7 +941,7 @@ pub async fn list_agents(
 
     // -- Pagination --
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.map(|l| l.min(100));
+    let limit = params.limit.map(|l| l.min(500));
     let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(lim) = limit {
         agents.into_iter().skip(offset).take(lim).collect()
     } else {
@@ -1325,28 +1359,26 @@ pub async fn send_message(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_invalid_id})),
-            );
+            return ApiErrorResponse::bad_request(err_invalid_id)
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
     if req.message.len() > MAX_MESSAGE_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": err_too_large})),
-        );
+        return ApiErrorResponse::bad_request(err_too_large)
+            .with_code("message_too_large")
+            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
+            .into_response();
     }
 
     // Check agent exists before processing
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        );
+        return ApiErrorResponse::not_found(err_not_found)
+            .with_code("agent_not_found")
+            .into_response();
     }
 
     // Reject messages when the agent's provider has no API key configured
@@ -1374,12 +1406,14 @@ pub async fn send_message(
             if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
                 if let Some(p) = catalog.get_provider(provider) {
                     if !p.auth_status.is_available() {
-                        return (
-                            StatusCode::PRECONDITION_FAILED,
-                            Json(
-                                serde_json::json!({"error": format!("{} (provider: {})", err_auth_missing, provider)}),
-                            ),
-                        );
+                        return ApiErrorResponse {
+                            error: format!("{} (provider: {})", err_auth_missing, provider),
+                            code: Some("provider_auth_missing".to_string()),
+                            r#type: Some("provider_auth_missing".to_string()),
+                            details: None,
+                            status: StatusCode::PRECONDITION_FAILED,
+                        }
+                        .into_response();
                     }
                 }
             }
@@ -1412,10 +1446,9 @@ pub async fn send_message(
         Some(s) => match s.parse::<uuid::Uuid>() {
             Ok(id) => Some(librefang_types::agent::SessionId(id)),
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
-                );
+                return ApiErrorResponse::bad_request("invalid session_id: must be a UUID")
+                    .with_code("invalid_session_id")
+                    .into_response();
             }
         },
     };
@@ -1458,7 +1491,8 @@ pub async fn send_message(
                         "iterations": result.iterations,
                         "cost_usd": result.cost_usd,
                     })),
-                );
+                )
+                    .into_response();
             }
 
             // Extract reasoning trace (optional) and strip <think>...</think>
@@ -1497,24 +1531,31 @@ pub async fn send_message(
                     owner_notice: result.owner_notice,
                 })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
-            let status = if format!("{e}").contains("Agent not found") {
-                StatusCode::NOT_FOUND
+            let (status, code) = if format!("{e}").contains("Agent not found") {
+                (StatusCode::NOT_FOUND, "agent_not_found")
             } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
-                StatusCode::TOO_MANY_REQUESTS
+                (StatusCode::TOO_MANY_REQUESTS, "budget_exceeded")
             } else if format!("{e}").contains("belongs to a different agent") {
-                StatusCode::BAD_REQUEST
+                (StatusCode::BAD_REQUEST, "session_agent_mismatch")
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                (StatusCode::INTERNAL_SERVER_ERROR, "message_delivery_failed")
             };
-            (status, {
-                let t = ErrorTranslator::new(l);
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-message-delivery-failed", &[("reason", &e.to_string())])}),
-                )
-            })
+            let t = ErrorTranslator::new(l);
+            ApiErrorResponse {
+                error: t.t_args(
+                    "api-error-message-delivery-failed",
+                    &[("reason", &e.to_string())],
+                ),
+                code: Some(code.to_string()),
+                r#type: Some(code.to_string()),
+                details: None,
+                status,
+            }
+            .into_response()
         }
     }
 }
@@ -1574,29 +1615,26 @@ pub async fn get_agent_session(
     let Query(params) = match query {
         Ok(q) => q,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid session_id"})),
-            );
+            return ApiErrorResponse::bad_request("invalid session_id")
+                .with_code("invalid_session_id")
+                .into_response();
         }
     };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
         }
     };
 
@@ -1619,10 +1657,9 @@ pub async fn get_agent_session(
             // session_id — prevents leaking one agent's history via another's
             // id.
             if session.agent_id != agent_id {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "session not found for this agent"})),
-                );
+                return ApiErrorResponse::not_found("session not found for this agent")
+                    .with_code("session_agent_mismatch")
+                    .into_response();
             }
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
@@ -1782,6 +1819,7 @@ pub async fn get_agent_session(
                     "messages": messages,
                 })),
             )
+                .into_response()
         }
         Ok(None) => {
             // The session row is not materialized in the memory substrate
@@ -1794,10 +1832,9 @@ pub async fn get_agent_session(
             // entry), so matching it is safe to treat as the no-query path.
             if let Some(requested) = params.session_id {
                 if requested != entry.session_id.0 {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "session not found for this agent"})),
-                    );
+                    return ApiErrorResponse::not_found("session not found for this agent")
+                        .with_code("session_agent_mismatch")
+                        .into_response();
                 }
             }
             (
@@ -1810,13 +1847,13 @@ pub async fn get_agent_session(
                     "messages": [],
                 })),
             )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!("Session load failed for agent {id}: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-session-load-failed")})),
-            )
+            ApiErrorResponse::internal(t.t("api-error-session-load-failed"))
+                .with_code("session_load_failed")
+                .into_response()
         }
     }
 }
@@ -1841,10 +1878,9 @@ pub async fn kill_agent(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
@@ -1855,12 +1891,11 @@ pub async fn kill_agent(
     // Delete for hand agents already; this closes the direct-API loophole.
     if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
         if entry.is_hand {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead."
-                })),
-            );
+            return ApiErrorResponse::conflict(
+                "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead.",
+            )
+            .with_code("hand_agent_delete_denied")
+            .into_response();
         }
     }
 
@@ -1868,13 +1903,13 @@ pub async fn kill_agent(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "killed", "agent_id": id})),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             tracing::warn!("kill_agent failed for {id}: {e}");
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found-or-terminated")})),
-            )
+            ApiErrorResponse::not_found(t.t("api-error-agent-not-found-or-terminated"))
+                .with_code("agent_not_found")
+                .into_response()
         }
     }
 }
@@ -1888,21 +1923,20 @@ pub async fn suspend_agent(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID")
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
     match state.kernel.suspend_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "suspended", "agent_id": id})),
-        ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e.to_string())
+            .with_code("agent_not_found")
+            .into_response(),
     }
 }
 
@@ -1915,21 +1949,20 @@ pub async fn resume_agent(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            )
+            return ApiErrorResponse::bad_request("Invalid agent ID")
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
     match state.kernel.resume_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "running", "agent_id": id})),
-        ),
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
+        Err(e) => ApiErrorResponse::not_found(e.to_string())
+            .with_code("agent_not_found")
+            .into_response(),
     }
 }
 
@@ -1954,10 +1987,9 @@ pub async fn set_agent_mode(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
@@ -1969,11 +2001,11 @@ pub async fn set_agent_mode(
                 "agent_id": id,
                 "mode": body.mode,
             })),
-        ),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        ),
+        )
+            .into_response(),
+        Err(_) => ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+            .with_code("agent_not_found")
+            .into_response(),
     }
 }
 
@@ -2001,20 +2033,18 @@ pub async fn get_agent(
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .with_code("invalid_agent_id")
+                .into_response();
         }
     };
 
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            );
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
+                .into_response();
         }
     };
 
@@ -2082,6 +2112,7 @@ pub async fn get_agent(
             "web_search_augmentation": entry.manifest.web_search_augmentation,
         })),
     )
+        .into_response()
 }
 
 /// POST /api/agents/:id/message/stream — SSE streaming response.
@@ -2118,29 +2149,24 @@ pub async fn send_message_stream(
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
     if req.message.len() > MAX_MESSAGE_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": err_too_large})),
-        )
+        return ApiErrorResponse::bad_request(err_too_large)
+            .with_code("message_too_large")
+            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
             .into_response();
     }
 
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": err_invalid_id})),
-            )
+            return ApiErrorResponse::bad_request(err_invalid_id)
+                .with_code("invalid_agent_id")
                 .into_response();
         }
     };
 
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": err_not_found})),
-        )
+        return ApiErrorResponse::not_found(err_not_found)
+            .with_code("agent_not_found")
             .into_response();
     }
 
@@ -2158,10 +2184,8 @@ pub async fn send_message_stream(
         Some(s) => match s.parse::<uuid::Uuid>() {
             Ok(id) => Some(librefang_types::agent::SessionId(id)),
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "invalid session_id: must be a UUID"})),
-                )
+                return ApiErrorResponse::bad_request("invalid session_id: must be a UUID")
+                    .with_code("invalid_session_id")
                     .into_response();
             }
         },
@@ -2181,10 +2205,8 @@ pub async fn send_message_stream(
         Ok(pair) => pair,
         Err(e) => {
             tracing::warn!("Streaming message failed for agent {id}: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": err_streaming_failed})),
-            )
+            return ApiErrorResponse::internal(err_streaming_failed)
+                .with_code("streaming_failed")
                 .into_response();
         }
     };
@@ -2247,7 +2269,13 @@ pub async fn send_message_stream(
         }
     });
 
-    Sse::new(sse_stream).into_response()
+    Sse::new(sse_stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 /// GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's
@@ -2299,10 +2327,8 @@ pub async fn attach_session_stream(
     let session_id = match session_id_str.parse::<uuid::Uuid>() {
         Ok(uuid) => librefang_types::agent::SessionId(uuid),
         Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
-            )
+            return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
+                .with_code("invalid_session_id")
                 .into_response();
         }
     };
@@ -2310,10 +2336,8 @@ pub async fn attach_session_stream(
     let agent_entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-            )
+            return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                .with_code("agent_not_found")
                 .into_response();
         }
     };
@@ -2335,20 +2359,14 @@ pub async fn attach_session_stream(
     };
     if !session_valid {
         if let Err(e) = session_lookup {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
-                ),
+            return ApiErrorResponse::internal(
+                t.t_args("api-error-generic", &[("error", &e.to_string())]),
             )
-                .into_response();
+            .with_code("session_load_failed")
+            .into_response();
         }
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "session not found for this agent"
-            })),
-        )
+        return ApiErrorResponse::not_found("session not found for this agent")
+            .with_code("session_agent_mismatch")
             .into_response();
     }
 
@@ -3658,7 +3676,7 @@ pub async fn update_agent(
     }
 
     // Parse the new manifest
-    let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
+    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -3670,15 +3688,21 @@ pub async fn update_agent(
         }
     };
 
-    // Note: Full manifest update requires kill + respawn. For now, acknowledge receipt.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "acknowledged",
-            "agent_id": id,
-            "note": "Full manifest update requires agent restart. Use DELETE + POST to apply.",
-        })),
-    )
+    drop(t);
+
+    match state.kernel.update_manifest(agent_id, manifest) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "agent_id": id,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 #[utoipa::path(
@@ -4594,7 +4618,9 @@ pub async fn clone_agent(
             if let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) {
                 let src_identity = src_can.join(".identity");
                 let dst_identity = dst_can.join(".identity");
-                let _ = std::fs::create_dir_all(&dst_identity);
+                if let Err(e) = std::fs::create_dir_all(&dst_identity) {
+                    tracing::warn!("Failed to create identity directory for cloned agent: {e}");
+                }
                 for &fname in KNOWN_IDENTITY_FILES {
                     // Source: prefer .identity/ (post-migration), fall back to workspace root
                     let src_file = if src_identity.join(fname).exists() {
@@ -6374,6 +6400,7 @@ mod monitoring_tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
         });
         (state, tmp)
     }

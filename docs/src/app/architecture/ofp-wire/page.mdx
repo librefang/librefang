@@ -1,0 +1,126 @@
+# OFP Wire Encryption
+
+> **Status:** documented limitation. Tracked: closed [#3874](https://github.com/librefang/librefang/issues/3874), closed [#4001](https://github.com/librefang/librefang/pull/4001).
+> **Crate:** `librefang-wire`.
+
+The LibreFang Wire Protocol (OFP) is the protocol two LibreFang kernels
+speak when one calls an agent on the other (federation). This page
+documents how OFP handles transport security: what it guarantees on its
+own, what it deliberately does **not**, why, and how to deploy OFP across
+networks safely.
+
+## TL;DR
+
+- **OFP frames are plaintext on the wire.** A passive observer between two
+  kernels can read system prompts, user inputs, LLM outputs, and tool
+  results.
+- **HMAC framing covers active attackers** (forgery, tampering, replay,
+  cross-peer replay). It does **not** cover confidentiality.
+- **Confidentiality is delegated to the deployment layer.** For
+  cross-network federation, run OFP behind WireGuard, Tailscale, an SSH
+  tunnel, or a service-mesh mTLS layer.
+- We **don't** ship in-tree TLS in `librefang-wire` and don't plan to —
+  see the rationale below.
+
+## What HMAC framing already covers
+
+OFP requires a pre-shared `shared_secret` before any traffic flows.
+Authentication runs on every frame:
+
+| Attack | Blocked? | Mechanism |
+|--------|----------|-----------|
+| Forged frames from a peer that doesn't know `shared_secret` | Yes | Per-message HMAC-SHA256 + handshake HMAC |
+| Modifying frame contents in transit | Yes | Per-message HMAC over the JSON body |
+| Replaying a captured handshake | Yes | Time-windowed nonce tracker ([#3880](https://github.com/librefang/librefang/issues/3880)), HMAC-verify-before-record ordering |
+| Replaying a captured handshake against a *different* peer that shares the secret | Yes | HMAC binds `nonce \| sender_node_id \| recipient_node_id` ([#3875](https://github.com/librefang/librefang/issues/3875)) |
+| Oversized `AgentMessage` draining the receiver's LLM budget | Yes | `MAX_PEER_MESSAGE_BYTES = 64 KiB` ([#3876](https://github.com/librefang/librefang/issues/3876)) |
+| Timing side-channel on HMAC verification | Yes | `subtle::ConstantTimeEq` |
+| **Reading frame contents on the wire** | **No** | Use a deployment-layer overlay |
+
+In other words: an attacker on the path can sniff your federation traffic,
+but cannot impersonate a peer, mutate a message, or get oversized payloads
+through the receiver's safeguards.
+
+## What HMAC framing does not cover
+
+Confidentiality. JSON frames travel as plain TCP bytes. Anything in the
+frame body — system prompts (often containing tool/skill references),
+user inputs, LLM outputs, tool results — is visible to any on-path
+observer (corporate WiFi, ISP, cloud LB, Kubernetes sidecar, container
+network).
+
+If your deployment plausibly has such an observer, you must add
+confidentiality at the deployment layer.
+
+## Why we don't ship in-tree TLS
+
+We previously scoped a TLS 1.3 implementation inside `librefang-wire`
+(closed PR [#4001](https://github.com/librefang/librefang/pull/4001)). The
+cost/benefit didn't land:
+
+1. **The threat is rarely instantiated.** OFP is overwhelmingly used on a
+   single host or inside a trusted network. Cross-internet federation
+   between mutually-distrustful operators is, today, approximately nobody.
+2. **Operators have a much cheaper option that does the same job.**
+   Network-layer overlays (WireGuard, Tailscale, Nebula, SSH tunnels,
+   service-mesh mTLS) give confidentiality, peer reachability control,
+   and key rotation as one piece — none of it our code, none of it our
+   maintenance burden.
+3. **In-tree TLS is a long-tailed maintenance commitment.** Per-peer
+   keypairs, pin distribution, rotation, ciphersuite policy, and a
+   migration path away from plaintext peers all become permanent surface
+   area we'd have to keep safe across rustls bumps.
+
+The HMAC framing already blocks the attacks people care most about.
+Confidentiality is what remains, and overlays solve it well.
+
+## Recommended deployment
+
+Pick the row that matches your network topology:
+
+| Network shape | What to do |
+|---------------|-----------|
+| Single host (multiple kernels on one machine) | Run OFP directly on `127.0.0.1`. HMAC is sufficient. |
+| Single trusted LAN / single VPC | Run OFP directly. HMAC framing covers active-attacker concerns at this scope. |
+| Cross-network federation across the public internet | **Do not run OFP directly.** Tunnel it through a private overlay: [WireGuard](https://www.wireguard.com/), [Tailscale](https://tailscale.com/), [Nebula](https://github.com/slackhq/nebula), or an SSH tunnel. |
+| Federation inside a Kubernetes cluster | Let the service mesh ([Istio](https://istio.io/), [Linkerd](https://linkerd.io/), [Cilium](https://cilium.io/)) provide mTLS between OFP pods. |
+| Compliance-driven encryption requirement (e.g. SOC 2 wire-layer attestation) | Same as cross-network — terminate TLS in the overlay or mesh, not in OFP. |
+
+### Quick recipe: WireGuard
+
+The simplest setup for two-host federation:
+
+1. Stand up a WireGuard tunnel between the two hosts (one peer per host).
+2. Configure each LibreFang kernel to bind OFP on the WireGuard interface
+   IP, not the public interface.
+3. Configure each kernel's peer list to dial the *other* host's WireGuard
+   IP.
+4. Public-internet attackers see only encrypted WireGuard packets;
+   cleartext OFP frames never leave the tunnel.
+
+Tailscale, Nebula, and SSH tunnels follow the same pattern.
+
+## When we'd revisit
+
+We'll reopen [#3874](https://github.com/librefang/librefang/issues/3874)
+and reconsider in-tree TLS if any of the following becomes true:
+
+- A real deployment surfaces where overlays aren't workable — for example,
+  a multi-tenant federation whose operators don't trust each other enough
+  to share an overlay.
+- Compliance requirements (e.g. FedRAMP, SOC 2 Type II at the wire layer)
+  force on-the-wire encryption regardless of network topology.
+- The HMAC-only model is shown insufficient against a plausible attacker
+  profile the original design did not consider.
+
+Until then: plaintext + HMAC + overlay-for-confidentiality is the
+supported deployment model.
+
+## See also
+
+- [OFP Mutual Authentication](/architecture/security#9-ofp-mutual-authentication) —
+  the HMAC handshake and per-message HMAC details.
+- Closed PR [#4001](https://github.com/librefang/librefang/pull/4001) —
+  the in-tree TLS attempt that was declined.
+- Closed issue [#3874](https://github.com/librefang/librefang/issues/3874) —
+  original audit-filed plaintext-wire concern.

@@ -3772,7 +3772,7 @@ fn cmd_start(
 ///
 /// Returns `None` when the key is missing, empty, or whitespace-only —
 /// meaning the daemon is running in public (unauthenticated) mode.
-fn read_api_key() -> Option<String> {
+pub(crate) fn read_api_key() -> Option<String> {
     daemon_config_context(None).api_key
 }
 

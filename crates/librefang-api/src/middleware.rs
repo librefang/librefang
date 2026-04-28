@@ -162,10 +162,17 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
 }
 
 /// Pull a caller-provided token from the standard locations the auth path
-/// understands: `Authorization: Bearer <x>`, `X-API-Key: <x>`, then
-/// `?token=<x>` (percent-decoded). Headers win over query, Bearer wins
+/// understands: `Authorization: Bearer <x>` or `X-API-Key: <x>`. Bearer wins
 /// over X-API-Key — same precedence as the non-loopback flow at
 /// `auth(...)` line ~528. Returns `None` if no shape is present.
+///
+/// SECURITY: `?token=` query-string auth is intentionally NOT supported here.
+/// Query parameters appear in server access logs, browser history, and HTTP
+/// Referer headers forwarded to third parties, making them unsuitable for
+/// carrying credentials on regular HTTP routes. WebSocket upgrades are the
+/// sole exception — browsers cannot set custom headers on WebSocket
+/// connections — and they handle `?token=` in `crate::ws::ws_auth_token`
+/// rather than going through this middleware path.
 fn extract_request_token(request: &Request<Body>) -> Option<String> {
     let bearer = request
         .headers()
@@ -176,19 +183,11 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
     if bearer.is_some() {
         return bearer;
     }
-    let header_alt = request
+    request
         .headers()
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    if header_alt.is_some() {
-        return header_alt;
-    }
-    request
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|p| p.strip_prefix("token=")))
-        .map(crate::percent_decode)
+        .map(str::to_string)
 }
 
 /// Request ID header name (standard).
@@ -386,14 +385,17 @@ pub async fn auth(
     } else {
         after_version.strip_suffix('/').unwrap_or(&after_version)
     };
-    // Loopback requests (CLI on the same machine) bypass auth entirely —
-    // BUT if a Bearer/X-API-Key/?token= matches a configured user_api_key,
-    // attribute the request before short-circuiting so RBAC-gated handlers
-    // (audit, per-user budget write, …) that require an AuthenticatedApiUser
-    // extension can still be reached from loopback callers like the CLI or
-    // a Vite dev-proxy. Anonymous loopback (no token at all) keeps the
-    // legacy trusted-anonymous behaviour. Non-loopback callers fall through
-    // to the full auth flow below.
+    // SECURITY: Loopback requests go through the same auth check as all other
+    // connections. The unconditional loopback bypass has been removed — any
+    // process on the same host must supply a valid token just like a remote
+    // caller (see bug #3558).
+    //
+    // We still perform early token attribution here so that RBAC-gated
+    // handlers (audit, per-user budget write, …) that require an
+    // AuthenticatedApiUser extension work correctly for loopback callers that
+    // carry a valid session or per-user API key (e.g. the CLI, a Vite
+    // dev-proxy). After attribution the request falls through to the normal
+    // is_public / token-verification flow below — there is no early return.
     {
         let is_loopback = request
             .extensions()
@@ -402,13 +404,9 @@ pub async fn auth(
             .unwrap_or(false);
         if is_loopback {
             if let Some(token_str) = extract_request_token(&request) {
-                // First try user_api_keys (Argon2 verify against api_key_hash).
-                // Fall back to active dashboard sessions (random hex token
-                // exact match) — without this, a loopback caller carrying a
-                // dashboard_login session (the most common shape: the SPA
-                // proxied through Vite at 127.0.0.1) would lose its role
-                // attribution at the very first middleware hop and audit
-                // would still 403 the dashboard user.
+                // First try active dashboard sessions (random hex token exact
+                // match) — the SPA proxied through Vite at 127.0.0.1 presents
+                // a session cookie that must retain its role attribution.
                 let session_attribution = {
                     let sessions = auth_state.active_sessions.read().await;
                     sessions.get(&token_str).cloned()
@@ -423,26 +421,21 @@ pub async fn auth(
                             user_id,
                         });
                     }
-                    return next.run(request).await;
+                    // Fall through to normal auth — the session token will be
+                    // validated again in the main token-check path below.
                 }
-                // Use the local `user_api_keys` snapshot taken at the top
-                // of `auth()` (line ~363) — `auth_state.user_api_keys` is
-                // an `Arc<RwLock<Vec<…>>>` since the rotate-key fix and
-                // does not expose `iter()` directly. The snapshot is the
-                // single source of truth for this request.
-                if let Some(user) = user_api_keys
+                // Try per-user API keys (Argon2 verify against api_key_hash).
+                // Use the local `user_api_keys` snapshot taken at the top of
+                // `auth()` — single source of truth for this request.
+                else if let Some(user) = user_api_keys
                     .iter()
                     .find(|user| {
                         crate::password_hash::verify_password(&token_str, &user.api_key_hash)
                     })
                     .cloned()
                 {
-                    // Mirror the non-loopback role gate so attributing a
-                    // Viewer/User key on loopback can't smuggle a write the
-                    // same key would be denied over the LAN. Without this
-                    // the attribution would be honest about *who* you are
-                    // but dishonest about *what you can do*, which is worse
-                    // than the legacy trusted-anonymous bypass.
+                    // Apply the role gate so a Viewer/User key on loopback
+                    // cannot smuggle a write it would be denied over the LAN.
                     if !user_role_allows_request(user.role, &method, path) {
                         if let Some(ref audit) = auth_state.audit_log {
                             audit.record_with_context(
@@ -479,9 +472,12 @@ pub async fn auth(
                         role: user.role,
                         user_id: user.user_id,
                     });
+                    // Fall through to normal auth — the token will be
+                    // re-verified in the main token-check path below.
                 }
             }
-            return next.run(request).await;
+            // No early return — loopback requests continue through the
+            // standard is_public check and token verification below.
         }
     }
 
@@ -571,7 +567,11 @@ pub async fn auth(
             path,
             "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
         ) || dashboard_shell_public
-            || path.starts_with("/a2a/")
+            // The /a2a/agents listing is public so external callers can discover
+            // local agents without a bearer token (matches the A2A spec intent).
+            // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
+            // task transcripts — require authentication (Bug #3781).
+            || path == "/a2a/agents"
             || path.starts_with("/api/uploads/")
             || path.starts_with("/api/auth/login")
             // UAR discovery endpoints — unauthenticated so external clients can enumerate
@@ -613,8 +613,10 @@ pub async fn auth(
         || path.starts_with("/api/approvals/")
         || path.starts_with("/api/hands/")
         || path.starts_with("/api/cron/");
-    let dashboard_read_public =
-        (is_get && (dashboard_read_exact || dashboard_read_prefix)) || path == "/api/logs/stream"; // SSE stream, read-only
+    // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
+    // allowlist. It streams real-time audit/log events and must require auth
+    // the same way every other sensitive read endpoint does. (#3593/#3680)
+    let dashboard_read_public = is_get && (dashboard_read_exact || dashboard_read_prefix);
 
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
@@ -707,32 +709,23 @@ pub async fn auth(
     // SECURITY: Use constant-time comparison to prevent timing attacks.
     let header_auth = api_token.map(&matches_any);
 
-    // Also check ?token= query parameter (for EventSource/SSE clients that
-    // cannot set custom headers, same approach as WebSocket auth).
-    //
-    // Percent-decode (but NOT form-urlencoded) so literal `+` characters in
-    // base64-derived tokens are preserved instead of being turned into spaces.
-    // See issue #962 (ported from openfang).
-    let query_token_decoded = request
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-        .map(crate::percent_decode);
+    // SECURITY: ?token= query-string auth is deliberately NOT checked here.
+    // Query parameters are written to server access logs, retained in browser
+    // history, and forwarded in HTTP Referer headers to third parties. Tokens
+    // must only arrive via Authorization: Bearer or X-API-Key headers, or via
+    // the session cookie. WebSocket upgrades are the sole exception (browsers
+    // cannot set custom headers on WebSocket connections); they authenticate
+    // via crate::ws::ws_auth_token, which never passes through this middleware.
 
-    // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let query_auth = query_token_decoded.as_deref().map(&matches_any);
-
-    // Accept if either auth method matches a static API key or legacy token
-    if header_auth == Some(true) || query_auth == Some(true) {
+    // Accept if header auth matches a static API key or legacy token
+    if header_auth == Some(true) {
         return next.run(request).await;
     }
 
     // Check the active session store for randomly generated dashboard tokens.
     // Also prune expired sessions opportunistically. Cookie token is only
     // consulted for `/dashboard/*` navigation (filtered upstream).
-    let provided_token = api_token
-        .or(query_token_decoded.as_deref())
-        .or(cookie_session_token.as_deref());
+    let provided_token = api_token.or(cookie_session_token.as_deref());
     if let Some(token_str) = provided_token {
         let mut sessions = auth_state.active_sessions.write().await;
         // Remove expired sessions while we hold the lock
@@ -827,7 +820,7 @@ pub async fn auth(
         .unwrap_or(i18n::DEFAULT_LANGUAGE);
     let translator = i18n::ErrorTranslator::new(lang);
 
-    let credential_provided = header_auth.is_some() || query_auth.is_some();
+    let credential_provided = header_auth.is_some();
     let error_msg = if credential_provided {
         translator.t("api-error-auth-invalid-key")
     } else {
@@ -866,12 +859,15 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert("x-xss-protection", "1; mode=block".parse().unwrap());
-    // All JS/CSS is bundled inline. Some UI dependencies (for example xterm)
-    // embed small WOFF2 fonts as data: URLs, so font-src permits data: while
-    // keeping the rest of the policy narrow.
+    // All JS/CSS is bundled inline — only external resource is Google Fonts.
+    // SECURITY: 'unsafe-eval' removed from script-src (#3732). 'unsafe-inline'
+    // removed from script-src as well; the bundled SPA does not need it.
+    // 'unsafe-inline' is kept in style-src only because the React/Vite bundle
+    // injects CSS-in-JS style tags at runtime and removing it would break the
+    // dashboard UI until a nonce-based approach is wired through the build.
     headers.insert(
         "content-security-policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' data: https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'"
             .parse()
             .unwrap(),
     );
@@ -1933,5 +1929,137 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- Regression tests for bug #3558: loopback bypass removed -----------
+
+    /// Regression #3558: when an api_key IS configured, a loopback request
+    /// with NO token must be rejected. The old code unconditionally let any
+    /// loopback caller through; the fix removes that bypass so loopback goes
+    /// through the same token check as every other origin.
+    #[tokio::test]
+    async fn configured_key_loopback_no_token_is_rejected() {
+        let app = protected_router(with_key_state("secret"));
+        let resp = app.oneshot(req_with_addr("127.0.0.1")).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "loopback with a configured api_key but no token must be 401, not bypassed"
+        );
+    }
+
+    /// Regression #3558: when an api_key IS configured, a loopback request
+    /// WITH the correct token must still succeed (the fix must not break
+    /// legitimate loopback callers that present credentials).
+    #[tokio::test]
+    async fn configured_key_loopback_valid_token_is_allowed() {
+        let app = protected_router(with_key_state("secret"));
+        let addr: std::net::SocketAddr = "127.0.0.1:40000".parse().unwrap();
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/agents/1")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "loopback with a valid bearer token must still be allowed through"
+        );
+    }
+
+    // ---- Bug #3781: GET /a2a/tasks/{id} must require auth ---------------
+    //
+    // Before the fix, `path.starts_with("/a2a/")` in the always_public_get_only
+    // block let any caller read full task transcripts (agent prompts + LLM
+    // outputs) without a bearer token. Only `/a2a/agents` (capability discovery)
+    // should remain public; task-level resources contain sensitive data.
+
+    /// GET /a2a/agents (the capability listing) must stay public — external
+    /// A2A peers call this to discover what skills a local agent exposes.
+    #[tokio::test]
+    async fn a2a_agents_listing_is_always_public() {
+        let app = Router::new()
+            .route("/a2a/agents", get(|| async { "agent list" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET /a2a/agents must be public so external A2A peers can discover local agents"
+        );
+    }
+
+    /// GET /a2a/tasks/{id} must require auth (Bug #3781). Task transcripts
+    /// contain full agent prompts and LLM outputs — sensitive operational data.
+    #[tokio::test]
+    async fn a2a_task_transcript_requires_auth() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}", get(|| async { "full task transcript" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        // Unauthenticated → must be rejected.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/tasks/some-uuid-1234")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /a2a/tasks/{{id}} must require auth — it returns full task transcripts"
+        );
+    }
+
+    /// GET /a2a/tasks/{id} must allow access with a valid bearer token.
+    #[tokio::test]
+    async fn a2a_task_transcript_accessible_with_valid_token() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}", get(|| async { "full task transcript" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let addr: std::net::SocketAddr = "203.0.113.5:40000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/a2a/tasks/some-uuid-1234")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let response = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "valid bearer token must allow access to /a2a/tasks/{{id}}"
+        );
     }
 }

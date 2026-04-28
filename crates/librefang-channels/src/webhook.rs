@@ -73,15 +73,26 @@ impl WebhookAdapter {
     /// * `secret` - Shared secret for HMAC-SHA256 signature verification.
     /// * `listen_port` - Port to listen for incoming webhook POST requests.
     /// * `callback_url` - Optional URL to POST outbound messages to.
-    pub fn new(secret: String, _listen_port: u16, callback_url: Option<String>) -> Self {
-        Self {
+    ///
+    /// Returns an error if `callback_url` is present but points to a private/
+    /// loopback/metadata-service host (SSRF guard).
+    pub fn new(
+        secret: String,
+        _listen_port: u16,
+        callback_url: Option<String>,
+    ) -> Result<Self, String> {
+        if let Some(ref url) = callback_url {
+            crate::http_client::validate_url_for_fetch(url)
+                .map_err(|e| format!("WebhookAdapter: callback_url rejected by SSRF guard: {e}"))?;
+        }
+        Ok(Self {
             secret: Zeroizing::new(secret),
             callback_url,
             client: crate::http_client::new_client(),
             account_id: None,
             deliver_only: false,
             deliver_target: None,
-        }
+        })
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -128,6 +139,51 @@ impl WebhookAdapter {
             diff |= a ^ b;
         }
         diff == 0
+    }
+
+    /// Verify an incoming webhook request: signature validity **and** timestamp
+    /// freshness (replay protection).
+    ///
+    /// `signature` must be the value of the `X-Webhook-Signature` header
+    /// (`"sha256=<hex>"`), or an empty string if the header is absent.
+    /// `ts_secs` is the Unix timestamp (seconds) carried in
+    /// `X-Webhook-Timestamp`; pass `None` when the header is absent.
+    /// `now_secs` is the current Unix timestamp used for the freshness check
+    /// (injected so tests can control clock values).
+    ///
+    /// Returns `Ok(())` if the request is valid, or an `Err` string describing
+    /// the rejection reason.
+    pub fn verify_request(
+        secret: &str,
+        body: &[u8],
+        signature: &str,
+        ts_secs: Option<i64>,
+        now_secs: i64,
+    ) -> Result<(), &'static str> {
+        // 1. Require a non-empty signature header.
+        if signature.is_empty() {
+            return Err("missing signature");
+        }
+
+        // 2. Require a timestamp header.
+        let ts = ts_secs.ok_or("missing timestamp")?;
+
+        // 3. Reject stale or future timestamps (replay protection, ±5 min).
+        const MAX_SKEW_SECS: i64 = 5 * 60;
+        let skew = now_secs - ts;
+        if skew > MAX_SKEW_SECS {
+            return Err("timestamp too old");
+        }
+        if skew < -MAX_SKEW_SECS {
+            return Err("timestamp in the future");
+        }
+
+        // 4. Verify the HMAC signature.
+        if !Self::verify_signature(secret, body, signature) {
+            return Err("invalid signature");
+        }
+
+        Ok(())
     }
 
     /// Parse an incoming webhook JSON body.
@@ -411,7 +467,8 @@ mod tests {
             "my-secret".to_string(),
             9000,
             Some("https://example.com/callback".to_string()),
-        );
+        )
+        .expect("public URL should be accepted");
         assert_eq!(adapter.name(), "webhook");
         assert_eq!(
             adapter.channel_type(),
@@ -422,8 +479,42 @@ mod tests {
 
     #[test]
     fn test_webhook_no_callback() {
-        let adapter = WebhookAdapter::new("secret".to_string(), 9000, None);
+        let adapter = WebhookAdapter::new("secret".to_string(), 9000, None).unwrap();
         assert!(!adapter.has_callback());
+    }
+
+    #[test]
+    fn test_webhook_rejects_private_callback_url() {
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://127.0.0.1/hook".to_string()),
+        )
+        .is_err());
+
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://192.168.1.1/hook".to_string()),
+        )
+        .is_err());
+
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("http://169.254.169.254/latest/meta-data/".to_string()),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_webhook_accepts_public_callback_url() {
+        assert!(WebhookAdapter::new(
+            "secret".to_string(),
+            9000,
+            Some("https://hooks.example.com/receiver".to_string()),
+        )
+        .is_ok());
     }
 
     #[test]
@@ -508,5 +599,103 @@ mod tests {
     fn test_webhook_parse_body_no_message() {
         let body = serde_json::json!({ "sender_id": "user" });
         assert!(WebhookAdapter::parse_webhook_body(&body).is_none());
+    }
+
+    // ── verify_request error-path coverage (closes #3851) ────────────────────
+
+    const SECRET: &str = "test-secret-#3851";
+
+    fn make_sig(body: &[u8]) -> String {
+        WebhookAdapter::compute_signature(SECRET, body)
+    }
+
+    fn now() -> i64 {
+        // Fixed epoch value used as the "current time" in all verify_request
+        // tests so the suite is deterministic without real clock access.
+        1_700_000_000_i64
+    }
+
+    /// 1. Valid signature and fresh timestamp → accepted.
+    #[test]
+    fn test_verify_request_valid() {
+        let body = b"hello world";
+        let sig = make_sig(body);
+        assert!(
+            WebhookAdapter::verify_request(SECRET, body, &sig, Some(now()), now()).is_ok(),
+            "valid request must be accepted"
+        );
+    }
+
+    /// 2. Tampered body (signature no longer matches) → rejected.
+    #[test]
+    fn test_verify_request_tampered_body() {
+        let original = b"original body";
+        let sig = make_sig(original);
+        let tampered = b"tampered body";
+        let result = WebhookAdapter::verify_request(SECRET, tampered, &sig, Some(now()), now());
+        assert_eq!(
+            result,
+            Err("invalid signature"),
+            "tampered body must be rejected"
+        );
+    }
+
+    /// 3. Missing signature header (empty string) → rejected.
+    #[test]
+    fn test_verify_request_missing_signature() {
+        let body = b"some body";
+        let result = WebhookAdapter::verify_request(SECRET, body, "", Some(now()), now());
+        assert_eq!(
+            result,
+            Err("missing signature"),
+            "absent signature header must be rejected"
+        );
+    }
+
+    /// 4. Stale timestamp (> 5 minutes in the past) → rejected.
+    #[test]
+    fn test_verify_request_stale_timestamp() {
+        let body = b"some body";
+        let sig = make_sig(body);
+        let stale_ts = now() - (5 * 60 + 1); // 301 seconds ago
+        let result = WebhookAdapter::verify_request(SECRET, body, &sig, Some(stale_ts), now());
+        assert_eq!(
+            result,
+            Err("timestamp too old"),
+            "stale timestamp must be rejected"
+        );
+    }
+
+    /// 5. Future timestamp (> 5 minutes ahead) → rejected.
+    #[test]
+    fn test_verify_request_future_timestamp() {
+        let body = b"some body";
+        let sig = make_sig(body);
+        let future_ts = now() + (5 * 60 + 1); // 301 seconds ahead
+        let result = WebhookAdapter::verify_request(SECRET, body, &sig, Some(future_ts), now());
+        assert_eq!(
+            result,
+            Err("timestamp in the future"),
+            "future timestamp must be rejected"
+        );
+    }
+
+    /// Boundary: timestamp exactly at the ±5 min edge is still accepted.
+    #[test]
+    fn test_verify_request_boundary_timestamps_accepted() {
+        let body = b"boundary";
+        let sig = make_sig(body);
+        // Exactly 5 minutes old (skew == MAX_SKEW_SECS) is within the window.
+        let old_edge = now() - 5 * 60;
+        assert!(
+            WebhookAdapter::verify_request(SECRET, body, &sig, Some(old_edge), now()).is_ok(),
+            "timestamp exactly at -5 min edge must be accepted"
+        );
+        // Exactly 5 minutes in the future.
+        let future_edge = now() + 5 * 60;
+        assert!(
+            WebhookAdapter::verify_request(SECRET, body, &sig, Some(future_edge), now()).is_ok(),
+            "timestamp exactly at +5 min edge must be accepted"
+        );
     }
 }

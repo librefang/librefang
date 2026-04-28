@@ -215,6 +215,115 @@ impl AgentScheduler {
         Ok(())
     }
 
+    /// Atomically check the per-agent quota **and** pre-charge an estimated
+    /// token budget.
+    ///
+    /// This closes the TOCTOU window between `check_quota` and
+    /// `record_usage`: N concurrent callers all calling `check_quota` before
+    /// any of them calls `record_usage` can each individually pass the check
+    /// while the combined spend blows past the limit.  By reserving
+    /// `estimated_tokens` inside the same DashMap entry write-lock, at most
+    /// one caller can pass for any given budget slot.
+    ///
+    /// **Pessimistic by design.** Callers pass the model's `max_tokens`
+    /// (output cap) which is almost always larger than the real per-call
+    /// usage. This is intentional — the quota holds firm under concurrent
+    /// bursts at the cost of triggering `QuotaExceeded` slightly earlier
+    /// than perfectly-tight accounting would. `settle_reservation` corrects
+    /// `total_tokens` down to the actual amount once the call finishes, so
+    /// over the long run the counters remain accurate.
+    ///
+    /// After the LLM call completes, the caller **must** call
+    /// `settle_reservation` with the actual [`TokenUsage`] so the
+    /// reservation is corrected and the sliding-window counters are updated.
+    /// **Do not call `record_usage` for a pre-charged call** — `settle_reservation`
+    /// does both jobs in one atomic step.
+    ///
+    /// Returns `Ok(estimated_tokens)` (the amount reserved) on success, or
+    /// `Err(QuotaExceeded)` if the reservation would breach the limit.
+    /// Returns `Ok(0)` when no quota is configured for the agent (caller
+    /// should still call `record_usage` normally in that case).
+    pub fn check_quota_and_reserve(
+        &self,
+        agent_id: AgentId,
+        estimated_tokens: u64,
+    ) -> LibreFangResult<u64> {
+        let quota = match self.quotas.get(&agent_id) {
+            Some(q) => q.clone(),
+            None => return Ok(0), // No quota = no limit; nothing to reserve
+        };
+        let mut tracker = match self.usage.get_mut(&agent_id) {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        tracker.reset_if_expired();
+
+        let token_limit = quota.effective_token_limit();
+        if token_limit > 0 {
+            let projected = tracker.total_tokens.saturating_add(estimated_tokens);
+            if projected > token_limit {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Token limit would be exceeded: {} + {} reserved > {}",
+                    tracker.total_tokens, estimated_tokens, token_limit
+                )));
+            }
+            // Burst check against the projected spend
+            let burst_cap = token_limit / 5;
+            let tokens_last_min = tracker.tokens_in_last_minute();
+            if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Token burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
+                    tokens_last_min, estimated_tokens, burst_cap
+                )));
+            }
+            // Atomically pre-charge inside the same DashMap entry write-lock
+            tracker.total_tokens = projected;
+        }
+
+        Ok(estimated_tokens)
+    }
+
+    /// Settle a prior [`check_quota_and_reserve`] reservation.
+    ///
+    /// Replaces the pre-charged estimate in `total_tokens` with the actual
+    /// token count consumed, and updates the sliding-window / per-dimension
+    /// counters that [`record_usage`] normally maintains.  Callers MUST use
+    /// this instead of `record_usage` after a pre-charged call so the
+    /// counters are not double-incremented.
+    ///
+    /// When `estimated_tokens == 0` (no quota was configured) the function
+    /// falls back to the same logic as `record_usage`.
+    pub fn settle_reservation(&self, agent_id: AgentId, estimated_tokens: u64, usage: &TokenUsage) {
+        let actual_tokens = usage.total();
+        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
+            tracker.reset_if_expired();
+
+            if estimated_tokens > 0 {
+                // Correct the pre-charged estimate to the actual amount:
+                //   total_tokens was incremented by `estimated`; adjust it
+                //   to reflect `actual` instead.
+                tracker.total_tokens = tracker
+                    .total_tokens
+                    .saturating_sub(estimated_tokens)
+                    .saturating_add(actual_tokens);
+            } else {
+                // No reservation was made (no quota) — behave like record_usage
+                tracker.total_tokens += actual_tokens;
+            }
+
+            // Per-dimension counters (never pre-charged)
+            tracker.input_tokens += usage.input_tokens;
+            tracker.output_tokens += usage.output_tokens;
+            tracker.llm_calls += 1;
+
+            // Sliding-window for burst detection
+            tracker
+                .token_timestamps
+                .push_back((Instant::now(), actual_tokens));
+        }
+    }
+
     /// Reset usage tracking for an agent (e.g. on session reset).
     pub fn reset_usage(&self, agent_id: AgentId) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
@@ -391,5 +500,139 @@ mod tests {
         );
         scheduler.record_tool_calls(id, 9999);
         assert!(scheduler.check_quota(id).is_ok());
+    }
+
+    /// Regression test for #3736 — TOCTOU between check_quota and record_usage.
+    ///
+    /// Many threads racing through `check_quota_and_reserve` for the same
+    /// agent must collectively reserve no more than `token_limit`. The old
+    /// `check_quota` + `record_usage` split allowed all N to pass the check
+    /// before any of them recorded usage; this test would fail under the
+    /// old code with `succeeded > expected_max`.
+    #[test]
+    fn test_concurrent_check_and_reserve_respects_limit() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let scheduler = Arc::new(AgentScheduler::new());
+        let id = AgentId::new();
+        // 100 token-per-hour limit, each call wants 10 → at most 10 can pass.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        let succeeded = Arc::new(AtomicU64::new(0));
+        let denied = Arc::new(AtomicU64::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let sched = Arc::clone(&scheduler);
+            let succ = Arc::clone(&succeeded);
+            let den = Arc::clone(&denied);
+            handles.push(thread::spawn(move || {
+                match sched.check_quota_and_reserve(id, 10) {
+                    Ok(_) => {
+                        succ.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => {
+                        den.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let s = succeeded.load(Ordering::SeqCst);
+        let d = denied.load(Ordering::SeqCst);
+        assert_eq!(s + d, 50, "all 50 threads should have a verdict");
+        // Reservations go through `check_quota_and_reserve` only, which
+        // does NOT push to `token_timestamps` (that only happens in
+        // settle_reservation). So `tokens_in_last_minute()` stays at 0
+        // throughout and the burst cap (100/5=20) never trips. The
+        // binding limit is `projected > 100`: 10 reservations of 10
+        // tokens hit total_tokens=100 exactly, the 11th would project to
+        // 110 and is rejected. Success count is therefore deterministically 10.
+        assert_eq!(
+            s, 10,
+            "exactly 10 reservations of 10 tokens fit in a 100-token quota"
+        );
+        // The TOCTOU bug would manifest as multiple threads reading
+        // total_tokens=0 then each incrementing past the limit. Verify
+        // the post-condition holds.
+        let snap = scheduler.get_usage(id).unwrap();
+        assert!(
+            snap.total_tokens <= 100,
+            "reservations must not exceed the 100-token limit, got total_tokens={}",
+            snap.total_tokens
+        );
+    }
+
+    /// Regression test for #3736 — settle_reservation must correctly adjust
+    /// the pre-charged total to the actual token count.
+    #[test]
+    fn test_settle_reservation_corrects_overestimate() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(10_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // Reserve 1000 (pessimistic); actual usage is 100.
+        let reserved = scheduler.check_quota_and_reserve(id, 1000).unwrap();
+        assert_eq!(reserved, 1000);
+        let after_reserve = scheduler.get_usage(id).unwrap();
+        assert_eq!(after_reserve.total_tokens, 1000);
+
+        scheduler.settle_reservation(
+            id,
+            reserved,
+            &TokenUsage {
+                input_tokens: 60,
+                output_tokens: 40,
+                ..Default::default()
+            },
+        );
+        let after_settle = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after_settle.total_tokens, 100,
+            "settle should correct down to actual"
+        );
+        assert_eq!(after_settle.input_tokens, 60);
+        assert_eq!(after_settle.output_tokens, 40);
+        assert_eq!(after_settle.llm_calls, 1);
+    }
+
+    /// Regression test for #3736 — settle_reservation with empty usage (e.g.
+    /// the agent loop failed before the LLM call) must release the entire
+    /// pre-charged amount, not leave it permanently consumed.
+    #[test]
+    fn test_settle_empty_usage_releases_full_reservation() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        // Limit 100k → burst cap 20k, so 500 reserved comfortably fits.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        let reserved = scheduler.check_quota_and_reserve(id, 500).unwrap();
+        scheduler.settle_reservation(id, reserved, &TokenUsage::default());
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after.total_tokens, 0,
+            "failed call should release the reservation"
+        );
+        // llm_calls is still incremented — the call was attempted.
+        assert_eq!(after.llm_calls, 1);
     }
 }

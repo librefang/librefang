@@ -6,7 +6,7 @@ WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
 RUN corepack enable \
-    && pnpm install --frozen-lockfile --config.strict-dep-builds=false \
+    && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
 
 # Stage 2: Build Rust binary
@@ -55,11 +55,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 \
     gosu \
     && rm -rf /var/lib/apt/lists/*
+RUN addgroup --system --gid 1001 librefang && \
+    adduser --system --uid 1001 --ingroup librefang librefang
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# CIS Docker Benchmark §4.1: run the service as a dedicated non-root user with
+# no login shell. The entrypoint starts as root (to chown /data on first boot)
+# and then drops privileges with `gosu librefang` before exec'ing the binary.
+RUN groupadd -r librefang && useradd -r -g librefang -s /sbin/nologin librefang
 EXPOSE 4545
 ENV LIBREFANG_HOME=/data
+# docker-entrypoint.sh uses gosu to exec as the librefang user, so we
+# keep the entrypoint itself running as root to allow bind-mount chown
+# and data-dir initialisation before privilege drop.
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]

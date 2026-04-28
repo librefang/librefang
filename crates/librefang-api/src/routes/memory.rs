@@ -143,10 +143,34 @@ fn default_user_id() -> String {
     "00000000-0000-0000-0000-000000000000".to_string()
 }
 
-/// Log the full error server-side but return a generic message to the client.
+/// Map a [`librefang_types::error::LibreFangError`] to the appropriate HTTP status code.
+///
+/// Previously every failure was mapped to 500. This function now returns
+/// semantically correct codes for `InvalidInput` (400), `AgentNotFound` /
+/// `SessionNotFound` (404), `CapabilityDenied` (403), and `QuotaExceeded` (429)
+/// so callers can distinguish between client errors and server errors.
 fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
-    tracing::error!("Memory operation failed: {e}");
-    ApiErrorResponse::internal("Internal server error").into_json_tuple()
+    map_memory_error(e.to_string())
+}
+
+fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
+    // Classify by the error message prefix emitted by LibreFangError Display impls.
+    // This avoids a dependency on the concrete type at every call-site while still
+    // providing correct HTTP semantics.
+    let status = if msg.starts_with("Invalid input:") {
+        StatusCode::BAD_REQUEST
+    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
+        StatusCode::NOT_FOUND
+    } else if msg.starts_with("Capability denied:") {
+        StatusCode::FORBIDDEN
+    } else if msg.starts_with("Resource quota exceeded:") {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        tracing::error!("Memory operation failed: {msg}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    (status, Json(serde_json::json!({ "error": msg })))
 }
 
 /// Build a [`MemoryNamespaceGuard`] for the current request from the
@@ -528,10 +552,7 @@ pub async fn memory_delete(
     };
 
     match store.delete(&memory_id, &real_agent_id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
-        ),
+        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
         Err(e) => internal_error(e),
     }
@@ -660,10 +681,7 @@ pub async fn memory_reset_agent(
     };
 
     match store.reset(&agent_id) {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"reset": true, "deleted_count": count})),
-        ),
+        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Err(e) => internal_error(e),
     }
 }
@@ -712,14 +730,7 @@ pub async fn memory_clear_level(
     };
 
     match store.clear_level(&agent_id, level) {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "cleared": true,
-                "level": level_str,
-                "deleted_count": count,
-            })),
-        ),
+        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Err(e) => internal_error(e),
     }
 }
@@ -1501,6 +1512,7 @@ mod tests {
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
         });
         (state, tmp)
     }
