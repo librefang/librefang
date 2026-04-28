@@ -280,6 +280,7 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
 )]
 pub async fn a2a_send_task(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // Extract message text from A2A format
@@ -296,17 +297,64 @@ pub async fn a2a_send_task(
         })
         .unwrap_or_else(|| "No message provided".to_string());
 
-    // Find target agent (use first available or specified)
-    let agents = state.kernel.agent_registry().list();
-    if agents.is_empty() {
-        return ApiErrorResponse::not_found("No agents available").into_json_tuple();
+    // Extract caller identity from A2A header (for audit / ACL).
+    let caller_a2a_agent_id = headers
+        .get("x-a2a-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    // Require an explicit target agent — refuse to silently dispatch to agents[0].
+    let target_agent_id_str = request["params"]["agentId"]
+        .as_str()
+        .or_else(|| request["agent_id"].as_str())
+        .map(String::from);
+
+    let target_agent_id_str = match target_agent_id_str {
+        Some(s) => s,
+        None => {
+            return ApiErrorResponse::bad_request(
+                "Missing required field: params.agentId (or agent_id)",
+            )
+            .into_json_tuple();
+        }
+    };
+
+    // Parse and validate the target agent UUID.
+    let target_agent_id: librefang_types::agent::AgentId = match target_agent_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(format!(
+                "Invalid agent ID: {target_agent_id_str}"
+            ))
+            .into_json_tuple();
+        }
+    };
+
+    // Look up the agent and enforce state checks.
+    let agent_entry = match state.kernel.agent_registry().get(target_agent_id) {
+        Some(e) => e,
+        None => {
+            return ApiErrorResponse::not_found(format!("Agent not found: {target_agent_id_str}"))
+                .into_json_tuple();
+        }
+    };
+
+    if matches!(
+        agent_entry.state,
+        librefang_types::agent::AgentState::Suspended
+            | librefang_types::agent::AgentState::Terminated
+    ) {
+        return ApiErrorResponse::bad_request(format!(
+            "Agent {} is {:?} and cannot accept tasks",
+            target_agent_id_str, agent_entry.state
+        ))
+        .into_json_tuple();
     }
 
-    let agent = &agents[0];
     let task_id = uuid::Uuid::new_v4().to_string();
     let session_id = request["params"]["sessionId"].as_str().map(String::from);
 
-    // Create the task in the store as Working
+    // Create the task in the store as Working, recording dispatch target and caller.
     let task = librefang_runtime::a2a::A2aTask {
         id: task_id.clone(),
         session_id: session_id.clone(),
@@ -318,11 +366,17 @@ pub async fn a2a_send_task(
             }],
         }],
         artifacts: vec![],
+        agent_id: Some(target_agent_id_str),
+        caller_a2a_agent_id,
     };
     state.kernel.a2a_tasks().insert(task);
 
-    // Send message to agent
-    match state.kernel.send_message(agent.id, &message_text).await {
+    // Send message to the validated target agent.
+    match state
+        .kernel
+        .send_message(agent_entry.id, &message_text)
+        .await
+    {
         Ok(result) => {
             let response_msg = librefang_runtime::a2a::A2aMessage {
                 role: "agent".to_string(),

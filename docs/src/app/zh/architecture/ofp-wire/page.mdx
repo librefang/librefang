@@ -1,0 +1,112 @@
+# OFP 链路加密
+
+> **状态：** 文档化的限制（documented limitation）。已关闭 [#3874](https://github.com/librefang/librefang/issues/3874)、[#4001](https://github.com/librefang/librefang/pull/4001)。
+> **Crate：** `librefang-wire`。
+
+LibreFang 线路协议（OFP）是两台 LibreFang 内核之间互相调用对方 Agent
+（即"联邦"）所使用的协议。本页说明 OFP 在传输安全上的取舍：自身保证
+什么、刻意**不**保证什么、原因为何，以及跨网络部署 OFP 时如何安全
+落地。
+
+## 速览
+
+- **OFP 在线路上是明文的。** 两台内核之间路径上的被动观察者可以读取
+  system prompt、用户输入、LLM 输出和工具结果。
+- **HMAC 帧机制覆盖主动攻击者**（伪造、篡改、重放、跨对端重放），但
+  **不**覆盖保密性。
+- **保密性由部署层提供。** 跨网络联邦时把 OFP 套进 WireGuard、
+  Tailscale、SSH 隧道，或服务网格的 mTLS 层。
+- 我们**不**在 `librefang-wire` 中内置 TLS，且没有计划这样做 ——
+  原因见下文。
+
+## HMAC 帧机制已经覆盖的内容
+
+OFP 在任何流量出现前先要求一个预共享 `shared_secret`。每一帧都会做
+认证：
+
+| 攻击 | 是否阻止 | 实现 |
+|------|---------|------|
+| 不知道 `shared_secret` 的伪造帧 | 是 | 逐帧 HMAC-SHA256 + 握手 HMAC |
+| 在传输中篡改帧内容 | 是 | 在 JSON body 上的逐帧 HMAC |
+| 重放捕获的握手 | 是 | 时间窗 nonce 跟踪器（[#3880](https://github.com/librefang/librefang/issues/3880)）+ HMAC 校验后再记录 nonce 的顺序 |
+| 把捕获的握手重放到**另一个**共享相同密钥的对端 | 是 | HMAC 绑定 `nonce \| sender_node_id \| recipient_node_id`（[#3875](https://github.com/librefang/librefang/issues/3875)） |
+| 超大 `AgentMessage` 榨干接收方的 LLM 预算 | 是 | `MAX_PEER_MESSAGE_BYTES = 64 KiB`（[#3876](https://github.com/librefang/librefang/issues/3876)） |
+| HMAC 校验上的时序侧信道 | 是 | `subtle::ConstantTimeEq` |
+| **在线路上读取帧内容** | **否** | 使用部署层 overlay |
+
+换句话说：路径上的攻击者可以**嗅探**联邦流量，但无法冒充对端、修改
+消息、或让超大 payload 绕过接收方的保护。
+
+## HMAC 帧机制不覆盖的内容
+
+保密性。JSON 帧以明文 TCP 字节传输。帧体里的所有内容 —— system prompt
+（常含工具/技能引用）、用户输入、LLM 输出、工具结果 —— 对路径上的
+任何观察者（企业 WiFi、ISP、云负载均衡、Kubernetes sidecar、容器
+网络）都是可见的。
+
+如果你的部署可能存在这样的观察者，**必须**在部署层加上保密性。
+
+## 为什么不在仓库内做 TLS
+
+我们曾在 `librefang-wire` 内部尝试过 TLS 1.3 实现（已关闭 PR
+[#4001](https://github.com/librefang/librefang/pull/4001)）。成本/收益
+比不划算：
+
+1. **威胁场景出现率低。** OFP 主要部署在单机或单一受信网络内。在彼此
+   不互信的运营方之间跨公网做联邦的场景，今天几乎没有。
+2. **运维方有便宜得多的等价方案。** 网络层 overlay（WireGuard、
+   Tailscale、Nebula、SSH 隧道、服务网格 mTLS）一次性提供保密性、
+   对端可达性控制和密钥轮换 —— 这些都不是我们的代码、不是我们要维护
+   的负担。
+3. **在仓库内做 TLS 是长期维护承诺。** 每对端 keypair、pin 分发、
+   轮换、密码套件策略、从明文对端的迁移路径，全都会变成我们要在每次
+   rustls 升级时持续保安全的永久接口。
+
+HMAC 帧机制已经挡住了大家最在意的那些攻击。剩下的是保密性，而 overlay
+能很好地解决保密性。
+
+## 推荐部署模式
+
+按你的网络拓扑挑一行：
+
+| 网络形态 | 处理方式 |
+|---------|---------|
+| 单机（同一台机器上多个内核） | 直接把 OFP 绑在 `127.0.0.1`。HMAC 已经够用。 |
+| 单一受信内网 / 单一 VPC | 直接运行 OFP。HMAC 帧已覆盖此范围内的主动攻击者威胁。 |
+| 跨公网联邦 | **不要直连 OFP**。把它套进私有 overlay：[WireGuard](https://www.wireguard.com/)、[Tailscale](https://tailscale.com/)、[Nebula](https://github.com/slackhq/nebula)，或 SSH 隧道。 |
+| Kubernetes 集群内联邦 | 让服务网格（[Istio](https://istio.io/)、[Linkerd](https://linkerd.io/)、[Cilium](https://cilium.io/)）在 OFP Pod 之间提供 mTLS。 |
+| 合规要求线路加密（如 SOC 2 线路层证明） | 与跨公网同 —— 在 overlay 或网格层终结 TLS，不在 OFP 内做。 |
+
+### 速配方案：WireGuard
+
+两台主机做联邦的最简洁形态：
+
+1. 在两台主机间拉起一条 WireGuard 隧道（每台一个 peer）。
+2. 配置每台 LibreFang 内核把 OFP 绑在 WireGuard 接口的 IP 上，**不要**
+   绑在公网接口。
+3. 配置每台内核的 peer 列表去拨**对方**的 WireGuard IP。
+4. 公网攻击者只能看到加密的 WireGuard 报文；明文 OFP 帧不会离开隧道。
+
+Tailscale、Nebula、SSH 隧道按相同模式即可。
+
+## 何时重新评估
+
+如果出现以下情况，[#3874](https://github.com/librefang/librefang/issues/3874)
+会被重新开启、并重新考虑在仓库内做 TLS：
+
+- 出现 overlay 不可行的真实部署 —— 比如运营方彼此不互信、不愿共享
+  overlay 的多租户联邦。
+- 合规要求（FedRAMP、SOC 2 Type II 线路层证明等）强制要在线路层加密、
+  无视网络拓扑。
+- 仅靠 HMAC 的模型被证明对原始设计未考虑的合理攻击者不足以应对。
+
+在此之前：明文 + HMAC + overlay 提供保密性，是支持的部署模型。
+
+## 另见
+
+- [OFP 双向认证](/zh/architecture/security#9-ofp-双向认证) ——
+  HMAC 握手与逐帧 HMAC 的细节。
+- 已关闭 PR [#4001](https://github.com/librefang/librefang/pull/4001) ——
+  曾经在仓库内做 TLS 的尝试，已被拒绝。
+- 已关闭 Issue [#3874](https://github.com/librefang/librefang/issues/3874) ——
+  最初由审计自动开出的明文链路问题。
