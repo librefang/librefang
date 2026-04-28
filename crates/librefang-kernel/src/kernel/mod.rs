@@ -8597,6 +8597,59 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
+    /// Replace an agent's in-memory manifest with `new_manifest`, persist it
+    /// to disk, refresh capabilities and scheduler quotas, and invalidate
+    /// caches — the same side-effects as `reload_agent_from_disk` but driven
+    /// by an already-parsed manifest supplied by the caller.
+    ///
+    /// The invariant-protected fields (`name`, `workspace`, `tags`) are
+    /// preserved from the existing entry so callers cannot accidentally
+    /// desync the registry indexes.
+    pub fn update_agent_manifest(
+        &self,
+        agent_id: AgentId,
+        mut new_manifest: AgentManifest,
+    ) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Preserve invariant-protected fields that have associated index
+        // structures in the registry — changing them here without also
+        // updating the index would silently desync lookups.
+        new_manifest.name = entry.manifest.name.clone();
+        new_manifest.workspace = entry.manifest.workspace.clone();
+        new_manifest.tags = entry.manifest.tags.clone();
+
+        drop(entry); // release the read-guard before the write in replace_manifest
+
+        self.registry
+            .replace_manifest(agent_id, new_manifest)
+            .map_err(KernelError::LibreFang)?;
+
+        if let Some(refreshed) = self.registry.get(agent_id) {
+            // Re-grant capabilities in case the caps/profile changed.
+            let caps = manifest_to_capabilities(&refreshed.manifest);
+            self.capabilities.grant(agent_id, caps);
+            // Refresh scheduler quota so resource-limit changes take effect
+            // on the next message without requiring a daemon restart.
+            self.scheduler
+                .update_quota(agent_id, refreshed.manifest.resources.clone());
+            let _ = self.memory.save_agent(&refreshed);
+        }
+
+        // Invalidate the per-agent tool cache so skill/MCP allowlist changes
+        // take effect on the next message.
+        self.prompt_metadata_cache.tools.remove(&agent_id);
+
+        // Persist the updated manifest to disk (best-effort; errors are logged
+        // but not propagated — SQLite is the authoritative store).
+        self.persist_manifest_to_disk(agent_id);
+
+        info!(agent_id = %agent_id, "Updated agent manifest via API");
+        Ok(())
+    }
+
     pub fn set_agent_model(
         &self,
         agent_id: AgentId,
