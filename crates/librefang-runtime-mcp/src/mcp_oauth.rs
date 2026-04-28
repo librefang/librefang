@@ -195,6 +195,7 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     /// that route packets to an IPv4 endpoint on the wire:
     ///   * IPv4-mapped: `::ffff:x.x.x.x` (RFC 4291 §2.5.5.2)
     ///   * NAT64:       `64:ff9b::x.x.x.x` (RFC 6052)
+    ///
     /// Without these, `http://[::ffff:7f00:0001]/` bypasses the V4
     /// loopback check entirely — the daemon happily connects to
     /// 127.0.0.1 over an IPv6 socket.
