@@ -159,7 +159,7 @@ cargo xtask docker --latest --push          # also tag as :latest
 cargo xtask docker --platform linux/arm64   # specific platform
 ```
 
-Image: `ghcr.io/librefang/librefang`. Dockerfile: `deploy/Dockerfile`.
+Image: `ghcr.io/librefang/librefang`. Dockerfile: `./Dockerfile`.
 
 ### `setup` — Dev Environment Setup
 
