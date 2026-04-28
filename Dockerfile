@@ -61,6 +61,10 @@ COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# CIS Docker Benchmark §4.1: run the service as a dedicated non-root user with
+# no login shell. The entrypoint starts as root (to chown /data on first boot)
+# and then drops privileges with `gosu librefang` before exec'ing the binary.
+RUN groupadd -r librefang && useradd -r -g librefang -s /sbin/nologin librefang
 EXPOSE 4545
 ENV LIBREFANG_HOME=/data
 ENTRYPOINT ["docker-entrypoint.sh"]

@@ -1749,8 +1749,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
     { available: true },
     {
       enabled: modelOpen,
-      // Model picker opens on demand. Keep query idle until popover visible.
-      staleTime: 0,
+      // Model picker opens on demand; keep query idle until popover visible.
+      // 5-minute staleTime avoids a network round-trip on every popover open —
+      // available models change rarely in normal usage.
+      staleTime: 5 * 60 * 1000,
     },
   );
 
