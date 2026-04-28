@@ -812,6 +812,14 @@ fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
 | **消息大小限制** | `MAX_MESSAGE_SIZE = 16 MB` 防止内存 DoS |
 | **协议版本检查** | `PROTOCOL_VERSION` 不匹配时返回 `WireError::VersionMismatch` |
 
+### 9.5 链路保密性
+
+OFP 在线路上传输的帧是**明文**的。上述 HMAC 帧机制证明对端身份、防止
+篡改与重放，但**不加密**有效载荷。保密性由**部署层**提供，不在
+`librefang-wire` 内部重新实现。完整部署建议（WireGuard / Tailscale /
+SSH 隧道 / 服务网格 mTLS）、HMAC 已覆盖的威胁、以及重新评估的条件，
+见 [OFP 链路加密](/zh/architecture/ofp-wire) 页面。
+
 ---
 
 ## 10. 安全响应头

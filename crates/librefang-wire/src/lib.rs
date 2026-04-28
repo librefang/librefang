@@ -18,7 +18,7 @@
 //! deployment (WireGuard / Tailscale / SSH tunnel / service-mesh mTLS).
 //!
 //! Do not add TLS termination inside this crate without first re-evaluating
-//! the decision recorded in `docs/architecture/ofp-wire-security.md`
+//! the decision documented at <https://docs.librefang.ai/architecture/ofp-wire>
 //! (closed issue #3874, closed PR #4001). The HMAC framing intentionally
 //! covers active-attacker threats; overlays cover passive-observer threats.
 //! Re-implementing TLS on top of that adds maintenance burden without
