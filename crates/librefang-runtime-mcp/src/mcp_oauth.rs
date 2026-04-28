@@ -263,7 +263,6 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
     Ok(())
 }
 
-
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
@@ -447,11 +446,13 @@ pub fn parse_authorization_server_metadata(
 
     // SSRF guard — validate every discovered endpoint URL.
     for (label, url_str) in [
-        ("authorization_endpoint", raw.authorization_endpoint.as_str()),
+        (
+            "authorization_endpoint",
+            raw.authorization_endpoint.as_str(),
+        ),
         ("token_endpoint", raw.token_endpoint.as_str()),
     ] {
-        let parsed =
-            Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
+        let parsed = Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("{label} has no host"))?;

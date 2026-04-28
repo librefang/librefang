@@ -160,7 +160,10 @@ impl PeerRateLimiter {
         let one_minute = Duration::from_secs(60);
 
         if self.max_msgs_per_minute > 0 {
-            let mut entry = self.msg_counts.entry(peer_id.to_string()).or_insert((0, now));
+            let mut entry = self
+                .msg_counts
+                .entry(peer_id.to_string())
+                .or_insert((0, now));
             let (count, window_start) = &mut *entry;
             if now.duration_since(*window_start) >= one_minute {
                 // New window — reset counter
@@ -204,7 +207,10 @@ impl PeerRateLimiter {
         let now = Instant::now();
         let one_hour = Duration::from_secs(3600);
 
-        let mut entry = self.token_counts.entry(peer_id.to_string()).or_insert((0, now));
+        let mut entry = self
+            .token_counts
+            .entry(peer_id.to_string())
+            .or_insert((0, now));
         let (total, window_start) = &mut *entry;
         if now.duration_since(*window_start) >= one_hour {
             // New hour window — reset
@@ -961,7 +967,8 @@ async fn connection_loop(
             }
             // Handle requests (produce response)
             WireMessageKind::Request(_) => {
-                let response = handle_request_in_loop(&msg, handle, peer_node_id, rate_limiter).await;
+                let response =
+                    handle_request_in_loop(&msg, handle, peer_node_id, rate_limiter).await;
                 if let Some(key) = session_key {
                     write_message_authenticated(writer, &response, key).await?;
                 } else {

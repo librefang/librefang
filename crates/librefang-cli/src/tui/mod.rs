@@ -120,7 +120,9 @@ enum Backend {
         /// API key read from config.toml `api_key`, forwarded to every HTTP request.
         api_key: Option<String>,
     },
-    InProcess { kernel: Arc<LibreFangKernel> },
+    InProcess {
+        kernel: Arc<LibreFangKernel>,
+    },
     None,
 }
 
@@ -1906,7 +1908,12 @@ impl App {
         match &self.backend {
             Backend::Daemon { base_url, api_key } => {
                 self.agents.sub = agents::AgentSubScreen::Spawning;
-                event::spawn_daemon_agent(base_url.clone(), toml_content, api_key.clone(), self.event_tx.clone());
+                event::spawn_daemon_agent(
+                    base_url.clone(),
+                    toml_content,
+                    api_key.clone(),
+                    self.event_tx.clone(),
+                );
             }
             Backend::InProcess { kernel } => {
                 let manifest: librefang_types::agent::AgentManifest =
@@ -2112,10 +2119,7 @@ impl App {
                     Backend::Daemon { base_url, .. } => {
                         // Fetch agent list asynchronously — avoids blocking the TUI event loop.
                         // The `ChatAgentListLoaded` event handler will push the reply.
-                        event::spawn_fetch_agents_for_chat(
-                            base_url.clone(),
-                            self.event_tx.clone(),
-                        );
+                        event::spawn_fetch_agents_for_chat(base_url.clone(), self.event_tx.clone());
                     }
                     Backend::InProcess { kernel } => {
                         let lines: Vec<String> = kernel

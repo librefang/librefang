@@ -1871,7 +1871,7 @@ pub async fn approve_request(
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2507,7 +2507,7 @@ pub async fn totp_setup(
                 } else {
                     // TOTP code — check replay before verifying (#3359).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2639,7 +2639,7 @@ pub async fn totp_confirm(
 
     // Replay-prevention check (#3359): reject a code already used in the last 60 s.
     if state.kernel.approvals().is_totp_code_used(&body.code) {
-        state.kernel.approvals().record_totp_failure("api_admin");
+        let _ = state.kernel.approvals().record_totp_failure("api_admin");
         return ApiErrorResponse::bad_request(
             "TOTP code has already been used. Wait for the next 30-second window.",
         )

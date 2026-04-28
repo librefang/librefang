@@ -4043,6 +4043,7 @@ dependencies = [
  "http-body-util",
  "include_dir",
  "jsonwebtoken",
+ "libc",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
@@ -4307,6 +4308,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "serial_test",
+ "sha2",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -4468,6 +4471,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2",
  "shlex",
  "tar",
@@ -4528,6 +4532,7 @@ name = "librefang-runtime-wasm"
 version = "2026.4.28-beta7"
 dependencies = [
  "anyhow",
+ "async-trait",
  "librefang-http",
  "librefang-kernel-handle",
  "librefang-types",

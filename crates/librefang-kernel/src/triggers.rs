@@ -664,9 +664,7 @@ impl TriggerEngine {
                 Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&trigger.id) {
-                    let elapsed = (now - *last)
-                        .to_std()
-                        .unwrap_or(Duration::ZERO);
+                    let elapsed = (now - *last).to_std().unwrap_or(Duration::ZERO);
                     if elapsed < cooldown {
                         debug!(
                             trigger_id = %trigger.id,
@@ -1876,8 +1874,7 @@ mod tests {
         let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            matches[0].session_mode_override,
-            None,
+            matches[0].session_mode_override, None,
             "session_mode_override must be None when the trigger has no override; \
              the dispatcher should then fall back to the agent manifest default"
         );
@@ -1891,9 +1888,9 @@ mod tests {
         use librefang_types::agent::SessionMode;
 
         // Helper that mimics the single line in the kernel dispatch loop.
-        let resolve = |trigger_override: Option<SessionMode>, manifest: SessionMode| -> SessionMode {
-            trigger_override.unwrap_or(manifest)
-        };
+        let resolve = |trigger_override: Option<SessionMode>,
+                       manifest: SessionMode|
+         -> SessionMode { trigger_override.unwrap_or(manifest) };
 
         // Case 1: trigger override = New → New regardless of manifest
         assert_eq!(
@@ -1943,7 +1940,10 @@ mod tests {
         );
 
         // Sanity: override is present before the patch.
-        assert_eq!(engine.get_trigger(tid).unwrap().session_mode, Some(SessionMode::New));
+        assert_eq!(
+            engine.get_trigger(tid).unwrap().session_mode,
+            Some(SessionMode::New)
+        );
 
         // Clear the override.
         engine.update(
@@ -1958,8 +1958,9 @@ mod tests {
             engine.get_trigger(tid).unwrap().session_mode,
             None,
             "patching session_mode = Some(None) must clear the per-trigger override"
+        );
+    }
 
-    // ── PR #3913 cooldown tests ──
     // -- cooldown persistence across restarts (#3779) -------------------------
 
     /// Verify that `last_fired_at` survives a persist → load round-trip so
