@@ -6,7 +6,7 @@
 <h3 align="center">자유로운 에이전트 운영체제 — Libre는 자유를 의미합니다</h3>
 
 <p align="center">
-  Rust로 구축된 오픈소스 Agent OS. 14개 크레이트. 2,100+ 테스트. clippy 경고 제로.
+  Rust로 구축된 오픈소스 Agent OS. 24개 크레이트. 2,100+ 테스트. clippy 경고 제로.
 </p>
 
 <p align="center">
@@ -53,11 +53,11 @@ curl -fsSL https://librefang.ai/install.sh | sh
 # 또는 Cargo로 설치
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
-# 초기화 (프로바이더 설정 안내)
-librefang init
-
-# 시작 — 대시보드 http://localhost:4545
+# 시작 — 첫 실행 시 자동 초기화되며, 대시보드는 http://localhost:4545 에 있습니다
 librefang start
+
+# 또는 대화형 제공자 선택을 위해 설정 마법사를 수동으로 실행합니다
+# librefang init
 ```
 
 <details>
@@ -92,26 +92,12 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands: 당신을 위해 일하는 에이전트
 
-**Hands**는 사전 구축된 자율형 기능 패키지로, 스케줄에 따라 독립적으로 작동합니다. 14개 내장:
+**Hands** 는 프롬프트 없이 일정에 따라 독립적으로 실행되는 자율 기능 패키지입니다. 각 Hand는 `HAND.toml` 매니페스트, 시스템 프롬프트 및 구성된 환경에서 로드되는 선택적 `SKILL.md` 파일에 의해 정의됩니다 `hands_dir`.
 
-| Hand | 기능 |
-|------|------|
-| **Researcher** | 심층 조사 — 다중 소스 교차 참조, CRAAP 신뢰도 평가, 인용 보고서 |
-| **Collector** | OSINT 모니터링 — 변경 감지, 감정 추적, 지식 그래프 |
-| **Predictor** | 초예측 — 신뢰 구간이 포함된 교정된 예측 |
-| **Strategist** | 전략 분석 — 시장 조사, 경쟁 인텔리전스, 사업 계획 |
-| **Analytics** | 데이터 분석 — 수집, 분석, 시각화, 자동 보고 |
-| **Trader** | 시장 인텔리전스 — 다중 신호 분석, 리스크 관리, 포트폴리오 분석 |
-| **Lead** | 잠재 고객 발굴 — 웹 조사, 스코어링, 중복 제거, 리드 전달 |
-| **Twitter** | 자율형 X/Twitter — 콘텐츠 생성, 스케줄링, 승인 큐 |
-| **Reddit** | Reddit 관리 — 서브레딧 모니터링, 게시, 참여 추적 |
-| **LinkedIn** | LinkedIn 관리 — 콘텐츠 생성, 네트워킹, 전문적 교류 |
-| **Clip** | YouTube 쇼츠 변환 — 베스트 모먼트 컷, 자막, AI 내레이션 |
-| **Browser** | 웹 자동화 — Playwright 기반, 구매 승인 게이트 필수 |
-| **API Tester** | API 테스트 — 엔드포인트 발견, 검증, 부하 테스트, 회귀 감지 |
-| **DevOps** | DevOps 자동화 — CI/CD, 인프라 모니터링, 인시던트 대응 |
+예제 Hand 정의(Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps)는 커뮤니티 [Hands 리포지토리에서 확인할 수 있습니다](https://github.com/librefang/hands).
 
 ```bash
+# 커뮤니티 Hand를 설치한 후:
 librefang hand activate researcher   # 즉시 작업 시작
 librefang hand status researcher     # 진행 상황 확인
 librefang hand list                  # 모든 Hands 보기
@@ -121,30 +107,46 @@ librefang hand list                  # 모든 Hands 보기
 
 ## 아키텍처
 
-14개 Rust 크레이트, 모듈러 커널 설계.
+24개 Rust 크레이트 + xtask, 모듈러 커널 설계.
 
 ```
-librefang-kernel      오케스트레이션, 워크플로, 미터링, RBAC, 스케줄러, 예산
-librefang-runtime     에이전트 루프, 3 LLM 드라이버, 53 도구, WASM 샌드박스, MCP, A2A
-librefang-api         140+ REST/WS/SSE 엔드포인트, OpenAI 호환 API, 대시보드
-librefang-channels    40 메시징 어댑터, 레이트 리미팅, DM/그룹 정책
-librefang-memory      SQLite 영속화, 벡터 임베딩, 세션, 압축
-librefang-types       코어 타입, 테인트 추적, Ed25519 서명, 모델 카탈로그
-librefang-skills      60 번들 스킬, SKILL.md 파서, FangHub 마켓플레이스
-librefang-hands       14 자율 Hands, HAND.toml 파서, 라이프사이클 관리
-librefang-extensions  25 MCP 템플릿, AES-256-GCM 볼트, OAuth2 PKCE
-librefang-wire        OFP P2P 프로토콜, HMAC-SHA256 상호 인증
-librefang-cli         CLI, 데몬 관리, TUI 대시보드, MCP 서버 모드
-librefang-desktop     Tauri 2.0 네이티브 앱 (트레이, 알림, 단축키)
-librefang-migrate     OpenClaw, LangChain, AutoGPT 마이그레이션 엔진
-xtask                 빌드 자동화
+librefang-kernel            오케스트레이션, 워크플로, 미터링, RBAC, 스케줄러, 예산
+librefang-runtime           에이전트 루프, 3 LLM 드라이버, 53 도구, WASM 샌드박스, MCP, A2A
+librefang-api               140+ REST/WS/SSE 엔드포인트, OpenAI 호환 API, 대시보드
+librefang-channels          40 메시징 어댑터, 레이트 리미팅, DM/그룹 정책
+librefang-memory            SQLite 영속화, 벡터 임베딩, 세션, 압축
+librefang-types             코어 타입, 테인트 추적, Ed25519 서명, 모델 카탈로그
+librefang-skills            60 번들 스킬, SKILL.md 파서, FangHub 마켓플레이스
+librefang-hands             자율 Hands, HAND.toml 파서, 라이프사이클 관리
+librefang-extensions        25 MCP 템플릿, AES-256-GCM 볼트, OAuth2 PKCE
+librefang-wire              OFP P2P 프로토콜, HMAC-SHA256 상호 인증
+librefang-cli               CLI, 데몬 관리, TUI 대시보드, MCP 서버 모드
+librefang-desktop           Tauri 2.0 네이티브 앱 (트레이, 알림, 단축키)
+librefang-migrate           OpenClaw, LangChain, AutoGPT 마이그레이션 엔진
+librefang-http              공유 HTTP 클라이언트 빌더, 프록시, TLS 폴백
+librefang-testing           테스트 인프라: 모의(mock) 커널, 모의 LLM 드라이버 및 API 라우트 테스트 유틸리티
+librefang-telemetry         용 OpenTelemetry + Prometheus 메트릭 계측
+librefang-llm-driver        용 LLM 드라이버 trait 및 공유 타입
+librefang-llm-drivers       trait를 구현하는 구체적인 LLM 제공자 드라이버(anthropic, openai, gemini 등)
+librefang-runtime-mcp       런타임용 MCP(Model Context Protocol) 클라이언트
+librefang-kernel-handle     커널로의 인프로세스(in-process) 호출자를 위한 KernelHandle trait
+librefang-runtime-wasm      런타임용 WASM 스킬 샌드박스
+librefang-kernel-router     커널용 Hand/Template 라우팅 엔진
+librefang-runtime-oauth     런타임 드라이버용 OAuth 플로우(ChatGPT, GitHub Copilot)
+librefang-kernel-metering   커널에 대한 비용 측정 및 할당량(quota) 적용
+xtask                       빌드 자동화
 ```
+> **OFP wire는 plaintext-by-design입니다.** HMAC-SHA256 상호 인증 + 메시지별
+> HMAC + nonce 리플레이 방지 기능이 *활성* 공격자를 방어하지만, 프레임 콘텐츠는
+> 암호화되지 않습니다. 교차 네트워크 페더레이션의 경우 프라이빗
+> 오버레이(WireGuard, Tailscale, SSH 터널) 또는 서비스 메시 mTLS 계층 뒤에서 OFP를 실행하세요.
+> 세부 정보: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
 
 ## 주요 기능
 
-**40 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](https://docs.librefang.ai/integrations/channels)
+**57 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](https://docs.librefang.ai/integrations/channels)
 
-**27 LLM 프로바이더** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama 등. 지능형 라우팅, 자동 폴백, 비용 추적. [상세](https://docs.librefang.ai/configuration/providers)
+**28 LLM 프로바이더** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama 등. 지능형 라우팅, 자동 폴백, 비용 추적. [상세](https://docs.librefang.ai/configuration/providers)
 
 **16 보안 레이어** — WASM 샌드박스, Merkle 감사 추적, 테인트 추적, Ed25519 서명, SSRF 보호, 시크릿 제로화 등. [상세](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 
