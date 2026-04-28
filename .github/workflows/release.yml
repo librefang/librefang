@@ -1343,6 +1343,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: mobile-android-${{ github.ref_name }}
+          restore-keys: |
+            mobile-android-
 
       - name: Cache Gradle
         uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
@@ -1410,10 +1412,12 @@ jobs:
         if: always() && (steps.art.outputs.aab != '' || steps.art.outputs.apk != '')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AAB_PATH: ${{ steps.art.outputs.aab }}
+          APK_PATH: ${{ steps.art.outputs.apk }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          for f in "${{ steps.art.outputs.aab }}" "${{ steps.art.outputs.apk }}"; do
+          for f in "$AAB_PATH" "$APK_PATH"; do
             [ -z "$f" ] && continue
             base=$(basename "$f")
             echo "Uploading $base"
@@ -1431,13 +1435,16 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [create_release]
     continue-on-error: true
-    runs-on: macos-14
+    # macos-15 ships Xcode 16, which understands the objectVersion=77
+    # pbxproj that `tauri ios init` (cargo-mobile2) emits. macos-14 + Xcode
+    # 15.4 fails with "future Xcode project file format (77)".
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1
         with:
-          xcode-version: "15.4"
+          xcode-version: "16.2"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -1454,6 +1461,8 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: mobile-ios-${{ github.ref_name }}
+          restore-keys: |
+            mobile-ios-
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli@^2 --locked
@@ -1522,15 +1531,18 @@ jobs:
         if: always() && steps.art.outputs.ipa != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IPA_PATH: ${{ steps.art.outputs.ipa }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release upload "$TAG" "${{ steps.art.outputs.ipa }}" --clobber || true
+          gh release upload "$TAG" "$IPA_PATH" --clobber || true
 
       - name: Tear down keychain
         if: always() && steps.keychain.outputs.keychain != ''
+        env:
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain }}
         run: |
-          security delete-keychain "${{ steps.keychain.outputs.keychain }}" || true
+          security delete-keychain "$KEYCHAIN_PATH" || true
 
   sync_homebrew_cask:
     name: Sync Homebrew Cask
