@@ -571,7 +571,7 @@ export function AgentsPage() {
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="relative shrink-0">
                 <Avatar fallback={agent.name} size="lg" />
-                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
+                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" role="img" aria-label="Agent active" />}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 min-w-0">
@@ -801,7 +801,7 @@ export function AgentsPage() {
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   <div className="relative shrink-0">
                     <Avatar fallback={detailAgent.name} size="lg" />
-                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} />
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full ${statusColor} border-2 border-surface ${!isDetailSuspended && !isDetailCrashed ? "animate-pulse" : ""}`} role="img" aria-label={isDetailSuspended ? "Agent suspended" : isDetailCrashed ? "Agent crashed" : "Agent active"} />
                   </div>
                   <div className="min-w-0 flex-1">
                     {editingName ? (
@@ -1718,20 +1718,36 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl" onClick={onClose}>
-      <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="prompts-experiments-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[640px] sm:max-w-[90vw] max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-4 border-b border-border-subtle flex items-center justify-between shrink-0">
           <div>
-            <h3 className="text-lg font-black">{agentName}</h3>
+            <h3 id="prompts-experiments-dialog-title" className="text-lg font-black">{agentName}</h3>
             <p className="text-xs text-text-dim">Prompts & Experiments</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close" })}><X className="w-4 h-4" /></button>
+          <button onClick={onClose} className="p-2 rounded-xl hover:bg-main" aria-label={t("common.close", { defaultValue: "Close dialog" })}><X className="w-4 h-4" /></button>
         </div>
         
-        <div className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
-          <button onClick={() => setActiveTab("versions")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+        <div role="tablist" aria-label="Prompts &amp; Experiments" className="px-6 py-3 border-b border-border-subtle flex gap-2 shrink-0">
+          <button
+            id="agents-tab-versions"
+            role="tab"
+            aria-selected={activeTab === "versions"}
+            aria-controls="agents-panel-versions"
+            tabIndex={activeTab === "versions" ? 0 : -1}
+            onClick={() => setActiveTab("versions")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "versions" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
             <FlaskConical className="w-3 h-3 inline mr-1" /> Versions
           </button>
-          <button onClick={() => setActiveTab("experiments")} className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+          <button
+            id="agents-tab-experiments"
+            role="tab"
+            aria-selected={activeTab === "experiments"}
+            aria-controls="agents-panel-experiments"
+            tabIndex={activeTab === "experiments" ? 0 : -1}
+            onClick={() => setActiveTab("experiments")}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${activeTab === "experiments" ? "bg-brand text-white" : "bg-main text-text-dim"}`}
+          >
             <GitBranch className="w-3 h-3 inline mr-1" /> Experiments
           </button>
         </div>
@@ -1740,7 +1756,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
           <AnimatePresence mode="wait">
           <motion.div key={activeTab} variants={tabContent} initial="initial" animate="animate" exit="exit">
           {activeTab === "versions" && (
-            <div className="space-y-4">
+            <div id="agents-panel-versions" role="tabpanel" aria-labelledby="agents-tab-versions" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateVersion(true)}>
                   <Plus className="w-3 h-3 mr-1" /> New Version
@@ -1781,8 +1797,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
               {showCreateVersion && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateVersion(false)}>
-                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 className="font-bold mb-4">Create Prompt Version</h4>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-version-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-version-dialog-title" className="font-bold mb-4">Create Prompt Version</h4>
                     <div className="space-y-4">
                       <div>
                         <label className="text-xs text-text-dim">System Prompt</label>
@@ -1796,8 +1812,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim()}>
-                        Create
+                      <Button variant="primary" className="flex-1" isLoading={createVersionMutation.isPending} onClick={() => createVersionMutation.mutate({ agentId, version: { system_prompt: newPromptSystemPrompt, description: newPromptDescription, version: (versionsQuery.data?.length || 0) + 1, content_hash: "", tools: [], variables: [], created_by: "dashboard" } }, { onSuccess: () => { setShowCreateVersion(false); setNewPromptSystemPrompt(""); setNewPromptDescription(""); } })} disabled={!newPromptSystemPrompt.trim() || createVersionMutation.isPending}>
+                        {createVersionMutation.isPending ? "Creating..." : "Create"}
                       </Button>
                       <Button variant="secondary" onClick={() => setShowCreateVersion(false)}>Cancel</Button>
                     </div>
@@ -1808,7 +1824,7 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
           )}
 
           {activeTab === "experiments" && (
-            <div className="space-y-4">
+            <div id="agents-panel-experiments" role="tabpanel" aria-labelledby="agents-tab-experiments" className="space-y-4">
               <div className="flex justify-end">
                 <Button variant="primary" size="sm" onClick={() => setShowCreateExperiment(true)}>
                   <Plus className="w-3 h-3 mr-1" /> New Experiment
@@ -1882,8 +1898,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
 
               {showCreateExperiment && (
                 <div className="fixed inset-0 z-60 flex items-end sm:items-center justify-center bg-black/50 p-0 sm:p-4" onClick={() => setShowCreateExperiment(false)}>
-                  <div className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                    <h4 className="font-bold mb-4">Create Experiment</h4>
+                  <div role="dialog" aria-modal="true" aria-labelledby="create-experiment-dialog-title" className="bg-surface rounded-t-2xl sm:rounded-xl shadow-2xl border border-border-subtle p-6 w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                    <h4 id="create-experiment-dialog-title" className="font-bold mb-4">Create Experiment</h4>
                     <div className="space-y-4">
                       <div>
                         <label className="text-xs text-text-dim">Experiment Name</label>
@@ -1913,8 +1929,8 @@ function PromptsExperimentsModal({ agentId, agentName, onClose }: { agentId: str
                       </div>
                     </div>
                     <div className="flex gap-2 mt-4">
-                      <Button variant="primary" className="flex-1" onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2}>
-                        Create ({selectedVariantIds.length} variants)
+                      <Button variant="primary" className="flex-1" isLoading={createExperimentMutation.isPending} onClick={() => createExperimentMutation.mutate({ agentId, experiment: { name: newExperimentName, status: "draft", traffic_split: selectedVariantIds.map(() => Math.floor(100 / selectedVariantIds.length)), success_criteria: { require_user_helpful: true, require_no_tool_errors: true, require_non_empty: true }, variants: selectedVariantIds.map((vId, i) => { const ver = versions.find(v => v.id === vId); return { name: i === 0 ? "Control" : `Variant ${String.fromCharCode(65 + i)}`, prompt_version_id: vId, description: ver ? `v${ver.version}` : undefined }; }) } }, { onSuccess: () => { setShowCreateExperiment(false); setNewExperimentName(""); setSelectedVariantIds([]); } })} disabled={!newExperimentName.trim() || selectedVariantIds.length < 2 || createExperimentMutation.isPending}>
+                        {createExperimentMutation.isPending ? "Creating..." : `Create (${selectedVariantIds.length} variants)`}
                       </Button>
                       <Button variant="secondary" onClick={() => { setShowCreateExperiment(false); setSelectedVariantIds([]); }}>Cancel</Button>
                     </div>

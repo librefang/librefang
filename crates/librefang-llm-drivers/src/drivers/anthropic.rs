@@ -48,7 +48,10 @@ impl AnthropicDriver {
         request_timeout_secs: Option<u64>,
     ) -> Self {
         let client = match proxy_url {
-            Some(url) => librefang_http::proxied_client_with_override(url),
+            Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
+                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
+                librefang_http::proxied_client()
+            }),
             None => librefang_http::proxied_client(),
         };
         Self {

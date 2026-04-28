@@ -1,19 +1,15 @@
 name: Nix Build
 
-# Catches NixOS build breakage on flake.nix or workspace changes before
+# Catches NixOS build breakage on flake.nix or workspace changes after
 # they reach main. Past incidents (#2937, #2974, #3052, #3156, #3197) all
 # slipped through because regular CI doesn't exercise the Nix path.
+#
+# Runs on push-to-main only — running on every PR push burned runner
+# minutes on builds gated by flake.lock / Cargo.lock churn that isn't
+# authoritative until merge. Trigger manually with workflow_dispatch
+# when a PR explicitly needs a pre-merge nix check.
 on:
   push:
-    branches: [main]
-    paths:
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - '.github/workflows/nix-build.yml'
-  pull_request:
     branches: [main]
     paths:
       - 'flake.nix'

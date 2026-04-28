@@ -163,7 +163,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Task queue management
         .route(
             "/tasks",
-            axum::routing::get(task_queue_list_root),
+            axum::routing::get(task_queue_list_root).post(task_queue_post_root),
         )
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
@@ -1772,7 +1772,11 @@ pub async fn approve_request(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 Ok((false, _)) => {
@@ -2415,7 +2419,11 @@ pub async fn totp_setup(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 _ => false,
@@ -2602,7 +2610,11 @@ pub async fn totp_revoke(
                     &stored, &body.code,
                 ) {
                     Ok((true, updated)) => {
-                        let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                        if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
+                            tracing::warn!(
+                                "Failed to persist updated TOTP recovery codes after use: {e}"
+                            );
+                        }
                         true
                     }
                     _ => false,
@@ -2634,9 +2646,15 @@ pub async fn totp_revoke(
 
     // Remove TOTP data from vault
     // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
-    let _ = state.kernel.vault_set("totp_confirmed", "false");
-    let _ = state.kernel.vault_set("totp_secret", "");
-    let _ = state.kernel.vault_set("totp_recovery_codes", "[]");
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_secret", "") {
+        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
+        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+    }
 
     (
         StatusCode::OK,
@@ -3518,10 +3536,12 @@ pub async fn create_backup(
         components: components.clone(),
     };
     if let Ok(manifest_json) = serde_json::to_string_pretty(&manifest) {
-        let _ = zip.start_file("manifest.json", options).and_then(|()| {
+        if let Err(e) = zip.start_file("manifest.json", options).and_then(|()| {
             std::io::Write::write_all(&mut zip, manifest_json.as_bytes())
                 .map_err(zip::result::ZipError::Io)
-        });
+        }) {
+            tracing::warn!("Failed to write manifest.json into export archive: {e}");
+        }
     }
 
     if let Err(e) = zip.finish() {
@@ -4543,6 +4563,53 @@ pub async fn task_queue_list_root(
                 Json(serde_json::json!({"tasks": tasks, "total": total})),
             )
         }
+        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+    }
+}
+
+/// POST /api/tasks — Enqueue a task on behalf of an external caller.
+///
+/// Body: `{"title": "...", "description": "...", "assigned_to": "<agent-id>"?, "created_by": "<agent-id>"?}`
+///
+/// Wraps `KernelHandle::task_post` so HTTP clients (skill subprocesses,
+/// cron scripts, external integrations) can enqueue tasks without a
+/// runtime/agent context. The agent-side `task_post` tool keeps the
+/// caller's agent id automatically; this HTTP form takes `created_by`
+/// as an optional explicit field for provenance.
+pub async fn task_queue_post_root(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let title = match body["title"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'title' field"})),
+            );
+        }
+    };
+    let description = match body["description"].as_str() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'description' field"})),
+            );
+        }
+    };
+    let assigned_to = body["assigned_to"].as_str();
+    let created_by = body["created_by"].as_str();
+    match state
+        .kernel
+        .task_post(title, description, assigned_to, created_by)
+        .await
+    {
+        Ok(task_id) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"id": task_id, "status": "pending"})),
+        ),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }
 }

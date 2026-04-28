@@ -180,7 +180,10 @@ impl ChatGptDriver {
 
     pub fn with_proxy(session_token: String, base_url: String, proxy_url: Option<&str>) -> Self {
         let client = match proxy_url {
-            Some(url) => librefang_http::proxied_client_with_override(url),
+            Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
+                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
+                librefang_http::proxied_client()
+            }),
             None => librefang_http::proxied_client(),
         };
         Self {

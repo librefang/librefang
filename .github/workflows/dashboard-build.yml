@@ -10,6 +10,12 @@ on:
       - 'crates/librefang-api/dashboard/package.json'
       - 'crates/librefang-api/dashboard/vite.config.*'
       - 'crates/librefang-api/dashboard/tsconfig.*'
+  pull_request:
+    paths:
+      - 'crates/librefang-api/dashboard/src/**'
+      - 'crates/librefang-api/dashboard/package.json'
+      - 'crates/librefang-api/dashboard/vite.config.*'
+      - 'crates/librefang-api/dashboard/tsconfig.*'
   release:
     types: [published]
   workflow_dispatch:
@@ -18,6 +24,13 @@ on:
         description: 'Release tag to upload dashboard asset to (e.g. v2026.4.5-beta14)'
         required: true
         type: string
+
+# Cancel superseded runs on the same ref (e.g. when a PR is force-pushed).
+# Main-branch and release runs each get their own group so they don't cancel
+# each other.
+concurrency:
+  group: dashboard-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -40,6 +53,15 @@ jobs:
         # ignored-builds setting; pass it on the CLI so it can't be missed.
         run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
 
+      - name: Typecheck
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run typecheck
+
+      - name: Run tests
+        working-directory: crates/librefang-api/dashboard
+        # Includes the no-inline-fetch lint test (src/lib/__tests__/no-inline-fetch.test.ts)
+        run: pnpm run test
+
       - name: Build dashboard
         working-directory: crates/librefang-api/dashboard
         run: pnpm run build
@@ -50,6 +72,7 @@ jobs:
           tar -czf /tmp/dashboard-dist.tar.gz .
 
       - name: Upload to release
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

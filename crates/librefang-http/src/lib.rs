@@ -164,20 +164,19 @@ pub fn proxied_client() -> reqwest::Client {
 
 /// Build a [`reqwest::Client`] that routes all traffic through the given proxy URL,
 /// ignoring the global proxy config. Used for per-provider proxy overrides.
-pub fn proxied_client_with_override(proxy_url: &str) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
+///
+/// Returns `Err` if `proxy_url` is invalid or the client cannot be built.
+/// Callers that want a best-effort client should call [`proxied_client`] on error
+/// and log a warning explicitly — this function never silently falls back.
+pub fn proxied_client_with_override(proxy_url: &str) -> reqwest::Result<reqwest::Client> {
+    let proxy = Proxy::all(proxy_url)?;
+    reqwest::Client::builder()
         .use_preconfigured_tls(tls_config())
-        .user_agent(USER_AGENT);
-    if let Ok(proxy) = Proxy::all(proxy_url) {
-        builder = builder.proxy(proxy);
-    } else {
-        tracing::warn!(
-            url = proxy_url,
-            "Invalid per-provider proxy URL, falling back to global proxy"
-        );
-        return proxied_client();
-    }
-    builder.build().unwrap_or_else(|_| proxied_client())
+        .user_agent(USER_AGENT)
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(300))
+        .proxy(proxy)
+        .build()
 }
 
 /// Backward-compatible alias for [`proxied_client_builder`].

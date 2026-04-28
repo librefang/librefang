@@ -167,8 +167,13 @@ export function CommsPage() {
       />
 
       {/* Tabs */}
-      <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit overflow-x-auto">
+      <div role="tablist" aria-label={t("nav.comms")} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit overflow-x-auto">
         <button
+          id="comms-tab-channels"
+          role="tab"
+          aria-selected={activeTab === "channels"}
+          aria-controls="comms-panel-channels"
+          tabIndex={activeTab === "channels" ? 0 : -1}
           onClick={() => setActiveTab("channels")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
@@ -178,6 +183,11 @@ export function CommsPage() {
           {t("comms.active_channels")}
         </button>
         <button
+          id="comms-tab-topology"
+          role="tab"
+          aria-selected={activeTab === "topology"}
+          aria-controls="comms-panel-topology"
+          tabIndex={activeTab === "topology" ? 0 : -1}
           onClick={() => setActiveTab("topology")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
@@ -187,6 +197,11 @@ export function CommsPage() {
           {t("comms.topology")}
         </button>
         <button
+          id="comms-tab-events"
+          role="tab"
+          aria-selected={activeTab === "events"}
+          aria-controls="comms-panel-events"
+          tabIndex={activeTab === "events" ? 0 : -1}
           onClick={() => setActiveTab("events")}
           className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-colors whitespace-nowrap ${
             activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
@@ -213,7 +228,7 @@ export function CommsPage() {
 
       {/* Content */}
       {activeTab === "channels" && (
-        <>
+        <div id="comms-panel-channels" role="tabpanel" aria-labelledby="comms-tab-channels" className="flex flex-col gap-6">
           {/* Stats Grid */}
           <StaggerList className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
             {[
@@ -290,11 +305,12 @@ export function CommsPage() {
               ))}
             </div>
           )}
-        </>
+        </div>
       )}
 
       {/* Topology Tab */}
       {activeTab === "topology" && (
+        <div id="comms-panel-topology" role="tabpanel" aria-labelledby="comms-tab-topology">
         <Card padding="lg">
           <h2 className="text-lg font-black tracking-tight mb-1">{t("comms.topology")}</h2>
           <p className="mb-6 text-xs text-text-dim font-medium">{t("comms.topology_description")}</p>
@@ -341,10 +357,12 @@ export function CommsPage() {
             </div>
           )}
         </Card>
+        </div>
       )}
 
       {/* Events Tab */}
       {activeTab === "events" && (
+        <div id="comms-panel-events" role="tabpanel" aria-labelledby="comms-tab-events">
         <Card padding="lg">
           <div className="flex items-center justify-between mb-4">
             <div>
@@ -369,6 +387,7 @@ export function CommsPage() {
             </div>
           )}
         </Card>
+        </div>
       )}
     </div>
   );

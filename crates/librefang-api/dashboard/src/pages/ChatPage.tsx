@@ -129,17 +129,39 @@ function makeMessageId(prefix: string): string {
 
 
 // WebSocket hook with auto-reconnect
-function useWebSocket(agentId: string | null, sessionId: string | null = null) {
+// Max reconnect attempts before giving up and surfacing an error
+const WS_MAX_RETRIES = 10;
+// Auth-failure close codes — do not reconnect on these
+const WS_AUTH_ERROR_CODES = new Set([4401, 4403]);
+
+function useWebSocket(
+  agentId: string | null,
+  sessionId: string | null = null,
+  onAuthError?: (msg: string) => void,
+) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  // Bug #3849: announce connection state changes to screen readers
+  const [ariaAnnouncement, setAriaAnnouncement] = useState("");
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
   const onDropRef = useRef<(() => void) | null>(null);
+  // Bug #3847: store the current URL in a ref so the reconnect closure always
+  // reads the latest value rather than capturing the URL from the previous
+  // agent via a stale closure.
+  const urlRef = useRef<string>("");
+  // Bug #3854: track whether we've hit a terminal auth-error state
+  const authErrorRef = useRef(false);
+  // Keep onAuthError in a ref to avoid triggering the effect when the caller
+  // passes a fresh inline lambda on every render.
+  const onAuthErrorRef = useRef(onAuthError);
+  useEffect(() => { onAuthErrorRef.current = onAuthError; }, [onAuthError]);
 
   useEffect(() => {
     if (!agentId) {
       setWsConnected(false);
+      setAriaAnnouncement("");
       return;
     }
 
@@ -151,24 +173,54 @@ function useWebSocket(agentId: string | null, sessionId: string | null = null) {
     const wsPath = sessionId
       ? `${base}?session_id=${encodeURIComponent(sessionId)}`
       : base;
-    const url = buildAuthenticatedWebSocketUrl(wsPath);
+    // Bug #3847: keep urlRef current so the reconnect closure always uses
+    // the latest agent's URL even after an agent switch and reconnect cycle.
+    urlRef.current = buildAuthenticatedWebSocketUrl(wsPath);
+    retriesRef.current = 0;
+    authErrorRef.current = false;
 
     function connect() {
+      // Bug #3847: read from the ref, not the closed-over local variable, so
+      // we always target the current agent on reconnect.
+      const currentUrl = urlRef.current;
       try {
-        const ws = new WebSocket(url);
+        const ws = new WebSocket(currentUrl);
 
         ws.onopen = () => {
           setWsConnected(true);
           retriesRef.current = 0;
+          // Bug #3849: announce successful connection
+          setAriaAnnouncement(`Connected to agent`);
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           setWsConnected(false);
           // Notify pending response handler
           if (onDropRef.current) {
             onDropRef.current();
             onDropRef.current = null;
           }
+
+          // Bug #3854: stop reconnecting on auth-failure close codes
+          if (WS_AUTH_ERROR_CODES.has(event.code)) {
+            authErrorRef.current = true;
+            const msg = "Authentication required — please refresh the page";
+            setAriaAnnouncement(msg);
+            onAuthErrorRef.current?.(msg);
+            return;
+          }
+
+          // Bug #3854: cap total retry attempts; surface an error after max
+          if (retriesRef.current >= WS_MAX_RETRIES) {
+            const msg = "Connection failed — unable to reach the agent";
+            setAriaAnnouncement(msg);
+            onAuthErrorRef.current?.(msg);
+            return;
+          }
+
+          // Bug #3849: announce disconnect
+          setAriaAnnouncement(`Disconnected from agent — reconnecting…`);
+
           // Auto-reconnect with exponential backoff (max 15s)
           const delay = Math.min(1000 * 2 ** retriesRef.current, 15000);
           retriesRef.current++;
@@ -190,6 +242,7 @@ function useWebSocket(agentId: string | null, sessionId: string | null = null) {
     return () => {
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       retriesRef.current = 0;
+      authErrorRef.current = false;
       onDropRef.current = null;
       const ws = wsRef.current;
       if (ws) {
@@ -206,7 +259,7 @@ function useWebSocket(agentId: string | null, sessionId: string | null = null) {
     };
   }, [agentId, sessionId]);
 
-  return { ws: wsRef, wsConnected, onDropRef };
+  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement };
 }
 
 // Per-agent session cache — survives agent switches within the same page lifecycle
@@ -271,7 +324,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef } = useWebSocket(agentId, sessionId);
+  const { ws, wsConnected, onDropRef, ariaAnnouncement } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -804,7 +857,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -2216,6 +2269,9 @@ export function ChatPage() {
   const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  // Message windowing: render only the last N messages to avoid DOM bloat in
+  // long sessions. The user can load earlier messages with the button above.
+  const [visibleCount, setVisibleCount] = useState(50);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
@@ -2225,9 +2281,11 @@ export function ChatPage() {
   const patchAgentConfigMutation = usePatchAgentConfig();
   const patchHandAgentRuntimeConfigMutation = usePatchHandAgentRuntimeConfig();
 
-  // Sync agent selection to URL search params
+  // Sync agent selection to URL search params. Also reset the visible-message
+  // window so new agent sessions start from the tail end of history.
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
+    setVisibleCount(50);
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
@@ -2352,7 +2410,7 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
-  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -2366,6 +2424,25 @@ export function ChatPage() {
   // `response` event. Textarea unblocks as soon as streaming ends so the user
   // can compose the next message immediately.
   const isStreaming = messages.some(m => m.role === "assistant" && m.isStreaming);
+
+  // Bug #3849: Track message count changes to announce new messages to screen
+  // readers via the aria-live region.
+  const [msgAriaAnnouncement, setMsgAriaAnnouncement] = useState("");
+  const prevMsgCountForAria = useRef(0);
+  useEffect(() => {
+    const prev = prevMsgCountForAria.current;
+    const curr = messages.length;
+    if (curr > prev && prev > 0) {
+      const newCount = curr - prev;
+      const agentName = agents.find(a => a.id === selectedAgentId)?.name ?? "agent";
+      setMsgAriaAnnouncement(
+        newCount === 1
+          ? `1 new message from ${agentName}`
+          : `${newCount} new messages from ${agentName}`,
+      );
+    }
+    prevMsgCountForAria.current = curr;
+  }, [messages.length, agents, selectedAgentId]);
 
   // Export current conversation as a markdown file. Keeps the local
   // timestamp, role, content, and (when present) tool call summaries
@@ -2558,6 +2635,12 @@ export function ChatPage() {
 
   return (
     <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
+      {/* Bug #3849: two separate aria-live regions so WS state changes and
+          new-message announcements are each surfaced independently — a single
+          region with `||` would silence msgAriaAnnouncement whenever the WS
+          connection string is non-empty. */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
+      <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
       {/* Header */}
       <header className="pb-2 sm:pb-4">
         <div className="flex items-center justify-between">
@@ -2731,7 +2814,16 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-6">
-                {messages.map(msg => (
+                {/* Load-earlier button — shown when history exceeds the render window */}
+                {messages.length > visibleCount && (
+                  <button
+                    onClick={() => setVisibleCount(prev => prev + 50)}
+                    className="w-full py-2 px-4 rounded-xl text-xs font-semibold text-text-dim bg-main hover:bg-surface-hover border border-border-subtle transition-colors"
+                  >
+                    {t("chat.load_earlier_messages", { count: messages.length - visibleCount, defaultValue: `Load ${messages.length - visibleCount} earlier messages` })}
+                  </button>
+                )}
+                {messages.slice(-visibleCount).map(msg => (
                   <MessageBubble
                     key={msg.id}
                     message={msg}

@@ -44,20 +44,37 @@ impl ConsolidationEngine {
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         // Phase 2: merge highly similar memories (>90% text similarity).
-        // Load all active memories and group pairs for merging.
+        // Load active memories per-agent to prevent cross-tenant merges: memories
+        // that belong to different agents must never be compared or merged, even
+        // when the global consolidation sweep runs across the shared database.
         // Cap at 100 merges per consolidation run to avoid O(n²) blowup on
         // large memory stores.
         const MAX_MERGES_PER_RUN: u64 = 100;
         let mut memories_merged: u64 = 0;
-        {
+
+        // Collect the distinct agent_ids that have active memories so we can
+        // process each tenant in isolation.
+        let agent_ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT agent_id FROM memories WHERE deleted = 0")
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        'agents: for agent_id in &agent_ids {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, content, confidence FROM memories WHERE deleted = 0 ORDER BY confidence DESC",
+                    "SELECT id, content, confidence FROM memories \
+                     WHERE deleted = 0 AND agent_id = ?1 \
+                     ORDER BY confidence DESC",
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows: Vec<(String, String, f64)> = stmt
-                .query_map([], |row| {
+                .query_map(rusqlite::params![agent_id], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -71,7 +88,7 @@ impl ConsolidationEngine {
             // Track which IDs have been absorbed into another memory.
             let mut absorbed: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-            'outer: for i in 0..rows.len() {
+            for i in 0..rows.len() {
                 if absorbed.contains(&rows[i].0) {
                     continue;
                 }
@@ -110,7 +127,7 @@ impl ConsolidationEngine {
                         memories_merged += 1;
 
                         if memories_merged >= MAX_MERGES_PER_RUN {
-                            break 'outer;
+                            break 'agents;
                         }
                     }
                 }
@@ -292,5 +309,57 @@ mod tests {
             )
             .unwrap();
         assert!((confidence - 0.9).abs() < f64::EPSILON);
+    }
+
+    /// Helper: insert a memory belonging to a specific agent_id.
+    fn insert_memory_for_agent(
+        conn: &Connection,
+        id: &str,
+        agent_id: &str,
+        content: &str,
+        confidence: f64,
+    ) {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, deleted)
+             VALUES (?1, ?2, ?3, '\"conversation\"', 'episodic', ?4, '{}', ?5, ?5, 0, 0)",
+            rusqlite::params![id, agent_id, content, confidence, now],
+        ).unwrap();
+    }
+
+    /// Identical content belonging to two different agents must NOT be merged.
+    /// Before the fix, the SELECT had no agent_id filter and would load all
+    /// tenants' memories into the same comparison set, causing cross-tenant
+    /// soft-deletes (data leak / data loss).
+    #[test]
+    fn test_no_cross_tenant_merge() {
+        let engine = setup();
+        {
+            let conn = engine.conn.lock().unwrap();
+            // Same content, same high similarity — but different agents.
+            insert_memory_for_agent(
+                &conn,
+                "agent-a-mem",
+                "agent-a",
+                "the quick brown fox jumps over the lazy dog",
+                0.8,
+            );
+            insert_memory_for_agent(
+                &conn,
+                "agent-b-mem",
+                "agent-b",
+                "the quick brown fox jumps over the lazy dog",
+                0.7,
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        // Cross-tenant merge must not happen — 0 merges expected.
+        assert_eq!(report.memories_merged, 0);
+
+        let conn = engine.conn.lock().unwrap();
+        // Both memories from different agents must survive intact.
+        assert!(!is_deleted(&conn, "agent-a-mem"));
+        assert!(!is_deleted(&conn, "agent-b-mem"));
     }
 }

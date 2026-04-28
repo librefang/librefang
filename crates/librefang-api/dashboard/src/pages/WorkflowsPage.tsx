@@ -325,8 +325,13 @@ export function WorkflowsPage() {
       />
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 border-b border-border-subtle">
+      <div role="tablist" aria-label={t("nav.workflows", { defaultValue: "Workflows" })} className="flex items-center gap-1 border-b border-border-subtle">
         <button
+          id="workflows-tab-workflows"
+          role="tab"
+          aria-selected={activeTab === "workflows"}
+          aria-controls="workflows-panel-workflows"
+          tabIndex={activeTab === "workflows" ? 0 : -1}
           onClick={() => setActiveTab("workflows")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "workflows"
@@ -338,6 +343,11 @@ export function WorkflowsPage() {
           {workflows.length > 0 && <span className="ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{workflows.length}</span>}
         </button>
         <button
+          id="workflows-tab-templates"
+          role="tab"
+          aria-selected={activeTab === "templates"}
+          aria-controls="workflows-panel-templates"
+          tabIndex={activeTab === "templates" ? 0 : -1}
           onClick={() => setActiveTab("templates")}
           className={`px-4 py-2.5 text-sm font-bold transition-colors border-b-2 -mb-px ${
             activeTab === "templates"
@@ -352,40 +362,42 @@ export function WorkflowsPage() {
 
       {/* Templates Tab */}
       {activeTab === "templates" && (
-        apiTemplates.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-            {apiTemplates.map(tmpl => {
-              const Icon = categoryIconMap[tmpl.category || ""] || Layers;
-              const stepCount = tmpl.steps?.length ?? 0;
-              return (
-                <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
-                  className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
-                  <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
-                      <Icon className="w-5 h-5 text-brand" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
-                      <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
-                      <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
-                        {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
-                        {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
-                        <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+        <div id="workflows-panel-templates" role="tabpanel" aria-labelledby="workflows-tab-templates">
+          {apiTemplates.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+              {apiTemplates.map(tmpl => {
+                const Icon = categoryIconMap[tmpl.category || ""] || Layers;
+                const stepCount = tmpl.steps?.length ?? 0;
+                return (
+                  <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
+                    className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
+                        <Icon className="w-5 h-5 text-brand" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
+                        <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
+                        <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
+                          {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
+                          {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
+                          <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
-        )
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+          )}
+        </div>
       )}
 
       {/* Workflows Tab */}
       {activeTab === "workflows" && (
-        <>
+        <div id="workflows-panel-workflows" role="tabpanel" aria-labelledby="workflows-tab-workflows">
           {/* Search Bar */}
           {hasWorkflows && (
             <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
@@ -734,7 +746,7 @@ export function WorkflowsPage() {
           />
         )
       )}
-        </>
+        </div>
       )}
       {/* Schedule Modal */}
       {scheduleWorkflowId && (

@@ -1,6 +1,7 @@
 //! Shared HTTP client builder with fallback CA roots.
 
 use reqwest::ClientBuilder;
+use std::time::Duration;
 
 pub fn client_builder() -> ClientBuilder {
     let mut root_store = rustls::RootCertStore::empty();
@@ -16,7 +17,13 @@ pub fn client_builder() -> ClientBuilder {
     .expect("default protocol versions")
     .with_root_certificates(root_store)
     .with_no_client_auth();
-    ClientBuilder::new().use_preconfigured_tls(tls_config)
+    ClientBuilder::new()
+        .use_preconfigured_tls(tls_config)
+        // Bound connection and read inactivity to prevent hung requests / SSRF amplification.
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(30))
+        // Allow at most 5 redirects; prevents redirect-loop SSRF amplification.
+        .redirect(reqwest::redirect::Policy::limited(5))
 }
 
 pub fn new_client() -> reqwest::Client {

@@ -89,6 +89,7 @@ export function ConnectWizardPage() {
       const creds = await getCredentials();
       if (!creds || cancelled) return;
       try {
+        // lint-disable-next-line dashboard/no-inline-fetch -- one-shot probe at user-supplied URL, must not be cached
         const resp = await fetch(`${creds.base_url}/api/health`, {
           headers: { Authorization: `Bearer ${creds.api_key}` },
           signal: AbortSignal.timeout(5_000),

@@ -318,7 +318,7 @@ jobs:
         working-directory: crates/librefang-api/dashboard
         run: pnpm run build
       - name: Upload dashboard artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dashboard-dist
           path: crates/librefang-api/static/react/
@@ -1189,7 +1189,11 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          # Prepend (NOT replace) the search list. Same reason as the
+          # mobile_ios job below — replace works on a clean GitHub-hosted
+          # runner but hides existing entries on a future self-hosted one.
+          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
@@ -1283,6 +1287,298 @@ jobs:
           includeUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
+
+  # ── Mobile builds ──────────────────────────────────────────────────────
+  #
+  # Treated as best-effort: a flaky cert refresh on Apple's side or an
+  # Android signing snag must NOT block the desktop matrix above. Each
+  # mobile job uses `continue-on-error: true` and `if: always()` for the
+  # release-attach step, so a failed build leaves the desktop release
+  # intact while still surfacing the failure in the workflow summary.
+  #
+  # Secrets required: see .github/SECRETS.md. When secrets are missing
+  # (typical on a fork or for the very first run on a fresh repo), each
+  # job degrades to an unsigned debug build that just verifies the
+  # toolchain still works, rather than failing the whole pipeline.
+
+  mobile_android:
+    name: Mobile / Android (aab + apk)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    env:
+      # ANDROID_HOME / ANDROID_SDK_ROOT are exported by setup-android; the
+      # Tauri Android driver insists on NDK_HOME being set explicitly even
+      # though the SDK manager already installs the NDK below.
+      NDK_VERSION: "27.0.12077973"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.NDK_VERSION }}"
+
+      - name: Export NDK_HOME
+        run: |
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+        with:
+          version: 10
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: mobile-android-${{ github.ref_name }}
+          restore-keys: |
+            mobile-android-
+
+      - name: Cache Gradle
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      # See mobile-smoke.yml for why this cache is paired with the install.
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
+      - name: Install Tauri CLI
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
+
+      - name: Build embedded dashboard assets
+        working-directory: crates/librefang-api/dashboard
+        run: |
+          pnpm install --frozen-lockfile --config.strict-dep-builds=false
+          pnpm run build
+
+      - name: Initialise Android project
+        working-directory: crates/librefang-desktop
+        # See mobile-smoke.yml — the repo's `gen/android/README.md`
+        # placeholder confuses tauri-cli into thinking the project is
+        # already scaffolded. Wipe it so init starts clean.
+        run: |
+          rm -rf gen/android
+          cargo tauri android init
+
+      - name: Decode Android signing keystore
+        id: keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::warning::ANDROID_KEYSTORE_B64 not set — falling back to debug build (unsigned, not for distribution)"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build signed release (.aab + .apk)
+        if: steps.keystore.outputs.signed == 'true'
+        working-directory: crates/librefang-desktop
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cargo tauri android build \
+            --target aarch64 \
+            --apk --aab
+
+      - name: Build unsigned debug (fallback)
+        if: steps.keystore.outputs.signed != 'true'
+        working-directory: crates/librefang-desktop
+        run: cargo tauri android build --target aarch64 --debug --apk
+
+      - name: Locate artifacts
+        id: art
+        run: |
+          set -euo pipefail
+          AAB=$(find . -name "*.aab" -path "*/release/*" | head -1 || true)
+          APK=$(find . -name "*.apk" \( -path "*/release/*" -o -path "*/debug/*" \) | head -1 || true)
+          echo "aab=$AAB" >> "$GITHUB_OUTPUT"
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        if: always() && (steps.art.outputs.aab != '' || steps.art.outputs.apk != '')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AAB_PATH: ${{ steps.art.outputs.aab }}
+          APK_PATH: ${{ steps.art.outputs.apk }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          for f in "$AAB_PATH" "$APK_PATH"; do
+            [ -z "$f" ] && continue
+            base=$(basename "$f")
+            echo "Uploading $base"
+            gh release upload "$TAG" "$f" --clobber || true
+          done
+
+      - name: Wipe keystore from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
+
+  mobile_ios:
+    name: Mobile / iOS (ipa)
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs: [create_release]
+    continue-on-error: true
+    # macos-26 ships Xcode 26 (default 26.2). Use the default Xcode
+    # rather than pinning a specific SDK — for a Tauri release build the
+    # SDK delta inside the 26.x line is irrelevant and skipping
+    # setup-xcode saves 1–2 min per run.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Show selected Xcode
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          xcrun simctl list runtimes available | head -20
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+        with:
+          version: 10
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: mobile-ios-${{ github.ref_name }}
+          restore-keys: |
+            mobile-ios-
+
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
+      - name: Install Tauri CLI
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
+
+      - name: Build embedded dashboard assets
+        working-directory: crates/librefang-api/dashboard
+        run: |
+          pnpm install --frozen-lockfile --config.strict-dep-builds=false
+          pnpm run build
+
+      - name: Initialise iOS project
+        working-directory: crates/librefang-desktop
+        run: cargo tauri ios init
+
+      - name: Import distribution certificate
+        id: keychain
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
+        run: |
+          if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_PROVISIONING_PROFILE_B64" ]; then
+            echo "::warning::Apple signing secrets missing — falling back to simulator build (unsigned, not for TestFlight)"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PWD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          # Prepend (NOT replace) the search list. On a clean GitHub-hosted
+          # macos runner only the login keychain is present and the delta
+          # is harmless, but a future self-hosted runner may have other
+          # entries we'd otherwise hide for the duration of the build.
+          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$APPLE_PROVISIONING_PROFILE_B64" | base64 --decode \
+            > "$HOME/Library/MobileDevice/Provisioning Profiles/librefang.mobileprovision"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "keychain=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed .ipa
+        if: steps.keychain.outputs.signed == 'true'
+        working-directory: crates/librefang-desktop
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cargo tauri ios build --target aarch64
+
+      - name: Build simulator (fallback)
+        if: steps.keychain.outputs.signed != 'true'
+        working-directory: crates/librefang-desktop
+        run: cargo tauri ios build --target aarch64-sim --debug
+
+      - name: Locate .ipa
+        id: art
+        run: |
+          set -euo pipefail
+          IPA=$(find . -name "*.ipa" | head -1 || true)
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to GitHub Release
+        if: always() && steps.art.outputs.ipa != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IPA_PATH: ${{ steps.art.outputs.ipa }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" "$IPA_PATH" --clobber || true
+
+      - name: Tear down keychain
+        if: always() && steps.keychain.outputs.keychain != ''
+        env:
+          KEYCHAIN_PATH: ${{ steps.keychain.outputs.keychain }}
+        run: |
+          security delete-keychain "$KEYCHAIN_PATH" || true
 
   sync_homebrew_cask:
     name: Sync Homebrew Cask

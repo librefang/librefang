@@ -300,7 +300,7 @@ async fn resolve_manifest(
     let mut manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
-            let _ = e;
+            tracing::warn!("Failed to parse agent manifest TOML: {e}");
             let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
                 message: t.t("api-error-manifest-invalid-format"),
@@ -3653,7 +3653,7 @@ pub async fn update_agent(
     }
 
     // Parse the new manifest
-    let _manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
+    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
         Ok(m) => m,
         Err(e) => {
             return (
@@ -3665,15 +3665,21 @@ pub async fn update_agent(
         }
     };
 
-    // Note: Full manifest update requires kill + respawn. For now, acknowledge receipt.
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "acknowledged",
-            "agent_id": id,
-            "note": "Full manifest update requires agent restart. Use DELETE + POST to apply.",
-        })),
-    )
+    drop(t);
+
+    match state.kernel.update_manifest(agent_id, manifest) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "agent_id": id,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 #[utoipa::path(
@@ -4589,7 +4595,9 @@ pub async fn clone_agent(
             if let (Ok(src_can), Ok(dst_can)) = (src_ws.canonicalize(), dst_ws.canonicalize()) {
                 let src_identity = src_can.join(".identity");
                 let dst_identity = dst_can.join(".identity");
-                let _ = std::fs::create_dir_all(&dst_identity);
+                if let Err(e) = std::fs::create_dir_all(&dst_identity) {
+                    tracing::warn!("Failed to create identity directory for cloned agent: {e}");
+                }
                 for &fname in KNOWN_IDENTITY_FILES {
                     // Source: prefer .identity/ (post-migration), fall back to workspace root
                     let src_file = if src_identity.join(fname).exists() {

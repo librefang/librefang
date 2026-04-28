@@ -29,13 +29,58 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
+// Security helpers
+// ---------------------------------------------------------------------------
+
+/// #3794 — Reject ids that contain path-traversal components (e.g. `../`,
+/// absolute paths, NUL bytes). Only ids consisting of a single normal path
+/// component are accepted.
+fn validate_migration_id(id: &str) -> Result<(), crate::MigrateError> {
+    if id.is_empty() {
+        return Err(crate::MigrateError::InvalidId("id is empty".to_string()));
+    }
+    if id.contains('\0') {
+        return Err(crate::MigrateError::InvalidId(
+            "id contains NUL byte".to_string(),
+        ));
+    }
+    for component in std::path::Path::new(id).components() {
+        match component {
+            std::path::Component::Normal(_) => {}
+            _ => {
+                return Err(crate::MigrateError::InvalidId(format!(
+                    "id contains illegal path component: {id:?}"
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// #3798 — Write `content` to `path` atomically: write to a sibling `.tmp`
+/// file first, then rename into place. Prevents torn writes from leaving a
+/// half-written config file if the process is interrupted.
+fn atomic_write(path: &std::path::Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // OpenClaw JSON5 input types
 // ---------------------------------------------------------------------------
+
+/// Schema versions this migrator can handle.
+const SUPPORTED_OPENCLAW_VERSIONS: &[u32] = &[1, 2];
 
 /// Top-level openclaw.json structure.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct OpenClawRoot {
+    /// #3797 — schema/format version declared by openclaw.json.
+    #[serde(alias = "schemaVersion")]
+    version: Option<u32>,
     auth: Option<OpenClawAuth>,
     models: Option<OpenClawModels>,
     agents: Option<OpenClawAgents>,
@@ -523,6 +568,18 @@ struct LibreFangMemorySection {
 /// Write or update a key in a secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
 fn write_secret_env(path: &Path, key: &str, value: &str) -> Result<(), std::io::Error> {
+    if key.contains('\n') || key.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret key must not contain newline characters",
+        ));
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain newline characters",
+        ));
+    }
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -1207,6 +1264,13 @@ fn migrate_from_json5(
     let root: OpenClawRoot = json5::from_str(&content)
         .map_err(|e| MigrateError::Json5Parse(format!("{}: {e}", config_path.display())))?;
 
+    // #3797 — Reject configs that declare a schema version we don't support.
+    match root.version {
+        None => warn!("openclaw.json has no version field — assuming compatible format"),
+        Some(v) if SUPPORTED_OPENCLAW_VERSIONS.contains(&v) => {}
+        Some(v) => return Err(MigrateError::UnsupportedVersion(v)),
+    }
+
     // 1. Migrate config
     migrate_config_from_json(&root, target, dry_run, report)?;
 
@@ -1288,7 +1352,16 @@ fn migrate_config_from_json(
 
     if !dry_run {
         std::fs::create_dir_all(target)?;
-        std::fs::write(&dest, &config_content)?;
+        if dest.exists() {
+            // #3795 — Never clobber an existing config on re-run.
+            warn!(
+                "Skipping existing config {:?} — re-run would overwrite user edits",
+                dest
+            );
+        } else {
+            // #3798 — Atomic write.
+            atomic_write(&dest, &config_content)?;
+        }
     }
 
     report.imported.push(MigrateItem {
@@ -1801,14 +1874,35 @@ fn migrate_agents_from_json(
             continue;
         }
 
+        // #3794 — Reject ids with path-traversal components.
+        if let Err(e) = validate_migration_id(id) {
+            warn!("Skipping agent with unsafe id {id:?}: {e}");
+            report.skipped.push(SkippedItem {
+                kind: ItemKind::Agent,
+                name: id.clone(),
+                reason: e.to_string(),
+            });
+            continue;
+        }
+
         match convert_agent_from_json(entry, defaults) {
             Ok((toml_str, unmapped_tools)) => {
                 let dest_dir = target.join("agents").join(id);
                 let dest_file = dest_dir.join("agent.toml");
 
                 if !dry_run {
-                    std::fs::create_dir_all(&dest_dir)?;
-                    std::fs::write(&dest_file, &toml_str)?;
+                    // #3795 — Skip files that already exist to avoid overwriting
+                    // user edits on re-run.
+                    if dest_file.exists() {
+                        warn!(
+                            "Skipping existing file {:?} — re-run would overwrite user edits",
+                            dest_file
+                        );
+                    } else {
+                        std::fs::create_dir_all(&dest_dir)?;
+                        // #3798 — Atomic write: tmp → rename.
+                        atomic_write(&dest_file, &toml_str)?;
+                    }
                 }
 
                 report.imported.push(MigrateItem {
@@ -2147,8 +2241,16 @@ fn migrate_memory_files(
                 let dest_file = dest_dir.join("imported_memory.md");
 
                 if !dry_run {
-                    std::fs::create_dir_all(&dest_dir)?;
-                    std::fs::write(&dest_file, &content)?;
+                    // #3795 — Skip existing memory files to preserve user edits.
+                    if dest_file.exists() {
+                        warn!(
+                            "Skipping existing file {:?} — re-run would overwrite user edits",
+                            dest_file
+                        );
+                    } else {
+                        std::fs::create_dir_all(&dest_dir)?;
+                        std::fs::write(&dest_file, &content)?;
+                    }
                 }
 
                 report.imported.push(MigrateItem {
@@ -2195,8 +2297,16 @@ fn migrate_memory_files(
                 let dest_file = dest_dir.join("imported_memory.md");
 
                 if !dry_run {
-                    std::fs::create_dir_all(&dest_dir)?;
-                    std::fs::write(&dest_file, &content)?;
+                    // #3795 — Skip existing memory files to preserve user edits.
+                    if dest_file.exists() {
+                        warn!(
+                            "Skipping existing file {:?} — re-run would overwrite user edits",
+                            dest_file
+                        );
+                    } else {
+                        std::fs::create_dir_all(&dest_dir)?;
+                        std::fs::write(&dest_file, &content)?;
+                    }
                 }
 
                 report.imported.push(MigrateItem {
@@ -2568,7 +2678,16 @@ fn migrate_legacy_config(
 
     if !dry_run {
         std::fs::create_dir_all(target)?;
-        std::fs::write(&dest, &config_content)?;
+        if dest.exists() {
+            // #3795 — Never clobber an existing config on re-run.
+            warn!(
+                "Skipping existing config {:?} — re-run would overwrite user edits",
+                dest
+            );
+        } else {
+            // #3798 — Atomic write.
+            atomic_write(&dest, &config_content)?;
+        }
     }
 
     report.imported.push(MigrateItem {
@@ -2863,14 +2982,34 @@ fn migrate_legacy_agents(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // #3794 — Validate agent name derived from the filesystem path.
+        if let Err(e) = validate_migration_id(&agent_name) {
+            warn!("Skipping agent with unsafe name {agent_name:?}: {e}");
+            report.skipped.push(SkippedItem {
+                kind: ItemKind::Agent,
+                name: agent_name,
+                reason: e.to_string(),
+            });
+            continue;
+        }
+
         match convert_legacy_agent(&agent_yaml, &agent_name) {
             Ok((toml_str, unmapped_tools)) => {
                 let dest_dir = target.join("agents").join(&agent_name);
                 let dest_file = dest_dir.join("agent.toml");
 
                 if !dry_run {
-                    std::fs::create_dir_all(&dest_dir)?;
-                    std::fs::write(&dest_file, &toml_str)?;
+                    if dest_file.exists() {
+                        // #3795 — Skip existing files to preserve user edits.
+                        warn!(
+                            "Skipping existing file {:?} — re-run would overwrite user edits",
+                            dest_file
+                        );
+                    } else {
+                        std::fs::create_dir_all(&dest_dir)?;
+                        // #3798 — Atomic write.
+                        atomic_write(&dest_file, &toml_str)?;
+                    }
                 }
 
                 report.imported.push(MigrateItem {
@@ -3061,8 +3200,16 @@ fn migrate_legacy_memory(
         let dest_file = dest_dir.join("imported_memory.md");
 
         if !dry_run {
-            std::fs::create_dir_all(&dest_dir)?;
-            std::fs::write(&dest_file, &content)?;
+            // #3795 — Skip existing memory files to preserve user edits.
+            if dest_file.exists() {
+                warn!(
+                    "Skipping existing file {:?} — re-run would overwrite user edits",
+                    dest_file
+                );
+            } else {
+                std::fs::create_dir_all(&dest_dir)?;
+                std::fs::write(&dest_file, &content)?;
+            }
         }
 
         report.imported.push(MigrateItem {

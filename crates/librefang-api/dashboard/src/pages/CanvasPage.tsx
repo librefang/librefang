@@ -2228,6 +2228,9 @@ function CanvasPageInner() {
             transition={{ duration: 0.18, ease: APPLE_EASE }}
           >
           <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="canvas-shortcuts-dialog-title"
             className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-140 sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
             variants={fadeInScale}
@@ -2236,8 +2239,8 @@ function CanvasPageInner() {
             exit="exit"
           >
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
-              <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
-              <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+              <h3 id="canvas-shortcuts-dialog-title" className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
+              <button onClick={() => setShowHelp(false)} aria-label={t("common.close", { defaultValue: "Close dialog" })} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
             </div>
             <div className="p-5 space-y-1 text-xs">
               {[

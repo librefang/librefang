@@ -157,7 +157,7 @@ fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     let kernel = match LibreFangKernel::boot(config.as_deref()) {
         Ok(k) => k,
         Err(e) => {
-            eprintln!("Failed to boot kernel for MCP: {e}");
+            tracing::error!("Failed to boot kernel for MCP: {e}");
             std::process::exit(1);
         }
     };
@@ -230,11 +230,11 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
 fn write_message(writer: &mut impl Write, msg: &Value) {
     let body = serde_json::to_string(msg).unwrap_or_default();
     if let Err(e) = write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body) {
-        eprintln!("MCP write error: {e}");
+        tracing::error!("MCP write error: {e}");
         return;
     }
     if let Err(e) = writer.flush() {
-        eprintln!("MCP flush error: {e}");
+        tracing::error!("MCP flush error: {e}");
     }
 }
 
