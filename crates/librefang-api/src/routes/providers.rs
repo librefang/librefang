@@ -1777,7 +1777,8 @@ fn persist_default_model(
     };
     let root = doc.as_table_mut().ok_or("Config is not a TOML table")?;
     root.insert("default_model".to_string(), toml::Value::Table(dm_table));
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 
@@ -1913,7 +1914,8 @@ fn upsert_provider_url(
         std::fs::create_dir_all(parent)?;
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 
@@ -1957,7 +1959,8 @@ fn upsert_provider_proxy_url(
         );
     }
 
-    std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    let toml_str = toml::to_string_pretty(&doc)?;
+    crate::atomic_write(config_path, toml_str.as_bytes())?;
     Ok(())
 }
 

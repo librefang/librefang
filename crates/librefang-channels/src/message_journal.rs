@@ -212,7 +212,10 @@ impl MessageJournal {
     /// Call periodically or on shutdown.
     pub async fn compact(&self) {
         let inner = self.inner.lock().await;
-        let tmp_path = inner.path.with_extension("jsonl.tmp");
+        let tmp_path = inner.path.with_extension(format!(
+            "jsonl.tmp.{}",
+            std::process::id()
+        ));
         let result = (|| -> std::io::Result<()> {
             let mut file = std::fs::File::create(&tmp_path)?;
             for entry in inner.pending.values() {
@@ -220,6 +223,7 @@ impl MessageJournal {
                 writeln!(file, "{line}")?;
             }
             file.flush()?;
+            file.sync_all()?;
             std::fs::rename(&tmp_path, &inner.path)?;
             Ok(())
         })();

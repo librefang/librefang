@@ -570,13 +570,24 @@ impl WorkflowEngine {
                 return;
             }
         }
-        let tmp_path = path.with_extension("json.tmp");
-        if let Err(e) = std::fs::write(&tmp_path, data.as_bytes()) {
-            warn!("Failed to write workflow runs temp file: {e}");
-            return;
+        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        {
+            use std::io::Write as _;
+            let write_result = (|| -> std::io::Result<()> {
+                let mut f = std::fs::File::create(&tmp_path)?;
+                f.write_all(data.as_bytes())?;
+                f.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = write_result {
+                warn!("Failed to write workflow runs temp file: {e}");
+                let _ = std::fs::remove_file(&tmp_path);
+                return;
+            }
         }
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             warn!("Failed to rename workflow runs file: {e}");
+            let _ = std::fs::remove_file(&tmp_path);
             return;
         }
         debug!("Persisted workflow runs to disk");

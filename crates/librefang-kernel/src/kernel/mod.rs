@@ -9353,7 +9353,7 @@ system_prompt = "You are a helpful assistant."
                     // Append after [agent] section or at end
                     format!("{content}\nenabled = {enabled}\n")
                 };
-                if let Err(e) = std::fs::write(&toml_path, new_content) {
+                if let Err(e) = atomic_write_toml(&toml_path, &new_content) {
                     warn!("Failed to persist enabled={enabled} for {name}: {e}");
                 }
             }
