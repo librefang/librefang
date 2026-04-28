@@ -154,6 +154,11 @@ function useWebSocket(
   const protocolsRef = useRef<string[]>([]);
   // Bug #3854: track whether we've hit a terminal auth-error state
   const authErrorRef = useRef(false);
+  // Audit of #3930: when retries are exhausted we used to silently
+  // park the connection forever; gaveUpRef lets the
+  // visibilitychange / online listeners below recover the socket
+  // when the user comes back or the network reappears.
+  const gaveUpRef = useRef(false);
   // Keep onAuthError in a ref to avoid triggering the effect when the caller
   // passes a fresh inline lambda on every render.
   const onAuthErrorRef = useRef(onAuthError);
@@ -186,6 +191,7 @@ function useWebSocket(
     }
     retriesRef.current = 0;
     authErrorRef.current = false;
+    gaveUpRef.current = false;
 
     function connect() {
       // Bug #3847: read from the refs, not closed-over locals, so we always
@@ -224,6 +230,12 @@ function useWebSocket(
 
           // Bug #3854: cap total retry attempts; surface an error after max
           if (retriesRef.current >= WS_MAX_RETRIES) {
+            // Mark the giveup state so the visibilitychange / online
+            // listeners below can wake the connection back up when the
+            // user returns or the network reappears — without a wakeup
+            // path the user is stuck on a dead WS until full page
+            // refresh (audit of #3930 caught the silent giveup).
+            gaveUpRef.current = true;
             const msg = "Connection failed — unable to reach the agent";
             setAriaAnnouncement(msg);
             onAuthErrorRef.current?.(msg);
@@ -251,10 +263,33 @@ function useWebSocket(
 
     connect();
 
+    // Recover from the retries-exhausted parked state when the tab
+    // becomes visible or the browser reports the network is back.
+    // Without these listeners the user is permanently stuck on a
+    // dead socket until they refresh the page (audit of #3930
+    // 'silent giveup' finding).  Auth-error termination is left
+    // alone — that genuinely needs a refresh to pick up new auth.
+    const wakeUp = () => {
+      if (authErrorRef.current) return;
+      if (!gaveUpRef.current) return;
+      gaveUpRef.current = false;
+      retriesRef.current = 0;
+      setAriaAnnouncement("Reconnecting…");
+      connect();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") wakeUp();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", wakeUp);
+
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", wakeUp);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       retriesRef.current = 0;
       authErrorRef.current = false;
+      gaveUpRef.current = false;
       onDropRef.current = null;
       const ws = wsRef.current;
       if (ws) {
