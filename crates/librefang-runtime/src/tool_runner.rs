@@ -2640,6 +2640,10 @@ async fn tool_shell_exec(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
+    // Ensure the child is terminated when the Child handle is dropped (e.g.
+    // on timeout or session cancellation) rather than becoming an orphan.
+    cmd.kill_on_drop(true);
+
     // Spawn the child process so we hold a handle that can be killed if the
     // session interrupt fires while the command is running.  Using `output()`
     // instead would block until the process *completes*, meaning cancel() would
@@ -5081,6 +5085,7 @@ async fn convert_to_ogg_opus(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn();
 
     let mut child = match spawn_result {

@@ -1010,6 +1010,11 @@ impl McpConnection {
             tokio::process::Command::new(&resolved_command).configure(|cmd| {
                 cmd.args(&args_owned);
 
+                // Terminate the MCP server process when the transport is
+                // dropped (agent session ends) rather than leaving it as an
+                // orphan.
+                cmd.kill_on_drop(true);
+
                 // SECURITY: Do NOT inherit the full parent environment.
                 // Only pass through safe system vars + explicitly declared vars.
                 cmd.env_clear();
