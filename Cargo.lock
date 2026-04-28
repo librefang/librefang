@@ -1036,6 +1036,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmov"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
+
+[[package]]
 name = "cobs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1603,6 +1609,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctutils"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+dependencies = [
+ "cmov",
+]
+
+[[package]]
 name = "curve25519-dalek"
 version = "4.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1807,6 +1822,7 @@ dependencies = [
  "block-buffer 0.12.0",
  "const-oid 0.10.2",
  "crypto-common 0.2.1",
+ "ctutils",
 ]
 
 [[package]]
@@ -3113,6 +3129,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
+dependencies = [
+ "digest 0.11.2",
+]
+
+[[package]]
 name = "hostname"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4065,7 +4090,7 @@ dependencies = [
  "futures",
  "governor",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "http-body-util",
  "include_dir",
  "jsonwebtoken",
@@ -4130,7 +4155,7 @@ dependencies = [
  "dashmap",
  "futures",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "html-escape",
  "image",
  "imap",
@@ -4469,7 +4494,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "http",
  "landlock",
  "libc",
@@ -4651,7 +4676,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "hex",
- "hmac",
+ "hmac 0.13.0",
  "librefang-types",
  "serde",
  "serde_json",
@@ -6963,7 +6988,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
- "hmac",
+ "hmac 0.12.1",
  "subtle",
 ]
 
@@ -9208,7 +9233,7 @@ checksum = "a2b36a9dd327e9f401320a2cb4572cc76ff43742bcfc3291f871691050f140ba"
 dependencies = [
  "base32",
  "constant_time_eq",
- "hmac",
+ "hmac 0.12.1",
  "qrcodegen-image",
  "rand 0.9.2",
  "sha1 0.10.6",
