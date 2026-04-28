@@ -12243,8 +12243,7 @@ system_prompt = "You are a helpful assistant."
                                 // side effects) so a suspended agent never triggers external
                                 // scripts or accumulates record_success counts (#3839).
                                 if let Some(entry) = kernel.registry.get(agent_id) {
-                                    if entry.state
-                                        == librefang_types::agent::AgentState::Suspended
+                                    if entry.state == librefang_types::agent::AgentState::Suspended
                                     {
                                         tracing::debug!(
                                             agent_id = %agent_id,
