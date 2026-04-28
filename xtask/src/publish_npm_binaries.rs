@@ -127,6 +127,10 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
 /// Downloads `{asset_url}.sha256`, parses the expected hash, then computes
 /// sha256 of the already-downloaded `asset_path` and compares. Returns an
 /// error if the download fails or the hashes do not match.
+///
+/// Note: the `.sha256` sidecar lives in the same GitHub Release as the
+/// binary, so this guards against transport corruption / partial downloads,
+/// not against an attacker who has write access to the release assets.
 fn verify_asset_sha256(
     repo: &str,
     tag: &str,
@@ -149,53 +153,20 @@ fn verify_asset_sha256(
 
     let data = fs::read(asset_path)?;
     let actual = sha256_hex(&data);
+    fs::remove_file(&tmp_sha).ok();
 
     if actual != expected {
-        return Err(format!(
-            "SHA256 mismatch for {asset_name}: expected {expected}, got {actual}"
-        )
-        .into());
+        return Err(
+            format!("SHA256 mismatch for {asset_name}: expected {expected}, got {actual}").into(),
+        );
     }
     println!("  ✓ SHA256 verified: {expected}");
     Ok(())
 }
 
 fn sha256_hex(data: &[u8]) -> String {
-    use std::fmt::Write;
-    // Use sha2 crate if available; otherwise fall back to the `shasum` binary.
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            "python3 -c 'import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'"
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write as _;
-            child.stdin.take().unwrap().write_all(data).ok();
-            child.wait_with_output()
-        });
-    match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase()
-        }
-        _ => {
-            // Fallback: manual hex encoding of sha256
-            let mut hash = [0u8; 32];
-            // Simple SHA-256 not available without a crate; use shasum binary
-            let tmp = std::env::temp_dir().join("__sha_input");
-            let _ = fs::write(&tmp, data);
-            let out = Command::new("shasum")
-                .args(["-a", "256", &tmp.to_string_lossy()])
-                .output()
-                .unwrap_or_default();
-            let s = String::from_utf8_lossy(&out.stdout);
-            s.split_whitespace().next().unwrap_or("").to_string()
-        }
-    }
-    .trim()
-    .to_string()
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
 }
 
 pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error>> {
