@@ -20,7 +20,9 @@ axum = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Shared: works on desktop and mobile
+# Shared: works on desktop and mobile.
+# `tauri` appears again in the desktop target block below with extra features —
+# Cargo merges features from both entries; mobile gets the base crate only.
 tauri = { version = "2" }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
@@ -29,7 +31,7 @@ toml = { workspace = true }
 open = "5"
 
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-# Desktop-only plugins — not available on iOS/Android
+# Desktop-only: adds tray-icon + image-png features on top of the shared `tauri` entry above.
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
