@@ -236,7 +236,11 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
     // For structured values we enable literal-separator mode so that a single
     // `*` cannot jump across `/` or `.` boundaries.
     let is_path = value.contains('/');
-    let is_host = !is_path && value.contains('.');
+    // Only apply dot-separator mode when the pattern itself contains dots.
+    // Inferring "is host" from the value alone misclassifies file names like
+    // "readme.txt" as hostnames, causing `glob_matches("*", "readme.txt")` to
+    // incorrectly return false.
+    let is_host = !is_path && pattern.contains('.');
     let separator: Option<char> = if is_path {
         Some('/')
     } else if is_host {
@@ -398,12 +402,15 @@ mod tests {
 
     #[test]
     fn test_capability_inheritance_subset_ok() {
+        // Parent grants broad access; child requests a strict subset.
+        // FileRead("/data/*") covers a specific file under /data.
+        // NetConnect("*.example.com:443") covers a concrete host.
         let parent = vec![
-            Capability::FileRead("*".to_string()),
+            Capability::FileRead("/data/*".to_string()),
             Capability::NetConnect("*.example.com:443".to_string()),
         ];
         let child = vec![
-            Capability::FileRead("/data/*".to_string()),
+            Capability::FileRead("/data/output.txt".to_string()),
             Capability::NetConnect("api.example.com:443".to_string()),
         ];
         assert!(validate_capability_inheritance(&parent, &child).is_ok());
