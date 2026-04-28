@@ -133,10 +133,22 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self.persist_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, data.as_bytes()).map_err(|e| {
-            LibreFangError::Internal(format!("Failed to write cron jobs temp file: {e}"))
-        })?;
+        let tmp_path = self.persist_path.with_extension(format!(
+            "json.tmp.{}",
+            std::process::id()
+        ));
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to create cron jobs temp file: {e}"))
+            })?;
+            f.write_all(data.as_bytes()).map_err(|e| {
+                LibreFangError::Internal(format!("Failed to write cron jobs temp file: {e}"))
+            })?;
+            f.sync_all().map_err(|e| {
+                LibreFangError::Internal(format!("Failed to fsync cron jobs temp file: {e}"))
+            })?;
+        }
         std::fs::rename(&tmp_path, &self.persist_path).map_err(|e| {
             LibreFangError::Internal(format!("Failed to rename cron jobs file: {e}"))
         })?;
