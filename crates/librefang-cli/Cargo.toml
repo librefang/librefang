@@ -9,6 +9,9 @@ description = "CLI tool for the LibreFang Agent OS"
 default = ["librefang-api/all-channels", "telemetry"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
+# Android target: exclude channel-email (rustls-connector 0.23.0 + rustls-platform-verifier 0.7.0
+# incompatibility — Verifier::new_with_extra_roots not implemented on Android).
+android = ["librefang-api/all-channels-no-email"]
 telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 [[bin]]
