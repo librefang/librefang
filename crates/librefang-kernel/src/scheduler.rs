@@ -550,12 +550,25 @@ mod tests {
         let s = succeeded.load(Ordering::SeqCst);
         let d = denied.load(Ordering::SeqCst);
         assert_eq!(s + d, 50, "all 50 threads should have a verdict");
-        // 10 reservations * 10 tokens = exactly 100 (the limit). 11 would
-        // project to 110 > 100 and be denied. Burst cap is 100/5=20 → only
-        // 2 can pass before burst kicks in. So success count is at most 2.
+        // Reservations go through `check_quota_and_reserve` only, which
+        // does NOT push to `token_timestamps` (that only happens in
+        // settle_reservation). So `tokens_in_last_minute()` stays at 0
+        // throughout and the burst cap (100/5=20) never trips. The
+        // binding limit is `projected > 100`: 10 reservations of 10
+        // tokens hit total_tokens=100 exactly, the 11th would project to
+        // 110 and is rejected. Success count is therefore deterministically 10.
+        assert_eq!(
+            s, 10,
+            "exactly 10 reservations of 10 tokens fit in a 100-token quota"
+        );
+        // The TOCTOU bug would manifest as multiple threads reading
+        // total_tokens=0 then each incrementing past the limit. Verify
+        // the post-condition holds.
+        let snap = scheduler.get_usage(id).unwrap();
         assert!(
-            s <= 10,
-            "no more than 10 reservations of 10 tokens may fit in a 100-token quota, got {s}"
+            snap.total_tokens <= 100,
+            "reservations must not exceed the 100-token limit, got total_tokens={}",
+            snap.total_tokens
         );
     }
 
