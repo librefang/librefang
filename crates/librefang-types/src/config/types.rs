@@ -2930,20 +2930,24 @@ pub struct KernelConfig {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
-    /// No checking — all messages pass through (default).
+    /// Log a warning but allow the message through (default — opt-out to disable).
     #[default]
-    Off,
-    /// Log a warning but allow the message through.
     Warn,
+    /// No checking — all messages pass through.
+    Off,
     /// Reject the message and send an error to the user.
     Block,
 }
 
 /// Configuration for channel input sanitization / prompt-injection detection.
 ///
+/// The sanitizer is enabled by default in `warn` mode, which logs suspicious
+/// messages but lets them through. Set `mode = "block"` to reject them, or
+/// `mode = "off"` to disable the sanitizer entirely.
+///
 /// ```toml
 /// [sanitize]
-/// mode = "warn"           # off | warn | block
+/// mode = "warn"           # warn (default) | off | block
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
 /// ```
@@ -2961,7 +2965,7 @@ pub struct SanitizeConfig {
 impl Default for SanitizeConfig {
     fn default() -> Self {
         Self {
-            mode: SanitizeMode::Off,
+            mode: SanitizeMode::Warn,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
         }

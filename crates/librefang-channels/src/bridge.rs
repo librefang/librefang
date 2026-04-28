@@ -808,13 +808,23 @@ fn flush_debounced(
 
             // --- Input sanitization (prompt injection detection) ---
             if !sanitizer.is_off() {
-                let text_to_check: Option<&str> = match &merged_msg.content {
+                // Build the text to inspect. For Command messages, reconstruct
+                // the full "/name arg1 arg2" string so that slash commands
+                // containing injection payloads in their arguments are also
+                // caught (e.g. `/admin ignore all previous instructions`).
+                let cmd_text: Option<String> =
+                    if let ChannelContent::Command { name, args } = &merged_msg.content {
+                        Some(reconstruct_command_text(name, args))
+                    } else {
+                        None
+                    };
+                let text_to_check: Option<&str> = cmd_text.as_deref().or(match &merged_msg.content {
                     ChannelContent::Text(t) => Some(t.as_str()),
                     ChannelContent::Image { caption, .. } => caption.as_deref(),
                     ChannelContent::Voice { caption, .. } => caption.as_deref(),
                     ChannelContent::Video { caption, .. } => caption.as_deref(),
                     _ => None,
-                };
+                });
                 if let Some(text) = text_to_check {
                     match sanitizer.check(text) {
                         SanitizeResult::Clean => {}
@@ -2244,13 +2254,23 @@ async fn dispatch_message(
 
     // --- Input sanitization (prompt injection detection) ---
     if !sanitizer.is_off() {
-        let text_to_check: Option<&str> = match &message.content {
+        // Build the text to inspect. For Command messages, reconstruct
+        // the full "/name arg1 arg2" string so that slash commands
+        // containing injection payloads in their arguments are also
+        // caught (e.g. `/admin ignore all previous instructions`).
+        let cmd_text: Option<String> =
+            if let ChannelContent::Command { name, args } = &message.content {
+                Some(reconstruct_command_text(name, args))
+            } else {
+                None
+            };
+        let text_to_check: Option<&str> = cmd_text.as_deref().or(match &message.content {
             ChannelContent::Text(t) => Some(t.as_str()),
             ChannelContent::Image { caption, .. } => caption.as_deref(),
             ChannelContent::Voice { caption, .. } => caption.as_deref(),
             ChannelContent::Video { caption, .. } => caption.as_deref(),
             _ => None,
-        };
+        });
         if let Some(text) = text_to_check {
             match sanitizer.check(text) {
                 SanitizeResult::Clean => {}
