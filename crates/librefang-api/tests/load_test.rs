@@ -166,7 +166,9 @@ memory_write = ["self.*"]
 
 /// Test: Concurrent agent spawns — verify kernel handles parallel agent creation.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // Flaky: race condition in concurrent agent lifecycle
+#[ignore = "Flaky: concurrent spawn race in AgentRegistry — registry lock contention causes \
+            intermittent 409/500 under load. Root cause: #3817 (concurrent agent lifecycle \
+            races). Un-ignore after registry spawn serialization is fixed."]
 async fn load_concurrent_agent_spawns() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();
@@ -533,7 +535,10 @@ async fn load_workflow_operations() {
 
 /// Test: Agent spawn + kill cycle — stress the registry.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // Flaky: race condition in spawn/kill timing
+#[ignore = "Flaky: spawn/kill race in AgentRegistry — kill sometimes races with post-spawn \
+            initialization leaving dangling registry entries that fail the final count assert. \
+            Root cause: #3817 (concurrent agent lifecycle races). Un-ignore after kill-during-init \
+            guard is implemented."]
 async fn load_spawn_kill_cycle() {
     let server = start_test_server().await;
     let client = librefang_runtime::http_client::new_client();

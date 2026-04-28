@@ -135,24 +135,57 @@ impl MessageJournal {
     }
 
     /// Record a new message as pending.  Call this BEFORE dispatching.
+    ///
+    /// The file write is executed via `spawn_blocking` so that slow disk I/O
+    /// (e.g. fsync on a busy volume) does not stall the async runtime while
+    /// the mutex is held.  The in-memory index is updated only after the
+    /// write completes, preserving the WAL invariant.
     pub async fn record(&self, entry: JournalEntry) {
-        let mut inner = self.inner.lock().await;
-        if let Err(e) = Self::append_entry(&inner.path, &entry) {
-            error!(error = %e, id = %entry.message_id, "Failed to write journal entry");
-            return;
+        let path = {
+            let inner = self.inner.lock().await;
+            inner.path.clone()
+        };
+        let line = match serde_json::to_string(&entry) {
+            Ok(l) => l,
+            Err(e) => {
+                error!(error = %e, id = %entry.message_id, "Failed to serialize journal entry");
+                return;
+            }
+        };
+        let write_result =
+            tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, id = %entry.message_id, "Failed to write journal entry");
+                return;
+            }
+            Err(e) => {
+                error!(error = %e, id = %entry.message_id, "spawn_blocking panicked writing journal");
+                return;
+            }
         }
+        let mut inner = self.inner.lock().await;
         inner.pending.insert(entry.message_id.clone(), entry);
     }
 
     /// Update the status of an existing entry.
+    ///
+    /// Like `record`, the disk write runs in `spawn_blocking` so that a slow
+    /// fsync cannot block the async runtime while the mutex is held.
     pub async fn update_status(
         &self,
         message_id: &str,
         status: JournalStatus,
         error: Option<String>,
     ) {
-        let mut inner = self.inner.lock().await;
-        if let Some(entry) = inner.pending.get_mut(message_id) {
+        // Snapshot the updated entry under the lock, then release before I/O.
+        let (updated, path, should_remove) = {
+            let mut inner = self.inner.lock().await;
+            let entry = match inner.pending.get_mut(message_id) {
+                Some(e) => e,
+                None => return,
+            };
             entry.status = status;
             entry.updated_at = Utc::now();
             if status == JournalStatus::Failed {
@@ -160,14 +193,35 @@ impl MessageJournal {
                 entry.last_error = error;
             }
             let updated = entry.clone();
-            if let Err(e) = Self::append_entry(&inner.path, &updated) {
+            let should_remove = status == JournalStatus::Completed
+                || (status == JournalStatus::Failed && updated.attempts >= 3);
+            (updated, inner.path.clone(), should_remove)
+        };
+
+        // Write without holding the mutex.
+        let line = match serde_json::to_string(&updated) {
+            Ok(l) => l,
+            Err(e) => {
+                error!(error = %e, id = message_id, "Failed to serialize journal update");
+                return;
+            }
+        };
+        let write_result =
+            tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
                 error!(error = %e, id = message_id, "Failed to update journal entry");
             }
-            if status == JournalStatus::Completed
-                || (status == JournalStatus::Failed && updated.attempts >= 3)
-            {
-                inner.pending.remove(message_id);
+            Err(e) => {
+                error!(error = %e, id = message_id, "spawn_blocking panicked updating journal");
             }
+        }
+
+        // Remove from in-memory index if terminal.
+        if should_remove {
+            let mut inner = self.inner.lock().await;
+            inner.pending.remove(message_id);
         }
     }
 
@@ -242,12 +296,15 @@ impl MessageJournal {
         });
     }
 
-    fn append_entry(path: &Path, entry: &JournalEntry) -> std::io::Result<()> {
+    /// Append a pre-serialized JSON line to the journal file.
+    ///
+    /// Intended for use inside `tokio::task::spawn_blocking` so that the
+    /// sync `OpenOptions::open` + `flush` calls do not stall the async runtime.
+    fn write_line_to_path(path: &Path, line: &str) -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)?;
-        let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         writeln!(file, "{line}")?;
         file.flush()?;
         Ok(())
