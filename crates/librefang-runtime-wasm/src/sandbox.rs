@@ -157,8 +157,7 @@ impl WasmSandbox {
     pub fn new() -> Result<Self, SandboxError> {
         // Build a throw-away Engine to surface any config errors at
         // construction time rather than first use.
-        Engine::new(&make_engine_config())
-            .map_err(|e| SandboxError::Compilation(e.to_string()))?;
+        Engine::new(&make_engine_config()).map_err(|e| SandboxError::Compilation(e.to_string()))?;
         Ok(Self)
     }
 
@@ -992,8 +991,7 @@ mod tests {
             "fuel-exhausted-guest",
         );
 
-        let (normal_result, exhausted_result) =
-            tokio::join!(normal_fut, exhausted_fut);
+        let (normal_result, exhausted_result) = tokio::join!(normal_fut, exhausted_fut);
 
         // The fuel-exhausted guest must fail with FuelExhausted.
         assert!(
