@@ -376,17 +376,23 @@ impl ChannelAdapter for LineAdapter {
                     let tx = Arc::clone(&tx);
                     let account_id = Arc::clone(&account_id);
                     async move {
-                        // Verify X-Line-Signature
-                        let signature = headers
+                        // Verify X-Line-Signature — header is mandatory.
+                        // A missing header is an error (HTTP 400); a present but
+                        // non-matching signature is HTTP 401.
+                        let signature = match headers
                             .get("x-line-signature")
                             .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
+                        {
+                            Some(s) => s.to_owned(),
+                            None => {
+                                warn!("LINE: missing X-Line-Signature header");
+                                return axum::http::StatusCode::BAD_REQUEST;
+                            }
+                        };
 
                         let body_bytes = serde_json::to_vec(&body.0).unwrap_or_default();
 
-                        if !signature.is_empty()
-                            && !verify_line_signature(secret.as_bytes(), &body_bytes, signature)
-                        {
+                        if !verify_line_signature(secret.as_bytes(), &body_bytes, &signature) {
                             warn!("LINE: invalid webhook signature");
                             return axum::http::StatusCode::UNAUTHORIZED;
                         }

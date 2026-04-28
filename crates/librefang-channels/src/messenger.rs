@@ -18,6 +18,40 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+/// Verify a Facebook Messenger X-Hub-Signature header using HMAC-SHA1.
+///
+/// The header format is `sha1=<hex-digest>`.
+/// The expected digest is `HMAC-SHA1(app_secret, raw_body)`.
+fn verify_hub_signature(app_secret: &[u8], body: &[u8], signature_header: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    let hex_sig = match signature_header.strip_prefix("sha1=") {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let Ok(expected_bytes) = hex::decode(hex_sig) else {
+        return false;
+    };
+
+    let Ok(mut mac) = Hmac::<Sha1>::new_from_slice(app_secret) else {
+        warn!("Messenger: failed to create HMAC-SHA1 instance");
+        return false;
+    };
+    mac.update(body);
+    let result = mac.finalize().into_bytes();
+
+    if result.len() != expected_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in result.iter().zip(expected_bytes.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// Facebook Graph API base URL for sending messages.
 const GRAPH_API_BASE: &str = "https://graph.facebook.com/v18.0";
 
@@ -37,6 +71,9 @@ pub struct MessengerAdapter {
     page_token: Zeroizing<String>,
     /// SECURITY: Verify token for webhook registration, zeroized on drop.
     verify_token: Zeroizing<String>,
+    /// SECURITY: App secret for HMAC-SHA1 webhook signature verification.
+    /// If empty, signature verification is skipped with a loud warning.
+    app_secret: Zeroizing<String>,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
@@ -49,11 +86,19 @@ impl MessengerAdapter {
     /// # Arguments
     /// * `page_token` - Facebook page access token for the Send API.
     /// * `verify_token` - Token used to verify the webhook during Facebook's setup.
+    /// * `app_secret` - Facebook App Secret for HMAC-SHA1 webhook verification.
+    ///   Pass an empty string to skip verification (logs a warning).
     /// * `webhook_port` - Local port (accepted from config, unused with shared server).
-    pub fn new(page_token: String, verify_token: String, _webhook_port: u16) -> Self {
+    pub fn new(
+        page_token: String,
+        verify_token: String,
+        app_secret: String,
+        _webhook_port: u16,
+    ) -> Self {
         Self {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
+            app_secret: Zeroizing::new(app_secret),
             client: crate::http_client::new_client(),
             account_id: None,
         }
@@ -158,9 +203,10 @@ impl MessengerAdapter {
     ///
     /// The router handles:
     /// - GET `/webhook` — Facebook webhook verification challenge
-    /// - POST `/webhook` — Incoming message events
+    /// - POST `/webhook` — Incoming message events (HMAC-SHA1 verified via X-Hub-Signature)
     fn build_webhook_router(&self, tx: mpsc::Sender<ChannelMessage>) -> axum::Router {
         let verify_token = Arc::new(self.verify_token.clone());
+        let app_secret = Arc::new(self.app_secret.clone());
         let account_id = Arc::new(self.account_id.clone());
         let tx = Arc::new(tx);
 
@@ -190,17 +236,48 @@ impl MessengerAdapter {
                 }
             })
             .post({
-                // Incoming message handler
+                // Incoming message handler — verify HMAC-SHA1 before processing.
                 let tx = Arc::clone(&tx);
-                move |body: axum::extract::Json<serde_json::Value>| {
+                let app_secret = Arc::clone(&app_secret);
+                let account_id = Arc::clone(&account_id);
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
+                    let app_secret = Arc::clone(&app_secret);
+                    let account_id = Arc::clone(&account_id);
                     async move {
-                        let object = body.0["object"].as_str().unwrap_or("");
+                        // Verify X-Hub-Signature (HMAC-SHA1 with app_secret).
+                        if app_secret.is_empty() {
+                            warn!(
+                                "Messenger: no app_secret configured — \
+                                 webhook signature verification is DISABLED. \
+                                 Set app_secret to harden this endpoint."
+                            );
+                        } else {
+                            let sig = headers
+                                .get("x-hub-signature")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            if sig.is_empty() {
+                                warn!("Messenger: missing X-Hub-Signature header — rejecting request");
+                                return axum::http::StatusCode::FORBIDDEN;
+                            }
+                            if !verify_hub_signature(app_secret.as_bytes(), &body, sig) {
+                                warn!("Messenger: invalid X-Hub-Signature — rejecting request");
+                                return axum::http::StatusCode::FORBIDDEN;
+                            }
+                        }
+
+                        let json_body: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return axum::http::StatusCode::BAD_REQUEST,
+                        };
+
+                        let object = json_body["object"].as_str().unwrap_or("");
                         if object != "page" {
                             return axum::http::StatusCode::OK;
                         }
 
-                        if let Some(entries) = body.0["entry"].as_array() {
+                        if let Some(entries) = json_body["entry"].as_array() {
                             for entry in entries {
                                 let msgs = parse_messenger_entry(entry);
                                 for mut msg in msgs {
@@ -450,6 +527,7 @@ mod tests {
         let adapter = MessengerAdapter::new(
             "page-token-123".to_string(),
             "verify-token-456".to_string(),
+            "app-secret-789".to_string(),
             8080,
         );
         assert_eq!(adapter.name(), "messenger");
@@ -461,9 +539,40 @@ mod tests {
 
     #[test]
     fn test_messenger_both_tokens() {
-        let adapter = MessengerAdapter::new("page-tok".to_string(), "verify-tok".to_string(), 9000);
+        let adapter = MessengerAdapter::new(
+            "page-tok".to_string(),
+            "verify-tok".to_string(),
+            "app-sec".to_string(),
+            9000,
+        );
         assert_eq!(adapter.page_token.as_str(), "page-tok");
         assert_eq!(adapter.verify_token.as_str(), "verify-tok");
+        assert_eq!(adapter.app_secret.as_str(), "app-sec");
+    }
+
+    #[test]
+    fn test_verify_hub_signature_valid() {
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+
+        let secret = b"my-app-secret";
+        let body = b"test payload body";
+
+        let mut mac = Hmac::<Sha1>::new_from_slice(secret).unwrap();
+        mac.update(body);
+        let result = mac.finalize().into_bytes();
+        let hex_sig = format!("sha1={}", hex::encode(result));
+
+        assert!(verify_hub_signature(secret, body, &hex_sig));
+    }
+
+    #[test]
+    fn test_verify_hub_signature_invalid() {
+        let secret = b"my-app-secret";
+        let body = b"test payload body";
+        assert!(!verify_hub_signature(secret, body, "sha1=deadbeef"));
+        assert!(!verify_hub_signature(secret, body, "bad-format"));
+        assert!(!verify_hub_signature(secret, body, ""));
     }
 
     #[test]

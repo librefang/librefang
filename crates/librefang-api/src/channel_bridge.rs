@@ -2403,10 +2403,14 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-teams")]
     for tm_config in config.teams.iter() {
         if let Some(password) = read_token(&tm_config.app_password_env, "Teams") {
+            let security_token =
+                read_token(&tm_config.security_token_env, "Teams (security_token)")
+                    .unwrap_or_default();
             let adapter = Arc::new(
                 TeamsAdapter::new(
                     tm_config.app_id.clone(),
                     password,
+                    security_token,
                     tm_config.webhook_port,
                     tm_config.allowed_tenants.clone(),
                 )
@@ -2624,9 +2628,17 @@ pub async fn start_channel_bridge_with_config(
         if let Some(page_token) = read_token(&ms_config.page_token_env, "Messenger (page)") {
             let verify_token =
                 read_token(&ms_config.verify_token_env, "Messenger (verify)").unwrap_or_default();
+            let app_secret =
+                read_token(&ms_config.app_secret_env, "Messenger (app_secret)")
+                    .unwrap_or_default();
             let adapter = Arc::new(
-                MessengerAdapter::new(page_token, verify_token, ms_config.webhook_port)
-                    .with_account_id(ms_config.account_id.clone()),
+                MessengerAdapter::new(
+                    page_token,
+                    verify_token,
+                    app_secret,
+                    ms_config.webhook_port,
+                )
+                .with_account_id(ms_config.account_id.clone()),
             );
             adapters.push((
                 adapter,
@@ -3135,20 +3147,22 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-webhook")]
     for wh_config in config.webhook.iter() {
         if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
-            let adapter = Arc::new(
-                WebhookAdapter::new(
-                    secret,
-                    wh_config.listen_port,
-                    wh_config.callback_url.clone(),
-                )
-                .with_account_id(wh_config.account_id.clone())
-                .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
-            );
-            adapters.push((
-                adapter,
-                wh_config.default_agent.clone(),
-                wh_config.account_id.clone(),
-            ));
+            match WebhookAdapter::new(secret, wh_config.listen_port, wh_config.callback_url.clone()) {
+                Ok(wa) => {
+                    let adapter = Arc::new(
+                        wa.with_account_id(wh_config.account_id.clone())
+                            .with_deliver_only(wh_config.deliver_only, wh_config.deliver.clone()),
+                    );
+                    adapters.push((
+                        adapter,
+                        wh_config.default_agent.clone(),
+                        wh_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!("Webhook adapter rejected by SSRF guard: {e}");
+                }
+            }
         }
     }
 

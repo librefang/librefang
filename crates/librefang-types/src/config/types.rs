@@ -5633,6 +5633,11 @@ pub struct TeamsConfig {
     pub app_id: String,
     /// Env var name holding the app password.
     pub app_password_env: String,
+    /// Env var name holding the outgoing webhook security token (base64-encoded).
+    /// Used for HMAC-SHA256 verification of inbound webhook requests.
+    /// If the env var is absent or empty, verification is skipped with a warning.
+    #[serde(default)]
+    pub security_token_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Allowed tenant IDs (empty = allow all).
@@ -5653,6 +5658,7 @@ impl Default for TeamsConfig {
         Self {
             app_id: String::new(),
             app_password_env: "TEAMS_APP_PASSWORD".to_string(),
+            security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
             webhook_port: 3978,
             allowed_tenants: vec![],
             account_id: None,
@@ -6018,6 +6024,12 @@ pub struct MessengerConfig {
     pub page_token_env: String,
     /// Env var name holding the webhook verify token.
     pub verify_token_env: String,
+    /// Env var name holding the Facebook App Secret.
+    /// Used for HMAC-SHA1 verification of incoming webhook POST requests
+    /// via `X-Hub-Signature`. If absent or empty, verification is skipped
+    /// with a warning (backwards compatibility).
+    #[serde(default)]
+    pub app_secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Unique identifier for this bot instance (used for multi-bot routing).
@@ -6035,6 +6047,7 @@ impl Default for MessengerConfig {
         Self {
             page_token_env: "MESSENGER_PAGE_TOKEN".to_string(),
             verify_token_env: "MESSENGER_VERIFY_TOKEN".to_string(),
+            app_secret_env: "MESSENGER_APP_SECRET".to_string(),
             webhook_port: 8452,
             account_id: None,
             default_agent: None,
