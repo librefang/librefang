@@ -14,6 +14,14 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+/// Outer loop handle + any inner watcher handles spawned by that loop.
+struct AgentTaskEntry {
+    outer: JoinHandle<()>,
+    /// Inner watcher tasks spawned by this agent's loop. These hold LLM permits
+    /// and must be aborted when the agent stops so permits are released promptly.
+    watchers: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+}
+
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
@@ -30,8 +38,8 @@ impl Drop for BusyGuard {
 
 /// Manages background task loops for autonomous agents.
 pub struct BackgroundExecutor {
-    /// Running background task handles, keyed by agent ID.
-    tasks: DashMap<AgentId, JoinHandle<()>>,
+    /// Running background task handles (outer loop + inner watcher list), keyed by agent ID.
+    tasks: DashMap<AgentId, AgentTaskEntry>,
     /// Shutdown signal receiver (from Supervisor).
     shutdown_rx: watch::Receiver<bool>,
     /// SECURITY: Global semaphore to limit concurrent background LLM calls.
@@ -126,6 +134,11 @@ impl BackgroundExecutor {
                 );
 
                 let check_interval = *check_interval_secs;
+                // Shared list of inner watcher handles so stop_agent can abort them.
+                let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                let watcher_handles_loop = watcher_handles.clone();
+
                 let handle = tokio::spawn(async move {
                     // Stagger first tick: random jitter (0..interval) so agents
                     // don't all load sessions into memory simultaneously at boot.
@@ -176,8 +189,9 @@ impl BackgroundExecutor {
                         let busy_clone = busy.clone();
                         let watcher_name = name.clone();
                         let jh = (send_message)(agent_id, prompt);
-                        // Spawn a watcher with RAII guard — busy flag clears even on panic
-                        tokio::spawn(async move {
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic.
+                        // Track the handle so stop_agent can abort it and release the permit.
+                        let watcher_jh = tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
                             if let Err(e) = jh.await {
@@ -189,10 +203,14 @@ impl BackgroundExecutor {
                                 );
                             }
                         });
+                        if let Ok(mut guards) = watcher_handles_loop.lock() {
+                            guards.retain(|h| !h.is_finished());
+                            guards.push(watcher_jh);
+                        }
                     }
                 });
 
-                self.tasks.insert(agent_id, handle);
+                self.tasks.insert(agent_id, AgentTaskEntry { outer: handle, watchers: watcher_handles });
             }
             ScheduleMode::Periodic { cron } => {
                 let interval_secs = parse_cron_to_secs(cron);
@@ -215,6 +233,11 @@ impl BackgroundExecutor {
                     cron = %cron, interval_secs = interval_secs,
                     "Starting periodic background loop"
                 );
+
+                // Shared list of inner watcher handles so stop_agent can abort them.
+                let watcher_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                let watcher_handles_loop = watcher_handles.clone();
 
                 let handle = tokio::spawn(async move {
                     // Stagger first tick: random jitter so agents don't spike memory together.
@@ -263,8 +286,9 @@ impl BackgroundExecutor {
                         let busy_clone = busy.clone();
                         let watcher_name = name.clone();
                         let jh = (send_message)(agent_id, prompt);
-                        // Spawn a watcher with RAII guard — busy flag clears even on panic
-                        tokio::spawn(async move {
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic.
+                        // Track the handle so stop_agent can abort it and release the permit.
+                        let watcher_jh = tokio::spawn(async move {
                             let _guard = BusyGuard { flag: busy_clone };
                             let _permit = permit; // drop permit when watcher exits
                             if let Err(e) = jh.await {
@@ -276,10 +300,14 @@ impl BackgroundExecutor {
                                 );
                             }
                         });
+                        if let Ok(mut guards) = watcher_handles_loop.lock() {
+                            guards.retain(|h| !h.is_finished());
+                            guards.push(watcher_jh);
+                        }
                     }
                 });
 
-                self.tasks.insert(agent_id, handle);
+                self.tasks.insert(agent_id, AgentTaskEntry { outer: handle, watchers: watcher_handles });
             }
             ScheduleMode::Proactive { .. } => {
                 // Proactive agents rely on triggers, not a dedicated loop.
@@ -290,10 +318,19 @@ impl BackgroundExecutor {
     }
 
     /// Stop the background loop for an agent, if one is running.
+    ///
+    /// Aborts both the outer scheduling loop and any in-flight inner watcher
+    /// tasks so that LLM semaphore permits are released immediately.
     pub fn stop_agent(&self, agent_id: AgentId) {
         self.pause_flags.remove(&agent_id);
-        if let Some((_, handle)) = self.tasks.remove(&agent_id) {
-            handle.abort();
+        if let Some((_, entry)) = self.tasks.remove(&agent_id) {
+            entry.outer.abort();
+            // Abort all tracked inner watcher tasks so they release LLM permits.
+            if let Ok(mut guards) = entry.watchers.lock() {
+                for watcher in guards.drain(..) {
+                    watcher.abort();
+                }
+            }
             info!(id = %agent_id, "Background loop stopped");
         }
     }

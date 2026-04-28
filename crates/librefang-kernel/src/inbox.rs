@@ -171,8 +171,17 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 };
 
                 if content.trim().is_empty() {
-                    // Move empty files to processed without sending
-                    let _ = move_to_processed(&path, &processed_dir).await;
+                    // Move empty files to processed without sending.
+                    // If the move fails (permissions, race), delete the file so
+                    // we don't spin forever rescanning the same empty file.
+                    if let Err(e) = move_to_processed(&path, &processed_dir).await {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Inbox: failed to move empty file to processed dir, removing to avoid spin loop"
+                        );
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
                     continue;
                 }
 

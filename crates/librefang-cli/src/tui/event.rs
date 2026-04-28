@@ -210,6 +210,14 @@ pub enum AppEvent {
     CommsSendResult(String),
     /// Comms task post result.
     CommsTaskResult(String),
+
+    // ── Async chat helpers (previously blocking on the event-loop thread) ──
+    /// Agent model label fetched for chat header.
+    ChatModelLabelLoaded { agent_id: String, label: String },
+    /// Model list loaded for the model picker in chat.
+    ChatModelsForPicker(Vec<super::screens::chat::ModelEntry>),
+    /// Agent list loaded for the /agents chat command.
+    ChatAgentListLoaded(Vec<String>),
 }
 
 /// Spawn the crossterm polling + tick thread. Returns sender + receiver.
@@ -2879,6 +2887,90 @@ pub fn spawn_comms_task(
             let _ = tx.send(AppEvent::CommsTaskResult(
                 "Task post not supported in-process".to_string(),
             ));
+        }
+    });
+}
+
+/// Fetch the model label for a daemon agent (used when entering chat).
+/// Sends `ChatModelLabelLoaded` so the event loop can update `chat.model_label`
+/// without blocking the render/input thread.
+pub fn spawn_fetch_agent_model_label(
+    base_url: String,
+    agent_id: String,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client
+            .get(format!("{base_url}/api/agents/{agent_id}"))
+            .send()
+        {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let provider = body["model_provider"].as_str().unwrap_or("?");
+                let model = body["model_name"].as_str().unwrap_or("?");
+                let label = format!("{provider}/{model}");
+                let _ = tx.send(AppEvent::ChatModelLabelLoaded { agent_id, label });
+            }
+        }
+    });
+}
+
+/// Fetch the model list from the daemon for the chat model picker.
+/// Sends `ChatModelsForPicker` so the event loop can open the picker
+/// without blocking the render/input thread.
+pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let models: Vec<super::screens::chat::ModelEntry> = body["models"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|m| m["available"].as_bool().unwrap_or(false))
+                            .map(|m| super::screens::chat::ModelEntry {
+                                id: m["id"].as_str().unwrap_or("").to_string(),
+                                display_name: m["display_name"].as_str().unwrap_or("").to_string(),
+                                provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = tx.send(AppEvent::ChatModelsForPicker(models));
+            }
+        }
+    });
+}
+
+/// Fetch the agent list from the daemon for the /agents chat command.
+/// Sends `ChatAgentListLoaded` so the event loop can push the reply
+/// without blocking the render/input thread.
+pub fn spawn_fetch_agents_for_chat(base_url: String, tx: mpsc::Sender<AppEvent>) {
+    std::thread::spawn(move || {
+        let client = daemon_client();
+        if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                let arr = if let Some(arr) = body.as_array() {
+                    arr.clone()
+                } else if let Some(items) = body.get("items").and_then(|v| v.as_array()) {
+                    items.clone()
+                } else {
+                    Vec::new()
+                };
+                let lines: Vec<String> = arr
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{} [{}] {}",
+                            a["name"].as_str().unwrap_or("?"),
+                            a["state"].as_str().unwrap_or("?"),
+                            a["model_name"].as_str().unwrap_or("?"),
+                        )
+                    })
+                    .collect();
+                let _ = tx.send(AppEvent::ChatAgentListLoaded(lines));
+            }
         }
     });
 }

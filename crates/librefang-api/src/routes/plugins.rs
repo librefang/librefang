@@ -1696,11 +1696,9 @@ pub async fn get_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
         .join(&name)
         .join(".state.json");
 
-    let content = if state_path.exists() {
-        std::fs::read_to_string(&state_path).unwrap_or_else(|_| "{}".to_string())
-    } else {
-        "{}".to_string()
-    };
+    let content = tokio::fs::read_to_string(&state_path)
+        .await
+        .unwrap_or_else(|_| "{}".to_string());
 
     let value: serde_json::Value = serde_json::from_str(&content).unwrap_or(serde_json::json!({}));
     (StatusCode::OK, Json(value)).into_response()
@@ -1716,7 +1714,7 @@ pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
         .join(&name)
         .join(".state.json");
 
-    match std::fs::write(&state_path, "{}") {
+    match tokio::fs::write(&state_path, "{}").await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response()
