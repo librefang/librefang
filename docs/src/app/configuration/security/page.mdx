@@ -360,6 +360,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `MATRIX_ACCESS_TOKEN` | Matrix | Matrix homeserver access token. |
 | `EMAIL_PASSWORD` | Email | Email account password or app password. |
 | `TEAMS_APP_PASSWORD` | Teams | Azure Bot Framework app password. |
+| `TEAMS_SECURITY_TOKEN` | Teams | Outgoing webhook security token (base64) — HMAC-SHA256 key used to verify the `Authorization: HMAC <…>` header on every inbound activity. Production deployments should always set this. |
 | `MATTERMOST_TOKEN` | Mattermost | Mattermost bot token. |
 | `TWITCH_OAUTH_TOKEN` | Twitch | Twitch OAuth token. |
 | `ROCKETCHAT_TOKEN` | Rocket.Chat | Rocket.Chat auth token. |
@@ -371,6 +372,7 @@ Complete table of all environment variables referenced by the configuration. Non
 | `VIBER_AUTH_TOKEN` | Viber | Viber Bot auth token. |
 | `MESSENGER_PAGE_TOKEN` | Messenger | Facebook page access token. |
 | `MESSENGER_VERIFY_TOKEN` | Messenger | Webhook verification token. |
+| `MESSENGER_APP_SECRET` | Messenger | Facebook App Secret — HMAC-SHA1 key used to verify the `X-Hub-Signature` header on every inbound webhook. Production deployments should always set this. |
 | `REDDIT_CLIENT_SECRET` | Reddit | Reddit app client secret. |
 | `REDDIT_PASSWORD` | Reddit | Reddit bot account password. |
 | `MASTODON_ACCESS_TOKEN` | Mastodon | Mastodon access token. |
