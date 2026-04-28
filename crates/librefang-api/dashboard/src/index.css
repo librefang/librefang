@@ -147,3 +147,31 @@ body {
 
 /* prefers-reduced-motion is handled by motion (`useReducedMotion`) on a
    per-variant basis; no global override is needed here. */
+
+/* ── iOS / Android safe-area insets ────────────── */
+/* Applied to elements that sit at the edge of the screen (sidebar bottom,
+   chat input bar, sticky action bars) so content clears the iOS home
+   indicator and Android gesture navigation bar.
+
+   pb-safe         — pure inset, no minimum (for fixed wrappers with no base padding)
+   pb-safe-2 / -4  — inset OR base padding, whichever is larger; use these when the
+                     element already has p-2 / p-4 padding and must not lose it on
+                     non-mobile platforms where the inset is 0. */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility pb-safe-2 {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+}
+@utility pb-safe-4 {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 1rem);
+}
+@utility pt-safe {
+  padding-top: max(env(safe-area-inset-top, 0px), 0px);
+}
+@utility pl-safe {
+  padding-left: max(env(safe-area-inset-left, 0px), 0px);
+}
+@utility pr-safe {
+  padding-right: max(env(safe-area-inset-right, 0px), 0px);
+}
