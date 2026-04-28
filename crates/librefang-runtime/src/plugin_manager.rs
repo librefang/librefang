@@ -4177,7 +4177,9 @@ after_turn = "hooks/after_turn.py"
     async fn test_list_registry_plugins_enriched() {
         // Skip disk cache so a cached name-only listing from a previous run
         // cannot mask a regression.
-        std::env::set_var("LIBREFANG_REGISTRY_NO_CACHE", "1");
+        // SAFETY: this test is marked #[ignore] and only runs explicitly (not
+        // in parallel); no other test thread races on this env var.
+        unsafe { std::env::set_var("LIBREFANG_REGISTRY_NO_CACHE", "1") };
         let entries = list_registry_plugins("librefang/librefang-registry")
             .await
             .expect("registry listing should succeed");

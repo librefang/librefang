@@ -4875,7 +4875,17 @@ async fn create_registry_content(
             if let Err(e) = write_secret_env(&secrets_path, env_var, key_value) {
                 tracing::warn!("Failed to write API key to secrets.env: {e}");
             }
-            std::env::set_var(env_var, key_value);
+            // `std::env::set_var` is not thread-safe in an async context; delegate
+            // to a blocking thread to avoid UB in the multithreaded tokio runtime.
+            {
+                let env_var_owned = env_var.clone();
+                let key_value_owned = key_value.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // SAFETY: single mutation on a dedicated blocking thread.
+                    unsafe { std::env::set_var(&env_var_owned, &key_value_owned) };
+                })
+                .await;
+            }
         }
 
         let mut catalog = state

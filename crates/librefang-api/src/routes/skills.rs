@@ -2302,7 +2302,14 @@ pub async fn install_hand_deps(
                 if !extra_paths.is_empty() {
                     let current_path = std::env::var("PATH").unwrap_or_default();
                     let new_path = format!("{};{}", extra_paths.join(";"), current_path);
-                    std::env::set_var("PATH", &new_path);
+                    // `std::env::set_var` is not thread-safe in an async context;
+                    // push to a blocking thread to avoid UB in the tokio runtime.
+                    let new_path_clone = new_path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // SAFETY: single mutation on a dedicated blocking thread.
+                        unsafe { std::env::set_var("PATH", &new_path_clone) };
+                    })
+                    .await;
                     tracing::info!(
                         added = extra_paths.len(),
                         "Refreshed PATH with winget/pip directories"
@@ -2621,10 +2628,17 @@ pub async fn set_hand_secret(
             .into_json_tuple();
     }
 
-    // Set in current process
-    // SAFETY: single-threaded secret writes during user-initiated config
-    unsafe {
-        std::env::set_var(&env_key, &value);
+    // Set in current process.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid UB in the multithreaded tokio runtime.
+    {
+        let env_key_clone = env_key.clone();
+        let value_clone = value.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_key_clone, &value_clone) };
+        })
+        .await;
     }
 
     (

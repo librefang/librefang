@@ -1195,14 +1195,18 @@ mod tests {
         assert_eq!(payload_hash, sha256_hex(b"{\"inputText\":\"hello\"}"));
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_bedrock_missing_keys() {
         // Without AWS env vars set, bedrock driver creation should fail.
         // Temporarily ensure the vars are unset for this test.
         let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
 
         let result =
             create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
@@ -1210,23 +1214,30 @@ mod tests {
         assert!(err_msg.contains("AWS_ACCESS_KEY_ID"));
 
         // Restore env vars if they were set.
-        if let Some(v) = had_key {
-            std::env::set_var("AWS_ACCESS_KEY_ID", v);
-        }
-        if let Some(v) = had_secret {
-            std::env::set_var("AWS_SECRET_ACCESS_KEY", v);
+        // SAFETY: same as above.
+        unsafe {
+            if let Some(v) = had_key {
+                std::env::set_var("AWS_ACCESS_KEY_ID", v);
+            }
+            if let Some(v) = had_secret {
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", v);
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_bedrock_with_keys() {
         // Set fake AWS keys for this test.
         let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
         let had_region = std::env::var("AWS_REGION").ok();
-        std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
-        std::env::set_var("AWS_REGION", "us-west-2");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
+            std::env::set_var("AWS_REGION", "us-west-2");
+        }
 
         let result =
             create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
@@ -1234,27 +1245,34 @@ mod tests {
         assert_eq!(result.unwrap().dimensions(), 1024);
 
         // Restore env vars.
-        match had_key {
-            Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
-            None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
-        }
-        match had_secret {
-            Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
-            None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
-        }
-        match had_region {
-            Some(v) => std::env::set_var("AWS_REGION", v),
-            None => std::env::remove_var("AWS_REGION"),
+        // SAFETY: same as above.
+        unsafe {
+            match had_key {
+                Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+                None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+            }
+            match had_secret {
+                Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+                None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+            }
+            match had_region {
+                Some(v) => std::env::set_var("AWS_REGION", v),
+                None => std::env::remove_var("AWS_REGION"),
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_bedrock_region_override_via_custom_base_url() {
         // When custom_base_url is passed for bedrock, it's treated as a region override.
         let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
-        std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
+        }
 
         let result = create_embedding_driver(
             "bedrock",
@@ -1266,13 +1284,16 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().dimensions(), 1536);
 
-        match had_key {
-            Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
-            None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
-        }
-        match had_secret {
-            Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
-            None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match had_key {
+                Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+                None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+            }
+            match had_secret {
+                Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+                None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+            }
         }
     }
 
@@ -1377,23 +1398,30 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_cohere_missing_key() {
         let had = std::env::var("COHERE_API_KEY").ok();
-        std::env::remove_var("COHERE_API_KEY");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::remove_var("COHERE_API_KEY") };
 
         let result = create_embedding_driver("cohere", "embed-english-v3.0", "", None, None);
         assert!(matches!(result, Err(EmbeddingError::MissingApiKey(_))));
 
-        if let Some(v) = had {
-            std::env::set_var("COHERE_API_KEY", v);
+        // SAFETY: same as above.
+        unsafe {
+            if let Some(v) = had {
+                std::env::set_var("COHERE_API_KEY", v);
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_cohere_with_key() {
         let had = std::env::var("COHERE_API_KEY").ok();
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("COHERE_API_KEY", "test-cohere-key") };
 
         let driver = create_embedding_driver(
             "cohere",
@@ -1405,12 +1433,16 @@ mod tests {
         .expect("cohere driver should build with key present");
         assert_eq!(driver.dimensions(), 1024);
 
-        match had {
-            Some(v) => std::env::set_var("COHERE_API_KEY", v),
-            None => std::env::remove_var("COHERE_API_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("COHERE_API_KEY", v),
+                None => std::env::remove_var("COHERE_API_KEY"),
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_cohere_remaps_openai_model_name() {
         // When auto-detect sends us an OpenAI-flavored model name, the Cohere
@@ -1421,7 +1453,8 @@ mod tests {
         // actual fallback choice is pinned in code and documented in the
         // warn!() call inside `create_embedding_driver`.
         let had = std::env::var("COHERE_API_KEY").ok();
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("COHERE_API_KEY", "test-cohere-key") };
 
         let driver = create_embedding_driver(
             "cohere",
@@ -1435,12 +1468,16 @@ mod tests {
         // 1536 that text-embedding-3-small would have inferred.
         assert_eq!(driver.dimensions(), 1024);
 
-        match had {
-            Some(v) => std::env::set_var("COHERE_API_KEY", v),
-            None => std::env::remove_var("COHERE_API_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("COHERE_API_KEY", v),
+                None => std::env::remove_var("COHERE_API_KEY"),
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_cloud_providers_require_base_url() {
         // Cloud providers no longer have hardcoded URL fallbacks — the catalog
@@ -1453,7 +1490,8 @@ mod tests {
         // fire. Other cloud providers don't reject empty api_key at
         // construction, so they reach the URL check regardless.
         let had = std::env::var("COHERE_API_KEY").ok();
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("COHERE_API_KEY", "test-cohere-key") };
 
         // `.unwrap_err()` would require `Box<dyn EmbeddingDriver + Send + Sync>: Debug`,
         // which the trait object doesn't provide. Match on Result directly.
@@ -1473,15 +1511,22 @@ mod tests {
             );
         }
 
-        match had {
-            Some(v) => std::env::set_var("COHERE_API_KEY", v),
-            None => std::env::remove_var("COHERE_API_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("COHERE_API_KEY", v),
+                None => std::env::remove_var("COHERE_API_KEY"),
+            }
         }
     }
 
     /// Clear every env var that `detect_embedding_provider` inspects. Each
     /// detect-priority test must call this first and restore the vars after
     /// so host env state doesn't pollute the priority it exercises.
+    ///
+    /// # Safety
+    /// Callers must be serialised via `#[serial_test::serial]` so no two
+    /// threads mutate the process env concurrently.
     fn clear_detect_env() -> Vec<(&'static str, Option<String>)> {
         let keys = [
             "OPENAI_API_KEY",
@@ -1497,7 +1542,8 @@ mod tests {
         ];
         let saved = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
         for k in keys {
-            std::env::remove_var(k);
+            // SAFETY: serialised by #[serial_test::serial] on the calling test.
+            unsafe { std::env::remove_var(k) };
         }
         saved
     }
@@ -1505,12 +1551,14 @@ mod tests {
     fn restore_detect_env(saved: Vec<(&'static str, Option<String>)>) {
         for (k, v) in saved {
             match v {
-                Some(value) => std::env::set_var(k, value),
-                None => std::env::remove_var(k),
+                // SAFETY: serialised by #[serial_test::serial] on the calling test.
+                Some(value) => unsafe { std::env::set_var(k, value) },
+                None => unsafe { std::env::remove_var(k) },
             }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_ignores_groq() {
         // Regression guard: Groq has no /v1/embeddings endpoint (confirmed
@@ -1518,7 +1566,8 @@ mod tests {
         // chat + Whisper). Auto-detect MUST NOT pick Groq, otherwise users
         // who only set GROQ_API_KEY get silent 404s at the first embed call.
         let saved = clear_detect_env();
-        std::env::set_var("GROQ_API_KEY", "test-groq-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("GROQ_API_KEY", "test-groq-key") };
 
         assert_eq!(
             detect_embedding_provider(),
@@ -1529,28 +1578,35 @@ mod tests {
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_picks_cohere_when_only_cohere_set() {
         let saved = clear_detect_env();
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("COHERE_API_KEY", "test-cohere-key") };
 
         assert_eq!(detect_embedding_provider(), Some("cohere"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_priority_openai_beats_cohere() {
         // OpenAI is still #1 in the priority list; setting both keys picks OpenAI.
         let saved = clear_detect_env();
-        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+            std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        }
 
         assert_eq!(detect_embedding_provider(), Some("openai"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_none_when_nothing_set() {
         let saved = clear_detect_env();
@@ -1558,101 +1614,131 @@ mod tests {
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_picks_vllm_when_only_vllm_url_set() {
         let saved = clear_detect_env();
-        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1") };
 
         assert_eq!(detect_embedding_provider(), Some("vllm"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_picks_lmstudio_when_only_lmstudio_url_set() {
         let saved = clear_detect_env();
-        std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1") };
 
         assert_eq!(detect_embedding_provider(), Some("lmstudio"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_local_priority_ollama_beats_vllm_beats_lmstudio() {
         // Local order matches create_embedding_driver's local builder order.
         let saved = clear_detect_env();
-        std::env::set_var("OLLAMA_HOST", "http://localhost:11434");
-        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
-        std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("OLLAMA_HOST", "http://localhost:11434");
+            std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+            std::env::set_var("LMSTUDIO_BASE_URL", "http://localhost:1234/v1");
+        }
 
         assert_eq!(detect_embedding_provider(), Some("ollama"));
-        std::env::remove_var("OLLAMA_HOST");
+        // SAFETY: same as above.
+        unsafe { std::env::remove_var("OLLAMA_HOST") };
         assert_eq!(detect_embedding_provider(), Some("vllm"));
-        std::env::remove_var("VLLM_BASE_URL");
+        unsafe { std::env::remove_var("VLLM_BASE_URL") };
         assert_eq!(detect_embedding_provider(), Some("lmstudio"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_detect_embedding_provider_cloud_beats_local() {
         // A configured API key still wins over a local server URL.
         let saved = clear_detect_env();
-        std::env::set_var("OPENAI_API_KEY", "test-openai-key");
-        std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "test-openai-key");
+            std::env::set_var("VLLM_BASE_URL", "http://localhost:8000/v1");
+        }
 
         assert_eq!(detect_embedding_provider(), Some("openai"));
 
         restore_detect_env(saved);
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_resolve_cohere_input_type_default() {
         let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
-        std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE") };
 
         assert_eq!(resolve_cohere_input_type(), "search_document");
 
-        if let Some(v) = had {
-            std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v);
+        // SAFETY: same as above.
+        unsafe {
+            if let Some(v) = had {
+                std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v);
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_resolve_cohere_input_type_valid_override() {
         let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
-        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "search_query");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "search_query") };
 
         assert_eq!(resolve_cohere_input_type(), "search_query");
 
-        match had {
-            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
-            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+                None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_resolve_cohere_input_type_invalid_falls_back() {
         let had = std::env::var("LIBREFANG_COHERE_INPUT_TYPE").ok();
-        std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "not-a-real-type");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", "not-a-real-type") };
 
         // Invalid values must not leak through to the Cohere API (it would
         // 400 with a cryptic message). Fall back to search_document.
         assert_eq!(resolve_cohere_input_type(), "search_document");
 
-        match had {
-            Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
-            None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("LIBREFANG_COHERE_INPUT_TYPE", v),
+                None => std::env::remove_var("LIBREFANG_COHERE_INPUT_TYPE"),
+            }
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn test_create_embedding_driver_cohere_custom_base_url() {
         // Users running behind a proxy / Cohere-compatible gateway should be
         // able to override the base URL.
         let had = std::env::var("COHERE_API_KEY").ok();
-        std::env::set_var("COHERE_API_KEY", "test-cohere-key");
+        // SAFETY: serialised via #[serial_test::serial]; no concurrent env mutation.
+        unsafe { std::env::set_var("COHERE_API_KEY", "test-cohere-key") };
 
         let driver = create_embedding_driver(
             "cohere",
@@ -1665,9 +1751,12 @@ mod tests {
         // Trailing slash must be stripped so `{base}/embed` is well-formed.
         assert_eq!(driver.dimensions(), 1024);
 
-        match had {
-            Some(v) => std::env::set_var("COHERE_API_KEY", v),
-            None => std::env::remove_var("COHERE_API_KEY"),
+        // SAFETY: same as above.
+        unsafe {
+            match had {
+                Some(v) => std::env::set_var("COHERE_API_KEY", v),
+                None => std::env::remove_var("COHERE_API_KEY"),
+            }
         }
     }
 }

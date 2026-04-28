@@ -655,7 +655,9 @@ mod tests {
         // Use a unique key per run so concurrent tests don't collide.
         let key = format!("LF_WASM_FAKE_SECRET_{}", std::process::id());
         let value = "sk-should-not-reach-child";
-        std::env::set_var(&key, value);
+        // SAFETY: key is unique per-process (includes PID); no other test
+        // thread races on this particular env var.
+        unsafe { std::env::set_var(&key, value) };
 
         let state = test_state(vec![Capability::ShellExec("*".to_string())]);
         let result = host_shell_exec(

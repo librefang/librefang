@@ -191,7 +191,9 @@ pub fn run() -> GuideResult {
                     let p = state.provider();
                     // Ensure the env var is set in-process so the daemon
                     // picks it up on boot (covers both verified and unverified).
-                    std::env::set_var(p.env_var, &state.key_input);
+                    // SAFETY: the TUI runs on the main thread; no other thread
+                    // concurrently reads or writes this env var at this point.
+                    unsafe { std::env::set_var(p.env_var, &state.key_input) };
                     break GuideResult::Completed {
                         provider: p.name.to_string(),
                         env_var: p.env_var.to_string(),
@@ -279,7 +281,9 @@ fn submit_key(state: &mut State, test_tx: &std::sync::mpsc::Sender<bool>) {
             // Only set env var after successful verification so the daemon
             // picks it up on boot.  set_var is called from the spawned thread
             // after the test completes — no concurrent env access.
-            std::env::set_var(&var, &key);
+            // SAFETY: this thread owns the mutation; no other thread is
+            // currently writing this env var.
+            unsafe { std::env::set_var(&var, &key) };
         }
         let _ = tx.send(ok);
     });

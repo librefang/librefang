@@ -178,11 +178,19 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
 
     let conversation_ttl_hours = wa_config.conversation_ttl_hours;
 
-    // Auto-set the env var so the rest of the system finds the gateway
-    std::env::set_var(
-        "WHATSAPP_WEB_GATEWAY_URL",
-        format!("http://127.0.0.1:{port}"),
-    );
+    // Auto-set the env var so the rest of the system finds the gateway.
+    // `std::env::set_var` is not thread-safe inside an async context; push it
+    // onto a blocking thread to avoid UB in the multithreaded tokio runtime.
+    let gateway_url = format!("http://127.0.0.1:{port}");
+    {
+        let gateway_url_clone = gateway_url.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: running on a dedicated blocking thread; tokio workers do
+            // not race on this env var at this point in boot.
+            unsafe { std::env::set_var("WHATSAPP_WEB_GATEWAY_URL", &gateway_url_clone) };
+        })
+        .await;
+    }
     info!("WHATSAPP_WEB_GATEWAY_URL set to http://127.0.0.1:{port}");
 
     // Spawn with crash monitoring

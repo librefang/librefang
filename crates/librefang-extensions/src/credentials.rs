@@ -212,29 +212,37 @@ SINGLE_QUOTED='single'
         assert!(map.is_empty());
     }
 
+    // Tests that mutate process-wide env vars must run serially to avoid races
+    // under `cargo test`'s parallel test runner.
+
+    #[serial_test::serial]
     #[test]
     fn resolver_env_var() {
-        std::env::set_var("TEST_CRED_RESOLVE_123", "from_env");
+        // SAFETY: test is serialised via #[serial_test::serial]; no other thread
+        // mutates this env var concurrently.
+        unsafe { std::env::set_var("TEST_CRED_RESOLVE_123", "from_env") };
         let resolver = CredentialResolver::new(None, None);
         let val = resolver.resolve("TEST_CRED_RESOLVE_123").unwrap();
         assert_eq!(val.as_str(), "from_env");
         assert!(resolver.has_credential("TEST_CRED_RESOLVE_123"));
-        std::env::remove_var("TEST_CRED_RESOLVE_123");
+        unsafe { std::env::remove_var("TEST_CRED_RESOLVE_123") };
     }
 
+    #[serial_test::serial]
     #[test]
     fn resolver_dotenv_overrides_env() {
         let dir = tempfile::tempdir().unwrap();
         let env_path = dir.path().join(".env");
         std::fs::write(&env_path, "TEST_CRED_DOT_456=from_dotenv\n").unwrap();
 
-        std::env::set_var("TEST_CRED_DOT_456", "from_env");
+        // SAFETY: test is serialised via #[serial_test::serial].
+        unsafe { std::env::set_var("TEST_CRED_DOT_456", "from_env") };
 
         let resolver = CredentialResolver::new(None, Some(&env_path));
         let val = resolver.resolve("TEST_CRED_DOT_456").unwrap();
         assert_eq!(val.as_str(), "from_dotenv"); // dotenv takes priority
 
-        std::env::remove_var("TEST_CRED_DOT_456");
+        unsafe { std::env::remove_var("TEST_CRED_DOT_456") };
     }
 
     #[test]
@@ -244,10 +252,14 @@ SINGLE_QUOTED='single'
         assert_eq!(missing, vec!["DEFINITELY_NOT_SET_XYZ_789"]);
     }
 
+    #[serial_test::serial]
     #[test]
     fn resolver_resolve_all() {
-        std::env::set_var("TEST_MULTI_A", "a_val");
-        std::env::set_var("TEST_MULTI_B", "b_val");
+        // SAFETY: test is serialised via #[serial_test::serial].
+        unsafe {
+            std::env::set_var("TEST_MULTI_A", "a_val");
+            std::env::set_var("TEST_MULTI_B", "b_val");
+        }
 
         let resolver = CredentialResolver::new(None, None);
         let resolved = resolver.resolve_all(&["TEST_MULTI_A", "TEST_MULTI_B", "TEST_MULTI_C"]);
@@ -255,7 +267,9 @@ SINGLE_QUOTED='single'
         assert_eq!(resolved["TEST_MULTI_A"].as_str(), "a_val");
         assert_eq!(resolved["TEST_MULTI_B"].as_str(), "b_val");
 
-        std::env::remove_var("TEST_MULTI_A");
-        std::env::remove_var("TEST_MULTI_B");
+        unsafe {
+            std::env::remove_var("TEST_MULTI_A");
+            std::env::remove_var("TEST_MULTI_B");
+        }
     }
 }

@@ -68,12 +68,16 @@ struct EnvVarGuard {
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        std::env::remove_var(self.key);
+        // SAFETY: see set_test_env comment above.
+        unsafe { std::env::remove_var(self.key) };
     }
 }
 
 fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
-    std::env::set_var(key, value);
+    // SAFETY: tests use unique env-var names per test function and are
+    // serialised by the single-threaded default test runner.  The guard
+    // removes the variable on drop so it never persists across tests.
+    unsafe { std::env::set_var(key, value) };
     EnvVarGuard { key }
 }
 
