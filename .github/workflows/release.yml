@@ -1355,8 +1355,18 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
+      # See mobile-smoke.yml for why this cache is paired with the install.
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli@^2 --locked
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -1472,8 +1482,17 @@ jobs:
           restore-keys: |
             mobile-ios-
 
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli@^2 --locked
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -1505,7 +1524,12 @@ jobs:
           echo "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERT_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          # Prepend (NOT replace) the search list. On a clean GitHub-hosted
+          # macos runner only the login keychain is present and the delta
+          # is harmless, but a future self-hosted runner may have other
+          # entries we'd otherwise hide for the duration of the build.
+          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"

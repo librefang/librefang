@@ -63,5 +63,12 @@ path = "src/main.rs"
 # src/main.rs can still depend on the library normally. Without these
 # extra crate-types, `cargo tauri ios build` fails with
 #   "Library not found at .../liblibrefang_desktop.a"
+#
+# Side effect: desktop builds now also produce the `staticlib` and
+# `cdylib` outputs. That adds a non-trivial link step (~10-20% extra
+# build time on a clean target/) — worth it for a unified workspace,
+# but if the desktop build ever feels slow this is one place to look.
+# Cargo doesn't let us conditionalize crate-type on `cfg(mobile)` at
+# the manifest layer, so we accept the cost.
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]

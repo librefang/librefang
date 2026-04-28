@@ -82,8 +82,21 @@ jobs:
           key: gradle-smoke-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-smoke-
 
+      # Cache the compiled tauri-cli binary across runs. Swatinem/rust-cache
+      # caches target/ + cargo registries, but NOT ~/.cargo/bin, so the
+      # 1-2 minute `cargo install tauri-cli` recompile happens cold every
+      # time without this. Cache hit = skip the install entirely.
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli@^2 --locked
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
@@ -142,8 +155,17 @@ jobs:
         with:
           key: mobile-ios-smoke
 
+      - name: Cache tauri-cli binary
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ runner.os }}-v2
+
       - name: Install Tauri CLI
-        run: cargo install tauri-cli@^2 --locked
+        run: |
+          if ! command -v cargo-tauri >/dev/null; then
+            cargo install tauri-cli@^2 --locked
+          fi
 
       - name: Build embedded dashboard assets
         working-directory: crates/librefang-api/dashboard
