@@ -143,9 +143,13 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     } else if force_local {
         // force_local is only meaningful on desktop — on mobile always use connection screen
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        { StartupMode::Local }
+        {
+            StartupMode::Local
+        }
         #[cfg(any(target_os = "ios", target_os = "android"))]
-        { StartupMode::ConnectionScreen }
+        {
+            StartupMode::ConnectionScreen
+        }
     } else if let Some(url) = std::env::var("LIBREFANG_SERVER_URL")
         .ok()
         .filter(|s| !s.is_empty())

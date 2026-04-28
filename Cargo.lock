@@ -11258,6 +11258,7 @@ dependencies = [
  "librefang-migrate",
  "regex",
  "serde_json",
+ "sha2",
  "toml_edit 0.25.11+spec-1.1.0",
 ]
 
