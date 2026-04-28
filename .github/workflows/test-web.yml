@@ -25,9 +25,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - uses: actions/checkout@v6
-
-      # Corepack must be enabled BEFORE setup-node: setup-node's
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       # `cache: pnpm` feature runs `pnpm --version` to compute the cache
       # key, and that fails if pnpm isn't on PATH yet. Modern setup-node
       # (v6 + Node ≥22, which bundles corepack) preserves corepack shims
@@ -36,7 +34,7 @@ jobs:
       - name: Enable corepack (activates pnpm from packageManager field)
         run: corepack enable
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: "web/.nvmrc"
           cache: "pnpm"
@@ -46,7 +44,7 @@ jobs:
         run: cd web && pnpm install --frozen-lockfile
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -60,7 +58,7 @@ jobs:
 
       - name: Upload trace on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-trace
           path: web/test-results/
