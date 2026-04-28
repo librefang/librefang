@@ -38,6 +38,7 @@ function getCurrentLang(): string {
   if (path.startsWith('/ja')) return 'ja'
   if (path.startsWith('/ko')) return 'ko'
   if (path.startsWith('/es')) return 'es'
+  if (path.startsWith('/pl')) return 'pl'
   return 'en'
 }
 
@@ -748,7 +749,7 @@ function Downloads(_props: SectionProps) {
   const version = release?.tag_name ?? ''
 
   const labels: Record<string, Record<string, string>> = {
-    title: { en: 'Downloads', zh: '下载', 'zh-TW': '下載', ja: 'ダウンロード', ko: '다운로드', de: 'Downloads', es: 'Descargas' },
+    title: { en: 'Downloads', zh: '下载', 'zh-TW': '下載', ja: 'ダウンロード', ko: '다운로드', de: 'Downloads', es: 'Descargas', pl: 'Pobieranie' },
     desc: {
       en: 'Desktop app, CLI binaries, and deployment options.',
       zh: '桌面应用、CLI 二进制文件和部署选项。',
@@ -757,10 +758,11 @@ function Downloads(_props: SectionProps) {
       ko: '데스크톱 앱, CLI 바이너리, 배포 옵션.',
       de: 'Desktop-App, CLI-Binaries und Deployment-Optionen.',
       es: 'App de escritorio, binarios CLI y opciones de despliegue.',
+      pl: 'Aplikacja komputerowa, pliki binarne CLI i opcje wdrażania.',
     },
-    onlineDeply: { en: 'One-Click Deploy', zh: '一键部署', 'zh-TW': '一鍵部署', ja: 'ワンクリックデプロイ', ko: '원클릭 배포', de: 'Ein-Klick-Deploy', es: 'Despliegue en un clic' },
-    allReleases: { en: 'All Releases', zh: '所有版本', 'zh-TW': '所有版本', ja: '全リリース', ko: '모든 릴리스', de: 'Alle Releases', es: 'Todas las versiones' },
-    sdk: { en: 'SDK & Packages', zh: 'SDK 和包', 'zh-TW': 'SDK 和套件', ja: 'SDK & パッケージ', ko: 'SDK & 패키지', de: 'SDK & Pakete', es: 'SDK y paquetes' },
+    onlineDeply: { en: 'One-Click Deploy', zh: '一键部署', 'zh-TW': '一鍵部署', ja: 'ワンクリックデプロイ', ko: '원클릭 배포', de: 'Ein-Klick-Deploy', es: 'Despliegue en un clic', pl: 'Wdrożenie jednym kliknięciem' },
+    allReleases: { en: 'All Releases', zh: '所有版本', 'zh-TW': '所有版本', ja: '全リリース', ko: '모든 릴리스', de: 'Alle Releases', es: 'Todas las versiones', pl: 'Wszystkie wydania' },
+    sdk: { en: 'SDK & Packages', zh: 'SDK 和包', 'zh-TW': 'SDK 和套件', ja: 'SDK & パッケージ', ko: 'SDK & 패키지', de: 'SDK & Pakete', es: 'SDK y paquetes', pl: 'SDK i pakiety' },
   }
 
   const l = (key: string) => labels[key]?.[lang] ?? labels[key]?.['en'] ?? key
