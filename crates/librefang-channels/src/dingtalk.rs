@@ -839,10 +839,10 @@ mod tests {
     fn test_dingtalk_signature_computation() {
         let timestamp: i64 = 1700000000000;
         let secret = "my-secret";
-        let sig = DingTalkAdapter::compute_signature(secret, timestamp);
+        let sig = DingTalkAdapter::compute_signature(secret, timestamp, b"");
         assert!(!sig.is_empty());
         // Verify deterministic output
-        let sig2 = DingTalkAdapter::compute_signature(secret, timestamp);
+        let sig2 = DingTalkAdapter::compute_signature(secret, timestamp, b"");
         assert_eq!(sig, sig2);
     }
 
@@ -850,14 +850,15 @@ mod tests {
     fn test_dingtalk_signature_verification() {
         let secret = "test-secret-123";
         let timestamp: i64 = 1700000000000;
-        let sig = DingTalkAdapter::compute_signature(secret, timestamp);
-        assert!(DingTalkAdapter::verify_signature(secret, timestamp, &sig));
+        let sig = DingTalkAdapter::compute_signature(secret, timestamp, b"");
+        assert!(DingTalkAdapter::verify_signature(secret, timestamp, b"", &sig));
         assert!(!DingTalkAdapter::verify_signature(
-            secret, timestamp, "bad-sig"
+            secret, timestamp, b"", "bad-sig"
         ));
         assert!(!DingTalkAdapter::verify_signature(
             "wrong-secret",
             timestamp,
+            b"",
             &sig
         ));
     }
