@@ -65,7 +65,11 @@ pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
 // Per-task trigger recursion depth (bug #3780)
 // ---------------------------------------------------------------------------
 
-/// Per-task trigger-chain recursion depth; module-level for the `'static` key required by `tokio::task_local!`.
+// Per-task trigger-chain recursion depth counter.
+// Declared at module level so it has a true `'static` key, as required by
+// `tokio::task_local!`.  Each independent event-processing task establishes
+// its own scope via `PUBLISH_EVENT_DEPTH.scope(Cell::new(0), future)`,
+// keeping depth counts isolated between concurrent chains.
 tokio::task_local! {
     static PUBLISH_EVENT_DEPTH: std::cell::Cell<u32>;
 }
