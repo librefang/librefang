@@ -1697,7 +1697,7 @@ jobs:
             elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
             fi
-            npm publish --access public $NPM_TAG
+            npm publish --access public --ignore-scripts $NPM_TAG
           fi
           echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
@@ -1713,7 +1713,7 @@ jobs:
           elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
             GPR_TAG="--tag lts"
           fi
-          npm publish --access public $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+          npm publish --access public --ignore-scripts $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
 
   sdk_cli_npm:
     name: SDK / CLI npm (@librefang/cli)
@@ -1752,7 +1752,7 @@ jobs:
             if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
               NPM_TAG="--tag next"
             fi
-            npm publish --access public $NPM_TAG
+            npm publish --access public --ignore-scripts $NPM_TAG
           fi
           echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
 
