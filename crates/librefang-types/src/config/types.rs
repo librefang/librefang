@@ -1308,6 +1308,13 @@ pub struct PairingConfig {
     pub max_devices: usize,
     /// Pairing token expiry in seconds. Default: 300 (5 min).
     pub token_expiry_secs: u64,
+    /// Public base URL the QR code points mobile clients at, e.g.
+    /// `https://librefang.example.com`. When set, takes precedence over
+    /// the request `Host` header — required for HTTPS reverse-proxy
+    /// deployments where trusting client-supplied `X-Forwarded-Proto`
+    /// would let any authenticated dashboard caller forge the scheme.
+    /// When `None`, the daemon falls back to `Host` + the runtime scheme.
+    pub public_base_url: Option<String>,
     /// Push notification provider: "none", "ntfy", "gotify".
     pub push_provider: String,
     /// Ntfy server URL (if push_provider = "ntfy").
@@ -1322,6 +1329,7 @@ impl Default for PairingConfig {
             enabled: false,
             max_devices: 10,
             token_expiry_secs: 300,
+            public_base_url: None,
             push_provider: "none".to_string(),
             ntfy_url: None,
             ntfy_topic: None,
