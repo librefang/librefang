@@ -235,15 +235,23 @@ fn host_fs_read(state: &GuestState, params: &serde_json::Value) -> serde_json::V
         Some(p) => p,
         None => return json!({"error": "Missing 'path' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(&state.capabilities, &Capability::FileRead(path.to_string())) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY (fix #3814): canonicalize FIRST so that path traversal components
+    // are resolved/rejected before the capability gate runs. Checking capability
+    // against the raw path allows an attacker to pass a non-canonical path that
+    // matches a granted capability pattern but resolves to a different file after
+    // canonicalization (or vice-versa). By resolving first we guarantee that the
+    // capability is evaluated against the exact path the OS will access.
     let canonical = match safe_resolve_path(path) {
         Ok(c) => c,
         Err(e) => return e,
     };
+    let canonical_str = canonical.to_string_lossy();
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileRead(canonical_str.to_string()),
+    ) {
+        return e;
+    }
     match std::fs::read_to_string(&canonical) {
         Ok(content) => json!({"ok": content}),
         Err(e) => json!({"error": format!("fs_read failed: {e}")}),
@@ -259,18 +267,21 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
         Some(c) => c,
         None => return json!({"error": "Missing 'content' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(
-        &state.capabilities,
-        &Capability::FileWrite(path.to_string()),
-    ) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY (fix #3814): resolve the write destination FIRST (rejecting traversal),
+    // then check FileWrite capability against the canonical path. For new files the
+    // parent directory is canonicalized and the filename is appended so the
+    // capability check reflects the real on-disk location.
     let write_path = match safe_resolve_parent(path) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    let write_path_str = write_path.to_string_lossy();
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileWrite(write_path_str.to_string()),
+    ) {
+        return e;
+    }
     match std::fs::write(&write_path, content) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": format!("fs_write failed: {e}")}),
@@ -282,15 +293,18 @@ fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::V
         Some(p) => p,
         None => return json!({"error": "Missing 'path' parameter"}),
     };
-    // Check capability with raw path first
-    if let Err(e) = check_capability(&state.capabilities, &Capability::FileRead(path.to_string())) {
-        return e;
-    }
-    // SECURITY: Reject path traversal after capability gate
+    // SECURITY (fix #3814): canonicalize before capability check (same rationale as fs_read).
     let canonical = match safe_resolve_path(path) {
         Ok(c) => c,
         Err(e) => return e,
     };
+    let canonical_str = canonical.to_string_lossy();
+    if let Err(e) = check_capability(
+        &state.capabilities,
+        &Capability::FileRead(canonical_str.to_string()),
+    ) {
+        return e;
+    }
     match std::fs::read_dir(&canonical) {
         Ok(entries) => {
             let names: Vec<String> = entries
@@ -820,6 +834,37 @@ mod tests {
         assert_eq!(
             extract_host_from_url("http://example.com"),
             "example.com:80"
+        );
+    }
+
+    /// Regression for #3814: capability check must use the canonical path,
+    /// not the raw path supplied by the guest. A traversal path like
+    /// `../../etc/passwd` must be rejected by path resolution *before* any
+    /// capability comparison can be made — it must never reach the file read.
+    #[tokio::test]
+    async fn test_fs_read_traversal_rejected_before_capability_check() {
+        // Even with a wildcard FileRead grant, traversal paths are rejected.
+        let state = test_state(vec![Capability::FileRead("*".to_string())]);
+        let result = host_fs_read(&state, &json!({"path": "../../etc/passwd"}));
+        let err = result["error"].as_str().unwrap();
+        assert!(
+            err.contains("traversal") || err.contains("forbidden"),
+            "traversal path must be rejected; got: {err}"
+        );
+    }
+
+    /// Regression for #3814: same for fs_write.
+    #[tokio::test]
+    async fn test_fs_write_traversal_rejected_before_capability_check() {
+        let state = test_state(vec![Capability::FileWrite("*".to_string())]);
+        let result = host_fs_write(
+            &state,
+            &json!({"path": "../../tmp/evil.txt", "content": "x"}),
+        );
+        let err = result["error"].as_str().unwrap();
+        assert!(
+            err.contains("traversal") || err.contains("forbidden"),
+            "traversal path must be rejected; got: {err}"
         );
     }
 }
