@@ -77,8 +77,7 @@ impl EventBus {
             EventTarget::Agent(agent_id) => {
                 if let Some(sender) = self.agent_channels.get(agent_id) {
                     if sender.send(event.clone()).is_err() {
-                        let total =
-                            self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        let total = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
                         if let Ok(mut last) = self.last_drop_warn.lock() {
                             if last.elapsed() >= std::time::Duration::from_secs(10) {
                                 warn!(
@@ -109,8 +108,8 @@ impl EventBus {
                     }
                 }
                 if agent_drops > 0 {
-                    let total =
-                        self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed) + agent_drops;
+                    let total = self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed)
+                        + agent_drops;
                     if let Ok(mut last) = self.last_drop_warn.lock() {
                         if last.elapsed() >= std::time::Duration::from_secs(10) {
                             warn!(

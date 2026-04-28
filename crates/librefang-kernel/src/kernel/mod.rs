@@ -11088,10 +11088,7 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Inner body of [`publish_event`]; requires `PUBLISH_EVENT_DEPTH` scope to be active.
-    async fn publish_event_inner(
-        &self,
-        event: Event,
-    ) -> Vec<crate::triggers::TriggerMatch> {
+    async fn publish_event_inner(&self, event: Event) -> Vec<crate::triggers::TriggerMatch> {
         let cfg = self.config.load_full();
         let max_trigger_depth = cfg.triggers.max_depth as u32;
 
