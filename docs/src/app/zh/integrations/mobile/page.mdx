@@ -1,0 +1,138 @@
+# LibreFang 移动端（iOS & Android）
+
+LibreFang 移动端是基于 [Tauri 2](https://v2.tauri.app/) 构建的 iOS 和 Android **轻客户端仪表板**。移动应用连接到运行在家庭服务器、VPS、NAS 或桌面设备上的远程 `librefang` 守护进程，本身不内嵌守护进程。
+
+<Note>
+  移动端支持正在积极开发中（Epic [#3351](https://github.com/librefang/librefang/issues/3351)），脚手架搭建和连接向导是首个里程碑。
+</Note>
+
+---
+
+## 架构
+
+```
+iPhone / Android 手机
+        │
+        │  HTTP / WebSocket（API 密钥认证）
+        ▼
+librefang 守护进程  ──  家庭服务器 / VPS / NAS / 桌面
+```
+
+这是设计上的有意为之。LibreFang 需要 7×24 小时运行定时任务、自动梦想、频道适配器和触发器。iOS 和 Android 严格限制后台执行，无法保证守护进程在手机上持续运行。
+
+**移动应用提供：**
+
+- 完整仪表板界面（Agents、聊天、Skills、Workflows、审计日志）
+- 首次启动连接向导，支持手动输入和二维码配对
+- 通过系统钥匙串安全存储凭据
+- 离线提示横幅 + 前台恢复时自动重连
+
+**移动应用不包含：**
+
+- 内嵌内核或守护进程
+- 后台频道适配器
+- 推送通知（需中转服务，延期支持）
+- mDNS / Bonjour 守护进程发现（延期至后续版本）
+
+---
+
+## 连接守护进程
+
+### 手动输入
+
+首次启动时，连接向导会要求填写两项信息：
+
+| 字段 | 示例 |
+|------|------|
+| 守护进程 URL | `https://librefang.yourserver.com` 或 `http://192.168.1.10:4545` |
+| API 密钥 | 守护进程 `config.toml` 或 Settings 页面中的 64 位密钥 |
+
+### 二维码配对
+
+在桌面仪表板的 **设置 → 移动配对** 页面生成一次性二维码，用移动应用扫描即可完成连接，无需手动输入 API 密钥。二维码有效期为 5 分钟且只能使用一次。
+
+---
+
+## 最低系统版本
+
+| 平台 | 最低版本 |
+|------|----------|
+| iOS | 14.0 |
+| Android | API 26（Android 8.0）|
+
+---
+
+## 从源码构建
+
+### 前置条件
+
+**Android：**
+- Android NDK 26+
+- Android SDK（API 26+ 目标）
+- Java 17
+- Rust target：`aarch64-linux-android`
+
+**iOS（仅 macOS）：**
+- Xcode 15+
+- iOS 模拟器运行时
+- Rust target：`aarch64-apple-ios`
+
+### 生成移动端脚手架（仅需一次）
+
+```bash
+cd crates/librefang-desktop
+
+# Android
+cargo tauri android init
+
+# iOS（仅 macOS）
+cargo tauri ios init
+```
+
+将生成的 `gen/android/` 和 `gen/apple/` 目录提交到代码库。
+
+### 开发调试
+
+```bash
+cd crates/librefang-desktop
+
+# Android 模拟器
+cargo tauri android dev
+
+# iOS 模拟器（仅 macOS）
+cargo tauri ios dev
+```
+
+### 发布构建
+
+```bash
+# Android (.aab)
+cargo tauri android build --apk
+
+# iOS (.ipa，仅 macOS)
+cargo tauri ios build
+```
+
+---
+
+## 移动端 vs 桌面端对比
+
+| 功能 | 桌面端 | 移动端 |
+|------|--------|--------|
+| 内嵌守护进程 | 是 | 否 — 远程连接 |
+| 系统托盘 | 是 | 否 |
+| 开机自启 | 是 | 否 |
+| 全局快捷键 | 是 | 否 |
+| 自动更新 | 是 | 否 |
+| 仪表板界面 | 是 | 是 |
+| 与 Agent 聊天 | 是 | 是 |
+| Skills / Workflows | 是 | 是 |
+| 二维码配对 | 无 — 作为服务端生成二维码 | 是 — 扫描二维码 |
+
+---
+
+## 相关链接
+
+- [桌面应用](/zh/integrations/desktop) — 内嵌守护进程的桌面端体验
+- [Android（Termux）](/zh/integrations/android-termux) — 在 Android 设备上运行完整守护进程
+- Epic [#3351](https://github.com/librefang/librefang/issues/3351) — 移动端路线图
