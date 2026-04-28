@@ -16,6 +16,21 @@ All 45 channel adapters are configured under `[channels.<name>]`. Each channel i
 | `account_id` | string or null | `null` | Unique identifier for this bot instance. Used for multi-bot routing via `[[bindings]]` match rules. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
+### Webhook security
+
+Channels that receive inbound traffic over HTTP enforce a uniform contract:
+
+| Outcome | Status |
+|---|---|
+| Required header missing or malformed (`X-Hub-Signature`, `X-Line-Signature`, `X-Viber-Content-Signature`, `Authorization: HMAC …`, DingTalk `timestamp`/`sign`) | **400 Bad Request** |
+| Header present but signature mismatched, replayed, or expired | **401 Unauthorized** |
+
+HMAC verification covers the **raw wire bytes** (not bytes round-tripped through `serde_json::Value`), so the signing key set in the platform portal must match the env var configured below. Comparison runs in constant time.
+
+Channels with a per-secret env var (Messenger `app_secret_env`, Teams `security_token_env`) fall back to "skip verification + log a startup warning" when the env var is unset — this preserves backwards compatibility but should never be left unset in production.
+
+Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through an SSRF guard at adapter construction: any private (`10/8`, `172.16/12`, `192.168/16`), CGN (`100.64/10`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), multicast, or cloud-metadata (`169.254.169.254`, `metadata.google.internal`, `metadata.azure.com`) target — including IPv6-bracket forms like `[::]`, `[::ffff:127.0.0.1]`, NAT64 `[64:ff9b::7f00:1]`, and trailing-dot FQDNs — is rejected with a startup error.
+
 #### `[channels.telegram]`
 
 ```toml
@@ -175,6 +190,7 @@ allowed_senders = []
 [channels.teams]
 app_id = ""
 app_password_env = "TEAMS_APP_PASSWORD"
+security_token_env = "TEAMS_SECURITY_TOKEN"
 # webhook_port = 3978  # Deprecated: webhooks now share the API port
 allowed_tenants = []
 ```
@@ -183,6 +199,7 @@ allowed_tenants = []
 |-------|------|---------|-------------|
 | `app_id` | string | `""` | Azure Bot App ID. |
 | `app_password_env` | string | `"TEAMS_APP_PASSWORD"` | Env var holding the Azure Bot Framework app password. |
+| `security_token_env` | string | `"TEAMS_SECURITY_TOKEN"` | Env var holding the **outgoing webhook security token** (base64-encoded, copied from the Teams portal). Used for HMAC-SHA256 verification of every inbound `Authorization: HMAC <…>` header. If unset or non-base64, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
 | `webhook_port` | u16 | `3978` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `allowed_tenants` | list of strings | `[]` | Azure AD tenant IDs allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
@@ -324,7 +341,7 @@ access_token_env = "LINE_CHANNEL_ACCESS_TOKEN"
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. |
+| `channel_secret_env` | string | `"LINE_CHANNEL_SECRET"` | Env var holding the LINE channel secret. **Required** — every inbound webhook must carry a matching `X-Line-Signature`; missing → 400, mismatched → 401. |
 | `access_token_env` | string | `"LINE_CHANNEL_ACCESS_TOKEN"` | Env var holding the LINE channel access token. |
 | `webhook_port` | u16 | `8450` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
@@ -340,7 +357,7 @@ webhook_url = ""
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. |
+| `auth_token_env` | string | `"VIBER_AUTH_TOKEN"` | Env var holding the Viber Bot auth token. **Required** — also used as the HMAC-SHA256 key to verify every inbound `X-Viber-Content-Signature`; missing → 400, mismatched → 401. |
 | `webhook_url` | string | `""` | Public URL for the Viber webhook endpoint. |
 | `webhook_port` | u16 | `8451` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
@@ -351,6 +368,7 @@ webhook_url = ""
 [channels.messenger]
 page_token_env = "MESSENGER_PAGE_TOKEN"
 verify_token_env = "MESSENGER_VERIFY_TOKEN"
+app_secret_env = "MESSENGER_APP_SECRET"
 # webhook_port = 8452  # Deprecated: webhooks now share the API port
 ```
 
@@ -358,6 +376,7 @@ verify_token_env = "MESSENGER_VERIFY_TOKEN"
 |-------|------|---------|-------------|
 | `page_token_env` | string | `"MESSENGER_PAGE_TOKEN"` | Env var holding the Facebook page access token. |
 | `verify_token_env` | string | `"MESSENGER_VERIFY_TOKEN"` | Env var holding the webhook verify token. |
+| `app_secret_env` | string | `"MESSENGER_APP_SECRET"` | Env var holding the **Facebook App Secret**. Used for HMAC-SHA1 verification of every inbound `X-Hub-Signature` header. If unset, signature verification is skipped and a warning is logged once at startup — production deployments should always set this. |
 | `webhook_port` | u16 | `8452` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
@@ -620,7 +639,7 @@ secret_env = "DINGTALK_SECRET"
 | `app_key_env` | string | `"DINGTALK_APP_KEY"` | Env var holding the DingTalk App Key (stream mode). |
 | `app_secret_env` | string | `"DINGTALK_APP_SECRET"` | Env var holding the DingTalk App Secret (stream mode). |
 | `access_token_env` | string | `"DINGTALK_ACCESS_TOKEN"` | Env var holding the DingTalk webhook access token (webhook mode). |
-| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). |
+| `secret_env` | string | `"DINGTALK_SECRET"` | Env var holding the DingTalk signing secret (webhook mode). **Required** — webhook mode rejects requests without a numeric `timestamp` header (400), with a stale or mismatched signature (401). |
 | `webhook_port` | u16 | `8457` | **Deprecated.** Previously used for standalone webhook server; now ignored. All webhooks share the API port. |
 | `robot_code` | string or null | `null` | Robot code for stream mode replies (defaults to app_key). |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
@@ -702,7 +721,7 @@ listen_port = 8460
 |-------|------|---------|-------------|
 | `secret_env` | string | `"WEBHOOK_SECRET"` | Env var holding the HMAC signing secret for verifying incoming webhooks. |
 | `listen_port` | u16 | `8460` | Port to listen for incoming webhook requests. |
-| `callback_url` | string or null | `null` | URL to POST outgoing messages to. |
+| `callback_url` | string or null | `null` | URL to POST outgoing messages to. **SSRF-guarded:** the daemon refuses to start the adapter if this resolves to a private, loopback, link-local, multicast, or cloud-metadata range (e.g. `127.0.0.1`, `10.0.0.1`, `169.254.169.254`, `[::1]`, `[::ffff:127.0.0.1]`). Public hostnames only. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
 #### `[channels.voice]`
