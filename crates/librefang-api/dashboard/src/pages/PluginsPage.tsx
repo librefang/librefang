@@ -364,7 +364,7 @@ export function PluginsPage() {
         <div className="p-5 space-y-4">
               {/* Source Tabs */}
               <div>
-                <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.source")}</label>
+                <span className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.source")}</span>
                 <div className="flex gap-2 mt-1">
                   {(["registry", "local", "git"] as const).map(s => (
                     <button key={s} onClick={() => setInstallSource(s)}
@@ -381,30 +381,30 @@ export function PluginsPage() {
               {installSource === "registry" && (
                 <>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
-                    <input value={installName} onChange={e => setInstallName(e.target.value)} className={inputClass} placeholder="e.g. echo-memory" />
+                    <label htmlFor="install-plugin-name" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
+                    <input id="install-plugin-name" value={installName} onChange={e => setInstallName(e.target.value)} className={inputClass} placeholder="e.g. echo-memory" />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.registry_optional")}</label>
-                    <input value={installRepo} onChange={e => setInstallRepo(e.target.value)} className={inputClass} placeholder={t("plugins.registry_placeholder")} />
+                    <label htmlFor="install-plugin-repo" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.registry_optional")}</label>
+                    <input id="install-plugin-repo" value={installRepo} onChange={e => setInstallRepo(e.target.value)} className={inputClass} placeholder={t("plugins.registry_placeholder")} />
                   </div>
                 </>
               )}
               {installSource === "local" && (
                 <div>
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.path")}</label>
-                  <input value={installPath} onChange={e => setInstallPath(e.target.value)} className={inputClass} placeholder="/path/to/plugin" />
+                  <label htmlFor="install-plugin-path" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.path")}</label>
+                  <input id="install-plugin-path" value={installPath} onChange={e => setInstallPath(e.target.value)} className={inputClass} placeholder="/path/to/plugin" />
                 </div>
               )}
               {installSource === "git" && (
                 <>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.url")}</label>
-                    <input value={installUrl} onChange={e => setInstallUrl(e.target.value)} className={inputClass} placeholder="https://github.com/..." />
+                    <label htmlFor="install-plugin-url" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.url")}</label>
+                    <input id="install-plugin-url" value={installUrl} onChange={e => setInstallUrl(e.target.value)} className={inputClass} placeholder="https://github.com/..." />
                   </div>
                   <div>
-                    <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.branch")}</label>
-                    <input value={installBranch} onChange={e => setInstallBranch(e.target.value)} className={inputClass} placeholder="main" />
+                    <label htmlFor="install-plugin-branch" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.branch")}</label>
+                    <input id="install-plugin-branch" value={installBranch} onChange={e => setInstallBranch(e.target.value)} className={inputClass} placeholder="main" />
                   </div>
                 </>
               )}
@@ -430,16 +430,16 @@ export function PluginsPage() {
       <DrawerPanel isOpen={showScaffold} onClose={() => setShowScaffold(false)} title={t("plugins.scaffold_title")} size="sm">
         <div className="p-5 space-y-4">
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
-            <input value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" disabled={scaffoldMutation.isPending} />
+            <label htmlFor="scaffold-plugin-name" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.plugin_name")}</label>
+            <input id="scaffold-plugin-name" value={scaffoldName} onChange={e => setScaffoldName(e.target.value)} className={inputClass} placeholder="my-plugin" disabled={scaffoldMutation.isPending} />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
-            <input value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} disabled={scaffoldMutation.isPending} />
+            <label htmlFor="scaffold-plugin-desc" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.description")}</label>
+            <input id="scaffold-plugin-desc" value={scaffoldDesc} onChange={e => setScaffoldDesc(e.target.value)} className={inputClass} placeholder={t("plugins.scaffold_desc")} disabled={scaffoldMutation.isPending} />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
-            <select value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass} disabled={scaffoldMutation.isPending}>
+            <label htmlFor="scaffold-plugin-runtime" className="text-[10px] font-bold text-text-dim uppercase">{t("plugins.runtime", { defaultValue: "Runtime" })}</label>
+            <select id="scaffold-plugin-runtime" value={scaffoldRuntime} onChange={e => setScaffoldRuntime(e.target.value)} className={inputClass} disabled={scaffoldMutation.isPending}>
               <option value="python">Python</option>
               <option value="node">Node.js</option>
               <option value="deno">Deno (TypeScript)</option>

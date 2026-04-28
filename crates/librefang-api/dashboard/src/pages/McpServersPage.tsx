@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import React, { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
@@ -34,17 +34,36 @@ import {
   ShieldHalf,
 } from "lucide-react";
 import { TaintPolicyEditor } from "../components/TaintPolicyEditor";
-import { DynamicIcon } from "lucide-react/dynamic";
-import type { IconName } from "lucide-react/dynamic";
+// Lazy-load individual lucide icons by name — avoids pulling the full
+// ~1500-icon registry that `lucide-react/dynamic` bundles.
+type IconName = string;
+const lazyIconCache = new Map<string, React.LazyExoticComponent<React.ComponentType<{ className?: string }>>>();
+function getLazyIcon(name: string) {
+  if (!lazyIconCache.has(name)) {
+    lazyIconCache.set(
+      name,
+      lazy(() =>
+        import("lucide-react").then((mod) => {
+          // Convert kebab-case icon name to PascalCase component name
+          const pascal = name
+            .split("-")
+            .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+            .join("");
+          const Component = (mod as Record<string, unknown>)[pascal] as React.ComponentType<{ className?: string }> | undefined;
+          if (!Component) throw new Error(`lucide icon not found: ${pascal}`);
+          return { default: Component };
+        }),
+      ),
+    );
+  }
+  return lazyIconCache.get(name)!;
+}
 
-// Wraps `DynamicIcon` so a catalog entry with a stale or mistyped
-// `lucide:xxx` name (backend-controlled, but still human-edited) falls back
-// to a neutral icon instead of throwing and blowing up the surrounding card.
-// `DynamicIcon` lazy-imports the icon module — if the name isn't a real
-// lucide icon the import rejects and the `Suspense` fallback doesn't catch
-// that; it bubbles up as a render error, which this boundary converts into
-// `fallback`.
-class DynamicIconBoundary extends Component<
+// Error boundary wrapping each lazily-loaded catalog icon. If the icon
+// name from the backend doesn't map to a real lucide export the lazy
+// import rejects — the boundary catches the render error and shows the
+// neutral fallback instead of blowing up the surrounding card.
+class LazyIconBoundary extends Component<
   { children: ReactNode; fallback: ReactNode },
   { hasError: boolean }
 > {
@@ -54,7 +73,7 @@ class DynamicIconBoundary extends Component<
   }
   componentDidCatch(error: Error) {
     // eslint-disable-next-line no-console
-    console.warn("CatalogIcon: DynamicIcon failed to load, using fallback.", error);
+    console.warn("CatalogIcon: lazy icon failed to load, using fallback.", error);
   }
   render() {
     return this.state.hasError ? this.props.fallback : this.props.children;
@@ -65,10 +84,13 @@ function CatalogIcon({ icon, className }: { icon: string; className?: string }) 
   if (icon.startsWith("lucide:")) {
     const name = icon.slice("lucide:".length) as IconName;
     const fallback = <Plug className={className} />;
+    const LazyIcon = getLazyIcon(name);
     return (
-      <DynamicIconBoundary fallback={fallback}>
-        <DynamicIcon name={name} className={className} fallback={() => fallback} />
-      </DynamicIconBoundary>
+      <LazyIconBoundary fallback={fallback}>
+        <Suspense fallback={fallback}>
+          <LazyIcon className={className} />
+        </Suspense>
+      </LazyIconBoundary>
     );
   }
   return <span className="text-xl">{icon}</span>;
@@ -347,7 +369,7 @@ function AuthBadge({
   }, [authState, polling, serverIdentity, onAuthSuccess, addToast, queryClient, t]);
 
   const handleStartAuth = useCallback(async () => {
-    const authWindow = window.open("about:blank", "_blank");
+    const authWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
     try {
       const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
@@ -1185,9 +1207,9 @@ export function McpServersPage() {
 
           {/* Transport type */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+            <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
               {t("mcp.transport_type")}
-            </label>
+            </span>
             <div className="flex gap-2">
               {(["stdio", "sse", "http"] as TransportType[]).map((tt) => (
                 <button
@@ -1220,9 +1242,9 @@ export function McpServersPage() {
                 placeholder={t("mcp.command_placeholder")}
               />
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                   {t("mcp.args")}
-                </label>
+                </span>
                 <ArgsEditor items={form.args} onChange={(v) => updateField("args", v)} />
               </div>
             </div>
@@ -1245,10 +1267,11 @@ export function McpServersPage() {
                 <p className="text-[10px] text-warning font-bold">{t("mcp.url_hint")}</p>
               )}
               <div className="flex flex-col gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                <label htmlFor="mcp-server-headers" className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                   {t("mcp.headers")}
                 </label>
                 <textarea
+                  id="mcp-server-headers"
                   value={form.headers}
                   onChange={(e) => updateField("headers", e.target.value)}
                   placeholder={t("mcp.headers_placeholder")}
@@ -1271,9 +1294,9 @@ export function McpServersPage() {
 
           {/* Env vars */}
           <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+            <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">
               {t("mcp.env")}
-            </label>
+            </span>
             <EnvEditor items={form.env} onChange={(v) => updateField("env", v)} />
           </div>
 
@@ -1310,7 +1333,7 @@ export function McpServersPage() {
           {(installingTemplate?.required_env ?? []).map(e => (
             <div key={e.name} className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
-                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim">
+                <label htmlFor={`catalog-env-${e.name}`} className="text-[10px] font-black uppercase tracking-widest text-text-dim">
                   {e.label || e.name}
                 </label>
                 {e.get_url && (
@@ -1321,6 +1344,7 @@ export function McpServersPage() {
               </div>
               {e.help && <span className="text-[9px] text-text-dim/50">{e.help}</span>}
               <input
+                id={`catalog-env-${e.name}`}
                 type={e.is_secret ? "password" : "text"}
                 value={envInputs[e.name] ?? ""}
                 onChange={(ev) => setEnvInputs(prev => ({ ...prev, [e.name]: ev.target.value }))}

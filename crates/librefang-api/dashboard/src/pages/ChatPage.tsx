@@ -352,6 +352,36 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, []);
 
+  // Streaming content buffer — accumulates text_delta chunks keyed by
+  // message id without triggering a React state update on every token.
+  // A requestAnimationFrame flush drains the buffer into React state at
+  // most once per paint frame (≈16 ms), reducing the O(n × tokens) map
+  // cost to O(n × frames) where frames ≪ tokens during fast streams.
+  const streamingBufferRef = useRef<Map<string, string>>(new Map());
+  const rafHandleRef = useRef<Map<string, number>>(new Map());
+
+  const flushStreamingContent = useCallback((agentId: string, msgId: string) => {
+    const buffered = streamingBufferRef.current.get(msgId);
+    if (buffered === undefined) return;
+    streamingBufferRef.current.delete(msgId);
+    rafHandleRef.current.delete(msgId);
+    updateAgentMessages(agentId, prev => {
+      const idx = prev.findIndex(m => m.id === msgId);
+      if (idx === -1) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], content: buffered, error: undefined };
+      return next;
+    });
+  }, [updateAgentMessages]);
+
+  const scheduleStreamingFlush = useCallback((agentId: string, msgId: string) => {
+    if (rafHandleRef.current.has(msgId)) return; // already scheduled
+    const handle = requestAnimationFrame(() => {
+      flushStreamingContent(agentId, msgId);
+    });
+    rafHandleRef.current.set(msgId, handle);
+  }, [flushStreamingContent]);
+
   // Save current messages to cache when switching away. The cleanup must
   // read the LATEST messages at unmount/agent-swap time, so we keep a
   // ref that tracks messages and only fire the save effect on agentId
@@ -671,9 +701,19 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
             const data = JSON.parse(event.data as string);
             if (data.type === "text_delta") {
               const chunk = data.content || "";
-              updateAgentMessages(sendAgentId, prev => prev.map(m =>
-                m.id === botMsg.id ? { ...m, content: m.content + chunk, error: undefined } : m
-              ));
+              // Accumulate into the buffer without a React state update on every token.
+              // The RAF flush drains the buffer into state at most once per paint frame.
+              const prev = streamingBufferRef.current.get(botMsg.id);
+              // Seed from the current live message content on the first delta so we
+              // don't lose any content that arrived before this batch started.
+              if (prev === undefined) {
+                // Read current content from the latest messages snapshot via ref
+                const currentContent = (messagesRef.current.find(m => m.id === botMsg.id)?.content) ?? "";
+                streamingBufferRef.current.set(botMsg.id, currentContent + chunk);
+              } else {
+                streamingBufferRef.current.set(botMsg.id, prev + chunk);
+              }
+              scheduleStreamingFlush(sendAgentId, botMsg.id);
             } else if (data.type === "thinking_delta") {
               const chunk = data.content || "";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
@@ -687,6 +727,10 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               ));
             } else if (data.type === "typing") {
               if (data.state === "stop") {
+                // Flush any buffered streaming content before marking done
+                const rafHandle = rafHandleRef.current.get(botMsg.id);
+                if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
+                flushStreamingContent(sendAgentId, botMsg.id);
                 updateAgentMessages(sendAgentId, prev => prev.map(m =>
                   m.id === botMsg.id ? { ...m, isStreaming: false } : m
                 ));
@@ -737,10 +781,19 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 addSkillOutput({ skillName: entry.tool, agentId: sendAgentId, content: entry.content });
               }
             } else if (data.type === "silent_complete") {
+              // Cancel any pending RAF flush — message is being removed
+              const rafHandle = rafHandleRef.current.get(botMsg.id);
+              if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
+              streamingBufferRef.current.delete(botMsg.id);
+              rafHandleRef.current.delete(botMsg.id);
               updateAgentMessages(sendAgentId, prev => prev.filter(m => m.id !== botMsg.id));
               finishTurnIfCurrent(sendAgentId, botMsg.id);
               cleanup();
             } else if (data.type === "error") {
+              // Flush any buffered streaming content before showing the error
+              const rafHandle = rafHandleRef.current.get(botMsg.id);
+              if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
+              flushStreamingContent(sendAgentId, botMsg.id);
               const error = data.content || "WebSocket error";
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id ? { ...m, isStreaming: false, error } : m
@@ -762,6 +815,12 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 if (!turn.responded) { cleanup(); sendViaHttp(); }
               }, 30_000);
             } else if (data.type === "response") {
+              // Cancel any pending RAF flush — the final response supersedes
+              // any buffered streaming content.
+              const rafHandle = rafHandleRef.current.get(botMsg.id);
+              if (rafHandle !== undefined) cancelAnimationFrame(rafHandle);
+              streamingBufferRef.current.delete(botMsg.id);
+              rafHandleRef.current.delete(botMsg.id);
               updateAgentMessages(sendAgentId, prev => prev.map(m =>
                 m.id === botMsg.id
                   ? {
@@ -779,10 +838,15 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               cleanup();
             }
           } catch {
-            // Non-JSON text chunk
-            updateAgentMessages(sendAgentId, prev => prev.map(m =>
-              m.id === botMsg.id ? { ...m, content: m.content + event.data } : m
-            ));
+            // Non-JSON text chunk — treat as a streaming delta
+            const prevBuf = streamingBufferRef.current.get(botMsg.id);
+            if (prevBuf === undefined) {
+              const currentContent = (messagesRef.current.find(m => m.id === botMsg.id)?.content) ?? "";
+              streamingBufferRef.current.set(botMsg.id, currentContent + (event.data as string));
+            } else {
+              streamingBufferRef.current.set(botMsg.id, prevBuf + (event.data as string));
+            }
+            scheduleStreamingFlush(sendAgentId, botMsg.id);
           }
         };
 
@@ -819,7 +883,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
 
     // HTTP fallback — direct, no fake streaming
     await sendViaHttp();
-  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory]);
+  }, [agentId, agents, wsConnected, ws, deepThinking, showThinkingProcess, finishTurnIfCurrent, clearHistory, scheduleStreamingFlush, flushStreamingContent]);
 
   // Abort an in-flight agent run. Hits the backend stop endpoint (which aborts
   // the tokio task on the kernel side) and optimistically finalizes any
