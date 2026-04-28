@@ -134,10 +134,13 @@ impl DingTalkAdapter {
     // Webhook helpers
     // -----------------------------------------------------------------------
 
-    /// Compute the HMAC-SHA256 signature for a DingTalk request.
+    /// Compute the HMAC-SHA256 signature for a DingTalk callback request.
     ///
-    /// DingTalk signature = Base64(HMAC-SHA256(secret, timestamp + "\n" + secret))
-    fn compute_signature(secret: &str, timestamp: i64) -> String {
+    /// Signed data: `Base64(HMAC-SHA256(secret, timestamp + "\n" + secret + "\n" + body))`
+    ///
+    /// The body bytes are mixed into the HMAC so that a captured (timestamp, signature)
+    /// pair cannot be replayed against a different request body.
+    fn compute_signature(secret: &str, timestamp: i64, body_bytes: &[u8]) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
@@ -145,14 +148,16 @@ impl DingTalkAdapter {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
         mac.update(string_to_sign.as_bytes());
+        mac.update(b"\n");
+        mac.update(body_bytes);
         let result = mac.finalize();
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(result.into_bytes())
     }
 
     /// Verify an incoming DingTalk callback signature.
-    fn verify_signature(secret: &str, timestamp: i64, signature: &str) -> bool {
-        let expected = Self::compute_signature(secret, timestamp);
+    fn verify_signature(secret: &str, timestamp: i64, body_bytes: &[u8], signature: &str) -> bool {
+        let expected = Self::compute_signature(secret, timestamp, body_bytes);
         // Constant-time comparison
         if expected.len() != signature.len() {
             return false;
@@ -167,7 +172,7 @@ impl DingTalkAdapter {
     /// Build the signed send URL with access_token, timestamp, and signature.
     fn build_send_url(&self) -> String {
         let timestamp = Utc::now().timestamp_millis();
-        let sign = Self::compute_signature(&self.secret, timestamp);
+        let sign = Self::compute_signature(&self.secret, timestamp, b"");
         let encoded_sign = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("sign", &sign)
             .finish();
@@ -602,7 +607,7 @@ impl ChannelAdapter for DingTalkAdapter {
                 let secret = Arc::clone(&secret);
                 let account_id = Arc::clone(&account_id);
                 move |headers: axum::http::HeaderMap,
-                      body: axum::extract::Json<serde_json::Value>| {
+                      body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
                     let secret = Arc::clone(&secret);
                     let account_id = Arc::clone(&account_id);
@@ -617,23 +622,31 @@ impl ChannelAdapter for DingTalkAdapter {
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("");
 
-                        // Verify signature
+                        // Verify signature — body bytes are included in the signed data
+                        // so an attacker cannot replay a valid (timestamp, signature) pair
+                        // with a different body.
                         if let Ok(ts) = timestamp_str.parse::<i64>() {
-                            if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
+                            if !DingTalkAdapter::verify_signature(&secret, ts, &body, signature) {
                                 warn!("DingTalk: invalid signature");
                                 return axum::http::StatusCode::FORBIDDEN;
                             }
 
-                            // Check timestamp freshness (1 hour window)
+                            // Reject requests with a timestamp older than 5 minutes.
+                            // DingTalk sends timestamps in milliseconds.
                             let now = Utc::now().timestamp_millis();
-                            if (now - ts).unsigned_abs() > 3_600_000 {
-                                warn!("DingTalk: stale timestamp");
+                            if (now - ts).unsigned_abs() > 300_000 {
+                                warn!("DingTalk: stale timestamp (>5 min)");
                                 return axum::http::StatusCode::FORBIDDEN;
                             }
                         }
 
+                        let json_body: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return axum::http::StatusCode::BAD_REQUEST,
+                        };
+
                         if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
-                            DingTalkAdapter::parse_callback(&body)
+                            DingTalkAdapter::parse_callback(&json_body)
                         {
                             let content = if text.starts_with('/') {
                                 let parts: Vec<&str> = text.splitn(2, ' ').collect();

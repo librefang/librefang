@@ -232,6 +232,30 @@ impl ChannelAdapter for WebhookAdapter {
                             );
                         }
 
+                        // Reject replayed requests: if the caller supplies an
+                        // X-Webhook-Timestamp header (Unix seconds), reject it when the
+                        // timestamp is more than 5 minutes old (or more than 5 minutes in
+                        // the future, to tolerate minor clock skew).
+                        let ts_str = headers
+                            .get("x-webhook-timestamp")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("");
+                        if !ts_str.is_empty() {
+                            if let Ok(ts) = ts_str.parse::<i64>() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                if (now - ts).abs() > 300 {
+                                    warn!("Webhook: stale or future timestamp, rejecting replay");
+                                    return (
+                                        axum::http::StatusCode::FORBIDDEN,
+                                        "Forbidden: stale timestamp",
+                                    );
+                                }
+                            }
+                        }
+
                         let json_body: serde_json::Value = match serde_json::from_slice(&body) {
                             Ok(v) => v,
                             Err(_) => {

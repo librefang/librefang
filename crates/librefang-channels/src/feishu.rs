@@ -577,6 +577,26 @@ impl FeishuAdapter {
                             );
                         }
 
+                        // Verify the event token for all non-challenge events.
+                        // The URL challenge path already validates the token above; this
+                        // guard ensures real event payloads are also authenticated so an
+                        // attacker cannot inject arbitrary events without the shared secret.
+                        if let Some(ref expected_token) = *vt {
+                            // v2 events carry token inside header.token; v1 events use token
+                            // at the top level. Check both locations.
+                            let token = payload["header"]["token"]
+                                .as_str()
+                                .or_else(|| payload["token"].as_str())
+                                .unwrap_or("");
+                            if token != expected_token {
+                                warn!("{label}: invalid verification token on event");
+                                return (
+                                    axum::http::StatusCode::FORBIDDEN,
+                                    axum::Json(serde_json::json!({})),
+                                );
+                            }
+                        }
+
                         // Deduplicate by event_id
                         if is_duplicate_event(&payload, &seen) {
                             debug!("{label}: duplicate event, skipping");
