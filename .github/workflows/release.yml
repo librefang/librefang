@@ -1556,7 +1556,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: deploy/Dockerfile
+          file: Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
           tags: ghcr.io/librefang/librefang

@@ -1,6 +1,4 @@
 # syntax=docker/dockerfile:1
-# This file exists for Render.com auto-deploy, which requires Dockerfile at the repo root.
-# CI (release.yml / docker-build.yml) still uses deploy/Dockerfile — keep both in sync.
 
 # Stage 1: Build React dashboard
 FROM node:20-alpine AS dashboard-builder
