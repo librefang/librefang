@@ -12468,6 +12468,9 @@ system_prompt = "You are a helpful assistant."
                                     }
                                 };
                                 let kernel_job = kernel.clone();
+                                // Shadow so outer `job_name` survives the move
+                                // for the post-arm per-job persist warn.
+                                let job_name = job_name.clone();
                                 tokio::spawn(async move {
                                     // Hold the permit for the full duration of this job.
                                     let _permit = permit;
