@@ -2744,6 +2744,10 @@ impl LibreFangKernel {
                                 .ok()?
                                 .with_timezone(&chrono::Utc),
                                 push_token: row["push_token"].as_str().map(String::from),
+                                api_key_hash: row["api_key_hash"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
                             })
                         })
                         .collect();
@@ -2764,6 +2768,7 @@ impl LibreFangKernel {
                         &device.paired_at.to_rfc3339(),
                         &device.last_seen.to_rfc3339(),
                         device.push_token.as_deref(),
+                        &device.api_key_hash,
                     ) {
                         tracing::warn!("Failed to persist paired device: {e}");
                     }
