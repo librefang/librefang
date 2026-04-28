@@ -1386,6 +1386,14 @@ impl McpConnection {
         }
     }
 
+    /// Protocol versions that this client understands.  The first entry is
+    /// the version we advertise in `initialize`; all entries are accepted
+    /// in the server's `InitializeResult`.  An unknown version from the
+    /// server triggers a warning but does not abort the connection — the
+    /// spec allows servers to negotiate down, and a warning is enough to
+    /// surface the mismatch without breaking existing deployments. (#3803)
+    const SUPPORTED_MCP_VERSIONS: &'static [&'static str] = &["2024-11-05", "2025-03-26"];
+
     /// Send the MCP `initialize` handshake over SSE transport.
     ///
     /// SSE is unidirectional (client → server), so we never declare the
@@ -1393,7 +1401,7 @@ impl McpConnection {
     /// `roots/list` back to us.
     async fn sse_initialize(&mut self) -> Result<(), String> {
         let params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": Self::SUPPORTED_MCP_VERSIONS[0],
             "capabilities": {},
             "clientInfo": {
                 "name": "librefang",
@@ -1409,6 +1417,19 @@ impl McpConnection {
                 server_info = %result,
                 "MCP SSE initialize response"
             );
+
+            // Validate the protocol version the server selected. (#3803)
+            if let Some(server_version) = result.get("protocolVersion").and_then(|v| v.as_str()) {
+                if !Self::SUPPORTED_MCP_VERSIONS.contains(&server_version) {
+                    tracing::warn!(
+                        server = %self.config.name,
+                        protocol_version = server_version,
+                        supported = ?Self::SUPPORTED_MCP_VERSIONS,
+                        "MCP server announced unsupported protocolVersion; \
+                         proceeding but some features may be unavailable"
+                    );
+                }
+            }
         }
 
         self.sse_send_notification("notifications/initialized", None)
@@ -1521,6 +1542,20 @@ impl McpConnection {
 
         let rpc_response: JsonRpcResponse = serde_json::from_slice(&body)
             .map_err(|e| format!("Invalid MCP SSE JSON-RPC response: {e}"))?;
+
+        // Verify the JSON-RPC id in the response matches the id we sent.
+        // A mismatch indicates a server routing error or a response intended
+        // for a concurrent request — processing it would silently corrupt
+        // data. (#3802)
+        if rpc_response.id != Some(id) {
+            tracing::warn!(
+                expected = id,
+                got = ?rpc_response.id,
+                method,
+                "MCP SSE: JSON-RPC id mismatch — dropping response"
+            );
+            return Ok(None);
+        }
 
         if let Some(err) = rpc_response.error {
             return Err(format!("{err}"));

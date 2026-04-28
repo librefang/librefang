@@ -6,7 +6,7 @@ WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
 RUN corepack enable \
-    && pnpm install --frozen-lockfile \
+    && pnpm install --frozen-lockfile --ignore-scripts \
     && pnpm run build
 
 # Stage 2: Build Rust binary
@@ -63,5 +63,8 @@ COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 4545
 ENV LIBREFANG_HOME=/data
+# docker-entrypoint.sh uses gosu to exec as the librefang user, so we
+# keep the entrypoint itself running as root to allow bind-mount chown
+# and data-dir initialisation before privilege drop.
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]
