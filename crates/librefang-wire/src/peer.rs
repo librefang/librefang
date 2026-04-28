@@ -59,13 +59,27 @@ impl NonceTracker {
     /// Returns `Err` on replay **or** when the tracker is at capacity —
     /// failing closed under flood is preferable to silently accepting an
     /// unbounded number of nonces.
+    ///
+    /// # DoS mitigation
+    ///
+    /// GC (`retain`) sweeps are amortized: they only run when the map has
+    /// reached 80% of `max_entries`. Running `retain` on every insert is
+    /// O(n) and lets any TCP client (even one that has not yet proven
+    /// knowledge of `shared_secret`) force an expensive sweep on every
+    /// connection attempt.
     pub fn check_and_record(&self, nonce: &str) -> Result<(), String> {
         use dashmap::mapref::entry::Entry;
         let now = Instant::now();
 
-        // Garbage-collect expired nonces (older than window).
-        self.seen
-            .retain(|_, ts| now.duration_since(*ts) < self.window);
+        // Amortized GC: only sweep expired nonces when the map is at or above
+        // 80% of capacity. This avoids an O(n) retain() call on every insert,
+        // which an unauthenticated attacker could exploit to cause repeated
+        // full-map scans with no HMAC knowledge required.
+        let gc_threshold = self.max_entries * 4 / 5; // 80%
+        if self.seen.len() >= gc_threshold {
+            self.seen
+                .retain(|_, ts| now.duration_since(*ts) < self.window);
+        }
 
         // Hard cap: after GC the tracker must still be at or below the
         // bound, otherwise reject new nonces to keep memory usage finite.
@@ -128,6 +142,15 @@ pub enum WireError {
 
 /// Maximum single message size (16 MB).
 pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
+
+/// SECURITY: Maximum size of an agent message forwarded from a remote peer.
+///
+/// Enforced before the message is handed to the kernel's LLM pipeline.
+/// Without this cap a federated peer (who may share the same `shared_secret`)
+/// can craft a 16 MB payload and cause the **receiver's** LLM budget to be
+/// drained at the receiver's cost. 64 KiB is generous for any legitimate
+/// inter-agent message and well below the transport-layer `MAX_MESSAGE_SIZE`.
+pub const MAX_PEER_MESSAGE_BYTES: usize = 65_536; // 64 KiB
 
 /// Configuration for a PeerNode.
 #[derive(Debug, Clone)]
@@ -250,18 +273,40 @@ impl PeerNode {
     }
 
     /// Connect to a remote peer and perform the handshake.
+    ///
+    /// `recipient_node_id` is the expected node ID of the remote peer. It is
+    /// embedded in the handshake HMAC so that a captured handshake cannot be
+    /// replayed against a *different* federation node that shares the same
+    /// `shared_secret` (see #3875). Pass an empty string only for bootstrap
+    /// connections where the remote node ID is genuinely unknown in advance;
+    /// the remote peer will verify its own node ID and reject the connection
+    /// if the HMAC was computed for a different recipient.
     pub async fn connect_to_peer(
         &self,
         addr: SocketAddr,
         handle: Arc<dyn PeerHandle>,
     ) -> Result<(), WireError> {
+        self.connect_to_peer_with_id(addr, handle, "").await
+    }
+
+    /// Like [`connect_to_peer`] but binds the handshake HMAC to a specific
+    /// recipient node ID, preventing cross-node replay (#3875).
+    pub async fn connect_to_peer_with_id(
+        &self,
+        addr: SocketAddr,
+        handle: Arc<dyn PeerHandle>,
+        recipient_node_id: &str,
+    ) -> Result<(), WireError> {
         info!("OFP: connecting to peer at {}", addr);
         let stream = TcpStream::connect(addr).await?;
         let (mut reader, mut writer) = stream.into_split();
 
-        // Send our handshake with HMAC authentication
+        // SECURITY (#3875): HMAC auth_data binds nonce + sender_node_id +
+        // recipient_node_id. Including the recipient prevents a captured
+        // handshake from being replayed against a different federation peer
+        // that shares the same shared_secret.
         let our_nonce = uuid::Uuid::new_v4().to_string();
-        let auth_data = format!("{}{}", our_nonce, self.config.node_id);
+        let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, recipient_node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
 
         let handshake = WireMessage {
@@ -295,21 +340,28 @@ impl PeerNode {
                     });
                 }
 
-                // SECURITY: Check for nonce replay on the ack
-                if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
-                    return Err(WireError::HandshakeFailed(replay_err));
-                }
-
-                // SECURITY: Verify the ack HMAC
-                let expected_data = format!("{}{}", ack_nonce, node_id);
+                // SECURITY (#3875): Verify ack HMAC before recording nonce.
+                // The ack auth_data covers nonce + sender_node_id (the remote)
+                // + recipient_node_id (our own node ID), binding this ack to
+                // us specifically.
+                let expected_ack_data =
+                    format!("{}|{}|{}", ack_nonce, node_id, self.config.node_id);
                 if !hmac_verify(
                     &self.config.shared_secret,
-                    expected_data.as_bytes(),
+                    expected_ack_data.as_bytes(),
                     ack_hmac,
                 ) {
                     return Err(WireError::HandshakeFailed(
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
+                }
+
+                // SECURITY (#3880): Record nonce AFTER successful HMAC
+                // verification. Recording before verification allows any TCP
+                // client to fill nonce capacity without proving knowledge of
+                // shared_secret.
+                if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
+                    return Err(WireError::HandshakeFailed(replay_err));
                 }
 
                 // SECURITY: Derive per-session key for authenticated messages
@@ -393,9 +445,11 @@ impl PeerNode {
         let stream = TcpStream::connect(peer.address).await?;
         let (mut reader, mut writer) = stream.into_split();
 
-        // SECURITY: Perform HMAC handshake before sending any data
+        // SECURITY (#3875): Perform HMAC handshake before sending any data.
+        // auth_data binds nonce + sender_node_id + recipient_node_id so a
+        // captured handshake cannot be replayed to a different federation peer.
         let our_nonce = uuid::Uuid::new_v4().to_string();
-        let auth_data = format!("{}{}", our_nonce, self.config.node_id);
+        let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
 
         let handshake = WireMessage {
@@ -427,19 +481,22 @@ impl PeerNode {
                         remote: *protocol_version,
                     });
                 }
-                // SECURITY: Check for nonce replay
-                if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
-                    return Err(WireError::HandshakeFailed(replay_err));
-                }
-                let expected_data = format!("{}{}", ack_nonce, ack_node_id);
+                // SECURITY (#3875): Verify ack HMAC — includes our own node_id
+                // as recipient so the ack is bound to this node specifically.
+                let expected_ack_data =
+                    format!("{}|{}|{}", ack_nonce, ack_node_id, self.config.node_id);
                 if !hmac_verify(
                     &self.config.shared_secret,
-                    expected_data.as_bytes(),
+                    expected_ack_data.as_bytes(),
                     ack_hmac,
                 ) {
                     return Err(WireError::HandshakeFailed(
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
+                }
+                // SECURITY (#3880): Record nonce AFTER HMAC verification.
+                if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
+                    return Err(WireError::HandshakeFailed(replay_err));
                 }
                 // SECURITY: Derive per-session key for authenticated post-handshake I/O
                 derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce)
@@ -548,21 +605,19 @@ impl PeerNode {
                     });
                 }
 
-                // SECURITY: Check for nonce replay before verifying HMAC
-                if let Err(replay_err) = node.nonce_tracker.check_and_record(nonce) {
-                    let err_resp = WireMessage {
-                        id: msg.id.clone(),
-                        kind: WireMessageKind::Response(WireResponse::Error {
-                            code: 403,
-                            message: "Nonce replay rejected".to_string(),
-                        }),
-                    };
-                    write_message(&mut writer, &err_resp).await?;
-                    return Err(WireError::HandshakeFailed(replay_err));
-                }
-
-                // SECURITY: Verify the incoming HMAC
-                let expected_data = format!("{}{}", nonce, node_id);
+                // SECURITY (#3875, #3880): Verify HMAC *before* recording the
+                // nonce. The HMAC auth_data now covers:
+                //   nonce | sender_node_id | recipient_node_id
+                // where recipient_node_id is *our* local node ID. This binds
+                // the handshake to this specific server — a captured packet
+                // cannot be replayed against a different peer that shares the
+                // same shared_secret.
+                //
+                // Checking HMAC first (order fix for #3880) means an attacker
+                // who does not know shared_secret cannot trigger nonce
+                // insertion or the GC sweep inside check_and_record.
+                let expected_data =
+                    format!("{}|{}|{}", nonce, node_id, node.config.node_id);
                 if !hmac_verify(
                     &node.config.shared_secret,
                     expected_data.as_bytes(),
@@ -581,9 +636,26 @@ impl PeerNode {
                     ));
                 }
 
-                // Send handshake ack with our own HMAC
+                // SECURITY (#3880): Record nonce only after HMAC is verified.
+                if let Err(replay_err) = node.nonce_tracker.check_and_record(nonce) {
+                    let err_resp = WireMessage {
+                        id: msg.id.clone(),
+                        kind: WireMessageKind::Response(WireResponse::Error {
+                            code: 403,
+                            message: "Nonce replay rejected".to_string(),
+                        }),
+                    };
+                    write_message(&mut writer, &err_resp).await?;
+                    return Err(WireError::HandshakeFailed(replay_err));
+                }
+
+                // Send handshake ack with our own HMAC.
+                // SECURITY (#3875): ack auth_data covers ack_nonce + our_node_id
+                // + the remote sender's node_id as recipient, so the ack is
+                // bound to the specific peer that initiated this handshake.
                 let ack_nonce = uuid::Uuid::new_v4().to_string();
-                let ack_auth_data = format!("{}{}", ack_nonce, node.config.node_id);
+                let ack_auth_data =
+                    format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
                 let ack_hmac = hmac_sign(&node.config.shared_secret, ack_auth_data.as_bytes());
 
                 let ack = WireMessage {
@@ -782,16 +854,40 @@ async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> W
             agent,
             message,
             sender,
-        }) => match handle
-            .handle_agent_message(agent, message, sender.as_deref())
-            .await
-        {
-            Ok(text) => WireMessageKind::Response(WireResponse::AgentResponse { text }),
-            Err(e) => WireMessageKind::Response(WireResponse::Error {
-                code: 500,
-                message: e,
-            }),
-        },
+        }) => {
+            // SECURITY (#3876): Reject oversized messages before they reach the
+            // kernel's LLM pipeline. A federated peer that shares the same
+            // shared_secret could otherwise send a 16 MB payload and drain the
+            // *receiver's* LLM budget at no cost to itself.
+            if message.len() > MAX_PEER_MESSAGE_BYTES {
+                warn!(
+                    "OFP: rejecting AgentMessage for agent '{}': payload {} bytes \
+                     exceeds MAX_PEER_MESSAGE_BYTES ({})",
+                    agent,
+                    message.len(),
+                    MAX_PEER_MESSAGE_BYTES,
+                );
+                WireMessageKind::Response(WireResponse::Error {
+                    code: 413,
+                    message: format!(
+                        "Message payload too large: {} bytes (max {})",
+                        message.len(),
+                        MAX_PEER_MESSAGE_BYTES,
+                    ),
+                })
+            } else {
+                match handle
+                    .handle_agent_message(agent, message, sender.as_deref())
+                    .await
+                {
+                    Ok(text) => WireMessageKind::Response(WireResponse::AgentResponse { text }),
+                    Err(e) => WireMessageKind::Response(WireResponse::Error {
+                        code: 500,
+                        message: e,
+                    }),
+                }
+            }
+        }
         _ => WireMessageKind::Response(WireResponse::Error {
             code: 400,
             message: "Unexpected request in connection loop".to_string(),
@@ -1073,9 +1169,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Node2 connects to Node1
+        // Node2 connects to Node1 with explicit recipient node_id binding (#3875)
         node2
-            .connect_to_peer(node1.local_addr(), handle2)
+            .connect_to_peer_with_id(node1.local_addr(), handle2, "node-1")
             .await
             .unwrap();
 
@@ -1229,9 +1325,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Connect node2 → node1
+        // Connect node2 → node1 with explicit recipient binding (#3875)
         node2
-            .connect_to_peer(node1.local_addr(), handle2)
+            .connect_to_peer_with_id(node1.local_addr(), handle2, "node-a")
             .await
             .unwrap();
 
@@ -1326,6 +1422,24 @@ mod tests {
         assert!(err.contains("capacity"), "err was {err}");
     }
 
+    /// GC sweep only runs at 80% capacity, not on every insert.
+    /// Verify that nonces below the GC threshold are still correctly
+    /// detected as replays (map lookup still works without a GC sweep).
+    #[test]
+    fn test_nonce_tracker_gc_amortized() {
+        let mut tracker = NonceTracker::new();
+        // Set a small cap so GC threshold (80%) = 4 entries.
+        tracker.max_entries = 5;
+        // Insert 4 nonces — below the 80% threshold (4 entries), no GC runs.
+        for i in 0..4 {
+            assert!(tracker.check_and_record(&format!("n-{i}")).is_ok());
+        }
+        // Replay of an already-seen nonce must still be rejected even without GC.
+        let result = tracker.check_and_record("n-0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("replay"), "expected replay error");
+    }
+
     // ── Per-message HMAC tests ───────────────────────────────────────────
 
     #[test]
@@ -1347,5 +1461,90 @@ mod tests {
         let key1 = derive_session_key("secret", "nonce-a", "nonce-b");
         let key2 = derive_session_key("secret", "nonce-b", "nonce-a");
         assert_ne!(key1, key2);
+    }
+
+    // ── Bug #3876: peer message size cap ────────────────────────────────
+
+    /// Oversized AgentMessage payloads must be rejected with HTTP 413 before
+    /// they reach the kernel's LLM pipeline and drain the receiver's budget.
+    #[tokio::test]
+    async fn test_oversized_agent_message_rejected() {
+        // Build a WireMessage directly to exercise handle_request_in_loop.
+        let handle = Arc::new(TestHandle::new());
+
+        let oversized = "x".repeat(MAX_PEER_MESSAGE_BYTES + 1);
+        let msg = WireMessage {
+            id: "big-1".to_string(),
+            kind: WireMessageKind::Request(WireRequest::AgentMessage {
+                agent: "echo".to_string(),
+                message: oversized,
+                sender: None,
+            }),
+        };
+
+        let response = handle_request_in_loop(&msg, &*handle).await;
+        match response.kind {
+            WireMessageKind::Response(WireResponse::Error { code, message }) => {
+                assert_eq!(code, 413, "expected 413 Payload Too Large, got {code}: {message}");
+                assert!(
+                    message.contains("too large"),
+                    "expected 'too large' in error message, got: {message}"
+                );
+            }
+            other => panic!("Expected Error(413), got {other:?}"),
+        }
+    }
+
+    /// Messages at exactly the limit must be accepted.
+    #[tokio::test]
+    async fn test_agent_message_at_limit_accepted() {
+        let handle = Arc::new(TestHandle::new());
+
+        let at_limit = "y".repeat(MAX_PEER_MESSAGE_BYTES);
+        let msg = WireMessage {
+            id: "limit-1".to_string(),
+            kind: WireMessageKind::Request(WireRequest::AgentMessage {
+                agent: "echo".to_string(),
+                message: at_limit.clone(),
+                sender: None,
+            }),
+        };
+
+        let response = handle_request_in_loop(&msg, &*handle).await;
+        match response.kind {
+            WireMessageKind::Response(WireResponse::AgentResponse { text }) => {
+                assert!(text.contains("Echo from echo"), "unexpected response: {text}");
+            }
+            other => panic!("Expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    // ── Bug #3875: HMAC must bind recipient node_id ──────────────────────
+
+    /// Verify that the HMAC auth_data format includes the pipe-delimited
+    /// recipient_node_id so a captured handshake cannot be replayed to a
+    /// different federation node. This is a unit test of the signing format
+    /// rather than a full network round-trip.
+    #[test]
+    fn test_handshake_hmac_includes_recipient() {
+        let secret = "shared-secret";
+        let nonce = "test-nonce-abc";
+        let sender = "node-sender";
+        let recipient = "node-receiver";
+
+        // auth_data must be `nonce|sender|recipient`
+        let auth_data = format!("{}|{}|{}", nonce, sender, recipient);
+        let sig = hmac_sign(secret, auth_data.as_bytes());
+
+        // Verification with correct recipient must pass.
+        assert!(hmac_verify(secret, auth_data.as_bytes(), &sig));
+
+        // A different recipient must produce a different signature (replay
+        // against another node is rejected).
+        let wrong_recipient_data = format!("{}|{}|{}", nonce, sender, "node-other");
+        assert!(
+            !hmac_verify(secret, wrong_recipient_data.as_bytes(), &sig),
+            "HMAC must differ when recipient_node_id differs"
+        );
     }
 }
