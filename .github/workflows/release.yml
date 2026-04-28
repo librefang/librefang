@@ -1189,7 +1189,11 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          # Prepend (NOT replace) the search list. Same reason as the
+          # mobile_ios job below — replace works on a clean GitHub-hosted
+          # runner but hides existing entries on a future self-hosted one.
+          PRIOR=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $PRIOR
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
