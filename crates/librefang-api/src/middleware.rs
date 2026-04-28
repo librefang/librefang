@@ -605,8 +605,16 @@ pub async fn auth(
             | "/api/workflows"
             | "/api/auto-dream/status"
     );
+    // SECURITY #3367: /api/approvals/session/{id} exposes pending shell
+    // commands and must require authentication.  The broader
+    // /api/approvals/* prefix is kept public for the dashboard polling
+    // paths that do not contain sensitive payload detail (e.g. the
+    // individual approval GET by id), but the /session/ sub-tree is
+    // explicitly excluded here and falls through to the normal auth gate.
+    let approvals_prefix_public = path.starts_with("/api/approvals/")
+        && !path.starts_with("/api/approvals/session/");
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
-        || path.starts_with("/api/approvals/")
+        || approvals_prefix_public
         || path.starts_with("/api/hands/")
         || path.starts_with("/api/cron/");
     // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
@@ -2056,6 +2064,71 @@ mod tests {
             response.status(),
             StatusCode::OK,
             "valid bearer token must allow access to /a2a/tasks/{{id}}"
+        );
+    }
+
+    /// Regression: #3367 — GET /api/approvals/session/{id} used to be
+    /// publicly readable via the `/api/approvals/` prefix in
+    /// `dashboard_read_prefix`. That endpoint returns pending approval
+    /// details including shell commands, so it must require authentication
+    /// even when `require_auth_for_reads` is off.
+    ///
+    /// The broader `/api/approvals/{id}` path (individual approval GET) is
+    /// still in the public bucket; only the `/session/` sub-tree is locked.
+    #[tokio::test]
+    async fn approvals_session_get_requires_auth() {
+        // Auth state: api_key configured, require_auth_for_reads OFF — this
+        // is the scenario where the bug was exploitable.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route(
+                "/api/approvals/session/{id}",
+                get(|| async { "pending approvals" }),
+            )
+            .route("/api/approvals/{id}", get(|| async { "approval detail" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        // GET /api/approvals/session/{id} — must require auth.
+        let session_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/approvals/session/sess-abc-123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session_resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "/api/approvals/session/{{id}} must be auth-gated"
+        );
+
+        // GET /api/approvals/{id} — must still be accessible without auth
+        // (dashboard polling).
+        let detail_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/approvals/some-approval-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            detail_resp.status(),
+            StatusCode::OK,
+            "/api/approvals/{{id}} should remain publicly readable"
         );
     }
 }

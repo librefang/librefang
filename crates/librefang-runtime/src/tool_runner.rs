@@ -448,6 +448,62 @@ pub async fn execute_tool_raw(
             tool_file_list(input, *workspace_root, &extra_refs).await
         }
         "apply_patch" => {
+            // SECURITY #3662: Enforce named workspace read-only restrictions
+            // before applying the patch.  Mirrors the upfront check in the
+            // `file_write` arm: any absolute target path that falls inside a
+            // read-only named workspace is rejected here, before the sandbox
+            // resolver even runs.  The sandbox itself would also block such
+            // writes (readonly workspaces are excluded from `additional_roots`),
+            // but the explicit pre-check catches the violation earlier and
+            // returns a clearer error message.
+            if let (Some(k), Some(agent_id)) = (kernel, caller_agent_id) {
+                let ro = k.readonly_workspace_prefixes(agent_id);
+                if !ro.is_empty() {
+                    // Parse the patch to inspect target paths before executing.
+                    if let Some(patch_str) = input["patch"].as_str() {
+                        if let Ok(ops) = crate::apply_patch::parse_patch(patch_str) {
+                            for op in &ops {
+                                let raw_paths: Vec<&str> = match op {
+                                    crate::apply_patch::PatchOp::AddFile { path, .. } => {
+                                        vec![path.as_str()]
+                                    }
+                                    crate::apply_patch::PatchOp::UpdateFile {
+                                        path,
+                                        move_to,
+                                        ..
+                                    } => {
+                                        let mut v = vec![path.as_str()];
+                                        if let Some(dest) = move_to {
+                                            v.push(dest.as_str());
+                                        }
+                                        v
+                                    }
+                                    crate::apply_patch::PatchOp::DeleteFile { path } => {
+                                        vec![path.as_str()]
+                                    }
+                                };
+                                for raw in raw_paths {
+                                    if Path::new(raw).is_absolute()
+                                        && ro
+                                            .iter()
+                                            .any(|prefix| Path::new(raw).starts_with(prefix))
+                                    {
+                                        return ToolResult {
+                                            tool_use_id: tool_use_id.to_string(),
+                                            content: format!(
+                                                "Write denied: '{}' is in a read-only named workspace",
+                                                raw
+                                            ),
+                                            is_error: true,
+                                            ..Default::default()
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             maybe_snapshot(checkpoint_manager, *workspace_root, "pre apply_patch").await;
             // apply_patch needs write access — restrict to rw named workspaces only.
             let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);

@@ -481,6 +481,52 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
 // Environment (capability-checked)
 // ---------------------------------------------------------------------------
 
+/// Hard-coded blocklist of env var name substrings that WASM plugins can
+/// NEVER read, regardless of their declared `EnvRead` capability.
+///
+/// The check is case-insensitive. Any variable whose upper-cased name
+/// contains one of these substrings is silently suppressed — the caller
+/// receives `null` rather than the real value, and no error is returned so
+/// that well-behaved plugins can't probe for the existence of secrets.
+const BLOCKED_ENV_SUBSTRINGS: &[&str] = &[
+    "KEY",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "CREDENTIAL",
+    "PRIVATE",
+];
+
+/// Specific full names (upper-cased) that are always blocked regardless of
+/// whether they contain a blocked substring. This catches names that are
+/// conventional secrets but do not contain any of the substrings above.
+const BLOCKED_ENV_EXACT: &[&str] = &[
+    "LIBREFANG_VAULT_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "GITHUB_TOKEN",
+    "NPM_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
+/// Returns `true` if the env var name matches the blocklist and must not be
+/// returned to a WASM guest.
+fn is_blocked_env_var(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    // Exact-name check (belt-and-suspenders — all of these also match a
+    // substring below, but an explicit list is easier to audit).
+    if BLOCKED_ENV_EXACT.contains(&upper.as_str()) {
+        return true;
+    }
+    // Substring check — catches any var that smells like a credential.
+    BLOCKED_ENV_SUBSTRINGS
+        .iter()
+        .any(|sub| upper.contains(sub))
+}
+
 fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let name = match params.get("name").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -488,6 +534,12 @@ fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::
     };
     if let Err(e) = check_capability(&state.capabilities, &Capability::EnvRead(name.to_string())) {
         return e;
+    }
+    // SECURITY: Never expose secrets to WASM guests even when the capability
+    // grants wildcard access.  Silently return null so the caller cannot
+    // distinguish "blocked" from "variable not set".
+    if is_blocked_env_var(name) {
+        return json!({"ok": null});
     }
     match std::env::var(name) {
         Ok(val) => json!({"ok": val}),
@@ -737,6 +789,73 @@ mod tests {
         let state = test_state(vec![Capability::EnvRead("PATH".to_string())]);
         let result = host_env_read(&state, &json!({"name": "PATH"}));
         assert!(result.get("ok").is_some(), "Expected ok: {:?}", result);
+    }
+
+    /// Regression: #3362 — a WASM guest with `EnvRead("*")` must not be able
+    /// to read secrets even with a wildcard capability.  The blocklist must
+    /// suppress any variable whose name contains KEY, SECRET, TOKEN, PASSWORD,
+    /// CREDENTIAL, or PRIVATE (case-insensitive).
+    #[tokio::test]
+    async fn test_env_read_blocklist_suppresses_secrets() {
+        let state = test_state(vec![Capability::EnvRead("*".to_string())]);
+
+        let blocked_names = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "LIBREFANG_VAULT_KEY",
+            "GITHUB_TOKEN",
+            "NPM_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "MY_CUSTOM_SECRET",
+            "DATABASE_PASSWORD",
+            "DEPLOY_CREDENTIAL",
+            "RSA_PRIVATE_KEY",
+            // Lower-case variants must also be blocked.
+            "my_api_key",
+            "db_password",
+        ];
+
+        for var_name in &blocked_names {
+            // Stamp a known value so we'd catch any leak.
+            std::env::set_var(var_name, "should-not-leak");
+            let result = host_env_read(&state, &json!({"name": var_name}));
+            // Must NOT return an error (no capability denial) — but value must be null.
+            assert!(
+                result.get("error").is_none(),
+                "Blocklist should not return capability error for {var_name}: {result:?}"
+            );
+            let val = result.get("ok");
+            assert!(
+                val.is_some() && val.unwrap().is_null(),
+                "Blocked var {var_name} must return null, got: {result:?}"
+            );
+            std::env::remove_var(var_name);
+        }
+    }
+
+    #[test]
+    fn test_is_blocked_env_var() {
+        // Exact names
+        assert!(is_blocked_env_var("ANTHROPIC_API_KEY"));
+        assert!(is_blocked_env_var("LIBREFANG_VAULT_KEY"));
+        assert!(is_blocked_env_var("AWS_SESSION_TOKEN"));
+        // Substring matches
+        assert!(is_blocked_env_var("MY_SECRET_THING"));
+        assert!(is_blocked_env_var("DB_PASSWORD"));
+        assert!(is_blocked_env_var("DEPLOY_TOKEN"));
+        assert!(is_blocked_env_var("PRIVATE_KEY_DATA"));
+        // Case-insensitive
+        assert!(is_blocked_env_var("my_api_key"));
+        assert!(is_blocked_env_var("db_password"));
+        // Safe vars must NOT be blocked
+        assert!(!is_blocked_env_var("PATH"));
+        assert!(!is_blocked_env_var("HOME"));
+        assert!(!is_blocked_env_var("LANG"));
+        assert!(!is_blocked_env_var("TERM"));
+        assert!(!is_blocked_env_var("USER"));
     }
 
     #[tokio::test]

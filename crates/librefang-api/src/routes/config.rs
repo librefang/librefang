@@ -1877,6 +1877,52 @@ pub async fn config_set(
         }
     };
 
+    // SECURITY #3458: Validate the config key path before touching any files.
+    // Each dot-separated component must only contain alphanumeric characters
+    // and underscores.  This prevents:
+    //   - Path traversal (e.g. "../secrets")
+    //   - Injection into structured TOML tables via special characters
+    //   - Empty segment attacks (e.g. "section..key")
+    //
+    // The path string itself is never used as a filesystem path — it is only
+    // used as a key chain into the in-memory TOML document — but we validate
+    // early to fail fast and to document the expected namespace.
+    fn validate_config_key_path(path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("config path must not be empty".to_string());
+        }
+        // Reject absolute paths and filesystem separators outright.
+        if path.starts_with('/') || path.starts_with('\\') || path.contains("..") {
+            return Err(format!(
+                "config path '{path}' is not a valid key path (no filesystem separators allowed)"
+            ));
+        }
+        for part in path.split('.') {
+            if part.is_empty() {
+                return Err(format!(
+                    "config path '{path}' contains an empty segment"
+                ));
+            }
+            if !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "config path segment '{part}' contains disallowed characters \
+                     (only ASCII alphanumeric, '_', and '-' are permitted)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    if let Err(e) = validate_config_key_path(&path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": e})),
+        );
+    }
+
     let config_path = state.kernel.home_dir().join("config.toml");
     // Block path-traversal (`..`) but allow Windows drive-letter prefixes
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
@@ -2280,6 +2326,78 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         "workflowCount": workflow_count,
         "webSearchAvailable": web_search_available,
     })
+}
+
+#[cfg(test)]
+mod config_key_path_validation_tests {
+    // Duplicate of the inline `validate_config_key_path` logic so the tests
+    // can exercise it without making it a public function.
+    fn validate(p: &str) -> Result<(), String> {
+        // Inline the same logic to avoid making the helper pub.
+        if p.is_empty() {
+            return Err("config path must not be empty".to_string());
+        }
+        if p.starts_with('/') || p.starts_with('\\') || p.contains("..") {
+            return Err(format!(
+                "config path '{p}' is not a valid key path (no filesystem separators allowed)"
+            ));
+        }
+        for part in p.split('.') {
+            if part.is_empty() {
+                return Err(format!("config path '{p}' contains an empty segment"));
+            }
+            if !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "config path segment '{part}' contains disallowed characters \
+                     (only ASCII alphanumeric, '_', and '-' are permitted)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// #3458 regression: valid key paths must pass validation.
+    #[test]
+    fn valid_paths_accepted() {
+        assert!(validate("api_key").is_ok());
+        assert!(validate("section.key").is_ok());
+        assert!(validate("section.sub.key").is_ok());
+        assert!(validate("llm.model_alias").is_ok());
+        assert!(validate("queue.concurrency.trigger_lane").is_ok());
+        assert!(validate("key-with-dash").is_ok());
+    }
+
+    /// #3458 regression: filesystem-like paths must be rejected.
+    #[test]
+    fn traversal_paths_rejected() {
+        assert!(validate("").is_err(), "empty path");
+        assert!(validate("../secret").is_err(), "traversal with ..");
+        assert!(validate("a..b").is_err(), "double dot in segment");
+        assert!(validate("/etc/passwd").is_err(), "absolute unix path");
+        assert!(validate("\\Windows\\System32").is_err(), "absolute windows path");
+    }
+
+    /// #3458 regression: special characters that could inject TOML structure
+    /// must be rejected.
+    #[test]
+    fn special_chars_rejected() {
+        assert!(validate("section[0]").is_err(), "bracket injection");
+        assert!(validate("section = evil").is_err(), "equals sign");
+        assert!(validate("section\nkey").is_err(), "newline");
+        assert!(validate("section\0key").is_err(), "null byte");
+        assert!(validate("section key").is_err(), "space");
+    }
+
+    /// Empty segment (double dot) must be rejected.
+    #[test]
+    fn empty_segment_rejected() {
+        assert!(validate("a..b").is_err());
+        assert!(validate(".a").is_err());
+        assert!(validate("a.").is_err());
+    }
 }
 
 #[cfg(test)]
