@@ -215,6 +215,107 @@ impl AgentScheduler {
         Ok(())
     }
 
+    /// Atomically check the per-agent quota **and** pre-charge an estimated
+    /// token budget.
+    ///
+    /// This closes the TOCTOU window between `check_quota` and
+    /// `record_usage`: N concurrent callers all calling `check_quota` before
+    /// any of them calls `record_usage` can each individually pass the check
+    /// while the combined spend blows past the limit.  By reserving
+    /// `estimated_tokens` inside the same DashMap entry write-lock, at most
+    /// one caller can pass for any given budget slot.
+    ///
+    /// After the LLM call completes, the caller **must** call
+    /// `settle_reservation` with the actual [`TokenUsage`] so the
+    /// reservation is corrected and the sliding-window counters are updated.
+    /// **Do not call `record_usage` for a pre-charged call** — `settle_reservation`
+    /// does both jobs in one atomic step.
+    ///
+    /// Returns `Ok(estimated_tokens)` (the amount reserved) on success, or
+    /// `Err(QuotaExceeded)` if the reservation would breach the limit.
+    /// Returns `Ok(0)` when no quota is configured for the agent (caller
+    /// should still call `record_usage` normally in that case).
+    pub fn check_quota_and_reserve(
+        &self,
+        agent_id: AgentId,
+        estimated_tokens: u64,
+    ) -> LibreFangResult<u64> {
+        let quota = match self.quotas.get(&agent_id) {
+            Some(q) => q.clone(),
+            None => return Ok(0), // No quota = no limit; nothing to reserve
+        };
+        let mut tracker = match self.usage.get_mut(&agent_id) {
+            Some(t) => t,
+            None => return Ok(0),
+        };
+
+        tracker.reset_if_expired();
+
+        let token_limit = quota.effective_token_limit();
+        if token_limit > 0 {
+            let projected = tracker.total_tokens.saturating_add(estimated_tokens);
+            if projected > token_limit {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Token limit would be exceeded: {} + {} reserved > {}",
+                    tracker.total_tokens, estimated_tokens, token_limit
+                )));
+            }
+            // Burst check against the projected spend
+            let burst_cap = token_limit / 5;
+            let tokens_last_min = tracker.tokens_in_last_minute();
+            if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Token burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
+                    tokens_last_min, estimated_tokens, burst_cap
+                )));
+            }
+            // Atomically pre-charge inside the same DashMap entry write-lock
+            tracker.total_tokens = projected;
+        }
+
+        Ok(estimated_tokens)
+    }
+
+    /// Settle a prior [`check_quota_and_reserve`] reservation.
+    ///
+    /// Replaces the pre-charged estimate in `total_tokens` with the actual
+    /// token count consumed, and updates the sliding-window / per-dimension
+    /// counters that [`record_usage`] normally maintains.  Callers MUST use
+    /// this instead of `record_usage` after a pre-charged call so the
+    /// counters are not double-incremented.
+    ///
+    /// When `estimated_tokens == 0` (no quota was configured) the function
+    /// falls back to the same logic as `record_usage`.
+    pub fn settle_reservation(&self, agent_id: AgentId, estimated_tokens: u64, usage: &TokenUsage) {
+        let actual_tokens = usage.total();
+        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
+            tracker.reset_if_expired();
+
+            if estimated_tokens > 0 {
+                // Correct the pre-charged estimate to the actual amount:
+                //   total_tokens was incremented by `estimated`; adjust it
+                //   to reflect `actual` instead.
+                tracker.total_tokens = tracker
+                    .total_tokens
+                    .saturating_sub(estimated_tokens)
+                    .saturating_add(actual_tokens);
+            } else {
+                // No reservation was made (no quota) — behave like record_usage
+                tracker.total_tokens += actual_tokens;
+            }
+
+            // Per-dimension counters (never pre-charged)
+            tracker.input_tokens += usage.input_tokens;
+            tracker.output_tokens += usage.output_tokens;
+            tracker.llm_calls += 1;
+
+            // Sliding-window for burst detection
+            tracker
+                .token_timestamps
+                .push_back((Instant::now(), actual_tokens));
+        }
+    }
+
     /// Reset usage tracking for an agent (e.g. on session reset).
     pub fn reset_usage(&self, agent_id: AgentId) {
         if let Some(mut tracker) = self.usage.get_mut(&agent_id) {

@@ -4732,18 +4732,27 @@ system_prompt = "You are a helpful assistant."
         };
         let _guard = lock.lock().await;
 
-        // Enforce quota on the effective target agent (after routing)
-        self.scheduler
-            .check_quota(agent_id)
-            .map_err(KernelError::LibreFang)?;
-
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        // Enforce quota on the effective target agent (after routing).
+        // Use check_quota_and_reserve so the estimated token budget is
+        // pre-charged inside the same DashMap write-lock, closing the TOCTOU
+        // race where N concurrent callers all pass the check before any of
+        // them calls record_usage (#3736).
+        let estimated_tokens = entry.manifest.model.max_tokens as u64;
+        let token_reservation = self
+            .scheduler
+            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .map_err(KernelError::LibreFang)?;
+
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
+            // Release the reservation immediately — no tokens will be consumed
+            self.scheduler
+                .settle_reservation(agent_id, token_reservation, &Default::default());
             return Ok(AgentLoopResult::default());
         }
 
@@ -4776,8 +4785,12 @@ system_prompt = "You are a helpful assistant."
 
         match result {
             Ok(result) => {
-                // Record token usage for quota tracking
-                self.scheduler.record_usage(agent_id, &result.total_usage);
+                // Settle the pre-charged reservation with actual usage.
+                // This replaces the old record_usage call — settle_reservation
+                // corrects total_tokens and updates per-dimension counters in
+                // one step so we never double-count.
+                self.scheduler
+                    .settle_reservation(agent_id, token_reservation, &result.total_usage);
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
                 self.scheduler.record_tool_calls(agent_id, tool_count);
@@ -5060,6 +5073,12 @@ system_prompt = "You are a helpful assistant."
                 Ok(result)
             }
             Err(e) => {
+                // Release the pre-charged token reservation — no tokens were
+                // consumed because the agent loop failed before or during the
+                // LLM call.
+                self.scheduler
+                    .settle_reservation(agent_id, token_reservation, &Default::default());
+
                 // SECURITY: Record failed message in audit trail
                 self.audit_log.record(
                     agent_id.to_string(),
@@ -5431,14 +5450,18 @@ system_prompt = "You are a helpful assistant."
         let _config_guard = self.config_reload_lock.try_read();
         let cfg = self.config.load();
 
-        // Enforce quota before spawning the streaming task
-        self.scheduler
-            .check_quota(agent_id)
-            .map_err(KernelError::LibreFang)?;
-
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+
+        // Pre-charge the estimated token budget atomically to prevent the
+        // TOCTOU race (#3736).  The reservation is settled inside the spawned
+        // task after the LLM call completes.
+        let estimated_tokens = entry.manifest.model.max_tokens as u64;
+        let token_reservation = self
+            .scheduler
+            .check_quota_and_reserve(agent_id, estimated_tokens)
+            .map_err(KernelError::LibreFang)?;
 
         let is_wasm = entry.manifest.module.starts_with("wasm:");
         let is_python = entry.manifest.module.starts_with("python:");
@@ -5480,15 +5503,22 @@ system_prompt = "You are a helpful assistant."
                                 usage: result.total_usage,
                             })
                             .await;
+                        // Settle pre-charged reservation (#3736)
                         kernel_clone
                             .scheduler
-                            .record_usage(agent_id, &result.total_usage);
+                            .settle_reservation(agent_id, token_reservation, &result.total_usage);
                         let _ = kernel_clone
                             .registry
                             .set_state(agent_id, AgentState::Running);
                         Ok(result)
                     }
                     Err(e) => {
+                        // Release reservation — no tokens consumed
+                        kernel_clone.scheduler.settle_reservation(
+                            agent_id,
+                            token_reservation,
+                            &Default::default(),
+                        );
                         kernel_clone.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
@@ -5878,6 +5908,23 @@ system_prompt = "You are a helpful assistant."
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
+        // Issue #3737: acquire the same session/agent lock as the non-streaming
+        // path so concurrent streaming + non-streaming turns on the same session
+        // are serialized (last-write-wins data loss on session history otherwise).
+        // We clone the Arc here (sync fn) and move it into the task; the lock
+        // itself is awaited inside the spawn where we can .await.
+        let session_lock = if session_id_override.is_some() {
+            self.session_msg_locks
+                .entry(effective_session_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        } else {
+            self.agent_msg_locks
+                .entry(agent_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+
         // Lifecycle: emit TurnStarted right before the spawn. Cloning the bus
         // Arc separately keeps it usable inside the async block via `kernel_clone`.
         self.session_lifecycle_bus.publish(
@@ -5888,6 +5935,11 @@ system_prompt = "You are a helpful assistant."
         );
 
         let handle = tokio::spawn(async move {
+            // Acquire the session/agent serialization lock for the duration of
+            // this streaming turn.  This matches the non-streaming path and
+            // prevents concurrent streaming + non-streaming writes from
+            // producing last-write-wins data loss on session history (#3737).
+            let _session_guard = session_lock.lock().await;
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on
             // the SAME session the outer loop just measured. Using the
@@ -6077,16 +6129,19 @@ system_prompt = "You are a helpful assistant."
                         }
                     }
 
+                    // Settle the pre-charged token reservation with actual usage
+                    // (#3736). This replaces record_usage for the token counters
+                    // while still correctly accounting for the burst window.
                     kernel_clone
                         .scheduler
-                        .record_usage(agent_id, &result.total_usage);
+                        .settle_reservation(agent_id, token_reservation, &result.total_usage);
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
                         .scheduler
                         .record_tool_calls(agent_id, tool_count);
 
-                    // Lifecycle: emit TurnCompleted alongside record_usage. Use
+                    // Lifecycle: emit TurnCompleted alongside settle_reservation. Use
                     // post-loop session length for message_count.
                     kernel_clone.session_lifecycle_bus.publish(
                         crate::session_lifecycle::SessionLifecycleEvent::TurnCompleted {
@@ -6267,6 +6322,13 @@ system_prompt = "You are a helpful assistant."
                     Ok(result)
                 }
                 Err(e) => {
+                    // Release the pre-charged token reservation — the loop
+                    // failed so no tokens need to be permanently reserved.
+                    kernel_clone.scheduler.settle_reservation(
+                        agent_id,
+                        token_reservation,
+                        &Default::default(),
+                    );
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
@@ -11997,6 +12059,11 @@ system_prompt = "You are a helpful assistant."
                     }
 
                     let due = kernel.cron_scheduler.due_jobs();
+                    // Snapshot the cron_lane semaphore once per tick so we
+                    // can move an Arc clone into each spawned job task (#3738).
+                    let cron_sem = kernel
+                        .command_queue
+                        .semaphore_for_lane(librefang_runtime::command_lane::Lane::Cron);
                     for job in due {
                         let job_id = job.id;
                         let agent_id = job.agent_id;
@@ -12087,71 +12154,90 @@ system_prompt = "You are a helpful assistant."
                                         job.id,
                                         chrono::Utc::now(),
                                     );
-                                let sender_ctx = sender_ctx_owned.as_ref();
+                                let message_owned = message.clone();
 
-                                // Prune the persistent cron session before firing
-                                // if the user has configured a size cap.
-                                if !wants_new_session {
-                                    let cfg_snap = kernel.config.load();
-                                    let max_tokens = cfg_snap.cron_session_max_tokens;
-                                    let max_messages = cfg_snap.cron_session_max_messages;
-                                    drop(cfg_snap);
-                                    if max_tokens.is_some() || max_messages.is_some() {
-                                        let cron_sid = SessionId::for_channel(agent_id, "cron");
-                                        if let Ok(Some(mut session)) =
-                                            kernel.memory.get_session(cron_sid)
-                                        {
-                                            // Prune by message count first.
-                                            if let Some(max_msgs) = max_messages {
-                                                if session.messages.len() > max_msgs {
-                                                    let excess = session.messages.len() - max_msgs;
-                                                    session.messages.drain(0..excess);
-                                                }
-                                            }
-                                            // Prune by token count.
-                                            if let Some(max_tok) = max_tokens {
-                                                use librefang_runtime::compactor::estimate_token_count;
-                                                loop {
-                                                    let est = estimate_token_count(
-                                                        &session.messages,
-                                                        None,
-                                                        None,
-                                                    );
-                                                    if est <= max_tok as usize
-                                                        || session.messages.is_empty()
-                                                    {
-                                                        break;
+                                // Spawn each AgentTurn job concurrently, bounded
+                                // by the `cron_lane` semaphore (#3738).  Acquiring
+                                // a permit blocks here (inside the tick loop) if
+                                // the lane is full; this back-pressures the
+                                // dispatcher so we never exceed `cron_lane`
+                                // in-flight tasks.
+                                let permit = match cron_sem.clone().acquire_owned().await {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        tracing::warn!(job = %job_name, "Cron lane semaphore closed; skipping job");
+                                        continue;
+                                    }
+                                };
+                                let kernel_job = kernel.clone();
+                                tokio::spawn(async move {
+                                    // Hold the permit for the full duration of this job.
+                                    let _permit = permit;
+
+                                    // Prune the persistent cron session before firing
+                                    // if the user has configured a size cap.
+                                    if !wants_new_session {
+                                        let cfg_snap = kernel_job.config.load();
+                                        let max_tokens = cfg_snap.cron_session_max_tokens;
+                                        let max_messages = cfg_snap.cron_session_max_messages;
+                                        drop(cfg_snap);
+                                        if max_tokens.is_some() || max_messages.is_some() {
+                                            let cron_sid =
+                                                SessionId::for_channel(agent_id, "cron");
+                                            if let Ok(Some(mut session)) =
+                                                kernel_job.memory.get_session(cron_sid)
+                                            {
+                                                if let Some(max_msgs) = max_messages {
+                                                    if session.messages.len() > max_msgs {
+                                                        let excess =
+                                                            session.messages.len() - max_msgs;
+                                                        session.messages.drain(0..excess);
                                                     }
-                                                    session.messages.remove(0);
                                                 }
+                                                if let Some(max_tok) = max_tokens {
+                                                    use librefang_runtime::compactor::estimate_token_count;
+                                                    loop {
+                                                        let est = estimate_token_count(
+                                                            &session.messages,
+                                                            None,
+                                                            None,
+                                                        );
+                                                        if est <= max_tok as usize
+                                                            || session.messages.is_empty()
+                                                        {
+                                                            break;
+                                                        }
+                                                        session.messages.remove(0);
+                                                    }
+                                                }
+                                                let _ = kernel_job.memory.save_session(&session);
                                             }
-                                            let _ = kernel.memory.save_session(&session);
                                         }
                                     }
-                                }
 
-                                match tokio::time::timeout(
-                                    timeout,
-                                    kernel.send_message_full(
-                                        agent_id,
-                                        message,
-                                        Some(kh),
-                                        None,
-                                        sender_ctx,
-                                        mode_override,
-                                        None,
-                                        fire_session_override,
-                                    ),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(result)) => {
+                                    let sender_ctx = sender_ctx_owned.as_ref();
+                                    match tokio::time::timeout(
+                                        timeout,
+                                        kernel_job.send_message_full(
+                                            agent_id,
+                                            &message_owned,
+                                            Some(kh),
+                                            None,
+                                            sender_ctx,
+                                            mode_override,
+                                            None,
+                                            fire_session_override,
+                                        ),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(result)) => {
                                         tracing::info!(job = %job_name, "Cron job completed successfully");
-                                        kernel.cron_scheduler.record_success(job_id);
+                                        kernel_job.cron_scheduler.record_success(job_id);
                                         // Deliver response to configured channel (skip NO_REPLY/silent)
                                         if !result.silent {
                                             cron_deliver_response(
-                                                &kernel,
+                                                &kernel_job,
                                                 agent_id,
                                                 &result.response,
                                                 &delivery,
@@ -12161,27 +12247,28 @@ system_prompt = "You are a helpful assistant."
                                             // delivery_targets (best-effort,
                                             // failure-isolated).
                                             cron_fan_out_targets(
-                                                &kernel,
+                                                &kernel_job,
                                                 &job_name,
                                                 &result.response,
                                                 &delivery_targets,
                                             )
                                             .await;
                                         }
+                                        }
+                                        Ok(Err(e)) => {
+                                            let err_msg = format!("{e}");
+                                            tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
+                                            kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
+                                            kernel_job.cron_scheduler.record_failure(
+                                                job_id,
+                                                &format!("timed out after {timeout_s}s"),
+                                            );
+                                        }
                                     }
-                                    Ok(Err(e)) => {
-                                        let err_msg = format!("{e}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
-                                        kernel.cron_scheduler.record_failure(
-                                            job_id,
-                                            &format!("timed out after {timeout_s}s"),
-                                        );
-                                    }
-                                }
+                                }); // end tokio::spawn for AgentTurn
                             }
                             librefang_types::scheduler::CronAction::Workflow {
                                 workflow_id,
