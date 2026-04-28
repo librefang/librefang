@@ -14,7 +14,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'deploy/Dockerfile'
+      - 'Dockerfile'
       - 'deploy/docker-entrypoint.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -25,7 +25,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'deploy/Dockerfile'
+      - 'Dockerfile'
       - 'deploy/docker-entrypoint.sh'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -59,7 +59,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: deploy/Dockerfile
+          file: Dockerfile
           load: true
           tags: librefang:ci
           cache-from: type=gha,scope=docker-build
