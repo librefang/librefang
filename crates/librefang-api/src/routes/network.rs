@@ -818,8 +818,9 @@ pub async fn a2a_discover_external(
                     .unwrap_or_else(|e| e.into_inner());
                 // A different URL claiming the same name as an existing trusted agent is a
                 // potential impersonation attempt. Reject it to prevent confusion.
-                if let Some((existing_url, _)) =
-                    agents.iter().find(|(u, c)| c.name == card.name && u != &url)
+                if let Some((existing_url, _)) = agents
+                    .iter()
+                    .find(|(u, c)| c.name == card.name && u != &url)
                 {
                     return (
                         StatusCode::CONFLICT,

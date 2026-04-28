@@ -147,8 +147,7 @@ pub struct AppState {
     /// Maps discovery URL → AgentCard. Agents here are NOT trusted yet and
     /// cannot receive tasks. Use POST /api/a2a/agents/{url}/approve to promote
     /// them into the kernel's trusted external-agent list.
-    pub pending_a2a_agents:
-        DashMap<String, librefang_runtime::a2a::AgentCard>,
+    pub pending_a2a_agents: DashMap<String, librefang_runtime::a2a::AgentCard>,
     /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
     #[cfg(feature = "telemetry")]
     pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
