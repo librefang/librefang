@@ -8047,6 +8047,8 @@ mod tests {
     async fn test_shell_exec_uses_exec_policy_allowed_env_vars() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let original = std::env::var("LIBREFANG_TEST_ALLOWED_ENV").ok();
+        // SAFETY: test captures and restores the previous value; unique enough
+        // name to avoid clashing with other tests running in parallel.
         unsafe {
             std::env::set_var("LIBREFANG_TEST_ALLOWED_ENV", "present");
         }

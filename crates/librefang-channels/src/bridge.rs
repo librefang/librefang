@@ -6321,14 +6321,19 @@ mod tests {
 
         fn with_guard_on<F: FnOnce()>(f: F) {
             let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
+            // SAFETY: guarded by ENV_LOCK mutex; no concurrent thread reads/writes
+            // LIBREFANG_GROUP_ADDRESSEE_GUARD while the lock is held.
+            unsafe {
+                std::env::set_var("LIBREFANG_GROUP_ADDRESSEE_GUARD", "on");
+            }
             f();
-            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+            unsafe { std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD") };
         }
 
         fn with_guard_off<F: FnOnce()>(f: F) {
             let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD");
+            // SAFETY: guarded by ENV_LOCK mutex.
+            unsafe { std::env::remove_var("LIBREFANG_GROUP_ADDRESSEE_GUARD") };
             f();
         }
 

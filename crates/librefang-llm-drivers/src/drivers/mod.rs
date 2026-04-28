@@ -1321,7 +1321,8 @@ mod tests {
         // Set NVIDIA_API_KEY env var, then create a custom "nvidia" provider with base_url.
         // The driver should pick up the key automatically via convention.
         let unique_key = "test-nvidia-key-12345";
-        std::env::set_var("NVIDIA_API_KEY", unique_key);
+        // SAFETY: unique env var name; test cleans up with remove_var at the end.
+        unsafe { std::env::set_var("NVIDIA_API_KEY", unique_key) };
         let config = DriverConfig {
             provider: "nvidia".to_string(),
             api_key: None, // not explicitly passed
@@ -1339,7 +1340,8 @@ mod tests {
             driver.is_ok(),
             "Custom provider with env var convention should succeed"
         );
-        std::env::remove_var("NVIDIA_API_KEY");
+        // SAFETY: same as set_var above.
+        unsafe { std::env::remove_var("NVIDIA_API_KEY") };
     }
 
     #[test]
@@ -1371,7 +1373,8 @@ mod tests {
         let provider_name = "my-custom-llm-provider";
         let env_var = "MY_CUSTOM_LLM_PROVIDER_API_KEY";
         let unique_key = "test-custom-key-67890";
-        std::env::set_var(env_var, unique_key);
+        // SAFETY: unique env var name; test cleans up with remove_var at the end.
+        unsafe { std::env::set_var(env_var, unique_key) };
         let config = DriverConfig {
             provider: provider_name.to_string(),
             api_key: None,
@@ -1392,7 +1395,8 @@ mod tests {
             "Error should mention base_url: {}",
             err
         );
-        std::env::remove_var(env_var);
+        // SAFETY: same as set_var above.
+        unsafe { std::env::remove_var(env_var) };
     }
 
     #[test]

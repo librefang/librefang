@@ -1014,10 +1014,17 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping temperature for this model");
                     oai_request.temperature = None;
+                    // Small backoff before retrying so we don't tight-loop on a
+                    // misconfigured request (100 ms × attempt, max ~300 ms).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
-                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens
+                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens.
+                // Add a small backoff to avoid a tight retry loop (#3758).
                 if status == 400
                     && body.contains("max_tokens")
                     && (body.contains("unsupported_parameter")
@@ -1029,6 +1036,12 @@ impl LlmDriver for OpenAIDriver {
                     warn!(model = %oai_request.model, "Switching to max_completion_tokens for this model");
                     oai_request.max_tokens = None;
                     oai_request.max_completion_tokens = Some(val);
+                    // Backoff before retry: 100 ms × attempt number (capped by max_retries=3
+                    // so the total extra wait is at most ~300 ms per switch attempt).
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1049,6 +1062,11 @@ impl LlmDriver for OpenAIDriver {
                     } else {
                         oai_request.max_tokens = Some(cap);
                     }
+                    // Small backoff to prevent a tight retry loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1071,6 +1089,11 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.tools.clear();
                     oai_request.tool_choice = None;
+                    // Small backoff to prevent a tight retry loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 

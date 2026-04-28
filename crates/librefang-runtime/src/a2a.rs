@@ -799,6 +799,12 @@ impl A2aClient {
         Self {
             client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
+                // Disable automatic redirect following (SSRF prevention, #3782).
+                // An initial URL may pass SSRF validation but redirect to a private
+                // IP.  With `redirect::Policy::none()` we return an error on any
+                // 3xx response so the caller must explicitly re-validate the new URL
+                // before following it.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("HTTP client build"),
         }
@@ -821,6 +827,11 @@ impl A2aClient {
             .await
             .map_err(|e| format!("A2A discovery failed: {e}"))?;
 
+        if response.status().is_redirection() {
+            return Err(
+                "A2A request redirect not followed (SSRF prevention)".to_string(),
+            );
+        }
         if !response.status().is_success() {
             return Err(format!("A2A discovery returned {}", response.status()));
         }
@@ -862,6 +873,12 @@ impl A2aClient {
             .await
             .map_err(|e| format!("A2A send_task failed: {e}"))?;
 
+        if response.status().is_redirection() {
+            return Err(
+                "A2A request redirect not followed (SSRF prevention)".to_string(),
+            );
+        }
+
         let body: serde_json::Value = response
             .json()
             .await
@@ -895,6 +912,12 @@ impl A2aClient {
             .send()
             .await
             .map_err(|e| format!("A2A get_task failed: {e}"))?;
+
+        if response.status().is_redirection() {
+            return Err(
+                "A2A request redirect not followed (SSRF prevention)".to_string(),
+            );
+        }
 
         let body: serde_json::Value = response
             .json()

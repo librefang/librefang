@@ -1002,8 +1002,18 @@ pub async fn set_provider_key(
             .into_json_tuple();
     }
 
-    // Set env var in current process so detect_auth picks it up
-    std::env::set_var(&env_var, &key);
+    // Set env var in current process so detect_auth picks it up.
+    // `std::env::set_var` is not thread-safe in an async context; delegate to
+    // a blocking thread to avoid undefined behaviour in the tokio runtime.
+    {
+        let env_var_clone = env_var.clone();
+        let key_clone = key.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            // SAFETY: single mutation on a dedicated blocking thread.
+            unsafe { std::env::set_var(&env_var_clone, &key_clone) };
+        })
+        .await;
+    }
 
     // Re-enable fallback detection (user is adding a key, undo any prior suppress)
     // and refresh auth status.
@@ -2054,8 +2064,17 @@ pub async fn copilot_oauth_poll(
                 );
             }
 
-            // Set in current process
-            std::env::set_var("GITHUB_TOKEN", access_token.as_str());
+            // Set in current process.
+            // `std::env::set_var` is not thread-safe inside async; push to a
+            // blocking thread to avoid UB in the multithreaded tokio runtime.
+            {
+                let token = access_token.to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // SAFETY: single mutation on a dedicated blocking thread.
+                    unsafe { std::env::set_var("GITHUB_TOKEN", &token) };
+                })
+                .await;
+            }
 
             // Refresh auth detection
             state

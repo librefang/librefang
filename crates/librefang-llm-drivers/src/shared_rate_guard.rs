@@ -409,7 +409,8 @@ mod tests {
     fn record_then_check_round_trip() {
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-roundtrip");
         assert!(
@@ -427,14 +428,16 @@ mod tests {
             remaining.as_secs()
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
     fn expired_lockout_is_cleared() {
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-expired");
         // until = 1s in the past
@@ -450,14 +453,16 @@ mod tests {
             "expired file should have been removed"
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
     fn corrupt_file_is_treated_as_unlocked() {
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-corrupt");
         let path = lockout_path("openai", &key_id);
@@ -469,7 +474,8 @@ mod tests {
             "corrupt file must not block requests"
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
@@ -481,7 +487,8 @@ mod tests {
         // acceptance criteria.
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-shared");
         record(
@@ -498,7 +505,8 @@ mod tests {
             "second process must see >100s remaining, got {observed:?}"
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
@@ -562,7 +570,8 @@ mod tests {
         // #3315 asks for and the regression we're locking down here.
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-max-merge");
 
@@ -585,7 +594,8 @@ mod tests {
             remaining.as_secs()
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
@@ -594,7 +604,8 @@ mod tests {
         // if the new lockout is *longer*, it MUST replace the old one.
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         let key_id = key_id_hash("sk-extend");
 
@@ -611,14 +622,16 @@ mod tests {
             remaining.as_secs()
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 
     #[test]
     fn record_from_snapshot_writes_file() {
         let _g = ENV_GUARD.lock().unwrap();
         let home = fresh_home();
-        std::env::set_var("LIBREFANG_HOME", home.path());
+        // SAFETY: guarded by ENV_GUARD mutex; no concurrent thread reads this var.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
 
         use crate::rate_limit_tracker::{RateLimitBucket, RateLimitSnapshot};
         use std::time::Instant;
@@ -641,6 +654,7 @@ mod tests {
             remaining.as_secs()
         );
 
-        std::env::remove_var("LIBREFANG_HOME");
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
     }
 }
