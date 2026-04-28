@@ -477,11 +477,7 @@ pub async fn delete_user(
     })
     .await
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status":"ok","deleted":name})),
-        )
-            .into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(PersistError::NotFound(m)) => err_response(StatusCode::NOT_FOUND, m),
         Err(PersistError::BadRequest(m)) => err_response(StatusCode::BAD_REQUEST, m),
         Err(PersistError::Conflict(m)) => err_response(StatusCode::CONFLICT, m),

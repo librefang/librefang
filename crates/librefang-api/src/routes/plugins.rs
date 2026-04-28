@@ -1717,7 +1717,7 @@ pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
         .join(".state.json");
 
     match std::fs::write(&state_path, "{}") {
-        Ok(()) => Json(serde_json::json!({"reset": true, "plugin": name})).into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::bad_request(format!("Failed to reset state: {e}")).into_response()
         }

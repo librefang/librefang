@@ -528,10 +528,7 @@ pub async fn memory_delete(
     };
 
     match store.delete(&memory_id, &real_agent_id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
-        ),
+        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found("Memory not found").into_json_tuple(),
         Err(e) => internal_error(e),
     }
@@ -660,10 +657,7 @@ pub async fn memory_reset_agent(
     };
 
     match store.reset(&agent_id) {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"reset": true, "deleted_count": count})),
-        ),
+        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Err(e) => internal_error(e),
     }
 }
@@ -712,14 +706,7 @@ pub async fn memory_clear_level(
     };
 
     match store.clear_level(&agent_id, level) {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "cleared": true,
-                "level": level_str,
-                "deleted_count": count,
-            })),
-        ),
+        Ok(_count) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Err(e) => internal_error(e),
     }
 }

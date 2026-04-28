@@ -1500,25 +1500,10 @@ pub async fn remove_channel(
 
     // Hot-reload: deactivate the channel immediately
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
-        Ok(started) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "removed",
-                "channel": name,
-                "remaining_channels": started,
-                "note": format!("{} deactivated.", name)
-            })),
-        ),
+        Ok(_started) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Err(e) => {
             tracing::warn!(error = %e, "Channel hot-reload failed after remove");
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "removed",
-                    "channel": name,
-                    "note": format!("Removed, but hot-reload failed: {e}. Restart daemon to fully deactivate.")
-                })),
-            )
+            (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
         }
     }
 }

@@ -428,6 +428,10 @@ pub struct AgentListQuery {
     pub order: Option<String>,
     /// Include hand agents in the response (default: false).
     pub include_hands: Option<bool>,
+    /// Filter agents by owner (matches manifest.author). When the authenticated
+    /// caller is a plain User role, this is auto-populated with their username
+    /// so that non-admin users only see agents they authored.
+    pub owner: Option<String>,
 }
 
 /// Paginated list response wrapper.

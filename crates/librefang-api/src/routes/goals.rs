@@ -407,10 +407,7 @@ pub async fn delete_goal(
         return ApiErrorResponse::internal(format!("Failed to delete goal: {e}")).into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed", "goal_id": id, "removed_count": removed})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// GET /api/goals/templates — List built-in goal templates.

@@ -822,8 +822,21 @@ pub(crate) fn effective_default_model(
 pub async fn list_agents(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Query(params): Query<AgentListQuery>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Query(mut params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
+    // Scope agents by authenticated user: non-admin/owner callers can only
+    // list agents they authored.  If the caller already supplied an explicit
+    // ?owner= filter we respect it as-is; otherwise we inject the caller's
+    // username automatically.
+    if params.owner.is_none() {
+        if let Some(ref user) = api_user {
+            use librefang_kernel::auth::UserRole;
+            if user.0.role < UserRole::Admin {
+                params.owner = Some(user.0.name.clone());
+            }
+        }
+    }
     let catalog = state.kernel.model_catalog_ref().read().ok();
     let dm = {
         let dm_override = state
@@ -856,6 +869,13 @@ pub async fn list_agents(
     if let Some(ref status) = params.status {
         let status_lower = status.to_lowercase();
         agents.retain(|e| format!("{:?}", e.state).to_lowercase() == status_lower);
+    }
+
+    // Filter by owner (matches manifest.author). For non-admin callers this
+    // is injected automatically above so they only see their own agents.
+    if let Some(ref owner) = params.owner {
+        let owner_lower = owner.to_lowercase();
+        agents.retain(|e| e.manifest.author.to_lowercase() == owner_lower);
     }
 
     let total = agents.len();

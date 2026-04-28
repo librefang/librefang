@@ -627,13 +627,14 @@ pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
     match state
@@ -641,13 +642,12 @@ pub async fn delete_agent_kv_key(
         .memory_substrate()
         .structured_delete(agent_id, &key)
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "key": key})),
-        ),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             tracing::warn!("Memory delete failed for key '{key}': {e}");
-            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -1300,24 +1300,23 @@ pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return ApiErrorResponse::bad_request(t.t("api-error-session-invalid-id"))
-                .into_json_tuple();
+                .into_json_tuple()
+                .into_response();
         }
     };
 
     match state.kernel.memory_substrate().delete_session(session_id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "session_id": id})),
-        ),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             ApiErrorResponse::internal(t.t_args("api-error-generic", &[("error", &e.to_string())]))
                 .into_json_tuple()
+                .into_response()
         }
     }
 }
@@ -2869,10 +2868,7 @@ pub async fn remove_binding(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.kernel.remove_binding(index) {
-        Some(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "status": "removed" })),
-        ),
+        Some(_) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
@@ -3185,7 +3181,8 @@ pub async fn pairing_remove_device(
                 device_id = %device_id,
                 "revoked paired device — bearer removed from live auth table"
             );
-            Json(serde_json::json!({"ok": true})).into_response()
+            // DELETE returns 204 No Content with no body (#3843).
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => ApiErrorResponse::not_found(e)
             .into_json_tuple()
@@ -3714,8 +3711,8 @@ pub async fn delete_backup(
 
     tracing::info!("Backup deleted: {filename}");
     (
-        StatusCode::OK,
-        Json(serde_json::json!({"deleted": filename})),
+        StatusCode::NO_CONTENT,
+        Json(serde_json::json!(null)),
     )
 }
 
@@ -4204,10 +4201,7 @@ pub async fn delete_event_webhook(
     };
     let mut store = EVENT_WEBHOOKS.write().await;
     if store.remove(&id).is_some() {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "removed", "id": id})),
-        )
+        (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
     } else {
         ApiErrorResponse::not_found(err_webhook_not_found).into_json_tuple()
     }
@@ -4321,10 +4315,7 @@ pub async fn delete_webhook(
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
             if state.webhook_store.delete(wh_id) {
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "deleted"})),
-                )
+                (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
             } else {
                 ApiErrorResponse::not_found(t.t("api-error-webhook-not-found")).into_json_tuple()
             }
@@ -4499,10 +4490,7 @@ pub async fn task_queue_delete(
         t.t("api-error-task-not-found")
     };
     match state.kernel.task_delete(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "id": id})),
-        ),
+        Ok(true) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
         Ok(false) => ApiErrorResponse::not_found(err_task_not_found).into_json_tuple(),
         Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
     }

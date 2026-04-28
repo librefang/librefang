@@ -1059,11 +1059,7 @@ pub async fn delete_user_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ok", "message": "budget cleared"})),
-            )
-                .into_response()
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(super::users::PersistError::NotFound(m)) => {
             ApiErrorResponse::not_found(m).into_response()

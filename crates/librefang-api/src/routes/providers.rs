@@ -292,10 +292,7 @@ pub async fn delete_alias(
             .into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed"})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 #[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
@@ -413,7 +410,7 @@ pub async fn delete_model_overrides(
     if let Err(e) = catalog.save_overrides(&overrides_path) {
         tracing::warn!("Failed to persist model overrides: {e}");
     }
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// Attach local-provider probe results to a JSON entry and optionally merge
@@ -963,10 +960,7 @@ pub async fn remove_custom_model(
             .into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed"})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
@@ -1229,10 +1223,7 @@ pub async fn delete_provider_key(
         catalog.detect_auth();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "removed", "provider": name})),
-    )
+    (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
