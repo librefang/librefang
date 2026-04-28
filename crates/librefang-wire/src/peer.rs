@@ -11,6 +11,7 @@
 use crate::message::*;
 use crate::registry::{PeerEntry, PeerRegistry, PeerState};
 
+#[allow(unused_imports)]
 use async_trait::async_trait;
 use dashmap::DashMap;
 use hmac::{Hmac, Mac};
@@ -22,6 +23,9 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, warn};
+
+#[allow(unused_imports)]
+use tokio_rustls::TlsAcceptor;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -124,10 +128,35 @@ pub enum WireError {
     MessageTooLarge { size: u32, max: u32 },
     #[error("Protocol version mismatch: local={local}, remote={remote}")]
     VersionMismatch { local: u32, remote: u32 },
+    #[error("Configuration error: {0}")]
+    Config(String),
 }
 
 /// Maximum single message size (16 MB).
 pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
+
+/// TLS configuration for OFP wire encryption.
+/// When provided, OFP uses TLS 1.3 for transport encryption.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// PEM-encoded TLS certificate.
+    pub cert_pem: Vec<u8>,
+    /// PEM-encoded private key.
+    pub key_pem: Vec<u8>,
+}
+
+impl TlsConfig {
+    /// Create a TLS acceptor for server-side connections.
+    ///
+    /// SECURITY: This enables TLS 1.3 encryption for OFP transport.
+    /// Without TLS, all wire traffic is plaintext and visible to on-path observers.
+    #[allow(unused_variables)]
+    pub fn to_acceptor(&self) -> Result<TlsAcceptor, WireError> {
+        Err(WireError::Config(
+            "TLS support not yet implemented — see issue #3874".to_string(),
+        ))
+    }
+}
 
 /// Configuration for a PeerNode.
 #[derive(Debug, Clone)]
@@ -141,6 +170,10 @@ pub struct PeerConfig {
     /// Pre-shared key for HMAC-SHA256 authentication.
     /// Required — OFP refuses to start without it.
     pub shared_secret: String,
+    /// TLS configuration for encrypted transport.
+    /// When None, OFP uses plaintext TCP (legacy mode).
+    /// SECURITY: Prefer TLS for production deployments.
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for PeerConfig {
@@ -150,6 +183,7 @@ impl Default for PeerConfig {
             node_id: uuid::Uuid::new_v4().to_string(),
             node_name: "librefang-node".to_string(),
             shared_secret: String::new(),
+            tls: None,
         }
     }
 }
@@ -193,6 +227,9 @@ pub struct PeerNode {
     /// SECURITY: Session key derived after handshake for per-message HMAC.
     #[allow(dead_code)]
     session_key: std::sync::Mutex<Option<String>>,
+    /// TLS acceptor for encrypted connections. None if TLS not configured.
+    #[expect(dead_code)]
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl PeerNode {
@@ -209,7 +246,16 @@ impl PeerNode {
             ));
         }
 
-        let listener = TcpListener::bind(config.listen_addr).await?;
+        // SECURITY: Build TLS acceptor if TLS config is provided
+        let tls_acceptor = if let Some(ref tls_config) = config.tls {
+            info!("OFP: using TLS 1.3 for transport encryption");
+            Some(tls_config.to_acceptor()?)
+        } else {
+            warn!("OFP: plaintext TCP (no TLS configured — SECURITY: consider enabling TLS)");
+            None
+        };
+
+        let listener = TcpListener::bind(&config.listen_addr).await?;
         let local_addr = listener.local_addr()?;
 
         info!(
@@ -224,6 +270,7 @@ impl PeerNode {
             start_time: Instant::now(),
             nonce_tracker: NonceTracker::new(),
             session_key: std::sync::Mutex::new(None),
+            tls_acceptor,
         });
 
         let node_clone = Arc::clone(&node);

@@ -20,3 +20,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
 dashmap = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+tokio-rustls = { workspace = true }
