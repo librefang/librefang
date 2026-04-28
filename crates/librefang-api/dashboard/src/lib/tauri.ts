@@ -69,7 +69,7 @@ export async function clearCredentials(): Promise<void> {
 // ── Barcode scanner (mobile only) ─────────────────────────────────────────
 
 export async function scanQrCode(): Promise<string | null> {
-  if (!isTauri()) return null;
+  if (!isMobileTauri()) return null;
   try {
     const result = await invoke<{ content: string }>(
       "plugin:barcode-scanner|scan",

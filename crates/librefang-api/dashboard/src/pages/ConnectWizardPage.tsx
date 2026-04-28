@@ -35,6 +35,11 @@ export function ConnectWizardPage() {
     const url = baseUrl.trim().replace(/\/$/, "");
     const key = apiKey.trim();
     if (!url || !key) return;
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      setStep("error");
+      setErrorMsg("URL must start with http:// or https://");
+      return;
+    }
     setStep("connecting");
     setErrorMsg("");
     try {

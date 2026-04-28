@@ -29,8 +29,11 @@ export function OfflineBanner() {
 
   const retry = async () => {
     setRetrying(true);
-    await qc.refetchQueries({ type: "active" });
-    setRetrying(false);
+    try {
+      await qc.refetchQueries({ type: "active" });
+    } finally {
+      setRetrying(false);
+    }
   };
 
   return (
