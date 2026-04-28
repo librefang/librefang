@@ -136,23 +136,27 @@ impl DingTalkAdapter {
 
     /// Compute the HMAC-SHA256 signature for a DingTalk request.
     ///
-    /// DingTalk signature = Base64(HMAC-SHA256(secret, timestamp + "\n" + secret))
-    fn compute_signature(secret: &str, timestamp: i64) -> String {
+    /// DingTalk signature = Base64(HMAC-SHA256(secret, timestamp + "\n" + secret + body_bytes))
+    ///
+    /// The body bytes are included to prevent HMAC-replay attacks where a valid
+    /// captured signature is reused with a different payload.
+    fn compute_signature(secret: &str, timestamp: i64, body: &[u8]) -> String {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
-        let string_to_sign = format!("{}\n{}", timestamp, secret);
+        let prefix = format!("{}\n{}", timestamp, secret);
         let mut mac =
             Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
-        mac.update(string_to_sign.as_bytes());
+        mac.update(prefix.as_bytes());
+        mac.update(body);
         let result = mac.finalize();
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.encode(result.into_bytes())
     }
 
-    /// Verify an incoming DingTalk callback signature.
-    fn verify_signature(secret: &str, timestamp: i64, signature: &str) -> bool {
-        let expected = Self::compute_signature(secret, timestamp);
+    /// Verify an incoming DingTalk callback signature (constant-time comparison).
+    fn verify_signature(secret: &str, timestamp: i64, body: &[u8], signature: &str) -> bool {
+        let expected = Self::compute_signature(secret, timestamp, body);
         // Constant-time comparison
         if expected.len() != signature.len() {
             return false;
@@ -165,9 +169,14 @@ impl DingTalkAdapter {
     }
 
     /// Build the signed send URL with access_token, timestamp, and signature.
+    ///
+    /// Outbound URL signing uses the legacy DingTalk spec (no body bytes in
+    /// the HMAC) because the signature is a URL query parameter, not an
+    /// inbound-request authenticator.
     fn build_send_url(&self) -> String {
         let timestamp = Utc::now().timestamp_millis();
-        let sign = Self::compute_signature(&self.secret, timestamp);
+        // Outbound signing: body is empty (signature is for the URL parameter).
+        let sign = Self::compute_signature(&self.secret, timestamp, b"");
         let encoded_sign = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("sign", &sign)
             .finish();
@@ -602,7 +611,7 @@ impl ChannelAdapter for DingTalkAdapter {
                 let secret = Arc::clone(&secret);
                 let account_id = Arc::clone(&account_id);
                 move |headers: axum::http::HeaderMap,
-                      body: axum::extract::Json<serde_json::Value>| {
+                      body: axum::body::Bytes| {
                     let tx = Arc::clone(&tx);
                     let secret = Arc::clone(&secret);
                     let account_id = Arc::clone(&account_id);
@@ -630,8 +639,10 @@ impl ChannelAdapter for DingTalkAdapter {
                             }
                         };
 
-                        // Verify signature
-                        if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
+                        // Verify signature — body bytes are included in the HMAC
+                        // (#3879) to prevent replay attacks where a captured
+                        // (timestamp, sign) pair is reused with a different payload.
+                        if !DingTalkAdapter::verify_signature(&secret, ts, &body, signature) {
                             warn!("DingTalk: invalid signature");
                             return axum::http::StatusCode::UNAUTHORIZED;
                         }
@@ -646,8 +657,14 @@ impl ChannelAdapter for DingTalkAdapter {
                             return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
+                        // Parse JSON from the raw bytes we already read
+                        let json_body: serde_json::Value = match serde_json::from_slice(&body) {
+                            Ok(v) => v,
+                            Err(_) => return axum::http::StatusCode::BAD_REQUEST,
+                        };
+
                         if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
-                            DingTalkAdapter::parse_callback(&body)
+                            DingTalkAdapter::parse_callback(&json_body)
                         {
                             let content = if text.starts_with('/') {
                                 let parts: Vec<&str> = text.splitn(2, ' ').collect();
@@ -840,25 +857,38 @@ mod tests {
     fn test_dingtalk_signature_computation() {
         let timestamp: i64 = 1700000000000;
         let secret = "my-secret";
-        let sig = DingTalkAdapter::compute_signature(secret, timestamp);
+        let body = b"test-body";
+        let sig = DingTalkAdapter::compute_signature(secret, timestamp, body);
         assert!(!sig.is_empty());
         // Verify deterministic output
-        let sig2 = DingTalkAdapter::compute_signature(secret, timestamp);
+        let sig2 = DingTalkAdapter::compute_signature(secret, timestamp, body);
         assert_eq!(sig, sig2);
+        // Different body must produce a different signature
+        let sig3 = DingTalkAdapter::compute_signature(secret, timestamp, b"other-body");
+        assert_ne!(sig, sig3);
     }
 
     #[test]
     fn test_dingtalk_signature_verification() {
         let secret = "test-secret-123";
         let timestamp: i64 = 1700000000000;
-        let sig = DingTalkAdapter::compute_signature(secret, timestamp);
-        assert!(DingTalkAdapter::verify_signature(secret, timestamp, &sig));
+        let body = b"webhook-body";
+        let sig = DingTalkAdapter::compute_signature(secret, timestamp, body);
+        assert!(DingTalkAdapter::verify_signature(secret, timestamp, body, &sig));
         assert!(!DingTalkAdapter::verify_signature(
-            secret, timestamp, "bad-sig"
+            secret, timestamp, body, "bad-sig"
         ));
         assert!(!DingTalkAdapter::verify_signature(
             "wrong-secret",
             timestamp,
+            body,
+            &sig
+        ));
+        // Tampered body must fail even with correct timestamp/secret
+        assert!(!DingTalkAdapter::verify_signature(
+            secret,
+            timestamp,
+            b"tampered-body",
             &sig
         ));
     }
