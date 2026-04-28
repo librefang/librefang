@@ -222,9 +222,15 @@ pub fn glob_matches(pattern: &str, value: &str) -> bool {
         return true;
     }
 
-    // If the pattern contains a path separator we apply segment-aware matching
-    // so that a single `*` cannot cross a `/`.
-    if pattern.contains('/') {
+    // If the pattern contains a path separator we apply segment-aware
+    // matching so that a single `*` cannot cross a separator.  Both `/`
+    // and `\\` count: Windows-native grants like `C:\\data\\*` would
+    // otherwise fall through to glob_matches_simple where `*` crosses
+    // `\\` freely, recreating exactly the traversal class #3863 closed
+    // for `/`.  Audit of #3925 caught this as a HIGH bypass: a grant
+    // of `FileWrite("C:\\data\\*")` would match
+    // `C:\\data\\..\\..\\Windows\\evil`.
+    if pattern.contains('/') || pattern.contains('\\') {
         return glob_matches_path(pattern, value);
     }
 
@@ -293,8 +299,13 @@ fn glob_matches_simple(pattern: &str, value: &str) -> bool {
 /// A single `*` within a segment matches any characters **except** `/`.
 /// A `**` segment matches zero or more complete path segments (like `/**/`).
 fn glob_matches_path(pattern: &str, value: &str) -> bool {
-    let pat_segs: Vec<&str> = pattern.split('/').collect();
-    let val_segs: Vec<&str> = value.split('/').collect();
+    // Split on either path separator.  Windows uses `\\`, Unix uses `/`,
+    // and a normalised path may carry either or both — a single splitter
+    // means the same grant pattern works on both platforms without
+    // forcing the caller to canonicalise separators first.
+    const SEPS: &[char] = &['/', '\\'];
+    let pat_segs: Vec<&str> = pattern.split(SEPS).collect();
+    let val_segs: Vec<&str> = value.split(SEPS).collect();
     glob_match_segments(&pat_segs, &val_segs)
 }
 
@@ -490,6 +501,30 @@ mod tests {
         assert!(glob_matches("mcp_*", "mcp_server1_tool_a"));
         assert!(glob_matches("mcp_*", "mcp_myserver_mytool"));
         assert!(!glob_matches("mcp_*", "file_read"));
+    }
+
+    /// Windows-native grants must use segment-aware matching so a `*`
+    /// cannot cross `\` — same rule as `/` on Unix (#3925 / audit).
+    #[test]
+    fn test_glob_matches_windows_backslash_segment_aware() {
+        // Single segment expansion: ok
+        assert!(glob_matches("C:\\data\\*", "C:\\data\\report.csv"));
+        // Cross-segment traversal: must fail
+        assert!(!glob_matches(
+            "C:\\data\\*",
+            "C:\\data\\..\\..\\Windows\\evil"
+        ));
+        assert!(!glob_matches("C:\\data\\*", "C:\\data\\sub\\file.txt"));
+    }
+
+    /// Mixed-separator grants and values still match.  Real-world
+    /// Windows code routinely produces both `\` (system APIs) and `/`
+    /// (URLs, normalised paths) in the same string; the segment matcher
+    /// treats them interchangeably.
+    #[test]
+    fn test_glob_matches_mixed_separators() {
+        assert!(glob_matches("C:/data/*", "C:\\data\\report.csv"));
+        assert!(glob_matches("C:\\data\\*", "C:/data/report.csv"));
     }
 
     // Verifies the resolution strategy used in tool_timeout_secs_for:
