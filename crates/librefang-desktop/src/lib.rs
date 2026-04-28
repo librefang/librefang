@@ -360,10 +360,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
 
     builder
         .setup(move |app| {
-            // Window creation is desktop-only. On iOS/Android the host OS
-            // manages the main window via tauri.conf.json's "app.windows"
-            // entry, and WebviewWindowBuilder does not expose .title() /
-            // .inner_size() / .center() on mobile.
+            // Desktop window. `.title()` / `.inner_size()` / `.center()` /
+            // `.min_inner_size()` are not exposed on mobile, so the mobile
+            // branch below has its own minimal builder.
             #[cfg(desktop)]
             {
                 if show_connection_screen {
@@ -396,6 +395,27 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     .visible(true)
                     .build()?;
                 }
+            }
+
+            // Mobile window. Without this, iOS/Android launches into a
+            // black WebView because tauri.conf.json's `app.windows` is
+            // empty and Tauri 2 does not auto-create a mobile window.
+            // The OS manages size/orientation, so we only set the URL
+            // and visibility.
+            #[cfg(mobile)]
+            {
+                let url = if show_connection_screen {
+                    WebviewUrl::CustomProtocol(
+                        "lfconnect://localhost/"
+                            .parse()
+                            .expect("lfconnect URL must parse"),
+                    )
+                } else {
+                    WebviewUrl::External(initial_url.parse().expect("Invalid server URL"))
+                };
+                let _window = WebviewWindowBuilder::new(app, "main", url)
+                    .visible(true)
+                    .build()?;
             }
 
             // Set up system tray (desktop only)
