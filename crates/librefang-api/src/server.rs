@@ -1101,24 +1101,34 @@ pub async fn build_router(
     // These bypass auth/rate-limit layers since external platforms (Feishu,
     // Teams, etc.) handle their own signature verification.
     // The router is dynamic (behind RwLock) so hot-reload can swap routes.
+    //
+    // SECURITY: Apply a per-route body-size cap *before* merging so that
+    // webhook handlers are not exempt from the global RequestBodyLimitLayer
+    // (which was applied above to `app`). Tower layers wrap the router they
+    // are attached to; a layer added to `app` after `.nest()` would not
+    // cover the nested router. 1 MiB is generous for any webhook payload
+    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks.
+    const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
     let channel_webhook_state = state.webhook_router.clone();
-    let channel_routes = Router::new().fallback(move |req: axum::extract::Request| {
-        let wr = channel_webhook_state.clone();
-        async move {
-            use tower::ServiceExt;
-            let guard = wr.read().await;
-            let router: Arc<axum::Router> = Arc::clone(&guard);
-            drop(guard);
-            // Unwrap the Arc — if we hold the only reference we avoid a clone,
-            // otherwise Router::clone is needed (only during hot-reload overlap).
-            Arc::try_unwrap(router)
-                .unwrap_or_else(|arc| (*arc).clone())
-                .into_service()
-                .oneshot(req)
-                .await
-                .unwrap_or_else(|e: std::convert::Infallible| match e {})
-        }
-    });
+    let channel_routes = Router::new()
+        .fallback(move |req: axum::extract::Request| {
+            let wr = channel_webhook_state.clone();
+            async move {
+                use tower::ServiceExt;
+                let guard = wr.read().await;
+                let router: Arc<axum::Router> = Arc::clone(&guard);
+                drop(guard);
+                // Unwrap the Arc — if we hold the only reference we avoid a clone,
+                // otherwise Router::clone is needed (only during hot-reload overlap).
+                Arc::try_unwrap(router)
+                    .unwrap_or_else(|arc| (*arc).clone())
+                    .into_service()
+                    .oneshot(req)
+                    .await
+                    .unwrap_or_else(|e: std::convert::Infallible| match e {})
+            }
+        })
+        .layer(RequestBodyLimitLayer::new(WEBHOOK_BODY_LIMIT));
     let app = app.nest("/channels", channel_routes);
 
     let app = app.with_state(state.clone());
@@ -1321,7 +1331,9 @@ pub async fn run_daemon(
             }
             // Stale PID file (process dead or different process reused PID), remove it
             info!("Removing stale daemon info file");
-            let _ = std::fs::remove_file(info_path);
+            if let Err(e) = std::fs::remove_file(info_path) {
+                tracing::warn!("Failed to remove stale daemon info file: {e}");
+            }
         }
 
         let daemon_info = DaemonInfo {
@@ -1332,7 +1344,9 @@ pub async fn run_daemon(
             platform: std::env::consts::OS.to_string(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&daemon_info) {
-            let _ = std::fs::write(info_path, json);
+            if let Err(e) = std::fs::write(info_path, json) {
+                tracing::warn!("Failed to write daemon info file: {e}");
+            }
             // SECURITY: Restrict daemon info file permissions (contains PID and port).
             restrict_permissions(info_path);
         }
@@ -1471,13 +1485,15 @@ pub async fn run_daemon(
         handle.abort();
     }
     for handle in bg_tasks {
-        let _ = handle.await;
+        let _ = handle.await; // JoinError from abort() is expected; ignore it
     }
     info!("Background tasks stopped");
 
     // Clean up daemon info file
     if let Some(info_path) = daemon_info_path {
-        let _ = std::fs::remove_file(info_path);
+        if let Err(e) = std::fs::remove_file(info_path) {
+            tracing::warn!("Failed to remove daemon info file on shutdown: {e}");
+        }
     }
 
     // Stop channel bridges
@@ -1763,7 +1779,9 @@ mod observability_tests {
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!("Failed to restrict permissions on {}: {e}", path.display());
+    }
 }
 
 #[cfg(not(unix))]
@@ -1844,7 +1862,7 @@ fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = pid;
+        let _ = pid; // suppress unused variable warning on unsupported platforms
         false
     }
 }
