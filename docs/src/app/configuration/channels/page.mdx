@@ -31,6 +31,17 @@ Channels with a per-secret env var (Messenger `app_secret_env`, Teams `security_
 
 Outbound webhook URLs (`callback_url` on `[channels.webhook]`) are run through an SSRF guard at adapter construction: any private (`10/8`, `172.16/12`, `192.168/16`), CGN (`100.64/10`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), unique-local (`fc00::/7`), multicast, or cloud-metadata (`169.254.169.254`, `metadata.google.internal`, `metadata.azure.com`) target — including IPv6-bracket forms like `[::]`, `[::ffff:127.0.0.1]`, NAT64 `[64:ff9b::7f00:1]`, and trailing-dot FQDNs — is rejected with a startup error.
 
+#### Upgrading from earlier versions
+
+If you are upgrading from a release before this contract was introduced:
+
+1. **Operating Messenger?** Copy your **App Secret** from the Facebook app dashboard and export it as `MESSENGER_APP_SECRET` (or whatever name you set `app_secret_env` to). Without it, inbound webhooks still work but are unauthenticated — a warning is logged once at startup.
+2. **Operating Teams?** Copy the outgoing-webhook **security token** (base64) from the Teams portal and export it as `TEAMS_SECURITY_TOKEN` (or whatever you set `security_token_env` to). Same fallback semantics — warning once, no verification.
+3. **Operating LINE / Viber / DingTalk?** No new env var to set, but probes/health-checks that hit the webhook path without the platform's signature header now return `400`/`401`. Real platform traffic always carries a signature, so genuine inbound is unaffected; only direct probes break.
+4. **Using `[channels.webhook]` with `callback_url` pointing at a private address?** The most common case is a local dev setup with `callback_url = "http://127.0.0.1/..."`. The adapter now refuses to start with that. Switch to a public tunnel (e.g. ngrok, cloudflared) or omit `callback_url` entirely if you don't need outbound delivery.
+
+If you operate **none** of the channels above, no action is required — your existing config keeps working unchanged.
+
 #### `[channels.telegram]`
 
 ```toml
