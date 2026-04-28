@@ -618,6 +618,30 @@ impl App {
                 self.extensions.status_msg = format!("Reconnected {id}: {tools} tools");
                 self.refresh_extension_health();
             }
+
+            // ── Async chat helpers (previously blocked the event-loop thread) ──
+            AppEvent::ChatModelLabelLoaded { agent_id: _, label } => {
+                self.chat.model_label = label;
+            }
+            AppEvent::ChatModelsForPicker(models) => {
+                if models.is_empty() {
+                    self.chat
+                        .push_message(chat::Role::System, "No models available.".to_string());
+                } else {
+                    self.chat.model_picker_models = models;
+                    self.chat.model_picker_filter.clear();
+                    self.chat.model_picker_idx = 0;
+                    self.chat.show_model_picker = true;
+                }
+            }
+            AppEvent::ChatAgentListLoaded(lines) => {
+                let msg = if lines.is_empty() {
+                    "No agents running.".to_string()
+                } else {
+                    lines.join("\n")
+                };
+                self.chat.push_message(chat::Role::System, msg);
+            }
         }
     }
 
@@ -1765,15 +1789,13 @@ impl App {
         self.chat.agent_name = name.clone();
         self.chat.mode_label = "daemon".to_string();
 
+        // Fetch model label asynchronously — avoids blocking the TUI event loop.
         if let Backend::Daemon { ref base_url, .. } = self.backend {
-            let client = crate::daemon_client();
-            if let Ok(resp) = client.get(format!("{base_url}/api/agents/{id}")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let provider = body["model_provider"].as_str().unwrap_or("?");
-                    let model = body["model_name"].as_str().unwrap_or("?");
-                    self.chat.model_label = format!("{provider}/{model}");
-                }
-            }
+            event::spawn_fetch_agent_model_label(
+                base_url.clone(),
+                id.clone(),
+                self.event_tx.clone(),
+            );
         }
 
         self.chat_target = Some(ChatTarget {
@@ -1883,59 +1905,44 @@ impl App {
     // ─── Model picker ────────────────────────────────────────────────────────
 
     fn open_model_picker(&mut self) {
-        let models = match &self.backend {
+        match &self.backend {
             Backend::Daemon { base_url, .. } => {
-                let client = crate::daemon_client();
-                match client.get(format!("{base_url}/api/models")).send() {
-                    Ok(resp) => match resp.json::<serde_json::Value>() {
-                        Ok(body) => body["models"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter(|m| m["available"].as_bool().unwrap_or(false))
-                                    .map(|m| chat::ModelEntry {
-                                        id: m["id"].as_str().unwrap_or("").to_string(),
-                                        display_name: m["display_name"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
-                                        tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        Err(_) => Vec::new(),
-                    },
-                    Err(_) => Vec::new(),
-                }
+                // Fetch model list asynchronously — avoids blocking the TUI event loop.
+                // The `ChatModelsForPicker` event handler will open the picker once loaded.
+                event::spawn_fetch_models_for_picker(base_url.clone(), self.event_tx.clone());
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel.model_catalog_ref().read().unwrap_or_else(|p| p.into_inner());
-                catalog
-                    .available_models()
-                    .into_iter()
-                    .map(|e| chat::ModelEntry {
-                        id: e.id.clone(),
-                        display_name: e.display_name.clone(),
-                        provider: e.provider.clone(),
-                        tier: format!("{:?}", e.tier),
-                    })
-                    .collect()
+                let models = {
+                    let catalog = kernel
+                        .model_catalog_ref()
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
+                    catalog
+                        .available_models()
+                        .into_iter()
+                        .map(|e| chat::ModelEntry {
+                            id: e.id.clone(),
+                            display_name: e.display_name.clone(),
+                            provider: e.provider.clone(),
+                            tier: format!("{:?}", e.tier),
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if models.is_empty() {
+                    self.chat
+                        .push_message(chat::Role::System, "No models available.".to_string());
+                    return;
+                }
+                self.chat.model_picker_models = models;
+                self.chat.model_picker_filter.clear();
+                self.chat.model_picker_idx = 0;
+                self.chat.show_model_picker = true;
             }
-            Backend::None => Vec::new(),
-        };
-
-        if models.is_empty() {
-            self.chat
-                .push_message(chat::Role::System, "No models available.".to_string());
-            return;
+            Backend::None => {
+                self.chat
+                    .push_message(chat::Role::System, "No models available.".to_string());
+            }
         }
-
-        self.chat.model_picker_models = models;
-        self.chat.model_picker_filter.clear();
-        self.chat.model_picker_idx = 0;
-        self.chat.show_model_picker = true;
     }
 
     fn switch_model(&mut self, model_id: &str) {
@@ -2069,49 +2076,42 @@ impl App {
                 self.chat.push_message(chat::Role::System, s.join("\n"));
             }
             "/agents" => {
-                let mut lines = Vec::new();
                 match &self.backend {
                     Backend::Daemon { base_url, .. } => {
-                        let client = crate::daemon_client();
-                        if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
-                            if let Ok(body) = resp.json::<serde_json::Value>() {
-                                // Handle both old format (direct array) and new format ({ "items": [...] })
-                                let arr = if let Some(arr) = body.as_array() {
-                                    arr.clone()
-                                } else if let Some(items) =
-                                    body.get("items").and_then(|v| v.as_array())
-                                {
-                                    items.clone()
-                                } else {
-                                    Vec::new()
-                                };
-                                for a in arr {
-                                    lines.push(format!(
-                                        "{} [{}] {}",
-                                        a["name"].as_str().unwrap_or("?"),
-                                        a["state"].as_str().unwrap_or("?"),
-                                        a["model_name"].as_str().unwrap_or("?"),
-                                    ));
-                                }
-                            }
-                        }
+                        // Fetch agent list asynchronously — avoids blocking the TUI event loop.
+                        // The `ChatAgentListLoaded` event handler will push the reply.
+                        event::spawn_fetch_agents_for_chat(
+                            base_url.clone(),
+                            self.event_tx.clone(),
+                        );
                     }
                     Backend::InProcess { kernel } => {
-                        for e in kernel.agent_registry().list() {
-                            lines.push(format!(
-                                "{} [{:?}] {}/{}",
-                                e.name, e.state, e.manifest.model.provider, e.manifest.model.model,
-                            ));
-                        }
+                        let lines: Vec<String> = kernel
+                            .agent_registry()
+                            .list()
+                            .into_iter()
+                            .map(|e| {
+                                format!(
+                                    "{} [{:?}] {}/{}",
+                                    e.name,
+                                    e.state,
+                                    e.manifest.model.provider,
+                                    e.manifest.model.model,
+                                )
+                            })
+                            .collect();
+                        let msg = if lines.is_empty() {
+                            "No agents running.".to_string()
+                        } else {
+                            lines.join("\n")
+                        };
+                        self.chat.push_message(chat::Role::System, msg);
                     }
-                    Backend::None => {}
+                    Backend::None => {
+                        self.chat
+                            .push_message(chat::Role::System, "No agents running.".to_string());
+                    }
                 }
-                let msg = if lines.is_empty() {
-                    "No agents running.".to_string()
-                } else {
-                    lines.join("\n")
-                };
-                self.chat.push_message(chat::Role::System, msg);
             }
             "/clear" => {
                 let name = self.chat.agent_name.clone();
