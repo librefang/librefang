@@ -522,9 +522,7 @@ fn is_blocked_env_var(name: &str) -> bool {
         return true;
     }
     // Substring check — catches any var that smells like a credential.
-    BLOCKED_ENV_SUBSTRINGS
-        .iter()
-        .any(|sub| upper.contains(sub))
+    BLOCKED_ENV_SUBSTRINGS.iter().any(|sub| upper.contains(sub))
 }
 
 fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {

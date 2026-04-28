@@ -611,8 +611,8 @@ pub async fn auth(
     // paths that do not contain sensitive payload detail (e.g. the
     // individual approval GET by id), but the /session/ sub-tree is
     // explicitly excluded here and falls through to the normal auth gate.
-    let approvals_prefix_public = path.starts_with("/api/approvals/")
-        && !path.starts_with("/api/approvals/session/");
+    let approvals_prefix_public =
+        path.starts_with("/api/approvals/") && !path.starts_with("/api/approvals/session/");
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
         || approvals_prefix_public
         || path.starts_with("/api/hands/")

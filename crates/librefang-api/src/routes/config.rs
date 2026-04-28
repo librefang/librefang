@@ -1899,9 +1899,7 @@ pub async fn config_set(
         }
         for part in path.split('.') {
             if part.is_empty() {
-                return Err(format!(
-                    "config path '{path}' contains an empty segment"
-                ));
+                return Err(format!("config path '{path}' contains an empty segment"));
             }
             if !part
                 .chars()
@@ -2377,7 +2375,10 @@ mod config_key_path_validation_tests {
         assert!(validate("../secret").is_err(), "traversal with ..");
         assert!(validate("a..b").is_err(), "double dot in segment");
         assert!(validate("/etc/passwd").is_err(), "absolute unix path");
-        assert!(validate("\\Windows\\System32").is_err(), "absolute windows path");
+        assert!(
+            validate("\\Windows\\System32").is_err(),
+            "absolute windows path"
+        );
     }
 
     /// #3458 regression: special characters that could inject TOML structure
