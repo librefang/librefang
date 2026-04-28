@@ -17,7 +17,7 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@librefang/cli-linux-x64": "0.0.0",
+    "@librefang/cli-linux-x64": "2026.3.2201",
     "@librefang/cli-linux-arm64": "0.0.0",
     "@librefang/cli-linux-x64-musl": "0.0.0",
     "@librefang/cli-linux-arm64-musl": "0.0.0",
