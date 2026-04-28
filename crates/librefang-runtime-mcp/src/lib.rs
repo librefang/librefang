@@ -1001,40 +1001,82 @@ impl McpConnection {
             command.to_string()
         };
 
-        // Expand environment variable references ($VAR, ${VAR}) in args so
-        // templates can use e.g. "$HOME" without wrapping in `sh -c`.
-        let args_owned: Vec<String> = args.iter().map(|a| expand_env_vars(a)).collect();
+        // Build the allowlist of env var names explicitly declared in config.
+        // expand_env_vars must only substitute vars from this set to prevent
+        // arbitrary daemon secrets (API keys, etc.) from leaking into argv.
         let env_owned: Vec<String> = extra_env.to_vec();
+        let declared_env_keys: std::collections::HashSet<String> = env_owned
+            .iter()
+            .map(|entry| {
+                entry
+                    .split_once('=')
+                    .map(|(k, _)| k.to_string())
+                    .unwrap_or_else(|| entry.clone())
+            })
+            .collect();
 
-        let transport = TokioChildProcess::new(
-            tokio::process::Command::new(&resolved_command).configure(|cmd| {
-                cmd.args(&args_owned);
+        // Expand environment variable references ($VAR, ${VAR}) in args, but
+        // ONLY for variables explicitly declared in the MCP server's env: block.
+        // Expanding arbitrary vars would leak daemon secrets (API keys, etc.)
+        // into the child's argv, visible in /proc/<pid>/cmdline and system logs.
+        let args_owned: Vec<String> = args
+            .iter()
+            .map(|a| expand_env_vars_restricted(a, &declared_env_keys))
+            .collect();
 
-                // SECURITY: Do NOT inherit the full parent environment.
-                // Only pass through safe system vars + explicitly declared vars.
-                cmd.env_clear();
+        let cmd = tokio::process::Command::new(&resolved_command).configure(|cmd| {
+            cmd.args(&args_owned);
 
-                // Pass safe system environment variables
-                for &var in SAFE_ENV_VARS {
-                    if let Ok(val) = std::env::var(var) {
-                        cmd.env(var, val);
+            // SECURITY: Do NOT inherit the full parent environment.
+            // Only pass through safe system vars + explicitly declared vars.
+            cmd.env_clear();
+
+            // Pass safe system environment variables
+            for &var in SAFE_ENV_VARS {
+                if let Ok(val) = std::env::var(var) {
+                    cmd.env(var, val);
+                }
+            }
+
+            // Pass declared environment variables from config
+            for entry in &env_owned {
+                if let Some((key, value)) = entry.split_once('=') {
+                    cmd.env(key, value);
+                } else {
+                    // Legacy format: plain name — look up from parent env
+                    if let Ok(value) = std::env::var(entry) {
+                        cmd.env(entry, value);
                     }
                 }
+            }
+        });
 
-                // Pass declared environment variables from config
-                for entry in &env_owned {
-                    if let Some((key, value)) = entry.split_once('=') {
-                        cmd.env(key, value);
-                    } else {
-                        // Legacy format: plain name — look up from parent env
-                        if let Ok(value) = std::env::var(entry) {
-                            cmd.env(entry, value);
+        // Pipe stderr so the MCP server's output doesn't pollute the daemon
+        // log and cannot stall the child by filling an inherited fd buffer.
+        let (transport, stderr_handle) = TokioChildProcess::builder(cmd)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
+
+        // Drain the piped stderr in the background, logging lines at debug
+        // level so diagnostics are preserved without polluting daemon stdout.
+        if let Some(stderr) = stderr_handle {
+            let label = resolved_command.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            tracing::debug!(target: "mcp_stderr", server = %label, "{}", line.trim_end());
                         }
                     }
                 }
-            }),
-        )
-        .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
+            });
+        }
 
         let client = if roots.is_empty() {
             ().into_dyn()
@@ -1377,10 +1419,19 @@ impl McpConnection {
             return Err(format!("MCP SSE returned {}", response.status()));
         }
 
-        let body = response
-            .text()
+        let raw = response
+            .bytes()
             .await
             .map_err(|e| format!("Failed to read SSE response: {e}"))?;
+        if raw.len() > MAX_MCP_RESPONSE_BYTES {
+            return Err(format!(
+                "MCP SSE response too large: {} bytes (limit {})",
+                raw.len(),
+                MAX_MCP_RESPONSE_BYTES
+            ));
+        }
+        let body = String::from_utf8(raw.to_vec())
+            .map_err(|e| format!("MCP SSE response is not valid UTF-8: {e}"))?;
 
         let rpc_response: JsonRpcResponse = serde_json::from_str(&body)
             .map_err(|e| format!("Invalid MCP SSE JSON-RPC response: {e}"))?;
@@ -1870,10 +1921,19 @@ impl McpConnection {
             .map_err(|e| format!("HTTP compatibility request failed: {e}"))?;
 
         let status = response.status();
-        let body = response
-            .text()
+        let raw = response
+            .bytes()
             .await
             .map_err(|e| format!("Failed to read HTTP compatibility response: {e}"))?;
+        if raw.len() > MAX_MCP_RESPONSE_BYTES {
+            return Err(format!(
+                "HTTP compatibility response too large: {} bytes (limit {})",
+                raw.len(),
+                MAX_MCP_RESPONSE_BYTES
+            ));
+        }
+        let body = String::from_utf8(raw.to_vec())
+            .map_err(|e| format!("HTTP compatibility response is not valid UTF-8: {e}"))?;
 
         if !status.is_success() {
             return Err(format!(
@@ -2084,11 +2144,20 @@ pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace('-', "_")
 }
 
-/// Expand `$VAR` and `${VAR}` references in a string using the process
-/// environment. Unknown variables are left as-is. This allows MCP server
-/// templates to reference `$HOME`, `$USER`, etc. without requiring a shell
-/// wrapper (`sh -c`), which the security check blocks.
-fn expand_env_vars(input: &str) -> String {
+/// Maximum number of bytes accepted from a single MCP HTTP response body.
+/// Responses larger than this are rejected to prevent memory exhaustion.
+const MAX_MCP_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Expand `$VAR` and `${VAR}` references in `input`, but only substitute
+/// variables whose names appear in `allowed`. Any other `$VAR` reference is
+/// left as-is and a warning is emitted so operators know which vars were
+/// blocked. This prevents arbitrary daemon secrets (API keys, etc.) from
+/// leaking into the child process's argv where they would be visible in
+/// `/proc/<pid>/cmdline` and system process listings.
+fn expand_env_vars_restricted(
+    input: &str,
+    allowed: &std::collections::HashSet<String>,
+) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -2115,10 +2184,26 @@ fn expand_env_vars(input: &str) -> String {
                 if braced {
                     result.push('{');
                 }
-            } else if let Ok(val) = std::env::var(&var_name) {
-                result.push_str(&val);
+            } else if allowed.contains(&var_name) {
+                if let Ok(val) = std::env::var(&var_name) {
+                    result.push_str(&val);
+                } else {
+                    // Declared but not set in environment — leave as-is
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
             } else {
-                // Unknown var — keep original text
+                // Not in the declared-env allowlist — refuse to expand
+                tracing::warn!(
+                    "MCP config attempted to expand undeclared env var ${{{}}}, leaving unexpanded",
+                    var_name
+                );
                 result.push('$');
                 if braced {
                     result.push('{');
