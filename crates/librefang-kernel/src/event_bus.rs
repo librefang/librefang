@@ -116,8 +116,7 @@ impl EventBus {
                                     event_id = %event.id,
                                     event_kind = payload_kind(&event.payload),
                                     total_dropped = total,
-                                    "Event bus: agent has no active receiver, event dropped — \
-                                     consider increasing queue capacity or checking agent health",
+                                    "Event bus: agent has no active receiver, event dropped — check agent health",
                                 );
                                 *last = std::time::Instant::now();
                             }
@@ -150,8 +149,7 @@ impl EventBus {
                                 dropped = agent_drops,
                                 total_dropped = total,
                                 event_kind = payload_kind(&event.payload),
-                                "Event bus: broadcast reached agents with no active receivers, \
-                                 events dropped — consider increasing queue capacity",
+                                "Event bus: broadcast reached agents with no active receivers, events dropped",
                             );
                             *last = std::time::Instant::now();
                         }
@@ -201,7 +199,7 @@ impl EventBus {
         history.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Return the total number of events dropped due to full channels.
+    /// Return the total number of events dropped due to no active receivers.
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
     }
