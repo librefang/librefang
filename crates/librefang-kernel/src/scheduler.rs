@@ -225,6 +225,14 @@ impl AgentScheduler {
     /// `estimated_tokens` inside the same DashMap entry write-lock, at most
     /// one caller can pass for any given budget slot.
     ///
+    /// **Pessimistic by design.** Callers pass the model's `max_tokens`
+    /// (output cap) which is almost always larger than the real per-call
+    /// usage. This is intentional — the quota holds firm under concurrent
+    /// bursts at the cost of triggering `QuotaExceeded` slightly earlier
+    /// than perfectly-tight accounting would. `settle_reservation` corrects
+    /// `total_tokens` down to the actual amount once the call finishes, so
+    /// over the long run the counters remain accurate.
+    ///
     /// After the LLM call completes, the caller **must** call
     /// `settle_reservation` with the actual [`TokenUsage`] so the
     /// reservation is corrected and the sliding-window counters are updated.
@@ -492,5 +500,126 @@ mod tests {
         );
         scheduler.record_tool_calls(id, 9999);
         assert!(scheduler.check_quota(id).is_ok());
+    }
+
+    /// Regression test for #3736 — TOCTOU between check_quota and record_usage.
+    ///
+    /// Many threads racing through `check_quota_and_reserve` for the same
+    /// agent must collectively reserve no more than `token_limit`. The old
+    /// `check_quota` + `record_usage` split allowed all N to pass the check
+    /// before any of them recorded usage; this test would fail under the
+    /// old code with `succeeded > expected_max`.
+    #[test]
+    fn test_concurrent_check_and_reserve_respects_limit() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let scheduler = Arc::new(AgentScheduler::new());
+        let id = AgentId::new();
+        // 100 token-per-hour limit, each call wants 10 → at most 10 can pass.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        let succeeded = Arc::new(AtomicU64::new(0));
+        let denied = Arc::new(AtomicU64::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let sched = Arc::clone(&scheduler);
+            let succ = Arc::clone(&succeeded);
+            let den = Arc::clone(&denied);
+            handles.push(thread::spawn(move || {
+                match sched.check_quota_and_reserve(id, 10) {
+                    Ok(_) => {
+                        succ.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => {
+                        den.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let s = succeeded.load(Ordering::SeqCst);
+        let d = denied.load(Ordering::SeqCst);
+        assert_eq!(s + d, 50, "all 50 threads should have a verdict");
+        // 10 reservations * 10 tokens = exactly 100 (the limit). 11 would
+        // project to 110 > 100 and be denied. Burst cap is 100/5=20 → only
+        // 2 can pass before burst kicks in. So success count is at most 2.
+        assert!(
+            s <= 10,
+            "no more than 10 reservations of 10 tokens may fit in a 100-token quota, got {s}"
+        );
+    }
+
+    /// Regression test for #3736 — settle_reservation must correctly adjust
+    /// the pre-charged total to the actual token count.
+    #[test]
+    fn test_settle_reservation_corrects_overestimate() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(10_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        // Reserve 1000 (pessimistic); actual usage is 100.
+        let reserved = scheduler.check_quota_and_reserve(id, 1000).unwrap();
+        assert_eq!(reserved, 1000);
+        let after_reserve = scheduler.get_usage(id).unwrap();
+        assert_eq!(after_reserve.total_tokens, 1000);
+
+        scheduler.settle_reservation(
+            id,
+            reserved,
+            &TokenUsage {
+                input_tokens: 60,
+                output_tokens: 40,
+                ..Default::default()
+            },
+        );
+        let after_settle = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after_settle.total_tokens, 100,
+            "settle should correct down to actual"
+        );
+        assert_eq!(after_settle.input_tokens, 60);
+        assert_eq!(after_settle.output_tokens, 40);
+        assert_eq!(after_settle.llm_calls, 1);
+    }
+
+    /// Regression test for #3736 — settle_reservation with empty usage (e.g.
+    /// the agent loop failed before the LLM call) must release the entire
+    /// pre-charged amount, not leave it permanently consumed.
+    #[test]
+    fn test_settle_empty_usage_releases_full_reservation() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        // Limit 100k → burst cap 20k, so 500 reserved comfortably fits.
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        let reserved = scheduler.check_quota_and_reserve(id, 500).unwrap();
+        scheduler.settle_reservation(id, reserved, &TokenUsage::default());
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after.total_tokens, 0,
+            "failed call should release the reservation"
+        );
+        // llm_calls is still incremented — the call was attempted.
+        assert_eq!(after.llm_calls, 1);
     }
 }

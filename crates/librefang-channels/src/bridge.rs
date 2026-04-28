@@ -475,11 +475,6 @@ struct SenderBuffer {
     first_arrived: Instant,
     timer_handle: Option<tokio::task::JoinHandle<()>>,
     max_timer_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Set to `true` once a flush has been sent for this buffer so that a
-    /// concurrent `max_timer` fire (which may have already enqueued its
-    /// message before we could `abort()` it) does not produce a second
-    /// flush when the receiver processes the key again.
-    flushed: bool,
 }
 
 struct MessageDebouncer {
@@ -529,7 +524,6 @@ impl MessageDebouncer {
                 first_arrived: Instant::now(),
                 timer_handle: None,
                 max_timer_handle,
-                flushed: false,
             }
         });
         buf.messages.push(pending);
@@ -543,11 +537,11 @@ impl MessageDebouncer {
             if let Some(handle) = buf.max_timer_handle.take() {
                 handle.abort();
             }
-            // Guard against double-fire: the max_timer task may have already
-            // enqueued its flush message before we could abort() it.  Setting
-            // `flushed = true` lets the drain site see that the buffer was
-            // already consumed when the stale flush key arrives.
-            buf.flushed = true;
+            // Guard against double-fire (#3742): the max_timer task may have
+            // already enqueued its flush message before we could abort() it.
+            // The double-fire is suppressed by `drain()` below — once the
+            // first flush key is processed, the entry is removed from
+            // `buffers`, so the stale key will find nothing and return None.
             let _ = self.flush_tx.send(key.to_string());
             return;
         }
@@ -596,10 +590,9 @@ impl MessageDebouncer {
         key: &str,
         buffers: &mut HashMap<String, SenderBuffer>,
     ) -> Option<(ChannelMessage, Option<Vec<ContentBlock>>)> {
-        // When the max_timer fires and the `push` path has already sent a
-        // manual flush (setting `flushed = true` and removing the entry via
-        // `buffers.remove` in the first drain call), this second call will
-        // find no entry and return `None` here — no duplicate dispatch.
+        // Guard against double-fire (#3742): if the manual-flush path in
+        // `push()` and a max_timer task both enqueue the same key, the second
+        // drain call will find the entry already gone and return `None` here.
         let buf = buffers.remove(key)?;
         if buf.messages.is_empty() {
             return None;

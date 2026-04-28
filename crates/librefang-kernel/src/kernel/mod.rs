@@ -12174,8 +12174,16 @@ system_prompt = "You are a helpful assistant."
                                 let permit = match cron_sem.clone().acquire_owned().await {
                                     Ok(p) => p,
                                     Err(_) => {
-                                        tracing::warn!(job = %job_name, "Cron lane semaphore closed; skipping job");
-                                        continue;
+                                        // SemaphoreClosed means the command_queue lane was
+                                        // dropped — every subsequent acquire on the same
+                                        // semaphore will fail too. Bail out of this tick's
+                                        // due batch and let the next tick re-snapshot the
+                                        // lane (or exit on shutdown signal).
+                                        tracing::error!(
+                                            job = %job_name,
+                                            "Cron lane semaphore closed; aborting this tick's batch"
+                                        );
+                                        break;
                                     }
                                 };
                                 let kernel_job = kernel.clone();
