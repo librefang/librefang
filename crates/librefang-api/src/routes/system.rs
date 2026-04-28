@@ -1772,7 +1772,11 @@ pub async fn approve_request(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 Ok((false, _)) => {
@@ -2429,7 +2433,11 @@ pub async fn totp_setup(
                                 &stored, code,
                             ) {
                                 Ok((true, updated)) => {
-                                    let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                                    if let Err(e) =
+                                        state.kernel.vault_set("totp_recovery_codes", &updated)
+                                    {
+                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
+                                    }
                                     true
                                 }
                                 _ => false,
@@ -2636,7 +2644,11 @@ pub async fn totp_revoke(
                     &stored, &body.code,
                 ) {
                     Ok((true, updated)) => {
-                        let _ = state.kernel.vault_set("totp_recovery_codes", &updated);
+                        if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
+                            tracing::warn!(
+                                "Failed to persist updated TOTP recovery codes after use: {e}"
+                            );
+                        }
                         true
                     }
                     _ => false,
@@ -2668,9 +2680,15 @@ pub async fn totp_revoke(
 
     // Remove TOTP data from vault
     // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
-    let _ = state.kernel.vault_set("totp_confirmed", "false");
-    let _ = state.kernel.vault_set("totp_secret", "");
-    let _ = state.kernel.vault_set("totp_recovery_codes", "[]");
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_secret", "") {
+        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+    }
+    if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
+        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+    }
 
     (
         StatusCode::OK,
@@ -3552,10 +3570,12 @@ pub async fn create_backup(
         components: components.clone(),
     };
     if let Ok(manifest_json) = serde_json::to_string_pretty(&manifest) {
-        let _ = zip.start_file("manifest.json", options).and_then(|()| {
+        if let Err(e) = zip.start_file("manifest.json", options).and_then(|()| {
             std::io::Write::write_all(&mut zip, manifest_json.as_bytes())
                 .map_err(zip::result::ZipError::Io)
-        });
+        }) {
+            tracing::warn!("Failed to write manifest.json into export archive: {e}");
+        }
     }
 
     if let Err(e) = zip.finish() {
