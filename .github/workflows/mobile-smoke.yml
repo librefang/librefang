@@ -1,16 +1,24 @@
 name: Mobile Build Smoke
 
-# Best-effort PR smoke test for the iOS / Android Tauri targets. Triggers
-# only when the mobile surface actually changed — full release builds live
-# in `release.yml` under `mobile_android` / `mobile_ios`.
+# Post-merge smoke test for the iOS / Android Tauri targets. Runs on
+# pushes to main when the mobile surface actually changed — full signed
+# release builds live in `release.yml` under `mobile_android` /
+# `mobile_ios` and only fire on tag push.
 #
-# Both jobs run unsigned debug builds: the goal is "did the toolchain still
-# produce a binary?", not "is it shippable?". They never call into Apple /
-# Play and never need signing secrets, so a contributor's fork can run the
-# exact same checks the mainline runs.
+# Why post-merge instead of per-PR: each leg pulls a cold Android NDK +
+# Xcode iOS SDK and a full Rust mobile rebuild — ~25 min each on a cache
+# miss. Running that on every desktop/dashboard PR burns a lot of CI
+# time for breakage that's caught on the merge run anyway. Maintainers
+# can still hit `workflow_dispatch` from the Actions tab to validate a
+# branch before merging.
+#
+# Both jobs are unsigned debug builds — the goal is "did the toolchain
+# still produce a binary?", not "is it shippable?". Signed builds live
+# in `release.yml`.
 
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - "crates/librefang-desktop/**"
       - "crates/librefang-api/dashboard/**"
