@@ -689,7 +689,8 @@ pub async fn execute_tool_raw(
                             if let Some(idx) = command.find(ps) {
                                 // Verify path boundary after the match
                                 let after = &command[idx + ps.len()..];
-                                after.is_empty() || after.starts_with('/')
+                                after.is_empty()
+                                    || after.starts_with('/')
                                     || after.starts_with('"')
                                     || after.starts_with('\'')
                                     || after.starts_with(' ')

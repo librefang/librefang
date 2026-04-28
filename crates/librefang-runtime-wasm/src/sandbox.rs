@@ -744,10 +744,12 @@ mod tests {
     #[tokio::test]
     async fn test_host_call_capability_denied() {
         let sandbox = WasmSandbox::new().unwrap();
-        // Try fs_read with no capabilities → denied
+        // fs_read canonicalizes before the capability check (#3814), so the
+        // path must exist for the deny to land. Cargo.toml is present in
+        // every crate's working dir during tests.
         let input = serde_json::json!({
             "method": "fs_read",
-            "params": {"path": "/etc/passwd"}
+            "params": {"path": "Cargo.toml"}
         });
         let config = SandboxConfig {
             capabilities: vec![], // No capabilities!
