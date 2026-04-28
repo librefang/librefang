@@ -943,9 +943,14 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
-            if let Some(secs) = self.request_timeout_secs {
-                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
-            }
+            // Per-request timeout takes priority; fall back to driver-level config,
+            // then a 300 s default so the daemon never waits indefinitely.
+            let timeout_secs = request
+                .timeout_secs
+                .or(self.request_timeout_secs)
+                .unwrap_or(300);
+            req_builder =
+                req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()
@@ -1352,9 +1357,14 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
-            if let Some(secs) = self.request_timeout_secs {
-                req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
-            }
+            // Per-request timeout takes priority; fall back to driver-level config,
+            // then a 300 s default so the daemon never waits indefinitely.
+            let timeout_secs = request
+                .timeout_secs
+                .or(self.request_timeout_secs)
+                .unwrap_or(300);
+            req_builder =
+                req_builder.timeout(std::time::Duration::from_secs(timeout_secs));
 
             let resp = req_builder
                 .send()

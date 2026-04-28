@@ -59,13 +59,29 @@ pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Regi
 /// `OnceLock` and subsequent calls return a clone of the existing handle.
 /// This is important for test environments where multiple tests may build
 /// their own app state in parallel within the same process.
+///
+/// If another metrics recorder was already registered (e.g. by a test harness
+/// or a second crate initialising first), the error is demoted to a warning
+/// and a standalone handle is returned. The `/api/metrics` endpoint calls
+/// `handle.render()` directly so it continues to work; global `metrics::*`
+/// macros will route to whichever recorder was registered first.
 pub fn init_prometheus() -> PrometheusHandle {
     PROMETHEUS_HANDLE
         .get_or_init(|| {
             let builder = PrometheusBuilder::new();
-            builder
-                .install_recorder()
-                .expect("failed to install prometheus recorder")
+            match builder.install_recorder() {
+                Ok(handle) => handle,
+                Err(e) => {
+                    tracing::warn!(
+                        "metrics recorder already registered; prometheus endpoint will \
+                         use a standalone handle (double-registration is harmless): {e}"
+                    );
+                    // Build a fresh recorder without registering a global one.
+                    // `PrometheusHandle::render()` works on any recorder, so
+                    // the `/api/metrics` scrape endpoint remains functional.
+                    PrometheusBuilder::new().build_recorder().handle()
+                }
+            }
         })
         .clone()
 }

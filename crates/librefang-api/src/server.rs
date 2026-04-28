@@ -1264,7 +1264,11 @@ pub async fn run_daemon(
         }
     }
 
-    // Track background task handles for graceful shutdown
+    // Track background task handles for graceful shutdown.
+    // `bg_shutdown_tx` is broadcast to all looping bg_tasks so they can exit
+    // cleanly before we resort to abort().
+    let (bg_shutdown_tx, _bg_shutdown_rx) =
+        tokio::sync::watch::channel::<bool>(false);
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     let (app, state) = build_router(kernel.clone(), addr).await;
@@ -1301,12 +1305,18 @@ pub async fn run_daemon(
         let k = kernel.clone();
         let st = state.clone();
         let config_path = kernel.home_dir().join("config.toml");
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
                 .ok();
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::select! {
+                    // Graceful shutdown signal: exit the loop so the task
+                    // finishes cleanly instead of being aborted mid-operation.
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                }
                 let current = std::fs::metadata(&config_path)
                     .and_then(|m| m.modified())
                     .ok();
@@ -1400,6 +1410,7 @@ pub async fn run_daemon(
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {
         let kernel = state.kernel.clone();
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
@@ -1436,7 +1447,11 @@ pub async fn run_daemon(
                         );
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+                // Wait 24 hours or until shutdown signal, whichever comes first.
+                tokio::select! {
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)) => {}
+                }
             }
         }));
     }
@@ -1444,11 +1459,15 @@ pub async fn run_daemon(
     // Background: periodic GC for API-layer caches (every 5 minutes)
     {
         let st = state.clone();
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // Skip first immediate tick
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = interval.tick() => {}
+                }
 
                 // Evict expired clawhub/skillhub cache entries (120s TTL)
                 let cache_ttl = std::time::Duration::from_secs(120);
@@ -1514,12 +1533,25 @@ pub async fn run_daemon(
     .with_graceful_shutdown(shutdown_signal(api_shutdown))
     .await?;
 
-    // Abort tracked background tasks (config reload watcher, catalog sync)
-    for handle in &bg_tasks {
-        handle.abort();
-    }
+    // Signal background tasks to exit their loops gracefully, then wait up to
+    // 5 seconds for each to finish. Abort any that haven't exited by then so
+    // we don't stall shutdown indefinitely.
+    let _ = bg_shutdown_tx.send(true);
+    let grace = std::time::Duration::from_secs(5);
     for handle in bg_tasks {
-        let _ = handle.await; // JoinError from abort() is expected; ignore it
+        let abort = handle.abort_handle();
+        match tokio::time::timeout(grace, handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Task did not finish within the grace period — abort as a
+                // last resort so a mid-operation task does not stall shutdown.
+                tracing::warn!(
+                    "Background task did not finish within {}s of shutdown signal; aborting",
+                    grace.as_secs()
+                );
+                abort.abort();
+            }
+        }
     }
     info!("Background tasks stopped");
 
