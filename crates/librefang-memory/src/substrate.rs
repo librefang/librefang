@@ -55,7 +55,9 @@ impl MemorySubstrate {
             "PRAGMA journal_mode=WAL; \
              PRAGMA busy_timeout=5000; \
              PRAGMA cache_size=-2000; \
-             PRAGMA mmap_size=0;",
+             PRAGMA mmap_size=0; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -85,6 +87,11 @@ impl MemorySubstrate {
     ) -> LibreFangResult<Self> {
         let conn =
             Connection::open_in_memory().map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 

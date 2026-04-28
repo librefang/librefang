@@ -1197,6 +1197,14 @@ pub async fn run_daemon(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = listen_addr.parse()?;
 
+    // Acquire an exclusive file lock on `daemon.lock` so two daemons can never
+    // open the same SQLite database simultaneously. This is a true cross-process
+    // mutex that works even when the old daemon was bound to a different port
+    // (making `is_daemon_responding` return false). The lock is released when
+    // `_daemon_lock` is dropped at the end of this function.
+    let lock_path = kernel.home_dir().join("daemon.lock");
+    let _daemon_lock = acquire_daemon_lock(&lock_path)?;
+
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
     kernel.start_background_agents().await;
@@ -1931,6 +1939,55 @@ async fn shutdown_signal(api_shutdown: Arc<tokio::sync::Notify>) {
             }
         }
     }
+}
+
+/// Acquire an exclusive file lock on `path`, creating the file if needed.
+///
+/// Returns a `std::fs::File` whose OS file lock is held for as long as the
+/// handle is alive. Dropping the handle releases the lock automatically (the
+/// kernel releases all `flock` locks when the last fd for the file is closed).
+///
+/// On Unix this uses `flock(2)` with `LOCK_EX | LOCK_NB` — a true
+/// cross-process mutex. If another daemon already holds the lock the call
+/// returns `EWOULDBLOCK` immediately (non-blocking). On other platforms the
+/// file is opened as a best-effort marker only.
+fn acquire_daemon_lock(path: &Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    use std::fs::OpenOptions;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("Cannot open daemon lock file {}: {e}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: flock(2) is safe to call on any open fd; the fd remains valid
+        // for the entire lifetime of `file`.
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let errno = std::io::Error::last_os_error();
+            return Err(format!(
+                "Another LibreFang daemon is already running (could not acquire exclusive lock \
+                 on {}): {}. Stop the existing daemon before starting a new one.",
+                path.display(),
+                errno
+            )
+            .into());
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms (Windows, WASM, etc.) the lock file is created
+        // as a best-effort marker. A proper LockFileEx implementation can be
+        // added when needed.
+        let _ = &file;
+    }
+
+    Ok(file)
 }
 
 /// Check if a process with the given PID is still alive.
