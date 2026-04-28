@@ -862,6 +862,11 @@ pub async fn build_router(
 
     let auth_login_limiter = Arc::new(rate_limiter::AuthLoginLimiter::new());
 
+    // Build the GCRA rate limiter before AppState so both the middleware layer
+    // and the background GC task can share the same Arc (see #3668).
+    let rl_cfg_early = kernel.config_ref().rate_limit.clone();
+    let gcra_limiter_arc = rate_limiter::create_rate_limiter(rl_cfg_early.api_requests_per_minute);
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -886,6 +891,7 @@ pub async fn build_router(
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
+        gcra_limiter: gcra_limiter_arc.clone(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -1012,8 +1018,11 @@ pub async fn build_router(
         audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
+    // Reuse the limiter Arc already stored in AppState (created above before
+    // the AppState constructor so the background GC task can share it for
+    // periodic retain_recent() eviction — see #3668).
     let gcra_limiter = rate_limiter::GcraState {
-        limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
+        limiter: state.gcra_limiter.clone(),
         retry_after_secs: rl_cfg.retry_after_secs,
     };
     let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
@@ -1503,15 +1512,29 @@ pub async fn run_daemon(
                 st.auth_login_limiter.prune_stale();
                 let auth_rl_removed = before_auth_rl - st.auth_login_limiter.map.len();
 
+                // Evict stale GCRA rate-limiter entries. The DashMap grows
+                // unbounded as new client IPs arrive — every unique IP adds a
+                // permanent entry. `retain_recent()` drops entries that are
+                // older than one full quota period so the map stays small
+                // between bursts. See #3668.
+                let gcra_before = st.gcra_limiter.len();
+                st.gcra_limiter.retain_recent();
+                let gcra_removed = gcra_before.saturating_sub(st.gcra_limiter.len());
+
                 let claw_removed = before_claw - st.clawhub_cache.len();
                 let skill_removed = before_skill - st.skillhub_cache.len();
-                let total = claw_removed + skill_removed + expired_sessions + auth_rl_removed;
+                let total = claw_removed
+                    + skill_removed
+                    + expired_sessions
+                    + auth_rl_removed
+                    + gcra_removed;
                 if total > 0 {
                     tracing::info!(
                         clawhub = claw_removed,
                         skillhub = skill_removed,
                         sessions = expired_sessions,
                         auth_rate_limit_entries = auth_rl_removed,
+                        gcra_ips = gcra_removed,
                         "API cache GC sweep completed"
                     );
                 }

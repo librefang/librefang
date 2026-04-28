@@ -16,6 +16,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+/// Hard cap on the number of audit entries kept in memory.
+///
+/// When `record_with_context` appends an entry that would push the in-memory
+/// buffer above this ceiling, the oldest entries are drained from the front so
+/// only the most recent `MAX_AUDIT_ENTRIES` survive. This prevents unbounded
+/// memory growth in long-running daemons that lack a configured retention
+/// policy. The cap applies only to the in-memory window; entries have already
+/// been persisted to SQLite before the drain, so forensic completeness is
+/// preserved on disk.
+const MAX_AUDIT_ENTRIES: usize = 10_000;
+
 /// Categories of auditable actions within the agent runtime.
 ///
 /// **Hash-chain stability:** the variant name is folded into the per-entry
@@ -558,6 +569,21 @@ impl AuditLog {
 
         entries.push(entry);
         *tip = hash.clone();
+
+        // Hard cap: if the in-memory buffer grew beyond MAX_AUDIT_ENTRIES,
+        // drain the oldest prefix so memory stays bounded. Entries are
+        // already persisted to SQLite above, so no forensic data is lost.
+        // We update chain_anchor to the last drained entry's hash so
+        // verify_integrity() stays sound across the implicit trim.
+        if entries.len() > MAX_AUDIT_ENTRIES {
+            let overflow = entries.len() - MAX_AUDIT_ENTRIES;
+            let new_anchor = entries[overflow - 1].hash.clone();
+            {
+                let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                *anchor = Some(new_anchor);
+            }
+            entries.drain(..overflow);
+        }
 
         // Advance the external anchor so a later DB rewrite is detectable.
         // The anchor stores the post-push count so `verify_integrity`

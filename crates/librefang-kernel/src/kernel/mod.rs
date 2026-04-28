@@ -4564,9 +4564,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
+            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
+            // incurs one Arc::new() per entry instead of a full AgentEntry
+            // deep-clone. See #3685.
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
-                .list()
+                .list_arcs()
                 .iter()
                 .map(|a| {
                     (
@@ -5889,9 +5892,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
+            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
+            // incurs one Arc::new() per entry instead of a full AgentEntry
+            // deep-clone. See #3685.
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
-                .list()
+                .list_arcs()
                 .iter()
                 .map(|a| {
                     (
@@ -7434,9 +7440,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
+            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
+            // incurs one Arc::new() per entry instead of a full AgentEntry
+            // deep-clone. See #3685.
             let peer_agents: Vec<(String, String, String)> = self
                 .registry
-                .list()
+                .list_arcs()
                 .iter()
                 .map(|a| {
                     (
@@ -15167,14 +15176,25 @@ system_prompt = "You are a helpful assistant."
 
     /// Build a compact MCP server/tool summary for the system prompt so the
     /// agent knows what external tool servers are connected.
+    ///
+    /// The sync Mutex is held for the minimum time possible: only the tool
+    /// names are extracted while the guard is live. All serialization and
+    /// rendering happens after the lock is released so we never block MCP
+    /// tool-update operations on string formatting work. See #3687.
     fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
-        let tools = match self.mcp_tools.lock() {
-            Ok(t) => t.clone(),
+        // Extract only the names we need while holding the lock, then drop it
+        // immediately. Cloning the entire Vec<ToolDefinition> (which may hold
+        // 60KB+ of JSON schema values) under the Mutex was the original bug.
+        let tool_names: Vec<String> = match self.mcp_tools.lock() {
+            Ok(t) => {
+                if t.is_empty() {
+                    return String::new();
+                }
+                t.iter().map(|t| t.name.clone()).collect()
+            }
             Err(_) => return String::new(),
         };
-        if tools.is_empty() {
-            return String::new();
-        }
+        // Lock released here — all further work is lock-free.
 
         let configured_servers: Vec<String> = self
             .effective_mcp_servers
@@ -15182,7 +15202,6 @@ system_prompt = "You are a helpful assistant."
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
 
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
         render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist)
     }
 
