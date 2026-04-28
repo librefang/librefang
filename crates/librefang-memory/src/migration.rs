@@ -11,107 +11,59 @@ const SCHEMA_VERSION: u32 = 25;
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     let current_version = get_schema_version(conn);
 
-    if current_version < 1 {
-        migrate_v1(conn)?;
+    // Refuse to run if the DB was created by a newer binary. Silently
+    // downgrading `user_version` would corrupt v(N+1)+ columns/indexes.
+    if current_version > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::CannotOpen,
+                extended_code: 0,
+            },
+            Some(format!(
+                "Database schema version {} is newer than this binary supports ({}). \
+                 Downgrade is not supported. Use the correct binary version or restore from backup.",
+                current_version, SCHEMA_VERSION
+            )),
+        ));
     }
 
-    if current_version < 2 {
-        migrate_v2(conn)?;
+    macro_rules! run_step {
+        ($version:expr, $migrate_fn:expr) => {
+            if current_version < $version {
+                let tx = conn.unchecked_transaction()?;
+                $migrate_fn(&tx)?;
+                set_schema_version(&tx, $version)?;
+                tx.commit()?;
+            }
+        };
     }
 
-    if current_version < 3 {
-        migrate_v3(conn)?;
-    }
+    run_step!(1, migrate_v1);
+    run_step!(2, migrate_v2);
+    run_step!(3, migrate_v3);
+    run_step!(4, migrate_v4);
+    run_step!(5, migrate_v5);
+    run_step!(6, migrate_v6);
+    run_step!(7, migrate_v7);
+    run_step!(8, migrate_v8);
+    run_step!(9, migrate_v9);
+    run_step!(10, migrate_v10);
+    run_step!(11, migrate_v11);
+    run_step!(12, migrate_v12);
+    run_step!(13, migrate_v13);
+    run_step!(14, migrate_v14);
+    run_step!(15, migrate_v15);
+    run_step!(16, migrate_v16);
+    run_step!(17, migrate_v17);
+    run_step!(18, migrate_v18);
+    run_step!(19, migrate_v19);
+    run_step!(20, migrate_v20);
+    run_step!(21, migrate_v21);
+    run_step!(22, migrate_v22);
+    run_step!(23, migrate_v23);
+    run_step!(24, migrate_v24);
+    run_step!(25, migrate_v25);
 
-    if current_version < 4 {
-        migrate_v4(conn)?;
-    }
-
-    if current_version < 5 {
-        migrate_v5(conn)?;
-    }
-
-    if current_version < 6 {
-        migrate_v6(conn)?;
-    }
-
-    if current_version < 7 {
-        migrate_v7(conn)?;
-    }
-
-    if current_version < 8 {
-        migrate_v8(conn)?;
-    }
-
-    if current_version < 9 {
-        migrate_v9(conn)?;
-    }
-
-    if current_version < 10 {
-        migrate_v10(conn)?;
-    }
-
-    if current_version < 11 {
-        migrate_v11(conn)?;
-    }
-
-    if current_version < 12 {
-        migrate_v12(conn)?;
-    }
-
-    if current_version < 13 {
-        migrate_v13(conn)?;
-    }
-
-    if current_version < 14 {
-        migrate_v14(conn)?;
-    }
-
-    if current_version < 15 {
-        migrate_v15(conn)?;
-    }
-
-    if current_version < 16 {
-        migrate_v16(conn)?;
-    }
-
-    if current_version < 17 {
-        migrate_v17(conn)?;
-    }
-
-    if current_version < 18 {
-        migrate_v18(conn)?;
-    }
-
-    if current_version < 19 {
-        migrate_v19(conn)?;
-    }
-
-    if current_version < 20 {
-        migrate_v20(conn)?;
-    }
-
-    if current_version < 21 {
-        migrate_v21(conn)?;
-    }
-
-    if current_version < 22 {
-        migrate_v22(conn)?;
-    }
-
-    if current_version < 23 {
-        migrate_v23(conn)?;
-    }
-
-    if current_version < 24 {
-        migrate_v24(conn)?;
-    }
-
-    if current_version < 25 {
-        migrate_v25(conn)?;
-    }
-
-    set_schema_version(conn, SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -421,16 +373,25 @@ fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 10: Add agent_id to entities and relations for per-agent cleanup.
 fn migrate_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // Use column_exists guards — identical to the pattern in v6, v14, v15 — so
+    // a retry after a partial failure does not error with "column already exists".
+    if !column_exists(conn, "entities", "agent_id") {
+        conn.execute(
+            "ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "relations", "agent_id") {
+        conn.execute(
+            "ALTER TABLE relations ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
     conn.execute_batch(
-        "
-        ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
-        ALTER TABLE relations ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
-        CREATE INDEX IF NOT EXISTS idx_entities_agent ON entities(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_relations_agent ON relations(agent_id);
-
-        INSERT OR IGNORE INTO migrations (version, applied_at, description)
-        VALUES (10, datetime('now'), 'Add agent_id to entities and relations');
-        ",
+        "CREATE INDEX IF NOT EXISTS idx_entities_agent ON entities(agent_id);
+         CREATE INDEX IF NOT EXISTS idx_relations_agent ON relations(agent_id);
+         INSERT OR IGNORE INTO migrations (version, applied_at, description)
+         VALUES (10, datetime('now'), 'Add agent_id to entities and relations');",
     )?;
     Ok(())
 }

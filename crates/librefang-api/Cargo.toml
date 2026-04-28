@@ -164,6 +164,7 @@ mini = [
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["process"] }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }
