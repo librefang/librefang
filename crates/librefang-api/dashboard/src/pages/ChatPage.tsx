@@ -2630,14 +2630,12 @@ export function ChatPage() {
 
   return (
     <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
-      {/* Bug #3849: visually-hidden aria-live region for screen reader announcements */}
-      <div
-        aria-live="polite"
-        aria-atomic="true"
-        className="sr-only"
-      >
-        {ariaAnnouncement || msgAriaAnnouncement}
-      </div>
+      {/* Bug #3849: two separate aria-live regions so WS state changes and
+          new-message announcements are each surfaced independently — a single
+          region with `||` would silence msgAriaAnnouncement whenever the WS
+          connection string is non-empty. */}
+      <div aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
+      <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
       {/* Header */}
       <header className="pb-2 sm:pb-4">
         <div className="flex items-center justify-between">
