@@ -2331,20 +2331,27 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-signal")]
     for sig_config in config.signal.iter() {
         if !sig_config.phone_number.is_empty() {
-            let adapter = Arc::new(
-                SignalAdapter::new(
-                    sig_config.api_url.clone(),
-                    sig_config.phone_number.clone(),
-                    sig_config.allowed_users.clone(),
-                )
-                .with_account_id(sig_config.account_id.clone())
-                .with_poll_interval(sig_config.poll_interval_secs),
-            );
-            adapters.push((
-                adapter,
-                sig_config.default_agent.clone(),
-                sig_config.account_id.clone(),
-            ));
+            match SignalAdapter::new(
+                sig_config.api_url.clone(),
+                sig_config.phone_number.clone(),
+                sig_config.allowed_users.clone(),
+            ) {
+                Ok(inner) => {
+                    let adapter = Arc::new(
+                        inner
+                            .with_account_id(sig_config.account_id.clone())
+                            .with_poll_interval(sig_config.poll_interval_secs),
+                    );
+                    adapters.push((
+                        adapter,
+                        sig_config.default_agent.clone(),
+                        sig_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    warn!("Signal: invalid api_url, skipping adapter: {e}");
+                }
+            }
         } else {
             warn!("Signal configured but phone_number is empty, skipping");
         }

@@ -15,6 +15,64 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
+/// Validate the signal-cli REST API URL to prevent SSRF attacks.
+///
+/// Rejects:
+/// - Non-HTTP/HTTPS schemes.
+/// - Loopback hostnames (`localhost`, `127.*`).
+/// - Link-local addresses (169.254.x.x).
+/// - RFC-1918 private ranges (10.x, 172.16-31.x, 192.168.x).
+/// - IPv6 loopback (`::1`) and unspecified (`::`) addresses.
+///
+/// Note: this is a best-effort blocklist. Agents should also be deployed
+/// behind a network perimeter that restricts outbound connections. Always
+/// configure signal-cli REST API with authentication (bearer token) and
+/// TLS when exposed on a non-loopback interface.
+fn validate_signal_api_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid signal api_url: {e}"))?;
+
+    // Only allow http and https schemes.
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "signal api_url must use http or https scheme, got '{}'",
+            parsed.scheme()
+        ));
+    }
+
+    let host = parsed.host_str().unwrap_or("");
+
+    // Block loopback and private-network hostnames/IPs.
+    let blocked = host == "localhost"
+        || host.starts_with("127.")
+        || host.starts_with("169.254.")
+        || host.starts_with("10.")
+        || host == "::1"
+        || host == "::"
+        || {
+            // 172.16.0.0/12 → 172.16.x.x … 172.31.x.x
+            if let Some(rest) = host.strip_prefix("172.") {
+                rest.split('.')
+                    .next()
+                    .and_then(|octet| octet.parse::<u8>().ok())
+                    .map(|o| (16..=31).contains(&o))
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        || host.starts_with("192.168.");
+
+    if blocked {
+        return Err(format!(
+            "signal api_url must not point to a private or loopback address (got '{host}'). \
+             signal-cli REST API should be deployed with bearer-token authentication and TLS \
+             on a non-loopback interface, or accessed only through a secure local proxy."
+        ));
+    }
+
+    Ok(())
+}
+
 // Poll interval is now configurable via SignalConfig.
 
 /// Signal adapter via signal-cli REST API.
@@ -38,9 +96,17 @@ pub struct SignalAdapter {
 
 impl SignalAdapter {
     /// Create a new Signal adapter.
-    pub fn new(api_url: String, phone_number: String, allowed_users: Vec<String>) -> Self {
+    ///
+    /// Returns an error if `api_url` is invalid or points to a private/loopback
+    /// address that could be used for SSRF attacks.
+    pub fn new(
+        api_url: String,
+        phone_number: String,
+        allowed_users: Vec<String>,
+    ) -> Result<Self, String> {
+        validate_signal_api_url(&api_url)?;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        Self {
+        Ok(Self {
             api_url,
             phone_number,
             client: crate::http_client::new_client(),
@@ -49,7 +115,7 @@ impl SignalAdapter {
             poll_interval: Duration::from_secs(2),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
-        }
+        })
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
@@ -586,10 +652,11 @@ mod tests {
     #[test]
     fn test_signal_adapter_creation() {
         let adapter = SignalAdapter::new(
-            "http://localhost:8080".to_string(),
+            "http://signal-cli.example.com:8080".to_string(),
             "+1234567890".to_string(),
             vec![],
-        );
+        )
+        .expect("valid external URL should be accepted");
         assert_eq!(adapter.name(), "signal");
         assert_eq!(adapter.channel_type(), ChannelType::Signal);
     }
@@ -597,11 +664,81 @@ mod tests {
     #[test]
     fn test_signal_allowed_check() {
         let adapter = SignalAdapter::new(
-            "http://localhost:8080".to_string(),
+            "http://signal-cli.example.com:8080".to_string(),
             "+1234567890".to_string(),
             vec!["+9876543210".to_string()],
-        );
+        )
+        .expect("valid external URL should be accepted");
         assert!(adapter.is_allowed("+9876543210"));
         assert!(!adapter.is_allowed("+1111111111"));
+    }
+
+    // --- validate_signal_api_url tests ---
+
+    #[test]
+    fn valid_https_url_is_accepted() {
+        assert!(validate_signal_api_url("https://signal-cli.example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn valid_http_url_is_accepted() {
+        assert!(validate_signal_api_url("http://signal-cli.example.com:8080").is_ok());
+    }
+
+    #[test]
+    fn rejects_localhost() {
+        assert!(validate_signal_api_url("http://localhost:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_127_loopback() {
+        assert!(validate_signal_api_url("http://127.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_link_local() {
+        assert!(validate_signal_api_url("http://169.254.169.254/latest/meta-data/").is_err());
+    }
+
+    #[test]
+    fn rejects_10_dot_private() {
+        assert!(validate_signal_api_url("http://10.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_172_16_private() {
+        assert!(validate_signal_api_url("http://172.16.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_172_31_private() {
+        assert!(validate_signal_api_url("http://172.31.255.255:8080").is_err());
+    }
+
+    #[test]
+    fn allows_172_32_as_not_private() {
+        // 172.32.x.x is outside RFC-1918 range
+        assert!(validate_signal_api_url("http://172.32.0.1:8080").is_ok());
+    }
+
+    #[test]
+    fn rejects_192_168_private() {
+        assert!(validate_signal_api_url("http://192.168.1.1:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_ipv6_loopback() {
+        assert!(validate_signal_api_url("http://[::1]:8080").is_err());
+    }
+
+    #[test]
+    fn rejects_non_http_scheme() {
+        assert!(validate_signal_api_url("ftp://signal-cli.example.com:8080").is_err());
+        assert!(validate_signal_api_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_url() {
+        assert!(validate_signal_api_url("not a url at all").is_err());
     }
 }
