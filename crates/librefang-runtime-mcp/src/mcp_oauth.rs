@@ -237,13 +237,12 @@ pub fn validate_metadata_endpoints(
     metadata: &OAuthMetadata,
     server_url: &str,
 ) -> Result<(), String> {
-    let server_parsed = Url::parse(server_url)
-        .map_err(|e| format!("Invalid server URL: {e}"))?;
+    let server_parsed = Url::parse(server_url).map_err(|e| format!("Invalid server URL: {e}"))?;
     let server_origin = server_parsed.origin();
 
     let check = |endpoint: &str, label: &str| -> Result<(), String> {
-        let parsed = Url::parse(endpoint)
-            .map_err(|e| format!("Invalid {label} URL '{endpoint}': {e}"))?;
+        let parsed =
+            Url::parse(endpoint).map_err(|e| format!("Invalid {label} URL '{endpoint}': {e}"))?;
         if parsed.origin() != server_origin {
             return Err(format!(
                 "OAuth metadata endpoint domain mismatch: {label} '{endpoint}' \
@@ -706,10 +705,10 @@ mod tests {
 
     #[test]
     fn test_well_known_url_http() {
-        let url = well_known_url("http://localhost:3000/mcp").unwrap();
+        let url = well_known_url("http://mcp.example.com:3000/mcp").unwrap();
         assert_eq!(
             url,
-            "http://localhost:3000/.well-known/oauth-authorization-server"
+            "http://mcp.example.com:3000/.well-known/oauth-authorization-server"
         );
     }
 
@@ -914,7 +913,10 @@ mod tests {
             err.contains("domain mismatch"),
             "error should mention domain mismatch: {err}"
         );
-        assert!(err.contains("token_endpoint"), "error should name the field: {err}");
+        assert!(
+            err.contains("token_endpoint"),
+            "error should name the field: {err}"
+        );
     }
 
     #[test]

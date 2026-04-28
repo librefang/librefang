@@ -481,9 +481,8 @@ pub async fn auth_callback(
     // Load stored PKCE state from vault using the per-flow key (#3727).
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
     let flow_key_prefix = format!("{server_url}:{flow_id}");
-    let load = |field: &str| {
-        provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field))
-    };
+    let load =
+        |field: &str| provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
 
     let stored_state = match load("pkce_state") {
         Some(s) => s,
@@ -664,7 +663,13 @@ pub async fn auth_callback(
     }
 
     // Clean up one-time PKCE values from vault (per-flow key — #3727).
-    for field in &["pkce_verifier", "pkce_state", "redirect_uri", "token_endpoint", "client_id"] {
+    for field in &[
+        "pkce_verifier",
+        "pkce_state",
+        "redirect_uri",
+        "token_endpoint",
+        "client_id",
+    ] {
         let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
     }
 
