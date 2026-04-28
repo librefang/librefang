@@ -142,10 +142,9 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self.persist_path.with_extension(format!(
-            "json.tmp.{}",
-            std::process::id()
-        ));
+        let tmp_path = self
+            .persist_path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
@@ -397,55 +396,6 @@ impl CronScheduler {
         count
     }
 
-    /// Warn about cron fires that were missed while the daemon was offline.
-    ///
-    /// Should be called immediately after [`Self::load`] on daemon startup.
-    /// Any enabled job whose `next_run` is more than 60 seconds in the past
-    /// is considered to have missed at least one fire during downtime. The
-    /// method logs a warning with the estimated missed-fire count and
-    /// immediately reschedules the job to fire on the next tick (by setting
-    /// `next_run = now`) so the scheduler can catch up without further delay.
-    ///
-    /// The 60-second grace window prevents false positives for jobs that
-    /// were just about to fire when the daemon stopped.
-    pub fn warn_missed_fires(&self) {
-        let now = Utc::now();
-        for mut entry in self.jobs.iter_mut() {
-            let meta = entry.value_mut();
-            if !meta.job.enabled {
-                continue;
-            }
-            if let Some(next_run) = meta.job.next_run {
-                let grace = Duration::seconds(60);
-                if next_run < now - grace {
-                    let overdue_secs = (now - next_run).num_seconds();
-                    // Estimate how many fires were skipped based on schedule interval.
-                    let interval_secs: i64 = match &meta.job.schedule {
-                        CronSchedule::Every { every_secs } => *every_secs as i64,
-                        CronSchedule::At { .. } => overdue_secs, // one-shot: effectively 1 missed fire
-                        CronSchedule::Cron { .. } => {
-                            // For cron expressions, approximate with the gap between
-                            // `next_run` and what `next_run` would have been after one cycle.
-                            let hypothetical_next =
-                                compute_next_run_after(&meta.job.schedule, next_run);
-                            (hypothetical_next - next_run).num_seconds().max(1)
-                        }
-                    };
-                    let missed_count = (overdue_secs / interval_secs).max(1);
-                    warn!(
-                        agent_id = %meta.job.agent_id,
-                        job_id = %meta.job.id,
-                        missed_count,
-                        overdue_secs,
-                        "cron job missed fires during daemon downtime; firing now"
-                    );
-                    // Reschedule to fire immediately on the next tick.
-                    meta.job.next_run = Some(now);
-                }
-            }
-        }
-    }
-
     /// Remove all cron jobs belonging to a specific agent.
     ///
     /// Used when an agent is deleted so its cron entries don't linger as
@@ -524,11 +474,10 @@ impl CronScheduler {
     /// `At` one-shot jobs that have already passed are silently ignored
     /// (they would have been removed on successful execution anyway).
     ///
-    /// Distinct from [`Self::warn_missed_fires`] (no-arg), which both
-    /// logs and reschedules overdue jobs for catch-up firing. Both were
-    /// independently introduced as fixes for #3828 in PRs #3906 and
-    /// #3923 and ended up colliding on the same name; this one is the
-    /// since-windowed log-only variant.
+    /// Introduced as a fix for #3828 (PR #3923). A previous duplicate
+    /// `warn_missed_fires` method (no-arg, PR #3906) that both logged and
+    /// rescheduled overdue jobs has been removed (#4030); this is now the
+    /// sole missed-fire reporter.
     pub fn log_missed_fires_since(&self, since: chrono::DateTime<Utc>) {
         let now = Utc::now();
         if since >= now {

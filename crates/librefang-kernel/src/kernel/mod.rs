@@ -839,7 +839,10 @@ impl LibreFangKernel {
     /// runtime via [`update_budget_config`], so callers always see the
     /// latest values set through the API.
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        self.budget_config.read().unwrap_or_else(|p| p.into_inner()).clone()
+        self.budget_config
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Safely mutate the runtime budget configuration.
@@ -848,7 +851,10 @@ impl LibreFangKernel {
     /// All writes are serialised through an `RwLock` write-guard, which
     /// eliminates the data-race hazard of the old raw-pointer approach.
     pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut guard = self.budget_config.write().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self
+            .budget_config
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
         f(&mut guard);
     }
 
@@ -2927,10 +2933,6 @@ impl LibreFangKernel {
                 warn!("Failed to load cron jobs: {e}");
             }
         }
-        // Warn about any jobs that missed fires while the daemon was offline,
-        // and reschedule them to fire immediately on the next tick (#3828).
-        cron_scheduler.warn_missed_fires();
-
         // Initialize trigger engine and reload persisted triggers
         let trigger_engine = TriggerEngine::with_config(&config.triggers, &config.home_dir);
         match trigger_engine.load() {
@@ -6579,9 +6581,8 @@ system_prompt = "You are a helpful assistant."
         if !is_fork {
             // #3739: abort any previous task before replacing it so we don't
             // orphan an in-flight LLM call by dropping its abort handle.
-            if let Some((_, old_task)) = self
-                .running_tasks
-                .remove(&(agent_id, effective_session_id))
+            if let Some((_, old_task)) =
+                self.running_tasks.remove(&(agent_id, effective_session_id))
             {
                 tracing::debug!(
                     agent_id = %agent_id,
