@@ -92,29 +92,15 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands: Agents That Work for You
 
-**Hands** are pre-built autonomous capability packages that run independently, on schedules, without prompting. 14 bundled:
+**Hands** are autonomous capability packages that run independently, on schedules, without prompting. Each Hand is defined by a `HAND.toml` manifest, a system prompt, and optional `SKILL.md` files loaded from your configured `hands_dir`.
 
-| Hand | What It Does |
-|------|-------------|
-| **Researcher** | Deep research — multi-source, credibility scoring (CRAAP), cited reports |
-| **Collector** | OSINT monitoring — change detection, sentiment tracking, knowledge graph |
-| **Predictor** | Superforecasting — calibrated predictions with confidence intervals |
-| **Strategist** | Strategy analysis — market research, competitive intel, business planning |
-| **Analytics** | Data analytics — collection, analysis, visualization, automated reporting |
-| **Trader** | Market intelligence — multi-signal analysis, risk management, portfolio analytics |
-| **Lead** | Prospect discovery — web research, scoring, dedup, qualified lead delivery |
-| **Twitter** | Autonomous X/Twitter — content creation, scheduling, approval queue |
-| **Reddit** | Reddit manager — subreddit monitoring, posting, engagement tracking |
-| **LinkedIn** | LinkedIn manager — content creation, networking, professional engagement |
-| **Clip** | YouTube to vertical shorts — cuts best moments, captions, voice-over |
-| **Browser** | Web automation — Playwright-based, mandatory purchase approval gate |
-| **API Tester** | API testing — endpoint discovery, validation, load testing, regression detection |
-| **DevOps** | DevOps automation — CI/CD, infrastructure monitoring, incident response |
+Example Hand definitions (Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps) are available in the [community hands repository](https://github.com/librefang/hands).
 
 ```bash
+# Install a community Hand, then:
 librefang hand activate researcher   # Starts working immediately
 librefang hand status researcher     # Check progress
-librefang hand list                  # See all Hands
+librefang hand list                  # See all installed Hands
 ```
 
 Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https://docs.librefang.ai/agent/skills)
@@ -131,7 +117,7 @@ librefang-channels    40 messaging adapters with rate limiting, DM/group policie
 librefang-memory      SQLite persistence, vector embeddings, sessions, compaction
 librefang-types       Core types, taint tracking, Ed25519 signing, model catalog
 librefang-skills      60 bundled skills, SKILL.md parser, FangHub marketplace
-librefang-hands       14 autonomous Hands, HAND.toml parser, lifecycle management
+librefang-hands       HAND.toml parser, Hand registry, lifecycle management
 librefang-extensions  25 MCP templates, AES-256-GCM vault, OAuth2 PKCE
 librefang-wire        OFP P2P protocol, HMAC-SHA256 mutual auth (see note)
 librefang-cli         CLI, daemon management, TUI dashboard, MCP server mode

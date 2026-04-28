@@ -41,9 +41,12 @@ pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Regi
         // If the caller registers this second layer as the active subscriber
         // layer, OTel spans would silently never reach it.
         //
-        // Tracing isn't up yet (we're still building the subscriber), so
-        // `tracing::warn!` would be lost. Use stderr directly so a confused
-        // future reader has a lead to pull on.
+        // NOTE: `tracing::warn!` is intentionally NOT used here.  This
+        // function is called during subscriber construction — the global
+        // tracing dispatcher is not yet installed, so any `tracing!` macro
+        // invocation would be a no-op and the warning would be silently
+        // dropped.  `eprintln!` is the only channel guaranteed to reach
+        // the operator at this point in the startup sequence.
         eprintln!(
             "warning: install_otel_reload_layer called more than once; the \
              second layer is NOT wired to the OTel reload handle and will \
