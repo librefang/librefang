@@ -4810,8 +4810,22 @@ pub(crate) fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Escape a value for safe storage in a `.env` file.
+///
+/// If a value contains literal newlines the raw `KEY=value\nEXTRA=junk` text
+/// would be parsed as two separate keys by every dotenv reader. Backslashes
+/// must be doubled so they are not misread as escape sequences on read-back.
+fn escape_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\") // must come first to avoid double-escaping
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
+/// Values containing newlines or backslashes are escaped so they stay on a
+/// single line and round-trip correctly through dotenv parsers.
 pub(crate) fn write_secret_env(
     path: &std::path::Path,
     key: &str,
@@ -4831,8 +4845,10 @@ pub(crate) fn write_secret_env(
     // Remove existing line for this key
     lines.retain(|l| !l.starts_with(&format!("{key}=")));
 
-    // Add new line
-    lines.push(format!("{key}={value}"));
+    // Add new line — escape the value so embedded newlines/backslashes cannot
+    // corrupt the file structure.
+    let escaped = escape_env_value(value);
+    lines.push(format!("{key}={escaped}"));
 
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
@@ -5809,6 +5825,65 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
         assert!(
             !raw.contains("[channels.discord]"),
             "channel section should have been removed — got:\n{raw}"
+        );
+    }
+
+    // ── escape_env_value tests (Bug #3790) ─────────────────────────────────
+
+    #[test]
+    fn escape_env_value_plain_value_unchanged() {
+        assert_eq!(escape_env_value("hello"), "hello");
+        assert_eq!(escape_env_value("sk-abc123"), "sk-abc123");
+    }
+
+    #[test]
+    fn escape_env_value_newline_becomes_backslash_n() {
+        let raw = "line1\nline2";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "line1\\nline2");
+        // Must not contain a literal newline character.
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_carriage_return_becomes_backslash_r() {
+        let raw = "val\r\nend";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "val\\r\\nend");
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn escape_env_value_backslash_is_doubled() {
+        let raw = r"C:\Users\secret";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, r"C:\\Users\\secret");
+    }
+
+    #[test]
+    fn escape_env_value_backslash_before_newline_double_escapes_correctly() {
+        // "\\\n" → the backslash must be doubled before the newline is escaped,
+        // producing "\\\\n" (a literal backslash-backslash-n), not "\\n".
+        let raw = "\\\n";
+        let escaped = escape_env_value(raw);
+        assert_eq!(escaped, "\\\\\\n");
+        assert!(!escaped.contains('\n'));
+    }
+
+    #[test]
+    fn write_secret_env_value_with_newline_stays_single_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.env");
+        write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Must not inject additional key-looking lines.
+        let key_lines: Vec<&str> = content.lines().filter(|l| l.contains('=')).collect();
+        assert_eq!(key_lines.len(), 1, "expected 1 key line, got: {content:?}");
+        assert!(
+            key_lines[0].starts_with("API_KEY="),
+            "wrong key line: {}",
+            key_lines[0]
         );
     }
 }
