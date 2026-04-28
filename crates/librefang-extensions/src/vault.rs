@@ -6,7 +6,7 @@
 
 use crate::{ExtensionError, ExtensionResult};
 use aes_gcm::aead::rand_core::RngCore;
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
 use serde::{Deserialize, Serialize};
@@ -343,6 +343,11 @@ impl CredentialVault {
     }
 
     /// Save encrypted vault to disk.
+    ///
+    /// The vault file path is used as AES-GCM Additional Associated Data (AAD)
+    /// so that a ciphertext blob cannot be silently transplanted to a different
+    /// path or a different install's vault file — decryption will fail with an
+    /// authentication error if the path recorded at encryption time differs.
     fn save(&self, master_key: &[u8; 32]) -> ExtensionResult<()> {
         // Serialize entries to JSON
         let plain_entries: HashMap<String, String> = self
@@ -367,12 +372,22 @@ impl CredentialVault {
         // Derive encryption key from master key + salt using Argon2
         let derived_key = derive_key(master_key, &salt)?;
 
-        // Encrypt with AES-256-GCM
+        // Encrypt with AES-256-GCM, binding the ciphertext to this vault's
+        // canonical path via AAD. An adversary who copies the raw vault file to
+        // a different path (or to another install) will receive an authentication
+        // error on decrypt rather than silently obtaining a valid plaintext.
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
+        let aad = self.path.to_string_lossy();
         let ciphertext = cipher
-            .encrypt(nonce, plaintext.as_slice())
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: plaintext.as_slice(),
+                    aad: aad.as_bytes(),
+                },
+            )
             .map_err(|e| ExtensionError::Vault(format!("Encryption failed: {e}")))?;
 
         // Write to file
@@ -415,6 +430,9 @@ impl CredentialVault {
     }
 
     /// Load and decrypt vault from disk.
+    ///
+    /// The vault file path is passed as AAD to AES-GCM decrypt; this must
+    /// match the path that was active when the ciphertext was produced.
     fn load(&mut self, master_key: &[u8; 32]) -> ExtensionResult<()> {
         let raw = std::fs::read(&self.path)?;
 
@@ -459,13 +477,22 @@ impl CredentialVault {
         // Derive key
         let derived_key = derive_key(master_key, &salt)?;
 
-        // Decrypt
+        // Decrypt, supplying the vault path as AAD so the authentication tag
+        // covers both the ciphertext and the path. A file swapped from a
+        // different path will fail here with "Decryption failed".
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
+        let aad = self.path.to_string_lossy();
         let plaintext = Zeroizing::new(
             cipher
-                .decrypt(nonce, ciphertext.as_slice())
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: ciphertext.as_slice(),
+                        aad: aad.as_bytes(),
+                    },
+                )
                 .map_err(|e| ExtensionError::Vault(format!("Decryption failed: {e}")))?,
         );
 
@@ -913,7 +940,8 @@ mod tests {
         assert_eq!(&raw[..4], b"OFV1");
         std::fs::write(&vault.path, &raw[4..]).unwrap();
 
-        // Should still load (legacy compat)
+        // Should still load (legacy compat) — the path (AAD) is unchanged so
+        // the GCM tag remains valid even without the magic prefix.
         let mut vault2 = CredentialVault::new(dir.path().join("vault.enc"));
         vault2.unlock_with_key(key).unwrap();
         assert_eq!(vault2.get("KEY").unwrap().as_str(), "val");
@@ -933,5 +961,47 @@ mod tests {
         assert!(result.is_err());
         let msg = format!("{:?}", result.unwrap_err());
         assert!(msg.contains("Unrecognized vault file format"));
+    }
+
+    /// Regression test for #3788: copying a vault file to a different path
+    /// must fail decryption because the AES-GCM AAD (vault path) no longer
+    /// matches the path embedded at encryption time.
+    #[test]
+    fn vault_path_binding_rejects_file_swap() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+
+        let path_a = dir_a.path().join("vault.enc");
+        let path_b = dir_b.path().join("vault.enc");
+
+        let key = random_key();
+
+        // Create and populate vault at path_a
+        let mut vault_a = CredentialVault::new(path_a.clone());
+        vault_a.init_with_key(key.clone()).unwrap();
+        vault_a
+            .set(
+                "TOKEN".to_string(),
+                Zeroizing::new("secret_value".to_string()),
+            )
+            .unwrap();
+
+        // Copy the raw vault bytes to path_b (simulating a file-swap attack)
+        std::fs::copy(&path_a, &path_b).unwrap();
+
+        // Opening path_b with the same key and the *same* path as path_a would
+        // succeed (same AAD). Opening it as path_b must fail because path_b was
+        // not the path used during encryption.
+        let mut vault_b = CredentialVault::new(path_b);
+        let result = vault_b.unlock_with_key(key);
+        assert!(
+            result.is_err(),
+            "Decryption of a vault file at a swapped path must fail (AAD mismatch)"
+        );
+        let msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            msg.contains("Decryption failed"),
+            "Expected 'Decryption failed' error, got: {msg}"
+        );
     }
 }
