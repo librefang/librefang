@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "ai.librefang.desktop",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJDOTE5MDhCRDNGMTUyMEQKUldRTlV2SFRpNUNSdkZRZDcvektwZkN6bUsyM0NJZC9OeXhHRU5id1FnZWllQmNlZGRoSGRQOHkK",
+      "endpoints": [
+        "https://github.com/librefang/librefang/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
