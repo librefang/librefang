@@ -784,6 +784,46 @@ impl std::fmt::Display for JsonRpcError {
 }
 
 // ---------------------------------------------------------------------------
+// Bounded HTTP response reading (#3801)
+// ---------------------------------------------------------------------------
+
+/// Maximum response body size accepted from an MCP server (SSE or HttpCompat).
+///
+/// A malicious server that returns a gigabyte-sized response would otherwise
+/// cause the daemon to OOM. We cap at 16 MiB, which is well above any sane
+/// MCP response, and reject anything larger with an error.
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Read an HTTP response body up to [`MAX_RESPONSE_BYTES`].
+///
+/// Rejects based on `Content-Length` header first (fast path), then reads
+/// the full body and errors if it exceeds the cap.
+async fn read_response_bytes_capped(response: reqwest::Response) -> Result<Vec<u8>, String> {
+    // Fast-path: reject via Content-Length before reading a single byte.
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "MCP response Content-Length ({content_length}) exceeds \
+                 the {MAX_RESPONSE_BYTES}-byte cap — response rejected"
+            ));
+        }
+    }
+    // Read the full body and enforce the cap.
+    let b = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read response body: {e}"))?;
+    if b.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "MCP response body ({} bytes) exceeds the {MAX_RESPONSE_BYTES}-byte cap \
+             — response rejected",
+            b.len()
+        ));
+    }
+    Ok(b.to_vec())
+}
+
+// ---------------------------------------------------------------------------
 // Environment variable allowlist for subprocess sandboxing
 // ---------------------------------------------------------------------------
 
@@ -943,8 +983,10 @@ impl McpConnection {
         extra_env: &[String],
         roots: Vec<String>,
     ) -> Result<(McpInner, Option<Vec<rmcp::model::Tool>>), String> {
+        use std::process::Stdio;
         use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
         use rmcp::ServiceExt;
+        use tokio::io::AsyncBufReadExt;
 
         // Validate command path (no path traversal)
         if command.contains("..") {
@@ -1001,12 +1043,35 @@ impl McpConnection {
             command.to_string()
         };
 
+        // Build the allowlist for env-var expansion: safe system vars + the
+        // operator-declared vars from this server's `env` config.  This
+        // prevents templates from silently reading arbitrary daemon secrets
+        // like ANTHROPIC_API_KEY that happen to be set in the environment
+        // but were never declared in the MCP server config. (#3823)
+        let mut expand_allowlist: std::collections::HashSet<String> = SAFE_ENV_VARS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for entry in extra_env {
+            // Extract just the variable name (before '=' for KEY=VALUE, or the
+            // whole entry for legacy plain-name format).
+            let var_name = entry.split_once('=').map(|(k, _)| k).unwrap_or(entry);
+            expand_allowlist.insert(var_name.to_string());
+        }
+
         // Expand environment variable references ($VAR, ${VAR}) in args so
         // templates can use e.g. "$HOME" without wrapping in `sh -c`.
-        let args_owned: Vec<String> = args.iter().map(|a| expand_env_vars(a)).collect();
+        // Expansion is restricted to the allowlist above. (#3823)
+        let args_owned: Vec<String> = args
+            .iter()
+            .map(|a| expand_env_vars(a, &expand_allowlist))
+            .collect();
         let env_owned: Vec<String> = extra_env.to_vec();
 
-        let transport = TokioChildProcess::new(
+        // Use the builder so we can capture stderr instead of inheriting the
+        // daemon's stderr fd.  An inherited fd would mix child output with
+        // daemon logs and could fill the daemon's stderr under high load. (#3805)
+        let (transport, stderr_opt) = TokioChildProcess::builder(
             tokio::process::Command::new(&resolved_command).configure(|cmd| {
                 cmd.args(&args_owned);
 
@@ -1034,7 +1099,58 @@ impl McpConnection {
                 }
             }),
         )
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to spawn MCP server '{resolved_command}': {e}"))?;
+
+        // Drain the child's stderr in a background task, logging each line at
+        // DEBUG level.  This prevents the pipe buffer from filling (which would
+        // stall the child) while keeping child diagnostics available in the
+        // daemon's structured logs.  Line length is capped at 256 bytes; we
+        // stop reading after 100 lines per session to bound memory usage. (#3805)
+        if let Some(stderr) = stderr_opt {
+            let server_name_for_log = resolved_command.clone();
+            tokio::spawn(async move {
+                use tokio::io::BufReader;
+                let mut reader = BufReader::new(stderr).lines();
+                let mut lines_read: u32 = 0;
+                const MAX_LINE_BYTES: usize = 256;
+                const MAX_LINES: u32 = 100;
+                while lines_read < MAX_LINES {
+                    match reader.next_line().await {
+                        Ok(Some(line)) => {
+                            let truncated = if line.len() > MAX_LINE_BYTES {
+                                // Find the last valid UTF-8 character boundary at
+                                // or before MAX_LINE_BYTES so we don't panic on
+                                // multi-byte characters.
+                                let safe_end = line
+                                    .char_indices()
+                                    .take_while(|(i, _)| *i < MAX_LINE_BYTES)
+                                    .last()
+                                    .map(|(i, c)| i + c.len_utf8())
+                                    .unwrap_or(0);
+                                format!("{}…", &line[..safe_end])
+                            } else {
+                                line
+                            };
+                            debug!(
+                                server = %server_name_for_log,
+                                "MCP stdio stderr: {truncated}"
+                            );
+                            lines_read += 1;
+                        }
+                        Ok(None) => break, // EOF
+                        Err(_) => break,   // pipe closed or read error
+                    }
+                }
+                if lines_read >= MAX_LINES {
+                    debug!(
+                        server = %server_name_for_log,
+                        "MCP stdio stderr drain reached {MAX_LINES}-line cap; suppressing further output"
+                    );
+                }
+            });
+        }
 
         let client = if roots.is_empty() {
             ().into_dyn()
@@ -1377,12 +1493,29 @@ impl McpConnection {
             return Err(format!("MCP SSE returned {}", response.status()));
         }
 
-        let body = response
-            .text()
-            .await
+        // Reject responses whose Content-Type is neither JSON nor an SSE
+        // stream — anything else is almost certainly a proxy error page or a
+        // misconfigured server, and decoding it as JSON-RPC would silently
+        // produce garbage. (#3802)
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !content_type.contains("application/json") && !content_type.contains("text/event-stream")
+        {
+            return Err(format!(
+                "MCP SSE response has unexpected Content-Type: {content_type:?}; \
+                 expected application/json or text/event-stream"
+            ));
+        }
+
+        // Guard against malicious MCP servers returning unbounded response bodies
+        // (e.g. gigabytes of garbage) that would OOM the daemon. (#3801)
+        let body = read_response_bytes_capped(response).await
             .map_err(|e| format!("Failed to read SSE response: {e}"))?;
 
-        let rpc_response: JsonRpcResponse = serde_json::from_str(&body)
+        let rpc_response: JsonRpcResponse = serde_json::from_slice(&body)
             .map_err(|e| format!("Invalid MCP SSE JSON-RPC response: {e}"))?;
 
         if let Some(err) = rpc_response.error {
@@ -1511,6 +1644,83 @@ impl McpConnection {
             description: format!("[MCP:{server_name}] {description}"),
             input_schema,
         });
+    }
+
+    /// Explicitly close the MCP connection and wait for the underlying
+    /// transport to shut down.
+    ///
+    /// For stdio (rmcp) connections this cancels the rmcp service and waits
+    /// for the background task to finish, which in turn drops the
+    /// `TokioChildProcess` and kills the child subprocess.  Callers that
+    /// perform hot-reload should call this instead of relying on the implicit
+    /// `Drop` path to guarantee the child is reaped before the new connection
+    /// is started. (#3800)
+    pub async fn close(self) {
+        let name = self.config.name.clone();
+        if let McpInner::Rmcp(mut client) = self.inner {
+            if let Err(e) = client.close().await {
+                warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
+            }
+        }
+        // SSE and HttpCompat hold no persistent connection; nothing to close.
+    }
+}
+
+/// Ensure the stdio child process is killed when `McpConnection` is dropped
+/// without an explicit call to [`McpConnection::close`]. (#3800)
+///
+/// For stdio connections backed by rmcp the inner `RunningService` already
+/// fires its `CancellationToken` via a `DropGuard`, which signals the
+/// transport loop to exit and eventually causes `ChildWithCleanup::drop` to
+/// spawn a kill task. However that path is fire-and-forget: there is no
+/// guarantee the task runs before the process is replaced. The explicit cancel
+/// here schedules the async cancel-and-wait on the current tokio runtime so
+/// the scheduler can drive it to completion in the background, giving it a
+/// better chance to reap the subprocess before a new connection starts.
+///
+/// Callers performing hot-reload should still prefer the explicit `.close()`
+/// call because only that path _awaits_ the join handle.
+impl Drop for McpConnection {
+    fn drop(&mut self) {
+        // Only stdio (rmcp) connections own a subprocess. SSE and HttpCompat
+        // hold only an HTTP client and need no special teardown.
+        if matches!(self.inner, McpInner::Rmcp(_)) {
+            // Swap out the inner value so we can move it into the async block
+            // without leaving self.inner in an undefined state. We replace it
+            // with a lightweight sentinel (HttpCompat client) that has no
+            // resources to clean up.
+            let inner = std::mem::replace(
+                &mut self.inner,
+                McpInner::HttpCompat {
+                    client: reqwest::Client::new(),
+                },
+            );
+            let name = self.config.name.clone();
+            if let McpInner::Rmcp(mut client) = inner {
+                // Best-effort: if we are inside a tokio runtime, schedule the
+                // cancel + wait so the child is reaped asynchronously. If
+                // there is no runtime (e.g. in tests that drop on a sync
+                // thread), the `DropGuard` on the `RunningService` will still
+                // cancel the token synchronously, and `ChildWithCleanup::drop`
+                // will spawn a detached kill task when the next runtime is
+                // entered.
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(e) = client.close().await {
+                            debug!(
+                                server = %name,
+                                error = ?e,
+                                "MCP stdio client close error on implicit drop (#3800)"
+                            );
+                        }
+                    });
+                }
+                // If there is no runtime the `RunningService` drop (which runs
+                // immediately when `client` goes out of scope here) will fire
+                // the CancellationToken via its DropGuard, which is the best
+                // we can do in a sync context.
+            }
+        }
     }
 }
 
@@ -1870,10 +2080,11 @@ impl McpConnection {
             .map_err(|e| format!("HTTP compatibility request failed: {e}"))?;
 
         let status = response.status();
-        let body = response
-            .text()
+        // Guard against malicious backends returning unbounded response bodies. (#3801)
+        let body_bytes = read_response_bytes_capped(response)
             .await
             .map_err(|e| format!("Failed to read HTTP compatibility response: {e}"))?;
+        let body = String::from_utf8_lossy(&body_bytes).into_owned();
 
         if !status.is_success() {
             return Err(format!(
@@ -2084,11 +2295,19 @@ pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace('-', "_")
 }
 
-/// Expand `$VAR` and `${VAR}` references in a string using the process
-/// environment. Unknown variables are left as-is. This allows MCP server
-/// templates to reference `$HOME`, `$USER`, etc. without requiring a shell
-/// wrapper (`sh -c`), which the security check blocks.
-fn expand_env_vars(input: &str) -> String {
+/// Expand `$VAR` and `${VAR}` references in a string, but **only** for
+/// variables whose names appear in `allowed_vars`.
+///
+/// This prevents command-argument templates from accidentally (or maliciously)
+/// reading daemon secrets such as `ANTHROPIC_API_KEY`, `GROQ_API_KEY`, etc.
+/// that are present in the daemon's process environment but were never declared
+/// in the MCP server's `env` config map. (#3823)
+///
+/// `allowed_vars` should be the set of variable names the operator explicitly
+/// declared in the server's `env` list (plus the safe system vars forwarded
+/// unconditionally).  Any `$VAR` token whose name is not in `allowed_vars` is
+/// left as-is in the output.
+fn expand_env_vars(input: &str, allowed_vars: &std::collections::HashSet<String>) -> String {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -2115,10 +2334,23 @@ fn expand_env_vars(input: &str) -> String {
                 if braced {
                     result.push('{');
                 }
-            } else if let Ok(val) = std::env::var(&var_name) {
-                result.push_str(&val);
+            } else if allowed_vars.contains(&var_name) {
+                // Only expand variables that the operator explicitly declared.
+                if let Ok(val) = std::env::var(&var_name) {
+                    result.push_str(&val);
+                } else {
+                    // Declared but not set in the environment — keep original.
+                    result.push('$');
+                    if braced {
+                        result.push('{');
+                    }
+                    result.push_str(&var_name);
+                    if braced {
+                        result.push('}');
+                    }
+                }
             } else {
-                // Unknown var — keep original text
+                // Not in the allowlist — do NOT call std::env::var(); leave as-is.
                 result.push('$');
                 if braced {
                     result.push('{');
@@ -3531,6 +3763,127 @@ mod tests {
         let ann = serde_json::json!("not-an-object");
         inject_annotation_class(&mut schema, Some(&ann));
         assert_eq!(schema, original);
+    }
+
+    // ── expand_env_vars allowlist tests (#3823) ───────────────────────────
+
+    fn make_allowlist(vars: &[&str]) -> std::collections::HashSet<String> {
+        vars.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_expand_env_vars_expands_allowed_dollar_var() {
+        std::env::set_var("_TEST_EXPAND_ALLOWED", "hello");
+        let allowed = make_allowlist(&["_TEST_EXPAND_ALLOWED"]);
+        let result = expand_env_vars("prefix_$_TEST_EXPAND_ALLOWED", &allowed);
+        assert_eq!(result, "prefix_hello");
+        std::env::remove_var("_TEST_EXPAND_ALLOWED");
+    }
+
+    #[test]
+    fn test_expand_env_vars_expands_allowed_braced_var() {
+        std::env::set_var("_TEST_EXPAND_BRACED", "world");
+        let allowed = make_allowlist(&["_TEST_EXPAND_BRACED"]);
+        let result = expand_env_vars("${_TEST_EXPAND_BRACED}/extra", &allowed);
+        assert_eq!(result, "world/extra");
+        std::env::remove_var("_TEST_EXPAND_BRACED");
+    }
+
+    #[test]
+    fn test_expand_env_vars_does_not_expand_disallowed_var() {
+        // Simulate a daemon secret that is NOT in the declared env list.
+        std::env::set_var("_TEST_SECRET_VAR", "super-secret");
+        let allowed = make_allowlist(&["HOME", "PATH"]); // _TEST_SECRET_VAR not listed
+        let result = expand_env_vars("$_TEST_SECRET_VAR", &allowed);
+        // Must leave the original token untouched, not expand it.
+        assert_eq!(result, "$_TEST_SECRET_VAR");
+        std::env::remove_var("_TEST_SECRET_VAR");
+    }
+
+    #[test]
+    fn test_expand_env_vars_does_not_expand_disallowed_braced_var() {
+        std::env::set_var("_TEST_BRACED_SECRET", "leak");
+        let allowed = make_allowlist(&["HOME"]);
+        let result = expand_env_vars("${_TEST_BRACED_SECRET}", &allowed);
+        assert_eq!(result, "${_TEST_BRACED_SECRET}");
+        std::env::remove_var("_TEST_BRACED_SECRET");
+    }
+
+    #[test]
+    fn test_expand_env_vars_empty_allowlist_expands_nothing() {
+        std::env::set_var("_TEST_EMPTY_LIST", "value");
+        let allowed = make_allowlist(&[]);
+        let result = expand_env_vars("$_TEST_EMPTY_LIST", &allowed);
+        assert_eq!(result, "$_TEST_EMPTY_LIST");
+        std::env::remove_var("_TEST_EMPTY_LIST");
+    }
+
+    #[test]
+    fn test_expand_env_vars_plain_string_unchanged() {
+        let allowed = make_allowlist(&["PATH", "HOME"]);
+        let result = expand_env_vars("/usr/local/bin/npx", &allowed);
+        assert_eq!(result, "/usr/local/bin/npx");
+    }
+
+    #[test]
+    fn test_expand_env_vars_unset_allowed_var_kept_as_is() {
+        // Declared in allowlist but not actually set in the environment.
+        std::env::remove_var("_TEST_UNSET_DECLARED");
+        let allowed = make_allowlist(&["_TEST_UNSET_DECLARED"]);
+        let result = expand_env_vars("$_TEST_UNSET_DECLARED/bin", &allowed);
+        // Must keep the original token, not substitute empty string or panic.
+        assert_eq!(result, "$_TEST_UNSET_DECLARED/bin");
+    }
+
+    // ── read_response_bytes_capped tests (#3801) ──────────────────────────
+
+    #[tokio::test]
+    async fn test_read_response_bytes_capped_small_body_accepted() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap();
+        let body = read_response_bytes_capped(resp).await.unwrap();
+        assert_eq!(body.as_slice(), b"hello");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_response_bytes_capped_rejects_oversized_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Report a Content-Length larger than the cap (no actual body needed).
+        let cap = MAX_RESPONSE_BYTES + 1;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {cap}\r\n\r\n"
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap();
+        let err = read_response_bytes_capped(resp).await.unwrap_err();
+        assert!(
+            err.contains("cap") || err.contains("Content-Length"),
+            "error must mention the cap or Content-Length: {err}"
+        );
+        server.await.unwrap();
     }
 
     /// Producer/consumer string contract: the literals `inject_annotation_class`

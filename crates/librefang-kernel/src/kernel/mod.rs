@@ -12985,10 +12985,25 @@ system_prompt = "You are a helpful assistant."
     /// The dropped `McpConnection` will shut down the underlying transport.
     /// Returns `true` if a connection was found and removed.
     pub async fn disconnect_mcp_server(&self, name: &str) -> bool {
-        let mut conns = self.mcp_connections.lock().await;
-        let before = conns.len();
-        conns.retain(|c| c.name() != name);
-        let removed = conns.len() < before;
+        // Extract the matching connection(s) so we can close them explicitly
+        // rather than relying on the implicit Drop path.  Explicit close ensures
+        // the underlying stdio child process is reaped before we return, which
+        // prevents subprocess leaks on hot-reload. (#3800)
+        let removed_conns: Vec<librefang_runtime::mcp::McpConnection> = {
+            let mut conns = self.mcp_connections.lock().await;
+            let mut extracted = Vec::new();
+            let mut i = 0;
+            while i < conns.len() {
+                if conns[i].name() == name {
+                    extracted.push(conns.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            extracted
+        };
+
+        let removed = !removed_conns.is_empty();
         if removed {
             // Remove cached tools from this server and bump generation.
             // MCP tools are prefixed: mcp_{normalized_server_name}_{tool_name}
@@ -12999,6 +13014,13 @@ system_prompt = "You are a helpful assistant."
             self.mcp_generation
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             info!(server = %name, "MCP server disconnected");
+
+            // Close each extracted connection after releasing the lock.
+            // For stdio connections this waits for the rmcp service task to
+            // finish and the child process to be killed. (#3800)
+            for conn in removed_conns {
+                conn.close().await;
+            }
         }
         removed
     }
@@ -13245,20 +13267,37 @@ system_prompt = "You are a helpful assistant."
             .collect();
 
         if !removed.is_empty() {
-            let mut conns = self.mcp_connections.lock().await;
-            conns.retain(|c| !removed.contains(&c.name().to_string()));
-            // Rebuild tool cache
-            if let Ok(mut tools) = self.mcp_tools.lock() {
-                tools.clear();
-                for conn in conns.iter() {
-                    tools.extend(conn.tools().iter().cloned());
+            // Extract the connections to remove so we can close them explicitly
+            // after releasing the lock, preventing subprocess leaks on hot-reload. (#3800)
+            let conns_to_close: Vec<librefang_runtime::mcp::McpConnection> = {
+                let mut conns = self.mcp_connections.lock().await;
+                let mut extracted = Vec::new();
+                let mut i = 0;
+                while i < conns.len() {
+                    if removed.contains(&conns[i].name().to_string()) {
+                        extracted.push(conns.remove(i));
+                    } else {
+                        i += 1;
+                    }
                 }
-                self.mcp_generation
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+                // Rebuild tool cache with remaining connections.
+                if let Ok(mut tools) = self.mcp_tools.lock() {
+                    tools.clear();
+                    for conn in conns.iter() {
+                        tools.extend(conn.tools().iter().cloned());
+                    }
+                    self.mcp_generation
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                extracted
+            };
             for name in &removed {
                 self.mcp_health.unregister(name);
                 info!(server = %name, "MCP server disconnected (removed)");
+            }
+            // Close extracted connections after releasing the lock. (#3800)
+            for conn in conns_to_close {
+                conn.close().await;
             }
         }
 
