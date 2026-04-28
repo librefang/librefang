@@ -109,21 +109,18 @@ jobs:
 
   ios_smoke:
     name: iOS (simulator, unsigned)
-    # macos-15 ships Xcode 16, which understands the objectVersion=77
-    # pbxproj that `tauri ios init` (cargo-mobile2) emits. macos-14 + Xcode
-    # 15.4 fails with "future Xcode project file format (77)".
-    runs-on: macos-15
+    # macos-26 ships Xcode 26 + iOS 26.4 Simulator runtime pre-staged.
+    # Matches the local dev setup (Xcode 26.4.1 + iOS 26.4 SDK), so the
+    # smoke binary is built against the same SDK developers ship from.
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      # Use the macos-15 image's default Xcode (16.x) — it understands the
-      # objectVersion=77 pbxproj that `tauri ios init` emits and ships with
-      # an iOS Simulator runtime preinstalled. setup-xcode@v1 switching to a
-      # pinned Xcode build (e.g. 16.2) silently lands on an install whose
-      # iOS Simulator runtime isn't pre-staged, and `xcodebuild
-      # -downloadPlatform iOS` then fails on hosted runners with "Unable to
-      # connect to simulator" (exit 70).
+      - uses: maxim-lobanov/setup-xcode@1242409711ff5721add51979e9e11e23ebb7e5a4 # v1
+        with:
+          xcode-version: "26.4.1"
+
       - name: Show selected Xcode
         run: |
           xcode-select -p
