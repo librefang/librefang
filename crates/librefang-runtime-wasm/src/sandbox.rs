@@ -383,6 +383,20 @@ impl WasmSandbox {
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
         // host_log: lightweight logging — no capability check required.
+        //
+        // SECURITY (Bug #3865): two hardening measures are applied before the
+        // message reaches the log pipeline:
+        //
+        // 1. **Length cap** — only the first `MAX_HOST_LOG_BYTES` bytes are
+        //    read from guest memory.  Without this a malicious plugin can write
+        //    gigabytes of data, saturating disk I/O and exhausting the
+        //    structured-logging pipeline (log-pipeline DoS).
+        //
+        // 2. **Newline stripping** — CR and LF characters are replaced with a
+        //    space before the message is handed to `tracing`.  Without this a
+        //    plugin can embed fake log lines and forge audit-trail entries (log
+        //    injection), because most log shippers split on newlines and treat
+        //    each line as an independent event.
         linker
             .func_wrap(
                 "librefang",
@@ -391,10 +405,19 @@ impl WasmSandbox {
                  level: i32,
                  msg_ptr: i32,
                  msg_len: i32| {
+                    // Cap the number of bytes read from the guest to prevent
+                    // log-pipeline DoS.
+                    const MAX_HOST_LOG_BYTES: usize = 4096;
+                    let capped_len = (msg_len as usize).min(MAX_HOST_LOG_BYTES) as i32;
+
                     let mut caller = caller;
-                    match Self::read_guest_bytes(&mut caller, msg_ptr, msg_len, "host_log") {
+                    match Self::read_guest_bytes(&mut caller, msg_ptr, capped_len, "host_log") {
                         Ok(bytes) => {
-                            let msg = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            // Strip newlines to prevent log injection — a WASM
+                            // guest must not be able to forge additional log
+                            // lines by embedding CR/LF in its message.
+                            let raw = String::from_utf8_lossy(&bytes);
+                            let msg = raw.replace(['\n', '\r'], " ");
                             let agent_id = &caller.data().agent_id;
 
                             match level {
