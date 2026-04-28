@@ -306,7 +306,10 @@ impl PeerNode {
         // handshake from being replayed against a different federation peer
         // that shares the same shared_secret.
         let our_nonce = uuid::Uuid::new_v4().to_string();
-        let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, recipient_node_id);
+        let auth_data = format!(
+            "{}|{}|{}",
+            our_nonce, self.config.node_id, recipient_node_id
+        );
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
 
         let handshake = WireMessage {
@@ -616,8 +619,7 @@ impl PeerNode {
                 // Checking HMAC first (order fix for #3880) means an attacker
                 // who does not know shared_secret cannot trigger nonce
                 // insertion or the GC sweep inside check_and_record.
-                let expected_data =
-                    format!("{}|{}|{}", nonce, node_id, node.config.node_id);
+                let expected_data = format!("{}|{}|{}", nonce, node_id, node.config.node_id);
                 if !hmac_verify(
                     &node.config.shared_secret,
                     expected_data.as_bytes(),
@@ -654,8 +656,7 @@ impl PeerNode {
                 // + the remote sender's node_id as recipient, so the ack is
                 // bound to the specific peer that initiated this handshake.
                 let ack_nonce = uuid::Uuid::new_v4().to_string();
-                let ack_auth_data =
-                    format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
+                let ack_auth_data = format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
                 let ack_hmac = hmac_sign(&node.config.shared_secret, ack_auth_data.as_bytes());
 
                 let ack = WireMessage {
@@ -1437,7 +1438,10 @@ mod tests {
         // Replay of an already-seen nonce must still be rejected even without GC.
         let result = tracker.check_and_record("n-0");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("replay"), "expected replay error");
+        assert!(
+            result.unwrap_err().contains("replay"),
+            "expected replay error"
+        );
     }
 
     // ── Per-message HMAC tests ───────────────────────────────────────────
@@ -1485,7 +1489,10 @@ mod tests {
         let response = handle_request_in_loop(&msg, &*handle).await;
         match response.kind {
             WireMessageKind::Response(WireResponse::Error { code, message }) => {
-                assert_eq!(code, 413, "expected 413 Payload Too Large, got {code}: {message}");
+                assert_eq!(
+                    code, 413,
+                    "expected 413 Payload Too Large, got {code}: {message}"
+                );
                 assert!(
                     message.contains("too large"),
                     "expected 'too large' in error message, got: {message}"
@@ -1513,7 +1520,10 @@ mod tests {
         let response = handle_request_in_loop(&msg, &*handle).await;
         match response.kind {
             WireMessageKind::Response(WireResponse::AgentResponse { text }) => {
-                assert!(text.contains("Echo from echo"), "unexpected response: {text}");
+                assert!(
+                    text.contains("Echo from echo"),
+                    "unexpected response: {text}"
+                );
             }
             other => panic!("Expected AgentResponse, got {other:?}"),
         }
