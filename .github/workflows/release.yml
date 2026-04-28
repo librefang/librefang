@@ -1514,6 +1514,11 @@ jobs:
 
       - name: Upload to Play Internal Testing
         if: steps.play_gate.outputs.ready == 'true'
+        # Soft-fail: a Play API hiccup (account verification still pending,
+        # transient 5xx, track not yet bootstrapped manually) downgrades to
+        # a job-summary warning instead of failing the whole release.
+        # The .aab still landed on the GitHub Release in the prior step.
+        continue-on-error: true
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
@@ -1733,6 +1738,11 @@ jobs:
 
       - name: Upload to TestFlight
         if: steps.tf_gate.outputs.ready == 'true'
+        # Soft-fail: an App Store Connect hiccup (slow processing, transient
+        # 5xx, app record not yet created) downgrades to a job-summary
+        # warning instead of failing the whole release. The .ipa still
+        # landed on the GitHub Release in the prior step.
+        continue-on-error: true
         uses: Apple-Actions/upload-testflight-build@9af5bd758aaff3f82a372079a38f029d60a7163b # v5.0.0
         with:
           app-path: ${{ steps.art.outputs.ipa }}
