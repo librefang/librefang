@@ -4638,6 +4638,10 @@ fn dummy_sender(channel: &str, chat_id: Option<&str>) -> SenderContext {
     SenderContext {
         channel: channel.to_string(),
         chat_id: chat_id.map(str::to_string),
+        ..Default::default()
+    }
+}
+
 // ── session_mode_override resolution + trigger concurrency caps (#3754, #3755) ──
 
 /// Helper: boot a minimal kernel in a temp directory.
@@ -4828,6 +4832,8 @@ fn resolve_dispatch_session_id_session_mode_override_beats_manifest() {
         None,
     );
     assert_eq!(got, Some(entry_sid));
+}
+
 // -- #3754: session_mode_override resolution via agent_concurrency_for --------
 
 /// An agent with `session_mode = "new"` and `max_concurrent_invocations = 3`
@@ -4916,12 +4922,7 @@ fn agent_concurrency_falls_back_to_config_default_when_unset() {
 
     let (kernel, _dir) = minimal_kernel("concurrency-default-fallback");
     // default_per_agent = 1 (KernelConfig default)
-    let expected = kernel
-        .config
-        .load()
-        .queue
-        .concurrency
-        .default_per_agent;
+    let expected = kernel.config.load().queue.concurrency.default_per_agent;
 
     let agent_id = kernel
         .spawn_agent_inner(
@@ -5068,7 +5069,11 @@ fn session_mode_persistent_plus_cap_two_is_clamped_preventing_parallel_fires() {
     let (kernel, _dir) = minimal_kernel("persistent-session-no-parallel");
     let agent_id = kernel
         .spawn_agent_inner(
-            concurrency_manifest("persistent-parallel-agent", SessionMode::Persistent, Some(2)),
+            concurrency_manifest(
+                "persistent-parallel-agent",
+                SessionMode::Persistent,
+                Some(2),
+            ),
             None,
             None,
             None,
