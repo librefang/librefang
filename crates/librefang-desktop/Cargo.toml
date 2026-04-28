@@ -56,3 +56,12 @@ mobile = []
 [[bin]]
 name = "librefang-desktop"
 path = "src/main.rs"
+
+# iOS / Android need the crate exposed as a `staticlib` (linked into the
+# native shell by Xcode / Gradle) and a `cdylib` (loaded by the Tauri
+# mobile runtime). `lib` (rlib) is kept so the desktop binary in
+# src/main.rs can still depend on the library normally. Without these
+# extra crate-types, `cargo tauri ios build` fails with
+#   "Library not found at .../liblibrefang_desktop.a"
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
