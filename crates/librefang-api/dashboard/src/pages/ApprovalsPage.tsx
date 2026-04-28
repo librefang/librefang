@@ -18,6 +18,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
+import { ResponsiveTable, type ResponsiveTableColumn } from "../components/ui/ResponsiveTable";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { CheckCircle, XCircle, Clock, MessageSquare, ChevronLeft, ChevronRight } from "lucide-react";
@@ -177,51 +178,55 @@ function AuditLogTab() {
     );
   }
 
+  const auditColumns = useMemo<ResponsiveTableColumn<ApprovalAuditEntry>[]>(
+    () => [
+      {
+        key: "tool_name",
+        label: t("approvals.auditLog.tool"),
+        tdClass: "px-4 py-3 font-medium",
+        render: (e) => e.tool_name,
+      },
+      {
+        key: "agent_id",
+        label: t("approvals.auditLog.agent"),
+        tdClass: "px-4 py-3 text-text-dim",
+        render: (e) => e.agent_id,
+      },
+      {
+        key: "decision",
+        label: t("approvals.auditLog.decision"),
+        tdClass: "px-4 py-3",
+        render: (e) => decisionBadge(e.decision, t),
+      },
+      {
+        key: "decided_by",
+        label: t("approvals.auditLog.decidedBy"),
+        tdClass: "px-4 py-3 text-text-dim",
+        render: (e) => e.decided_by ?? "—",
+      },
+      {
+        key: "decided_at",
+        label: t("approvals.auditLog.decidedAt"),
+        tdClass: "px-4 py-3 text-text-dim text-xs",
+        render: (e) => (e.decided_at ? new Date(e.decided_at).toLocaleString() : "—"),
+      },
+      {
+        key: "feedback",
+        label: t("approvals.auditLog.feedback"),
+        tdClass: "px-4 py-3 text-text-dim text-xs max-w-48 truncate",
+        render: (e) => e.feedback ?? "—",
+      },
+    ],
+    [t],
+  );
+
   return (
     <div className="flex flex-col gap-4">
-      {/* Table */}
-      <div className="overflow-x-auto rounded-xl border border-border-subtle">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border-subtle bg-surface-hover/50">
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.tool")}
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.agent")}
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.decision")}
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.decidedBy")}
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.decidedAt")}
-              </th>
-              <th className="px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-text-dim">
-                {t("approvals.auditLog.feedback")}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((entry) => (
-              <tr key={entry.id} className="border-b last:border-0 border-border-subtle hover:bg-surface-hover/30 transition-colors">
-                <td className="px-4 py-3 font-medium">{entry.tool_name}</td>
-                <td className="px-4 py-3 text-text-dim">{entry.agent_id}</td>
-                <td className="px-4 py-3">{decisionBadge(entry.decision, t)}</td>
-                <td className="px-4 py-3 text-text-dim">{entry.decided_by ?? "-"}</td>
-                <td className="px-4 py-3 text-text-dim text-xs">
-                  {entry.decided_at ? new Date(entry.decided_at).toLocaleString() : "-"}
-                </td>
-                <td className="px-4 py-3 text-text-dim text-xs max-w-48 truncate">
-                  {entry.feedback ?? "-"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <ResponsiveTable
+        columns={auditColumns}
+        rows={entries}
+        rowKey={(e) => e.id}
+      />
 
       {/* Pagination */}
       <div className="flex items-center justify-between text-sm text-text-dim">
