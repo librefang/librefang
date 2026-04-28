@@ -1730,15 +1730,23 @@ function CanvasPageInner() {
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
     setShowTemplateBrowser(false);
     try {
-      // Invalidate the workflows cache so the list refreshes
-      await queryClient.invalidateQueries({ queryKey: workflowQueries.list().queryKey });
-      const created = workflows.find(w => w.id === workflowId);
+      // Fetch the fresh list synchronously to this scope rather than
+      // invalidate-then-read-closure.  #3958 swapped pre-PR's
+      // `await listWorkflows()` for `invalidateQueries()` plus a
+      // closure read of `workflows` — but that closure value is the
+      // pre-invalidation snapshot, which for a just-instantiated
+      // template doesn't contain the new id yet, so `created` is
+      // undefined and the canvas header falls back to "" name and
+      // description until the next 30s poll.  fetchQuery awaits the
+      // network round-trip and returns the up-to-date list directly.
+      const fresh = await queryClient.fetchQuery(workflowQueries.list());
+      const created = fresh.find((w) => w.id === workflowId);
       await loadWorkflowIntoCanvas(workflowId, created ?? null);
       navigate({ to: "/canvas", search: { t: undefined, wf: workflowId }, replace: true });
     } catch (e: unknown) {
       showError(toErrorMessage(e, t("canvas.template_instantiate_error")));
     }
-  }, [queryClient, workflows, loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
+  }, [queryClient, loadWorkflowIntoCanvas, navigate, showError, t, toErrorMessage]);
 
   // Valid agent step count
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
