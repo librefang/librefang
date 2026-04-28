@@ -3,21 +3,26 @@
 # Create a GitHub Issue from a Discussion.
 # Shared by auto-promote, manual-promote, and backfill jobs.
 #
-# Usage:
-#   discussion-to-issue.sh <disc_number> <disc_title> <disc_url> <disc_author> <disc_category>
+# Usage (all values passed as environment variables — never positional args
+# from ${{ }} expressions to prevent shell injection):
+#   DISC_NUMBER=<n> DISC_TITLE=<t> DISC_URL=<u> DISC_AUTHOR=<a> \
+#   DISC_CATEGORY=<c> bash discussion-to-issue.sh
 #
-# Env: GH_TOKEN, REPO
+# Env: GH_TOKEN, REPO, DISC_NUMBER, DISC_TITLE, DISC_URL, DISC_AUTHOR, DISC_CATEGORY
 #   MANUAL=true — bypass content filters (used by /to-issue command)
 #
 # Exit 0 on success or skip (duplicate). Exit 1 on error.
 
 set -euo pipefail
 
-DISC_NUMBER="$1"
-DISC_TITLE="$2"
-DISC_URL="$3"
-DISC_AUTHOR="$4"
-DISC_CATEGORY="$5"
+# All caller-supplied values arrive via environment variables so that
+# attacker-controlled content (discussion title, author login, etc.) is
+# never interpolated into the shell command line.
+: "${DISC_NUMBER:?DISC_NUMBER env var is required}"
+: "${DISC_TITLE:?DISC_TITLE env var is required}"
+: "${DISC_URL:?DISC_URL env var is required}"
+: "${DISC_AUTHOR:?DISC_AUTHOR env var is required}"
+: "${DISC_CATEGORY:?DISC_CATEGORY env var is required}"
 
 DISC_JSON=$(gh api "repos/${REPO}/discussions/${DISC_NUMBER}" 2>/dev/null || true)
 if [ -z "$DISC_JSON" ]; then

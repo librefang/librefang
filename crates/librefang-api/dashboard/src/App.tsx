@@ -48,6 +48,7 @@ import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
 import { useKeyboardShortcuts } from "./lib/useKeyboardShortcuts";
 import { changePassword, checkDashboardAuthMode, clearApiKey, dashboardLogin, dashboardLogout, getDashboardUsername, getStatus, getVersionInfo, setApiKey, setOnUnauthorized, verifyStoredAuth, type AuthMode } from "./api";
 import { NotificationCenter } from "./components/NotificationCenter";
+import { OfflineBanner } from "./components/OfflineBanner";
 
 function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -413,12 +414,18 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 // Routes that must fill the remaining viewport height without scrolling.
 const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 
+// Routes that must render even when no daemon credentials are configured.
+// `/connect` is the mobile pairing wizard — by definition the user has
+// no API key yet, so the AuthDialog gate would deadlock the first launch.
+const NO_AUTH_ROUTES = new Set(["/connect"]);
+
 export function App() {
   const { t } = useTranslation();
   const theme = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
   const { location } = useRouterState();
   const isFullHeightPage = FULL_HEIGHT_ROUTES.has(location.pathname);
+  const isNoAuthRoute = NO_AUTH_ROUTES.has(location.pathname);
   const language = useUIStore((s) => s.language);
   const setLanguage = useUIStore((s) => s.setLanguage);
   const isMobileMenuOpen = useUIStore((s) => s.isMobileMenuOpen);
@@ -445,6 +452,16 @@ export function App() {
   // Wire up global 401 handler so any failed request re-shows login
   useEffect(() => {
     let cancelled = false;
+
+    // First-run pairing wizard must reach the screen without credentials —
+    // skip the auth probe entirely so the AuthDialog never gates `/connect`.
+    if (NO_AUTH_ROUTES.has(window.location.pathname)) {
+      setAuthNeeded(false);
+      setAuthChecked(true);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     setOnUnauthorized(() => {
       checkDashboardAuthMode().then((mode) => {
@@ -836,12 +853,13 @@ export function App() {
         </main>
       </div>
 
+      {!isNoAuthRoute && <OfflineBanner />}
       <PushDrawer />
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
-      {authChecked && authNeeded && (
+      {authChecked && authNeeded && !isNoAuthRoute && (
         <AuthDialog mode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
       )}
     </div>

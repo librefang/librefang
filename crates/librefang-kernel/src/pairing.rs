@@ -21,6 +21,15 @@ pub struct PairedDevice {
     pub last_seen: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing)]
     pub push_token: Option<String>,
+    /// Hash of this device's bearer token (SHA-256, prefixed `$sha256$`
+    /// — see `password_hash::hash_device_token`). The plaintext is
+    /// returned to the device exactly once during `complete_pairing`
+    /// and never stored — comparison happens via `verify_password`,
+    /// which dispatches by prefix so legacy Argon2 hashes from earlier
+    /// PR revisions still verify. Skipped in serialization so it
+    /// cannot leak through API responses.
+    #[serde(skip_serializing, default)]
+    pub api_key_hash: String,
 }
 
 /// Pairing request (short-lived, for QR code flow).
@@ -165,6 +174,29 @@ impl PairingManager {
     /// List paired devices.
     pub fn list_devices(&self) -> Vec<PairedDevice> {
         self.devices.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Snapshot `(device_id, api_key_hash)` pairs for every device that
+    /// has minted a bearer token. Pre-v24 rows (re-loaded from disk
+    /// before they have re-paired) are filtered out — a device with an
+    /// empty hash cannot authenticate, so the auth layer should not see
+    /// it as a valid bearer.
+    ///
+    /// Used by the API layer at boot to populate the live
+    /// `user_api_keys` table the auth middleware verifies bearers
+    /// against.
+    pub fn device_api_keys(&self) -> Vec<(String, String)> {
+        self.devices
+            .iter()
+            .filter_map(|entry| {
+                let d = entry.value();
+                if d.api_key_hash.is_empty() {
+                    None
+                } else {
+                    Some((d.device_id.clone(), d.api_key_hash.clone()))
+                }
+            })
+            .collect()
     }
 
     /// Remove a paired device.
@@ -365,6 +397,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         let result = mgr.complete_pairing("invalid-token", device);
         assert!(result.is_err());
@@ -383,6 +416,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
 
         let result = mgr.complete_pairing(&req.token, device);
@@ -409,6 +443,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req1.token, d1).unwrap();
 
@@ -421,6 +456,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         let result = mgr.complete_pairing(&req2.token, d2);
         assert!(result.is_err());
@@ -438,6 +474,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req.token, device).unwrap();
 
@@ -457,6 +494,7 @@ mod tests {
             paired_at: chrono::Utc::now(),
             last_seen: chrono::Utc::now(),
             push_token: None,
+            api_key_hash: String::new(),
         };
         mgr.complete_pairing(&req.token, device).unwrap();
 
