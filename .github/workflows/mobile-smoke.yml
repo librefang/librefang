@@ -105,6 +105,13 @@ jobs:
         with:
           xcode-version: "16.2"
 
+      # macos-15 + Xcode 16 ships only the macOS SDK by default; the iOS
+      # simulator runtime is fetched on demand. Without this download
+      # xcodebuild fails with "Found no destinations for the scheme
+      # 'librefang-desktop_iOS' and action build".
+      - name: Download iOS Simulator runtime
+        run: xcodebuild -downloadPlatform iOS
+
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-apple-ios-sim
