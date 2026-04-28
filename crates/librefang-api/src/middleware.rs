@@ -810,7 +810,7 @@ pub async fn auth(
         .unwrap_or(i18n::DEFAULT_LANGUAGE);
     let translator = i18n::ErrorTranslator::new(lang);
 
-    let credential_provided = header_auth.is_some() || query_auth.is_some();
+    let credential_provided = header_auth.is_some();
     let error_msg = if credential_provided {
         translator.t("api-error-auth-invalid-key")
     } else {
