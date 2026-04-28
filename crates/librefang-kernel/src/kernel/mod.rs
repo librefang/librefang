@@ -5504,9 +5504,11 @@ system_prompt = "You are a helpful assistant."
                             })
                             .await;
                         // Settle pre-charged reservation (#3736)
-                        kernel_clone
-                            .scheduler
-                            .settle_reservation(agent_id, token_reservation, &result.total_usage);
+                        kernel_clone.scheduler.settle_reservation(
+                            agent_id,
+                            token_reservation,
+                            &result.total_usage,
+                        );
                         let _ = kernel_clone
                             .registry
                             .set_state(agent_id, AgentState::Running);
@@ -6132,9 +6134,11 @@ system_prompt = "You are a helpful assistant."
                     // Settle the pre-charged token reservation with actual usage
                     // (#3736). This replaces record_usage for the token counters
                     // while still correctly accounting for the burst window.
-                    kernel_clone
-                        .scheduler
-                        .settle_reservation(agent_id, token_reservation, &result.total_usage);
+                    kernel_clone.scheduler.settle_reservation(
+                        agent_id,
+                        token_reservation,
+                        &result.total_usage,
+                    );
                     // Record tool calls for rate limiting
                     let tool_count = result.decision_traces.len() as u32;
                     kernel_clone
@@ -12182,8 +12186,7 @@ system_prompt = "You are a helpful assistant."
                                         let max_messages = cfg_snap.cron_session_max_messages;
                                         drop(cfg_snap);
                                         if max_tokens.is_some() || max_messages.is_some() {
-                                            let cron_sid =
-                                                SessionId::for_channel(agent_id, "cron");
+                                            let cron_sid = SessionId::for_channel(agent_id, "cron");
                                             if let Ok(Some(mut session)) =
                                                 kernel_job.memory.get_session(cron_sid)
                                             {
@@ -12232,33 +12235,35 @@ system_prompt = "You are a helpful assistant."
                                     .await
                                     {
                                         Ok(Ok(result)) => {
-                                        tracing::info!(job = %job_name, "Cron job completed successfully");
-                                        kernel_job.cron_scheduler.record_success(job_id);
-                                        // Deliver response to configured channel (skip NO_REPLY/silent)
-                                        if !result.silent {
-                                            cron_deliver_response(
-                                                &kernel_job,
-                                                agent_id,
-                                                &result.response,
-                                                &delivery,
-                                            )
-                                            .await;
-                                            // Fan out to multi-destination
-                                            // delivery_targets (best-effort,
-                                            // failure-isolated).
-                                            cron_fan_out_targets(
-                                                &kernel_job,
-                                                &job_name,
-                                                &result.response,
-                                                &delivery_targets,
-                                            )
-                                            .await;
-                                        }
+                                            tracing::info!(job = %job_name, "Cron job completed successfully");
+                                            kernel_job.cron_scheduler.record_success(job_id);
+                                            // Deliver response to configured channel (skip NO_REPLY/silent)
+                                            if !result.silent {
+                                                cron_deliver_response(
+                                                    &kernel_job,
+                                                    agent_id,
+                                                    &result.response,
+                                                    &delivery,
+                                                )
+                                                .await;
+                                                // Fan out to multi-destination
+                                                // delivery_targets (best-effort,
+                                                // failure-isolated).
+                                                cron_fan_out_targets(
+                                                    &kernel_job,
+                                                    &job_name,
+                                                    &result.response,
+                                                    &delivery_targets,
+                                                )
+                                                .await;
+                                            }
                                         }
                                         Ok(Err(e)) => {
                                             let err_msg = format!("{e}");
                                             tracing::warn!(job = %job_name, error = %err_msg, "Cron job failed");
-                                            kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
+                                            kernel_job
+                                                .cron_scheduler
+                                                .record_failure(job_id, &err_msg);
                                         }
                                         Err(_) => {
                                             tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");

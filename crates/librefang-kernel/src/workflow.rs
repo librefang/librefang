@@ -1071,7 +1071,7 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         reason: impl Into<String>,
     ) -> Result<Uuid, String> {
-        let run = self
+        let mut run = self
             .runs
             .get_mut(&run_id)
             .ok_or_else(|| format!("Workflow run not found: {run_id}"))?;
@@ -1127,7 +1127,7 @@ impl WorkflowEngine {
         // must not hold it across the await.
         let workflow = {
             let workflow_id = {
-                let run = self
+                let mut run = self
                     .runs
                     .get_mut(&run_id)
                     .ok_or_else(|| format!("Workflow run not found: {run_id}"))?;
@@ -1164,11 +1164,7 @@ impl WorkflowEngine {
                 .await
                 .get(&workflow_id)
                 .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "Workflow definition {workflow_id} not found"
-                    )
-                })?
+                .ok_or_else(|| format!("Workflow definition {workflow_id} not found"))?
         };
 
         // Re-enter the sequential path. It looks at paused_step_index /
@@ -1218,11 +1214,8 @@ impl WorkflowEngine {
         // via DashMap's get_mut, then drop the shard guard before the
         // async workflow lookup.
         let (workflow_id, input) = {
-            let run = self
-                .runs
-                .get_mut(&run_id)
-                .ok_or("Workflow run not found")?;
-            // Mutate via DerefMut — `mut` on the binding not required.
+            let mut run = self.runs.get_mut(&run_id).ok_or("Workflow run not found")?;
+            // Mutate via DerefMut — `mut` on the binding required to invoke it.
             run.state = WorkflowRunState::Running;
             (run.workflow_id, run.input.clone())
             // `run` (DashMap RefMut shard guard) is dropped here
@@ -1264,7 +1257,7 @@ impl WorkflowEngine {
     /// scattering identical clear-five-fields blocks across ~10 sites.
     /// See #3335 review.
     async fn cleanup_terminal_pause_state(&self, run_id: WorkflowRunId) {
-        if let Some(run) = self.runs.get_mut(&run_id) {
+        if let Some(mut run) = self.runs.get_mut(&run_id) {
             if matches!(
                 run.state,
                 WorkflowRunState::Completed | WorkflowRunState::Failed
@@ -1326,12 +1319,9 @@ impl WorkflowEngine {
             // iteration so an in-flight step is allowed to finish before
             // the run pauses — partial-step rollback would be a much
             // larger feature than #3335 requires.
-            let pending_pause = self
-                .runs
-                .get(&run_id)
-                .and_then(|r| r.pause_request.clone());
+            let pending_pause = self.runs.get(&run_id).and_then(|r| r.pause_request.clone());
             if let Some(pause) = pending_pause {
-                if let Some(run) = self.runs.get_mut(&run_id) {
+                if let Some(mut run) = self.runs.get_mut(&run_id) {
                     run.paused_step_index = Some(i);
                     run.paused_variables = variables
                         .iter()
@@ -1404,7 +1394,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                             };
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
                             }
 
@@ -1421,7 +1411,7 @@ impl WorkflowEngine {
                             info!(step = i + 1, name = %step.name, "Step skipped");
                         }
                         Err(e) => {
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
@@ -1504,7 +1494,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                 };
-                                if let Some(r) = self.runs.get_mut(&run_id) {
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
                                 }
                                 if let Some(ref var) = fan_step.output_var {
@@ -1517,7 +1507,7 @@ impl WorkflowEngine {
                                 let error_msg =
                                     format!("FanOut step '{}' failed: {}", step_name, e);
                                 warn!(%error_msg);
-                                if let Some(r) = self.runs.get_mut(&run_id) {
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
@@ -1530,7 +1520,7 @@ impl WorkflowEngine {
                                     step_name, fan_step.timeout_secs
                                 );
                                 warn!(%error_msg);
-                                if let Some(r) = self.runs.get_mut(&run_id) {
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(error_msg.clone());
                                     r.completed_at = Some(Utc::now());
@@ -1643,7 +1633,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms,
                             };
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
                             }
                             if let Some(ref var) = step.output_var {
@@ -1654,7 +1644,7 @@ impl WorkflowEngine {
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
@@ -1682,8 +1672,6 @@ impl WorkflowEngine {
                         // Re-snapshot step results each iteration (accumulates loop outputs)
                         let prev_results: Vec<StepResult> = self
                             .runs
-                            .read()
-                            .await
                             .get(&run_id)
                             .map(|r| r.step_results.clone())
                             .unwrap_or_default();
@@ -1719,7 +1707,7 @@ impl WorkflowEngine {
                                     output_tokens,
                                     duration_ms,
                                 };
-                                if let Some(r) = self.runs.get_mut(&run_id) {
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.step_results.push(step_result);
                                 }
 
@@ -1745,7 +1733,7 @@ impl WorkflowEngine {
                             }
                             Ok(None) => break,
                             Err(e) => {
-                                if let Some(r) = self.runs.get_mut(&run_id) {
+                                if let Some(mut r) = self.runs.get_mut(&run_id) {
                                     r.state = WorkflowRunState::Failed;
                                     r.error = Some(e.clone());
                                     r.completed_at = Some(Utc::now());
@@ -1771,7 +1759,7 @@ impl WorkflowEngine {
         // final iteration and this transition would otherwise survive on a
         // Completed run as dead data.
         let final_output = current_input.clone();
-        if let Some(r) = self.runs.get_mut(&run_id) {
+        if let Some(mut r) = self.runs.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
             r.output = Some(final_output.clone());
             r.completed_at = Some(Utc::now());
@@ -1821,7 +1809,7 @@ impl WorkflowEngine {
             // workflow that just never executes — and `cleanup_terminal_pause_state`
             // (called by execute_run after we return) wouldn't run because
             // state isn't terminal. Set Failed so the cleanup pass picks it up.
-            if let Some(run) = self.runs.get_mut(&run_id) {
+            if let Some(mut run) = self.runs.get_mut(&run_id) {
                 run.state = WorkflowRunState::Failed;
                 run.error = Some(format!(
                     "DAG workflow refused to start: pause requested ({reason}) \
@@ -1868,7 +1856,7 @@ impl WorkflowEngine {
                         ErrorMode::Fail => {
                             let error_msg =
                                 format!("Step '{}' skipped: dependency failed", step.name);
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(error_msg.clone());
                                 r.completed_at = Some(Utc::now());
@@ -1908,7 +1896,7 @@ impl WorkflowEngine {
                             output_tokens,
                             duration_ms,
                         };
-                        if let Some(r) = self.runs.get_mut(&run_id) {
+                        if let Some(mut r) = self.runs.get_mut(&run_id) {
                             r.step_results.push(step_result);
                         }
                         if let Some(ref var) = step.output_var {
@@ -1928,7 +1916,7 @@ impl WorkflowEngine {
                     Err(e) => {
                         failed_steps.insert(step.name.clone());
                         if matches!(step.error_mode, ErrorMode::Fail) {
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
@@ -2048,7 +2036,7 @@ impl WorkflowEngine {
                                 output_tokens,
                                 duration_ms: step_duration_ms,
                             };
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.step_results.push(step_result);
                             }
                             if let Some(ref var) = step.output_var {
@@ -2067,7 +2055,7 @@ impl WorkflowEngine {
                         }
                         Err(e) => {
                             failed_steps.insert(step_name.clone());
-                            if let Some(r) = self.runs.get_mut(&run_id) {
+                            if let Some(mut r) = self.runs.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(e.clone());
                                 r.completed_at = Some(Utc::now());
@@ -2087,7 +2075,7 @@ impl WorkflowEngine {
         }
 
         // Mark workflow as completed
-        if let Some(r) = self.runs.get_mut(&run_id) {
+        if let Some(mut r) = self.runs.get_mut(&run_id) {
             r.state = WorkflowRunState::Completed;
             r.output = Some(last_output.clone());
             r.completed_at = Some(Utc::now());
@@ -4181,7 +4169,10 @@ prompt_template = "do {{x}}"
             let count = engine.load_runs().unwrap();
             assert_eq!(count, 2);
 
-            let c = engine.runs.get(&completed_id).expect("completed run missing");
+            let c = engine
+                .runs
+                .get(&completed_id)
+                .expect("completed run missing");
             assert!(matches!(c.state, WorkflowRunState::Completed));
             assert_eq!(c.workflow_name, "persist-test");
             assert_eq!(c.output.as_deref(), Some("final output"));
