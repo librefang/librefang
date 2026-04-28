@@ -376,6 +376,55 @@ impl CronScheduler {
         count
     }
 
+    /// Warn about cron fires that were missed while the daemon was offline.
+    ///
+    /// Should be called immediately after [`Self::load`] on daemon startup.
+    /// Any enabled job whose `next_run` is more than 60 seconds in the past
+    /// is considered to have missed at least one fire during downtime. The
+    /// method logs a warning with the estimated missed-fire count and
+    /// immediately reschedules the job to fire on the next tick (by setting
+    /// `next_run = now`) so the scheduler can catch up without further delay.
+    ///
+    /// The 60-second grace window prevents false positives for jobs that
+    /// were just about to fire when the daemon stopped.
+    pub fn warn_missed_fires(&self) {
+        let now = Utc::now();
+        for mut entry in self.jobs.iter_mut() {
+            let meta = entry.value_mut();
+            if !meta.job.enabled {
+                continue;
+            }
+            if let Some(next_run) = meta.job.next_run {
+                let grace = Duration::seconds(60);
+                if next_run < now - grace {
+                    let overdue_secs = (now - next_run).num_seconds();
+                    // Estimate how many fires were skipped based on schedule interval.
+                    let interval_secs: i64 = match &meta.job.schedule {
+                        CronSchedule::Every { every_secs } => *every_secs as i64,
+                        CronSchedule::At { .. } => overdue_secs, // one-shot: effectively 1 missed fire
+                        CronSchedule::Cron { .. } => {
+                            // For cron expressions, approximate with the gap between
+                            // `next_run` and what `next_run` would have been after one cycle.
+                            let hypothetical_next =
+                                compute_next_run_after(&meta.job.schedule, next_run);
+                            (hypothetical_next - next_run).num_seconds().max(1)
+                        }
+                    };
+                    let missed_count = (overdue_secs / interval_secs).max(1);
+                    warn!(
+                        agent_id = %meta.job.agent_id,
+                        job_id = %meta.job.id,
+                        missed_count,
+                        overdue_secs,
+                        "cron job missed fires during daemon downtime; firing now"
+                    );
+                    // Reschedule to fire immediately on the next tick.
+                    meta.job.next_run = Some(now);
+                }
+            }
+        }
+    }
+
     /// Remove all cron jobs belonging to a specific agent.
     ///
     /// Used when an agent is deleted so its cron entries don't linger as
@@ -523,6 +572,17 @@ pub fn compute_next_run(schedule: &CronSchedule) -> chrono::DateTime<Utc> {
 /// this offset, calling `compute_next_run` right after a job fires can
 /// return the same minute (or even the same second), causing the
 /// scheduler to re-fire immediately.
+///
+/// # DST safety
+///
+/// All fire times are stored and compared in UTC. `chrono::Local` is never
+/// used internally — even when a job specifies a named `tz` (e.g.
+/// `"America/New_York"`), the computation converts `after` to that timezone
+/// only to honour the user's wall-clock intent, then immediately converts
+/// the result back to UTC before storing it. This means the scheduler is
+/// immune to DST transitions: a "09:00 daily" job in a DST-observing
+/// timezone will naturally shift by one UTC hour at the clock change, but
+/// will never fire twice or be skipped.
 pub fn compute_next_run_after(
     schedule: &CronSchedule,
     after: chrono::DateTime<Utc>,

@@ -2834,6 +2834,9 @@ impl LibreFangKernel {
                 warn!("Failed to load cron jobs: {e}");
             }
         }
+        // Warn about any jobs that missed fires while the daemon was offline,
+        // and reschedule them to fire immediately on the next tick (#3828).
+        cron_scheduler.warn_missed_fires();
 
         // Initialize trigger engine and reload persisted triggers
         let trigger_engine = TriggerEngine::with_config(&config.triggers, &config.home_dir);
@@ -12234,6 +12237,23 @@ system_prompt = "You are a helpful assistant."
                                 ..
                             } => {
                                 tracing::debug!(job = %job_name, agent = %agent_id, "Cron: firing agent turn");
+
+                                // Skip the cron fire entirely for Suspended agents.
+                                // This check must happen BEFORE pre_check_script (which has
+                                // side effects) so a suspended agent never triggers external
+                                // scripts or accumulates record_success counts (#3839).
+                                if let Some(entry) = kernel.registry.get(agent_id) {
+                                    if entry.state
+                                        == librefang_types::agent::AgentState::Suspended
+                                    {
+                                        tracing::debug!(
+                                            agent_id = %agent_id,
+                                            job = %job_name,
+                                            "skipping cron fire: agent is suspended"
+                                        );
+                                        continue; // Do NOT record_success
+                                    }
+                                }
 
                                 // Wake-gate: run pre_check_script and check for
                                 // {"wakeAgent": false} in the last non-empty output line.
