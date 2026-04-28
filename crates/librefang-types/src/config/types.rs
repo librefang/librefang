@@ -2930,6 +2930,15 @@ pub struct KernelConfig {
     /// integration lands in PR-4. See [`ParallelToolsConfig`].
     #[serde(default)]
     pub parallel_tools: ParallelToolsConfig,
+    /// How long (in minutes) a workflow run may remain in the `Running` or
+    /// `Pending` state before it is considered stale after a daemon restart.
+    ///
+    /// On boot the engine scans all persisted runs and marks any that are
+    /// older than this threshold as `Failed` with the error
+    /// `"Interrupted by daemon restart"`.  Set to `0` to disable recovery.
+    /// Default: `60` minutes.
+    #[serde(default = "default_workflow_stale_timeout_minutes")]
+    pub workflow_stale_timeout_minutes: u64,
 }
 
 /// Input sanitization mode for channel messages.
@@ -3880,6 +3889,11 @@ fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
 }
 
+/// Default workflow stale timeout: 60 minutes.
+fn default_workflow_stale_timeout_minutes() -> u64 {
+    60
+}
+
 /// Default maximum concurrent background LLM calls.
 fn default_max_concurrent_bg_llm() -> usize {
     5
@@ -4747,6 +4761,7 @@ impl Default for KernelConfig {
             terminal: TerminalConfig::default(),
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
+            workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
         }
     }
 }
