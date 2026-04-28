@@ -122,6 +122,82 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
+/// Download and verify the .sha256 checksum file for an asset.
+///
+/// Downloads `{asset_url}.sha256`, parses the expected hash, then computes
+/// sha256 of the already-downloaded `asset_path` and compares. Returns an
+/// error if the download fails or the hashes do not match.
+fn verify_asset_sha256(
+    repo: &str,
+    tag: &str,
+    asset_name: &str,
+    asset_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sha_url = format!(
+        "https://github.com/{}/releases/download/{}/{}.sha256",
+        repo, tag, asset_name
+    );
+    let tmp_sha = asset_path.with_extension("sha256");
+    download_asset(&sha_url, &tmp_sha)?;
+
+    let sha_content = fs::read_to_string(&tmp_sha)?;
+    let expected = sha_content
+        .split_whitespace()
+        .next()
+        .ok_or("empty .sha256 file")?
+        .to_ascii_lowercase();
+
+    let data = fs::read(asset_path)?;
+    let actual = sha256_hex(&data);
+
+    if actual != expected {
+        return Err(format!(
+            "SHA256 mismatch for {asset_name}: expected {expected}, got {actual}"
+        )
+        .into());
+    }
+    println!("  ✓ SHA256 verified: {expected}");
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use std::fmt::Write;
+    // Use sha2 crate if available; otherwise fall back to the `shasum` binary.
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "python3 -c 'import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'"
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write as _;
+            child.stdin.take().unwrap().write_all(data).ok();
+            child.wait_with_output()
+        });
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_ascii_lowercase()
+        }
+        _ => {
+            // Fallback: manual hex encoding of sha256
+            let mut hash = [0u8; 32];
+            // Simple SHA-256 not available without a crate; use shasum binary
+            let tmp = std::env::temp_dir().join("__sha_input");
+            let _ = fs::write(&tmp, data);
+            let out = Command::new("shasum")
+                .args(["-a", "256", &tmp.to_string_lossy()])
+                .output()
+                .unwrap_or_default();
+            let s = String::from_utf8_lossy(&out.stdout);
+            s.split_whitespace().next().unwrap_or("").to_string()
+        }
+    }
+    .trim()
+    .to_string()
+}
+
 pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root();
     let work = std::env::temp_dir().join(format!("xtask-npm-{}", std::process::id()));
@@ -166,6 +242,9 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
 
         if !args.dry_run {
             download_asset(&url, &asset_path)?;
+
+            // Verify SHA256 against the .sha256 file uploaded alongside the release asset
+            verify_asset_sha256(&args.repo, &args.tag, &asset, &asset_path)?;
 
             // Extract
             if target.ext == "tar.gz" {
