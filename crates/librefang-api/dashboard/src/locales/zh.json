@@ -2972,5 +2972,51 @@
     "bindings_unset": "未绑定平台 ID。来自任何渠道的入站消息都将无法识别。",
     "channel_rules_title": "按渠道的工具覆盖",
     "channel_rules_unset": "未配置渠道级覆盖。全局 ApprovalPolicy.channel_rules 仍生效。"
+  },
+  "offline_banner": {
+    "label": "守护进程不可达",
+    "retry": "重试"
+  },
+  "connect_wizard": {
+    "title": "连接守护进程",
+    "subtitle": "输入守护进程 URL 与 API Key，或扫描配对 QR 码。",
+    "tab_manual": "手动",
+    "tab_qr": "扫描 QR",
+    "field_url": "守护进程 URL",
+    "field_api_key": "API Key",
+    "field_device_name": "设备名称",
+    "device_name_placeholder": "我的 iPhone",
+    "device_name_help": "桌面端会显示此名称，用于后续撤销该设备。",
+    "qr_card_title": "打开桌面 Dashboard",
+    "qr_card_body": "前往 <strong>设置 → 移动配对</strong>，点击下方 <strong>扫描 QR</strong>。",
+    "btn_connect": "连接",
+    "btn_connecting": "连接中…",
+    "btn_scan": "扫描 QR 码",
+    "btn_scanning": "扫描中…",
+    "btn_pairing": "配对中…",
+    "done_title": "已连接！",
+    "done_subtitle": "正在打开 Dashboard…",
+    "error_title": "连接失败",
+    "error_url_scheme": "URL 必须以 http:// 或 https:// 开头",
+    "error_default_connect": "连接失败",
+    "error_default_pairing": "配对失败",
+    "btn_try_again": "重试",
+    "device_name_default": "LibreFang Mobile"
+  },
+  "mobile_pairing": {
+    "title": "移动配对",
+    "subtitle": "打开 LibreFang 移动 App，点击 <strong>扫描 QR</strong> 即可连接到本守护进程。",
+    "expired_message": "QR 码已过期 — 点击刷新获取新码。",
+    "refresh": "刷新",
+    "expired_label": "已过期",
+    "paired_devices_heading": "已配对设备",
+    "paired_at": "{{platform}} · 配对于 {{date}}",
+    "remove_title": "移除设备",
+    "remove_failed": "移除设备失败：{{reason}}",
+    "remove_unknown_error": "未知错误",
+    "error_disabled_title": "设备配对已禁用",
+    "error_disabled_body": "请在 <link>配置 → 安全</link> 中启用配对（<code>pairing.enabled = true</code>）。",
+    "error_generic_title": "无法生成配对码",
+    "btn_try_again": "重试"
   }
 }

@@ -84,6 +84,8 @@ const PermissionSimulatorPage = lazyWithReload(() => import("./pages/PermissionS
 const AuditPage = lazyWithReload(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
 const UserBudgetPage = lazyWithReload(() => import("./pages/UserBudgetPage").then(m => ({ default: m.UserBudgetPage })));
 const UserPolicyPage = lazyWithReload(() => import("./pages/UserPolicyPage").then(m => ({ default: m.UserPolicyPage })));
+const ConnectWizardPage = lazyWithReload(() => import("./pages/ConnectWizardPage").then(m => ({ default: m.ConnectWizardPage })));
+const MobilePairingPage = lazyWithReload(() => import("./pages/MobilePairingPage").then(m => ({ default: m.MobilePairingPage })));
 
 // Suspense wrapper — shows nothing briefly while chunk loads (page transition animation covers it)
 function L({ children }: { children: React.ReactNode }) {
@@ -310,6 +312,18 @@ const auditRoute = createRoute({
   component: () => <L><AuditPage /></L>
 });
 
+const connectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connect",
+  component: () => <L><ConnectWizardPage /></L>
+});
+
+const mobilePairingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/mobile-pairing",
+  component: () => <L><MobilePairingPage /></L>
+});
+
 const configIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/config",
@@ -394,6 +408,8 @@ const routeTree = rootRoute.addChildren([
   userBudgetRoute,
   userPolicyRoute,
   auditRoute,
+  connectRoute,
+  mobilePairingRoute,
 ]);
 
 function ChunkErrorBoundary({ error }: { error: Error }) {
