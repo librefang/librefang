@@ -1235,19 +1235,64 @@ pub async fn invoke_tool(
 // Session listing endpoints
 // ---------------------------------------------------------------------------
 
+/// Pagination query parameters shared by list endpoints.
+#[derive(serde::Deserialize, Default)]
+pub struct PaginationParams {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl PaginationParams {
+    const DEFAULT_LIMIT: usize = 100;
+    const MAX_LIMIT: usize = 500;
+
+    fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(Self::DEFAULT_LIMIT)
+            .min(Self::MAX_LIMIT)
+    }
+
+    fn effective_offset(&self) -> usize {
+        self.offset.unwrap_or(0)
+    }
+}
+
 /// GET /api/sessions — List all sessions with metadata.
 #[utoipa::path(
     get,
     path = "/api/sessions",
     tag = "sessions",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
+    ),
     responses(
-        (status = 200, description = "List sessions", body = Vec<serde_json::Value>)
+        (status = 200, description = "Paginated list of sessions", body = serde_json::Value)
     )
 )]
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
     match state.kernel.memory_substrate().list_sessions() {
-        Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
-        Err(_) => Json(serde_json::json!({"sessions": []})),
+        Ok(all_sessions) => {
+            let total = all_sessions.len();
+            let offset = pagination.effective_offset();
+            let limit = pagination.effective_limit();
+            let items: Vec<_> = all_sessions.into_iter().skip(offset).take(limit).collect();
+            Json(serde_json::json!({
+                "sessions": items,
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }))
+        }
+        Err(_) => Json(serde_json::json!({
+            "sessions": [],
+            "total": 0,
+            "offset": 0,
+            "limit": PaginationParams::DEFAULT_LIMIT,
+        })),
     }
 }
 
@@ -1557,8 +1602,20 @@ fn approval_to_json(
 ///
 /// Transforms field names to match the dashboard template expectations:
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
-#[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
-pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[utoipa::path(
+    get,
+    path = "/api/approvals",
+    tag = "approvals",
+    params(
+        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
+    ),
+    responses((status = 200, description = "Paginated list of pending and recent approvals", body = serde_json::Value))
+)]
+pub async fn list_approvals(
+    State(state): State<Arc<AppState>>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
@@ -1615,8 +1672,16 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
     });
 
     let total = approvals.len();
+    let offset = pagination.effective_offset();
+    let limit = pagination.effective_limit();
+    let items: Vec<_> = approvals.into_iter().skip(offset).take(limit).collect();
 
-    Json(serde_json::json!({"approvals": approvals, "total": total}))
+    Json(serde_json::json!({
+        "approvals": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }))
 }
 
 /// GET /api/approvals/{id} — Get a single approval request by ID.

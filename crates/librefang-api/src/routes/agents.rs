@@ -785,6 +785,10 @@ pub(crate) fn enrich_agent_json(
             "color": e.identity.color,
         },
         "web_search_augmentation": e.manifest.web_search_augmentation,
+        "parent_agent_id": e.parent.as_ref().map(|p| p.to_string()),
+        "children": e.children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+        "session_id": e.session_id.0.to_string(),
+        "tags": e.tags,
     })
 }
 
@@ -902,7 +906,7 @@ pub async fn list_agents(
 
     // -- Pagination --
     let offset = params.offset.unwrap_or(0);
-    let limit = params.limit.map(|l| l.min(100));
+    let limit = params.limit.map(|l| l.min(500));
     let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(lim) = limit {
         agents.into_iter().skip(offset).take(lim).collect()
     } else {
@@ -2242,7 +2246,13 @@ pub async fn send_message_stream(
         }
     });
 
-    Sse::new(sse_stream).into_response()
+    Sse::new(sse_stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 /// GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's

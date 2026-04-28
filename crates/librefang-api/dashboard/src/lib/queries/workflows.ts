@@ -1,6 +1,7 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listWorkflows,
+  getWorkflow,
   listWorkflowRuns,
   getWorkflowRun,
   listWorkflowTemplates,
@@ -29,6 +30,13 @@ export const workflowQueries = {
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
     }),
+  detail: (workflowId: string) =>
+    queryOptions({
+      queryKey: workflowKeys.detail(workflowId),
+      queryFn: () => getWorkflow(workflowId),
+      enabled: !!workflowId,
+      staleTime: STALE_MS,
+    }),
   runs: (workflowId: string) =>
     queryOptions({
       queryKey: workflowKeys.runs(workflowId),
@@ -54,6 +62,10 @@ export const workflowQueries = {
 
 export function useWorkflows(options: QueryOverrides = {}) {
   return useQuery(withOverrides(workflowQueries.list(), options));
+}
+
+export function useWorkflowDetail(workflowId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(workflowQueries.detail(workflowId), options));
 }
 
 export function useWorkflowRuns(workflowId: string, options: QueryOverrides = {}) {
