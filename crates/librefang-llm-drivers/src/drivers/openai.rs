@@ -1686,18 +1686,19 @@ impl LlmDriver for OpenAIDriver {
 
             // Flush any remaining buffered content from the think filter
             // (e.g. partial tag at stream end, or unclosed think block).
+            // The receiver may have already disconnected mid-stream; if so we
+            // skip the flush. We don't update `receiver_dropped` again here
+            // because nothing after this block reads it.
             if !receiver_dropped {
                 for action in think_filter.flush() {
                     match action {
                         FilterAction::EmitText(t) => {
                             if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
-                                receiver_dropped = true;
                                 break;
                             }
                         }
                         FilterAction::EmitThinking(t) => {
                             if tx.send(StreamEvent::ThinkingDelta { text: t }).await.is_err() {
-                                receiver_dropped = true;
                                 break;
                             }
                         }
@@ -1832,17 +1833,15 @@ impl LlmDriver for OpenAIDriver {
                     input: input.clone(),
                 });
 
-                if tx
+                // Receiver-drop here is non-recoverable but we still build the
+                // final response below so the caller (if present) gets it.
+                let _ = tx
                     .send(StreamEvent::ToolUseEnd {
                         id: id.clone(),
                         name: name.clone(),
                         input,
                     })
-                    .await
-                    .is_err()
-                {
-                    receiver_dropped = true;
-                }
+                    .await;
             }
 
             let stop_reason = match finish_reason.as_deref() {
