@@ -319,12 +319,14 @@ async fn dashboard_login(
                         }))
                         .into_response();
                     }
-                    // Verify TOTP code
+                    // Verify TOTP code with replay-attack prevention.
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                        &secret, totp_code, &issuer,
-                    ) {
+                    match state
+                        .kernel
+                        .approvals()
+                        .check_and_record_totp(&secret, totp_code, &issuer)
+                    {
                         Ok(true) => { /* TOTP valid, proceed to session creation */ }
                         Ok(false) => {
                             return (

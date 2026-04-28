@@ -8,10 +8,11 @@ use librefang_types::approval::{
 };
 use librefang_types::capability::glob_matches;
 use rusqlite::Connection;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm, Secret, TOTP};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -44,6 +45,10 @@ pub struct ApprovalManager {
     /// at which point it is set to the current instant. The lockout window is
     /// measured from that moment, not from the first failure.
     totp_failures: StdMutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// Replay-attack prevention: set of (time_step, code) pairs that have
+    /// already been accepted. Each entry covers one 30-second TOTP window.
+    /// Old entries (more than 2 steps in the past) are pruned on every insert.
+    used_totp_codes: StdMutex<HashSet<(u64, String)>>,
 }
 
 struct PendingRequest {
@@ -83,6 +88,7 @@ impl ApprovalManager {
             audit_db: None,
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
+            used_totp_codes: StdMutex::new(HashSet::new()),
         }
     }
 
@@ -96,6 +102,7 @@ impl ApprovalManager {
             audit_db: Some(conn),
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
+            used_totp_codes: StdMutex::new(HashSet::new()),
         }
     }
 
@@ -808,6 +815,52 @@ impl ApprovalManager {
         Ok(totp.check_current(code).unwrap_or(false))
     }
 
+    /// Verify a TOTP code against the stored secret with replay-attack prevention.
+    ///
+    /// Returns `Ok(true)` if the code is valid **and** has not been used before
+    /// in the current or adjacent time window.  Returns `Ok(false)` if the code
+    /// is invalid.  Returns `Err` if the secret is malformed or the code has
+    /// already been used within the same time step (replay detected).
+    ///
+    /// On success the code is recorded so any subsequent call with the same
+    /// `(time_step, code)` pair will be rejected.  Entries older than two steps
+    /// are pruned automatically on each insert.
+    pub fn check_and_record_totp(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        let time_step = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            / 30;
+
+        // Check for replay before doing the (potentially expensive) HMAC.
+        {
+            let used = self
+                .used_totp_codes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if used.contains(&(time_step, code.to_string())) {
+                return Err("TOTP code has already been used (replay detected)".into());
+            }
+        }
+
+        let valid = Self::verify_totp_code_with_issuer(secret_base32, code, issuer)?;
+        if valid {
+            let mut used = self
+                .used_totp_codes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            used.insert((time_step, code.to_string()));
+            // Prune entries older than 2 time steps to bound memory usage.
+            used.retain(|(step, _)| *step >= time_step.saturating_sub(2));
+        }
+        Ok(valid)
+    }
+
     /// Generate a new TOTP secret and return (base32_secret, otpauth_uri, qr_base64_png).
     pub fn generate_totp_secret(
         issuer: &str,
@@ -835,37 +888,75 @@ impl ApprovalManager {
         Ok((base32, uri, qr_b64))
     }
 
-    /// Generate 8 random recovery codes (format: xxxx-xxxx).
+    /// Generate 8 cryptographically random recovery codes.
+    ///
+    /// Each code is 128 bits of entropy encoded as uppercase hex, split into
+    /// four 8-character groups separated by hyphens for readability:
+    /// `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`.
     pub fn generate_recovery_codes() -> Vec<String> {
-        use rand::RngExt;
+        use rand::Rng;
         let mut rng = rand::rng();
         (0..8)
             .map(|_| {
-                let a: u32 = rng.random_range(0..10000);
-                let b: u32 = rng.random_range(0..10000);
-                format!("{a:04}-{b:04}")
+                let bytes: [u8; 16] = rng.random();
+                let hex = hex::encode(bytes).to_uppercase();
+                // Split into four groups of 8 characters.
+                format!(
+                    "{}-{}-{}-{}",
+                    &hex[0..8],
+                    &hex[8..16],
+                    &hex[16..24],
+                    &hex[24..32]
+                )
             })
             .collect()
     }
 
-    /// Check if a string matches the recovery code format: exactly `DDDD-DDDD`.
+    /// Check if a string matches the recovery code format:
+    /// `XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX` (32 uppercase hex chars, 3 hyphens).
     pub fn is_recovery_code_format(code: &str) -> bool {
         let trimmed = code.trim();
-        trimmed.len() == 9
-            && trimmed.as_bytes()[4] == b'-'
-            && trimmed[..4].chars().all(|c| c.is_ascii_digit())
-            && trimmed[5..].chars().all(|c| c.is_ascii_digit())
+        // Total length: 32 hex chars + 3 hyphens = 35
+        if trimmed.len() != 35 {
+            return false;
+        }
+        let bytes = trimmed.as_bytes();
+        // Hyphens at positions 8, 17, 26
+        if bytes[8] != b'-' || bytes[17] != b'-' || bytes[26] != b'-' {
+            return false;
+        }
+        // All other characters must be uppercase hex digits
+        for (i, &b) in bytes.iter().enumerate() {
+            if i == 8 || i == 17 || i == 26 {
+                continue;
+            }
+            if !matches!(b, b'0'..=b'9' | b'A'..=b'F') {
+                return false;
+            }
+        }
+        true
     }
 
     /// Verify a recovery code against the stored list, consuming it on success.
+    ///
+    /// Comparison is performed in constant time to prevent timing oracle attacks.
     ///
     /// Returns `Ok(true)` if the code matched and was consumed, `Ok(false)` if
     /// no match, `Err` if the stored codes are malformed.
     pub fn verify_recovery_code(stored_json: &str, code: &str) -> Result<(bool, String), String> {
         let mut codes: Vec<String> = serde_json::from_str(stored_json)
             .map_err(|e| format!("Invalid recovery codes JSON: {e}"))?;
-        let normalized = code.trim().to_lowercase();
-        if let Some(pos) = codes.iter().position(|c| c == &normalized) {
+        // Normalise to uppercase for comparison (stored codes are already uppercase,
+        // but accept lowercase input for robustness).
+        let normalized = code.trim().to_uppercase();
+        let matched_pos = codes.iter().position(|c| {
+            // Constant-time comparison to prevent timing side-channels.
+            // If lengths differ, ConstantTimeEq will still run on the shorter
+            // length — pad by comparing byte slices of equal declared length
+            // via the subtle crate's ConstantTimeEq impl for &[u8].
+            c.as_bytes().ct_eq(normalized.as_bytes()).into()
+        });
+        if let Some(pos) = matched_pos {
             codes.remove(pos);
             let updated = serde_json::to_string(&codes)
                 .map_err(|e| format!("Failed to serialize codes: {e}"))?;
@@ -2241,10 +2332,10 @@ mod tests {
     fn test_recovery_code_generate_and_verify() {
         let codes = ApprovalManager::generate_recovery_codes();
         assert_eq!(codes.len(), 8);
-        // Each code is xxxx-xxxx format
+        // Each code is XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX (35 chars, 3 hyphens, uppercase hex).
         for code in &codes {
-            assert_eq!(code.len(), 9);
-            assert!(code.contains('-'));
+            assert_eq!(code.len(), 35, "unexpected length for code: {code}");
+            assert!(ApprovalManager::is_recovery_code_format(code));
         }
 
         // Verify and consume
@@ -2260,6 +2351,64 @@ mod tests {
         let (matched2, _) =
             ApprovalManager::verify_recovery_code(&remaining_json, &codes[0]).unwrap();
         assert!(!matched2);
+
+        // Lowercase input should still match (normalization)
+        let json2 = serde_json::to_string(&codes).unwrap();
+        let lower = codes[1].to_lowercase();
+        let (matched3, _) = ApprovalManager::verify_recovery_code(&json2, &lower).unwrap();
+        assert!(matched3, "lowercase recovery code should be accepted");
+    }
+
+    #[test]
+    fn test_recovery_code_format_validation() {
+        // Valid format
+        assert!(ApprovalManager::is_recovery_code_format(
+            "ABCD1234-EF567890-12345678-ABCDEF01"
+        ));
+        // Wrong length
+        assert!(!ApprovalManager::is_recovery_code_format("1234-5678"));
+        // Old DDDD-DDDD format should now be rejected
+        assert!(!ApprovalManager::is_recovery_code_format("1234-5678"));
+        // Wrong separator position
+        assert!(!ApprovalManager::is_recovery_code_format(
+            "ABCD1234EF567890-12345678-ABCDEF01-"
+        ));
+        // Lowercase (not valid without normalisation)
+        assert!(!ApprovalManager::is_recovery_code_format(
+            "abcd1234-ef567890-12345678-abcdef01"
+        ));
+    }
+
+    #[test]
+    fn test_totp_replay_prevention() {
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+        // Generate a real TOTP secret and code for the test.
+        let (secret, _, _) =
+            ApprovalManager::generate_totp_secret("LibreFang", "test-replay").unwrap();
+        let raw = Secret::Encoded(secret.clone()).to_bytes().unwrap();
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            raw,
+            Some("LibreFang".to_string()),
+            "test-replay".to_string(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+
+        // First use: should succeed.
+        let result1 = mgr.check_and_record_totp(&secret, &code, "LibreFang");
+        assert_eq!(result1, Ok(true), "first use should succeed");
+
+        // Second use with same code: replay → should be rejected.
+        let result2 = mgr.check_and_record_totp(&secret, &code, "LibreFang");
+        assert!(
+            result2.is_err(),
+            "second use of same code must be rejected (replay)"
+        );
+        assert!(result2.unwrap_err().contains("replay"));
     }
 
     #[test]

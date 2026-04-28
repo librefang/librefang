@@ -1482,17 +1482,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             }
                         }
                         Some(code) => {
-                            // TOTP code
+                            // TOTP code — use instance method for replay-attack prevention.
                             let secret = match self.kernel.vault_get("totp_secret") {
                                 Some(s) => s,
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
                             };
                             let totp_issuer = self.kernel.approvals().policy().totp_issuer.clone();
-                            match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                                &secret,
-                                code,
-                                &totp_issuer,
-                            ) {
+                            match self
+                                .kernel
+                                .approvals()
+                                .check_and_record_totp(&secret, code, &totp_issuer)
+                            {
                                 Ok(true) => true,
                                 Ok(false) => {
                                     self.kernel.approvals().record_totp_failure(sender_id);

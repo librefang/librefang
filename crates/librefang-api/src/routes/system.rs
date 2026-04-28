@@ -1804,11 +1804,11 @@ pub async fn approve_request(
                             .into_response();
                         }
                     };
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                        &secret,
-                        code,
-                        &totp_issuer,
-                    ) {
+                    match state
+                        .kernel
+                        .approvals()
+                        .check_and_record_totp(&secret, code, &totp_issuer)
+                    {
                         Ok(true) => true,
                         Ok(false) => {
                             state.kernel.approvals().record_totp_failure("api_admin");
@@ -2425,14 +2425,11 @@ pub async fn totp_setup(
                 } else {
                     // TOTP code
                     match state.kernel.vault_get("totp_secret") {
-                        Some(secret) => {
-                            librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                                &secret,
-                                code,
-                                &totp_issuer,
-                            )
-                            .unwrap_or(false)
-                        }
+                        Some(secret) => state
+                            .kernel
+                            .approvals()
+                            .check_and_record_totp(&secret, code, &totp_issuer)
+                            .unwrap_or(false),
                         None => false,
                     }
                 };
@@ -2515,11 +2512,11 @@ pub async fn totp_confirm(
         }
     };
 
-    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-        &secret,
-        &body.code,
-        &totp_issuer,
-    ) {
+    match state
+        .kernel
+        .approvals()
+        .check_and_record_totp(&secret, &body.code, &totp_issuer)
+    {
         Ok(true) => {
             if let Err(e) = state.kernel.vault_set("totp_confirmed", "true") {
                 return ApiErrorResponse::internal(e).into_json_tuple();
@@ -2538,7 +2535,7 @@ pub async fn totp_confirm(
             )
             .into_json_tuple()
         }
-        Err(e) => ApiErrorResponse::internal(e).into_json_tuple(),
+        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
     }
 }
 
@@ -2611,14 +2608,11 @@ pub async fn totp_revoke(
         }
     } else {
         match state.kernel.vault_get("totp_secret") {
-            Some(secret) => {
-                librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                    &secret,
-                    &body.code,
-                    &totp_issuer,
-                )
-                .unwrap_or(false)
-            }
+            Some(secret) => state
+                .kernel
+                .approvals()
+                .check_and_record_totp(&secret, &body.code, &totp_issuer)
+                .unwrap_or(false),
             None => false,
         }
     };
