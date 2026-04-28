@@ -860,6 +860,7 @@ pub async fn build_router(
         ),
         webhook_router,
         config_write_lock: tokio::sync::Mutex::new(()),
+        pending_a2a_agents: dashmap::DashMap::new(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -1030,8 +1031,19 @@ pub async fn build_router(
         // Webhook trigger endpoints (not versioned — external callers use fixed URLs)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
-        // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned)
-        .merge(routes::network::protocol_router())
+        // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned).
+        // Apply an explicit body limit (1 MB) to inbound A2A task payloads so
+        // that external callers cannot exhaust server memory via oversized JSON
+        // bodies. This is a defence-in-depth companion to the global
+        // RequestBodyLimitLayer applied further down — the global limit uses the
+        // operator-configurable max_request_body_bytes value, which may be
+        // raised for other endpoints (e.g. file uploads). Pinning A2A separately
+        // ensures memory exhaustion DoS attacks via /a2a/tasks/send are always
+        // bounded (Bug #3785).
+        .merge(
+            routes::network::protocol_router()
+                .layer(RequestBodyLimitLayer::new(1024 * 1024)),
+        )
         // MCP HTTP endpoint (protocol-level, not versioned)
         .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API (follows OpenAI versioning, not ours)

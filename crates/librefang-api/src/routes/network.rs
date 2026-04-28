@@ -34,6 +34,13 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/a2a/tasks/{id}/status",
             axum::routing::get(a2a_external_task_status),
         )
+        // Bug #3786: operator must explicitly approve a discovered agent before
+        // it can receive tasks. POST /api/a2a/agents/{url_encoded}/approve
+        // promotes the pending entry into the kernel's trusted list.
+        .route(
+            "/a2a/agents/{id}/approve",
+            axum::routing::post(a2a_approve_external),
+        )
 }
 
 /// Build protocol-level A2A routes (not versioned, mounted at the root path).
@@ -477,6 +484,9 @@ pub async fn a2a_cancel_task(
 // ── A2A Management Endpoints (outbound) ─────────────────────────────────
 
 /// GET /api/a2a/agents — List discovered external A2A agents.
+///
+/// Returns both `trusted` agents (approved and able to receive tasks) and
+/// `pending` agents (discovered but not yet approved by the operator).
 #[utoipa::path(
     get,
     path = "/api/a2a/agents",
@@ -491,7 +501,7 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
         .a2a_agents()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let items: Vec<serde_json::Value> = agents
+    let mut items: Vec<serde_json::Value> = agents
         .iter()
         .map(|(_, card)| {
             serde_json::json!({
@@ -500,9 +510,22 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
                 "description": card.description,
                 "skills": card.skills,
                 "version": card.version,
+                "status": "trusted",
             })
         })
         .collect();
+    // Include pending (unapproved) agents so the operator can see and approve them.
+    for entry in state.pending_a2a_agents.iter() {
+        let card = entry.value();
+        items.push(serde_json::json!({
+            "name": card.name,
+            "url": card.url,
+            "description": card.description,
+            "skills": card.skills,
+            "version": card.version,
+            "status": "pending",
+        }));
+    }
     Json(serde_json::json!({"agents": items, "total": items.len()}))
 }
 
@@ -775,26 +798,75 @@ pub async fn a2a_discover_external(
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.discover(&url).await {
         Ok(card) => {
-            let card_json = serde_json::to_value(&card).unwrap_or_default();
-            // Store in kernel's external agents list
+            // SECURITY (Bug #3786): Warn that we have no cryptographic proof
+            // the remote agent is who it claims to be. Verification relies
+            // solely on the operator reviewing the card before approving.
+            tracing::warn!(
+                url = %url,
+                agent_name = %card.name,
+                "A2A agent discovered without cryptographic verification. \
+                 The returned AgentCard has NOT been signed or authenticated. \
+                 Review the card carefully before approving (POST /api/a2a/agents/{{url}}/approve)."
+            );
+
+            // SECURITY (Bug #3786): Check for name collision with already-trusted agents.
             {
-                let mut agents = state
+                let agents = state
                     .kernel
                     .a2a_agents()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                // Update or add
-                if let Some(existing) = agents.iter_mut().find(|(u, _)| u == &url) {
-                    existing.1 = card;
-                } else {
-                    agents.push((url.clone(), card));
+                // A different URL claiming the same name as an existing trusted agent is a
+                // potential impersonation attempt. Reject it to prevent confusion.
+                if let Some((existing_url, _)) =
+                    agents.iter().find(|(u, c)| c.name == card.name && u != &url)
+                {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!({
+                            "error": format!(
+                                "An agent named '{}' is already trusted from a different URL ('{}').",
+                                card.name, existing_url
+                            ),
+                            "hint": "Approve the existing agent or remove it before registering a new one with the same name."
+                        })),
+                    );
                 }
             }
+            // Also check pending agents for the same name collision.
+            if let Some(entry) = state
+                .pending_a2a_agents
+                .iter()
+                .find(|e| e.value().name == card.name && e.key() != &url)
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "A pending agent named '{}' was already discovered from a different URL ('{}').",
+                            card.name, entry.key()
+                        ),
+                        "hint": "Approve or remove the existing pending entry first."
+                    })),
+                );
+            }
+
+            let card_json = serde_json::to_value(&card).unwrap_or_default();
+
+            // SECURITY (Bug #3786): Store in the PENDING list, not the trusted kernel
+            // list. The agent cannot receive tasks until the operator explicitly
+            // approves it via POST /api/a2a/agents/{url}/approve.
+            state.pending_a2a_agents.insert(url.clone(), card);
+
             (
-                StatusCode::OK,
+                StatusCode::ACCEPTED,
                 Json(serde_json::json!({
                     "url": url,
+                    "status": "pending",
                     "agent": card_json,
+                    "message": "Agent discovered and placed in pending state. \
+                                An operator must approve it before it can receive tasks. \
+                                Use POST /api/a2a/agents/{url}/approve to trust this agent.",
                 })),
             )
         }
@@ -828,6 +900,15 @@ pub async fn a2a_send_external(
         None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
     };
     let session_id = body["session_id"].as_str();
+
+    // SECURITY (Bug #3786): Reject sends to agents that are still pending approval.
+    if state.pending_a2a_agents.contains_key(&url) {
+        return ApiErrorResponse::bad_request(
+            "This agent is pending operator approval and cannot receive tasks. \
+             Use POST /api/a2a/agents/{url}/approve to trust it first.",
+        )
+        .into_json_tuple();
+    }
 
     // SSRF protection: validate URL before making any outbound request
     let ssrf_allowed = state
@@ -901,6 +982,94 @@ pub async fn a2a_external_task_status(
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": e})),
         ),
+    }
+}
+
+/// POST /api/a2a/agents/{id}/approve — Approve a pending external A2A agent.
+///
+/// Promotes the agent from the pending list into the kernel's trusted external-agent
+/// list, allowing it to receive tasks via `/api/a2a/send`. The `{id}` path segment
+/// should be the URL-encoded discovery URL of the agent returned by
+/// `POST /api/a2a/discover`.
+///
+/// This endpoint exists to enforce operator oversight of newly discovered agents
+/// (Bug #3786). Discovered agents are placed in a pending state and cannot be used
+/// until an operator explicitly calls this endpoint.
+#[utoipa::path(
+    post,
+    path = "/api/a2a/agents/{id}/approve",
+    tag = "a2a",
+    params(
+        ("id" = String, Path, description = "Discovery URL of the pending agent (URL-encoded)"),
+    ),
+    responses(
+        (status = 200, description = "Agent approved and promoted to trusted list", body = serde_json::Value),
+        (status = 404, description = "No pending agent found for the given URL")
+    )
+)]
+pub async fn a2a_approve_external(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // The path parameter may be URL-encoded; decode it for matching.
+    let url = crate::percent_decode(&id);
+
+    match state.pending_a2a_agents.remove(&url) {
+        Some((_, card)) => {
+            tracing::info!(
+                url = %url,
+                agent_name = %card.name,
+                "A2A agent approved by operator and promoted to trusted list."
+            );
+            let card_json = serde_json::to_value(&card).unwrap_or_default();
+            // Promote to kernel's trusted list.
+            {
+                let mut agents = state
+                    .kernel
+                    .a2a_agents()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                // Update existing entry (same URL) or append.
+                if let Some(existing) = agents.iter_mut().find(|(u, _)| u == &url) {
+                    existing.1 = card;
+                } else {
+                    agents.push((url.clone(), card));
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "url": url,
+                    "status": "trusted",
+                    "agent": card_json,
+                    "message": "Agent approved. It can now receive tasks via POST /api/a2a/send.",
+                })),
+            )
+        }
+        None => {
+            // Also check if it's already trusted (idempotent re-approval).
+            let agents = state
+                .kernel
+                .a2a_agents()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if agents.iter().any(|(u, _)| u == &url) {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "url": url,
+                        "status": "trusted",
+                        "message": "Agent is already in the trusted list.",
+                    })),
+                );
+            }
+            ApiErrorResponse::not_found(format!(
+                "No pending agent found for URL '{}'. \
+                 Use POST /api/a2a/discover first.",
+                url
+            ))
+            .into_json_tuple()
+        }
     }
 }
 
