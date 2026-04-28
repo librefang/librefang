@@ -189,7 +189,9 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
 
 // ── Credential storage (mobile only — keyring) ───────────────────────────
 
+#[cfg(any(target_os = "ios", target_os = "android"))]
 const KEYRING_SERVICE: &str = "librefang-mobile";
+#[cfg(any(target_os = "ios", target_os = "android"))]
 const KEYRING_ACCOUNT: &str = "daemon-credentials";
 
 /// Store daemon credentials in the OS keyring.

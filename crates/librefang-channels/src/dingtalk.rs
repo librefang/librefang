@@ -607,29 +607,43 @@ impl ChannelAdapter for DingTalkAdapter {
                     let secret = Arc::clone(&secret);
                     let account_id = Arc::clone(&account_id);
                     async move {
-                        // Extract timestamp and sign from headers
+                        // Extract timestamp and sign from headers.
+                        // A missing or non-numeric timestamp is always a hard error —
+                        // never silently skip HMAC verification.
                         let timestamp_str = headers
                             .get("timestamp")
                             .and_then(|v| v.to_str().ok())
-                            .unwrap_or("0");
+                            .unwrap_or("");
                         let signature = headers
                             .get("sign")
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("");
 
-                        // Verify signature
-                        if let Ok(ts) = timestamp_str.parse::<i64>() {
-                            if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
-                                warn!("DingTalk: invalid signature");
-                                return axum::http::StatusCode::FORBIDDEN;
+                        let ts = match timestamp_str.parse::<i64>() {
+                            Ok(t) => t,
+                            Err(_) => {
+                                warn!(
+                                    "DingTalk: missing or non-numeric timestamp header — \
+                                     rejecting request"
+                                );
+                                return axum::http::StatusCode::BAD_REQUEST;
                             }
+                        };
 
-                            // Check timestamp freshness (1 hour window)
-                            let now = Utc::now().timestamp_millis();
-                            if (now - ts).unsigned_abs() > 3_600_000 {
-                                warn!("DingTalk: stale timestamp");
-                                return axum::http::StatusCode::FORBIDDEN;
-                            }
+                        // Verify signature
+                        if !DingTalkAdapter::verify_signature(&secret, ts, signature) {
+                            warn!("DingTalk: invalid signature");
+                            return axum::http::StatusCode::UNAUTHORIZED;
+                        }
+
+                        // Check timestamp freshness (1 hour window).
+                        // A stale timestamp is treated as a possible replay,
+                        // so we reject as unauthorized rather than forbidden —
+                        // matching the missing/invalid-signature path.
+                        let now = Utc::now().timestamp_millis();
+                        if (now - ts).unsigned_abs() > 3_600_000 {
+                            warn!("DingTalk: stale timestamp");
+                            return axum::http::StatusCode::UNAUTHORIZED;
                         }
 
                         if let Some((text, sender_id, sender_nick, conv_id, is_group)) =
@@ -892,6 +906,19 @@ mod tests {
         assert!(result.is_some());
         let (_, _, _, _, is_group) = result.unwrap();
         assert!(!is_group);
+    }
+
+    #[test]
+    fn test_dingtalk_verify_signature_rejects_wrong_timestamp() {
+        let secret = "test-secret";
+        let ts: i64 = 1700000000000;
+        let good_sig = DingTalkAdapter::compute_signature(secret, ts);
+        // Different timestamp → signature mismatch
+        assert!(!DingTalkAdapter::verify_signature(
+            secret,
+            ts + 1,
+            &good_sig
+        ));
     }
 
     #[test]

@@ -807,6 +807,51 @@ impl WorkflowEngine {
         self.runs.get(&run_id).map(|r| r.clone())
     }
 
+    /// Recover workflow runs left in `Running` or `Pending` state after a daemon crash.
+    ///
+    /// Called once at boot. Any run whose `started_at` age exceeds `stale_timeout` is
+    /// transitioned to `Failed` with a "Interrupted by daemon restart" error message.
+    /// Returns the number of runs recovered. A `stale_timeout` of zero is
+    /// treated as "feature disabled" and returns `0` without inspecting any
+    /// runs — kernel boot guards on this anyway, but keeping the no-op here
+    /// means a future direct caller can't accidentally fail every run.
+    pub fn recover_stale_running_runs(&self, stale_timeout: std::time::Duration) -> usize {
+        if stale_timeout.is_zero() {
+            return 0;
+        }
+        let now = Utc::now();
+        let stale_secs = stale_timeout.as_secs() as i64;
+        let mut recovered = 0usize;
+        // DashMap's `iter_mut` takes a per-shard write lock as the iterator
+        // visits each entry — no global write lock and no awaiting required.
+        for mut entry in self.runs.iter_mut() {
+            let run = entry.value_mut();
+            if !matches!(
+                run.state,
+                WorkflowRunState::Running | WorkflowRunState::Pending
+            ) {
+                continue;
+            }
+            let age = now.signed_duration_since(run.started_at).num_seconds();
+            if age < stale_secs {
+                continue;
+            }
+            warn!(
+                run_id = %run.id,
+                state = ?run.state,
+                started_at = %run.started_at,
+                age_secs = age,
+                "Recovering stale workflow run interrupted by daemon restart"
+            );
+            run.state = WorkflowRunState::Failed;
+            run.error = Some("Interrupted by daemon restart".to_string());
+            run.completed_at = Some(now);
+            run.clear_pause_state();
+            recovered += 1;
+        }
+        recovered
+    }
+
     /// List all workflow runs (optionally filtered by state).
     pub async fn list_runs(&self, state_filter: Option<&str>) -> Vec<WorkflowRun> {
         self.runs
