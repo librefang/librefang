@@ -98,7 +98,7 @@ jobs:
             echo "=== Scanning category: ${CAT} ==="
 
             gh api "repos/${REPO}/discussions" --paginate --jq \
-              ".[] | select(.category.name == \"${CAT}\") | @base64" \
+              --arg cat "$CAT" '.[] | select(.category.name == $cat) | @base64' \
             | while IFS= read -r row; do
                 decoded=$(printf '%s' "$row" | base64 -d)
                 num=$(printf '%s' "$decoded" | jq -r '.number')
