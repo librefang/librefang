@@ -875,8 +875,15 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         let status = http_resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_ms = http_resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|secs| secs * 1000)
+                .unwrap_or(5000);
             return Err(LlmError::RateLimited {
-                retry_after_ms: 5000,
+                retry_after_ms,
                 message: None,
             });
         }
