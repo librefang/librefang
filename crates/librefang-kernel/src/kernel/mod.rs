@@ -4959,8 +4959,13 @@ system_prompt = "You are a helpful assistant."
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
                             name, result.total_usage.input_tokens, result.total_usage.output_tokens,
                         );
-                        self.push_notification(&agent_id.to_string(), "task_completed", &msg)
-                            .await;
+                        self.push_notification(
+                            &agent_id.to_string(),
+                            "task_completed",
+                            &msg,
+                            resolved_session_id.as_ref(),
+                        )
+                        .await;
                     }
                 }
 
@@ -5246,8 +5251,13 @@ system_prompt = "You are a helpful assistant."
                         ),
                     ),
                 };
-                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
-                    .await;
+                self.push_notification(
+                    &agent_id.to_string(),
+                    event_type,
+                    &fail_msg,
+                    resolved_session_id.as_ref(),
+                )
+                .await;
 
                 Err(e)
             }
@@ -12857,11 +12867,15 @@ system_prompt = "You are a helpful assistant."
                                 "Agent \"{}\" is unresponsive (inactive for {}s)",
                                 status.name, status.inactive_secs,
                             );
+                            // health_check_failed is agent-level, not
+                            // session-scoped — pass None so the alert
+                            // doesn't get a misleading [session=…] suffix.
                             kernel
                                 .push_notification(
                                     &status.agent_id.to_string(),
                                     "health_check_failed",
                                     &msg,
+                                    None,
                                 )
                                 .await;
                         }
@@ -15904,7 +15918,20 @@ impl LibreFangKernel {
 
     /// Push a notification to all configured targets, resolving routing rules.
     /// Resolution: per-agent rules (matching event) > global channels for that event type.
-    async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
+    ///
+    /// When `session_id` is `Some`, ` [session=<uuid>]` is appended to the
+    /// delivered message so operators can correlate the alert with the
+    /// failing session's history (matches the `session_id` field in the
+    /// `Agent loop failed — recorded in supervisor` warn log).
+    /// Pass `None` for agent-level alerts that aren't session-scoped
+    /// (e.g. `health_check_failed`).
+    async fn push_notification(
+        &self,
+        agent_id: &str,
+        event_type: &str,
+        message: &str,
+        session_id: Option<&SessionId>,
+    ) {
         use librefang_types::capability::glob_matches;
         let cfg = self.config.load_full();
 
@@ -15933,8 +15960,13 @@ impl LibreFangKernel {
             }
         };
 
+        let delivered: std::borrow::Cow<'_, str> = match session_id {
+            Some(sid) => std::borrow::Cow::Owned(format!("{message} [session={sid}]")),
+            None => std::borrow::Cow::Borrowed(message),
+        };
+
         for target in &targets {
-            self.push_to_target(target, message).await;
+            self.push_to_target(target, &delivered).await;
         }
     }
 
