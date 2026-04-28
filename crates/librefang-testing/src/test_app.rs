@@ -147,6 +147,7 @@ impl TestAppState {
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
         })
     }
 }

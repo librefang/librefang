@@ -565,7 +565,11 @@ pub async fn auth(
             path,
             "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
         ) || dashboard_shell_public
-            || path.starts_with("/a2a/")
+            // The /a2a/agents listing is public so external callers can discover
+            // local agents without a bearer token (matches the A2A spec intent).
+            // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
+            // task transcripts — require authentication (Bug #3781).
+            || path == "/a2a/agents"
             || path.starts_with("/api/uploads/")
             || path.starts_with("/api/auth/login"));
     let always_public =
@@ -1953,6 +1957,98 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "loopback with a valid bearer token must still be allowed through"
+        );
+    }
+
+    // ---- Bug #3781: GET /a2a/tasks/{id} must require auth ---------------
+    //
+    // Before the fix, `path.starts_with("/a2a/")` in the always_public_get_only
+    // block let any caller read full task transcripts (agent prompts + LLM
+    // outputs) without a bearer token. Only `/a2a/agents` (capability discovery)
+    // should remain public; task-level resources contain sensitive data.
+
+    /// GET /a2a/agents (the capability listing) must stay public — external
+    /// A2A peers call this to discover what skills a local agent exposes.
+    #[tokio::test]
+    async fn a2a_agents_listing_is_always_public() {
+        let app = Router::new()
+            .route("/a2a/agents", get(|| async { "agent list" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET /a2a/agents must be public so external A2A peers can discover local agents"
+        );
+    }
+
+    /// GET /a2a/tasks/{id} must require auth (Bug #3781). Task transcripts
+    /// contain full agent prompts and LLM outputs — sensitive operational data.
+    #[tokio::test]
+    async fn a2a_task_transcript_requires_auth() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}", get(|| async { "full task transcript" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        // Unauthenticated → must be rejected.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/tasks/some-uuid-1234")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /a2a/tasks/{{id}} must require auth — it returns full task transcripts"
+        );
+    }
+
+    /// GET /a2a/tasks/{id} must allow access with a valid bearer token.
+    #[tokio::test]
+    async fn a2a_task_transcript_accessible_with_valid_token() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}", get(|| async { "full task transcript" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let addr: std::net::SocketAddr = "203.0.113.5:40000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/a2a/tasks/some-uuid-1234")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let response = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "valid bearer token must allow access to /a2a/tasks/{{id}}"
         );
     }
 }
