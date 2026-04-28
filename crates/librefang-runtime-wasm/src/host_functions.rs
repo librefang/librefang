@@ -276,10 +276,57 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
     ) {
         return e;
     }
-    match std::fs::write(&write_path, content) {
-        Ok(()) => json!({"ok": true}),
-        Err(e) => json!({"error": format!("fs_write failed: {e}")}),
+    // SECURITY: refuse to follow a leaf symlink.
+    //
+    // safe_resolve_parent canonicalises the *parent* directory and appends
+    // file_name verbatim, so the capability check sees a path inside the
+    // grant — but if the leaf itself is a symlink that points out of the
+    // grant (e.g. attacker pre-stages /grant/dir/sym -> /etc/passwd) then
+    // std::fs::write follows it and clobbers the real target.  The audit
+    // of #3925 flagged this as a HIGH symlink bypass.
+    //
+    // Cross-platform approach: refuse the write if the leaf is a symlink
+    // (symlink_metadata does not follow).  On Unix we additionally pass
+    // O_NOFOLLOW so the kernel rejects the open atomically — closes the
+    // narrow TOCTOU window between the lstat and the open.  Linux's
+    // O_NOFOLLOW value is 0o400000; we hard-code rather than pull in
+    // libc since this crate doesn't already depend on it.
+    if let Ok(meta) = std::fs::symlink_metadata(&write_path) {
+        if meta.file_type().is_symlink() {
+            return json!({
+                "error": "fs_write denied: refusing to follow a symlink leaf"
+            });
+        }
     }
+    use std::io::Write;
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.write(true).truncate(true).create(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux O_NOFOLLOW. macOS / *BSD use a different bit
+        // (0x0100); skip O_NOFOLLOW there and rely on the lstat
+        // pre-check above.  ELOOP -> deny shape stays Linux-only.
+        open_opts.custom_flags(0o0_400_000);
+    }
+    let mut f = match open_opts.open(&write_path) {
+        Ok(f) => f,
+        Err(e) => {
+            // ELOOP (40) is the kernel rejecting O_NOFOLLOW on Linux;
+            // surface it as a deny rather than a generic open failure.
+            #[cfg(target_os = "linux")]
+            if e.raw_os_error() == Some(40) {
+                return json!({
+                    "error": "fs_write denied: refusing to follow a symlink leaf"
+                });
+            }
+            return json!({"error": format!("fs_write failed: {e}")});
+        }
+    };
+    if let Err(e) = f.write_all(content.as_bytes()) {
+        return json!({"error": format!("fs_write failed: {e}")});
+    }
+    json!({"ok": true})
 }
 
 fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
