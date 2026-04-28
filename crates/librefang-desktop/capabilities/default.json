@@ -3,6 +3,7 @@
   "identifier": "default",
   "description": "Default permissions for the LibreFang desktop app",
   "windows": ["main"],
+  "platforms": ["macOS", "windows", "linux"],
   "permissions": [
     "core:default",
     "notification:default",
