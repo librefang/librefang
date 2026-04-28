@@ -3,7 +3,7 @@ services:
     image: ghcr.io/librefang/librefang:latest
     # build:  # Uncomment to build from source
     #   context: ..
-    #   dockerfile: deploy/Dockerfile
+    #   dockerfile: Dockerfile
     ports:
       - "4545:4545"
     volumes:

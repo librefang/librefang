@@ -1,4 +1,8 @@
 //! Update checker for the LibreFang desktop app.
+//!
+//! Desktop-only: auto-updater is not used on iOS or Android (stores handle updates).
+
+#![cfg(not(any(target_os = "ios", target_os = "android")))]
 
 use serde::Serialize;
 use tauri_plugin_notification::NotificationExt;

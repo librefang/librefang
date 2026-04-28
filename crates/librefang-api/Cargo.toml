@@ -137,6 +137,22 @@ all-channels = [
     "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
 ]
 
+# All channels except email — used for Android targets where rustls-connector's
+# rustls-platform-verifier dependency doesn't implement new_with_extra_roots on Android.
+all-channels-no-email = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
+    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
+    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
+    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
+    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
+    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-qq", "channel-voice", "channel-wechat", "channel-wecom",
+]
+
 # Mini: 12 core channels
 mini = [
     "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
