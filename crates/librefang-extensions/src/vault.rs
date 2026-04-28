@@ -772,9 +772,7 @@ fn machine_fingerprint() -> Vec<u8> {
             if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
                 hasher.update(user.as_bytes());
             }
-            if let Ok(host) =
-                std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME"))
-            {
+            if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
                 hasher.update(host.as_bytes());
             }
             hasher.update(b"librefang-vault-v1");
