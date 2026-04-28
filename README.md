@@ -133,7 +133,7 @@ librefang-types       Core types, taint tracking, Ed25519 signing, model catalog
 librefang-skills      60 bundled skills, SKILL.md parser, FangHub marketplace
 librefang-hands       14 autonomous Hands, HAND.toml parser, lifecycle management
 librefang-extensions  25 MCP templates, AES-256-GCM vault, OAuth2 PKCE
-librefang-wire        OFP P2P protocol, HMAC-SHA256 mutual auth
+librefang-wire        OFP P2P protocol, HMAC-SHA256 mutual auth (plaintext wire — run cross-network federation behind a WireGuard / Tailscale / SSH overlay; details: docs/architecture/ofp-wire-security.md)
 librefang-cli         CLI, daemon management, TUI dashboard, MCP server mode
 librefang-desktop     Tauri 2.0 native app (tray, notifications, shortcuts)
 librefang-migrate     OpenClaw, LangChain, AutoGPT migration engine
