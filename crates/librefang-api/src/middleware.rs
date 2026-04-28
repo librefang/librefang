@@ -609,8 +609,7 @@ pub async fn auth(
     // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
     // allowlist. It streams real-time audit/log events and must require auth
     // the same way every other sensitive read endpoint does. (#3593/#3680)
-    let dashboard_read_public =
-        is_get && (dashboard_read_exact || dashboard_read_prefix);
+    let dashboard_read_public = is_get && (dashboard_read_exact || dashboard_read_prefix);
 
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
