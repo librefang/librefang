@@ -587,7 +587,11 @@ mod tests {
         let sig = make_sig(original);
         let tampered = b"tampered body";
         let result = WebhookAdapter::verify_request(SECRET, tampered, &sig, Some(now()), now());
-        assert_eq!(result, Err("invalid signature"), "tampered body must be rejected");
+        assert_eq!(
+            result,
+            Err("invalid signature"),
+            "tampered body must be rejected"
+        );
     }
 
     /// 3. Missing signature header (empty string) → rejected.
@@ -595,7 +599,11 @@ mod tests {
     fn test_verify_request_missing_signature() {
         let body = b"some body";
         let result = WebhookAdapter::verify_request(SECRET, body, "", Some(now()), now());
-        assert_eq!(result, Err("missing signature"), "absent signature header must be rejected");
+        assert_eq!(
+            result,
+            Err("missing signature"),
+            "absent signature header must be rejected"
+        );
     }
 
     /// 4. Stale timestamp (> 5 minutes in the past) → rejected.
@@ -605,7 +613,11 @@ mod tests {
         let sig = make_sig(body);
         let stale_ts = now() - (5 * 60 + 1); // 301 seconds ago
         let result = WebhookAdapter::verify_request(SECRET, body, &sig, Some(stale_ts), now());
-        assert_eq!(result, Err("timestamp too old"), "stale timestamp must be rejected");
+        assert_eq!(
+            result,
+            Err("timestamp too old"),
+            "stale timestamp must be rejected"
+        );
     }
 
     /// 5. Future timestamp (> 5 minutes ahead) → rejected.
@@ -615,7 +627,11 @@ mod tests {
         let sig = make_sig(body);
         let future_ts = now() + (5 * 60 + 1); // 301 seconds ahead
         let result = WebhookAdapter::verify_request(SECRET, body, &sig, Some(future_ts), now());
-        assert_eq!(result, Err("timestamp in the future"), "future timestamp must be rejected");
+        assert_eq!(
+            result,
+            Err("timestamp in the future"),
+            "future timestamp must be rejected"
+        );
     }
 
     /// Boundary: timestamp exactly at the ±5 min edge is still accepted.
