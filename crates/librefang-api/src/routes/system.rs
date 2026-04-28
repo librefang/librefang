@@ -2881,6 +2881,15 @@ fn resolve_pairing_base_url(
     if let Some(url) = configured {
         let trimmed = url.trim().trim_end_matches('/');
         if !trimmed.is_empty() {
+            // Configured URL must carry a real http(s) scheme — silently
+            // accepting `librefang.example.com` or `ftp://...` would
+            // produce a QR the mobile client refuses with a vague
+            // "unexpected base_url protocol" error.
+            if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+                return Err(format!(
+                    "pairing.public_base_url must start with http:// or https:// (got: {trimmed:?})"
+                ));
+            }
             return Ok(trimmed.to_string());
         }
     }
@@ -2972,12 +2981,30 @@ pub async fn pairing_request(
     }
 }
 
+/// Body of `POST /api/pairing/complete`. Typed so a missing/empty `token`
+/// is rejected up front rather than silently degraded to an empty string
+/// that the kernel pairing manager has to re-validate.
+#[derive(serde::Deserialize)]
+pub struct PairingCompleteRequest {
+    pub token: String,
+    #[serde(default = "default_unknown")]
+    pub display_name: String,
+    #[serde(default = "default_unknown")]
+    pub platform: String,
+    #[serde(default)]
+    pub push_token: Option<String>,
+}
+
+fn default_unknown() -> String {
+    "unknown".to_string()
+}
+
 /// POST /api/pairing/complete — Complete pairing with token + device info.
 #[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Pairing completed", body = serde_json::Value)))]
 pub async fn pairing_complete(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<PairingCompleteRequest>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config_ref().pairing.enabled {
@@ -2988,19 +3015,15 @@ pub async fn pairing_complete(
     // ErrorTranslator is !Send; drop before the .await on user_api_keys below
     // so the handler future remains Send.
     drop(t);
-    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
-    let display_name = body
-        .get("display_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let platform = body
-        .get("platform")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let push_token = body
-        .get("push_token")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let token = body.token.trim();
+    if token.is_empty() {
+        return ApiErrorResponse::bad_request("token is required")
+            .into_json_tuple()
+            .into_response();
+    }
+    let display_name = body.display_name.as_str();
+    let platform = body.platform.as_str();
+    let push_token = body.push_token.clone();
     // Mint a fresh per-device bearer token. The plaintext is returned
     // to the mobile client exactly once below; only the Argon2 hash is
     // persisted, so this token cannot be reconstructed from a database
@@ -3048,6 +3071,14 @@ pub async fn pairing_complete(
                 user_id: librefang_types::agent::UserId::from_name(&device_user_name),
             };
             state.user_api_keys.write().await.push(auth);
+
+            tracing::info!(
+                target: "pairing.audit",
+                device_id = %device.device_id,
+                display_name = %device.display_name,
+                platform = %device.platform,
+                "paired new device — bearer minted and registered"
+            );
 
             Json(serde_json::json!({
                 "device_id": device.device_id,
@@ -3134,6 +3165,11 @@ pub async fn pairing_remove_device(
                 .write()
                 .await
                 .retain(|u| u.name != device_user_name);
+            tracing::info!(
+                target: "pairing.audit",
+                device_id = %device_id,
+                "revoked paired device — bearer removed from live auth table"
+            );
             Json(serde_json::json!({"ok": true})).into_response()
         }
         Err(e) => ApiErrorResponse::not_found(e)

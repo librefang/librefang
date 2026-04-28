@@ -1,5 +1,4 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { Wifi, QrCode, Loader2, CheckCircle, AlertCircle, RefreshCw } from "lucide-react";
 import { isMobileTauri, scanQrCode, getCredentials, clearCredentials } from "../lib/tauri";
 import { useConnectManual, useConnectViaQr } from "../lib/mutations/connection";
@@ -8,7 +7,16 @@ type Tab = "manual" | "qr";
 type Step = "idle" | "scanning" | "connecting" | "done" | "error";
 
 function navigateToDashboard(baseUrl: string) {
-  window.location.href = baseUrl.replace(/\/$/, "") + "/dashboard";
+  // On mobile Tauri the bundled SPA only serves the connect wizard — once
+  // paired we hop to the daemon-served dashboard. In a regular browser
+  // (including desktop dev) the SPA we're running IS the dashboard, so
+  // an internal hash-route change avoids a needless full reload onto a
+  // different origin.
+  if (isMobileTauri()) {
+    window.location.href = baseUrl.replace(/\/$/, "") + "/dashboard";
+  } else {
+    window.location.hash = "#/overview";
+  }
 }
 
 function defaultDisplayName(): string {
@@ -19,7 +27,12 @@ function defaultDisplayName(): string {
 }
 
 function devicePlatform(): string {
-  return /Android/.test(navigator.userAgent) ? "android" : "ios";
+  // Only label as ios when the UA actually identifies as iOS — defaulting
+  // every non-Android client to "ios" pollutes the paired-device list when
+  // the wizard is opened from a desktop browser for debugging.
+  if (/Android/.test(navigator.userAgent)) return "android";
+  if (/iPhone|iPad|iPod/.test(navigator.userAgent)) return "ios";
+  return "unknown";
 }
 
 interface PairingPayload {
@@ -54,7 +67,6 @@ function decodeQrPayload(raw: string): PairingPayload {
 }
 
 export function ConnectWizardPage() {
-  const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("manual");
   const [step, setStep] = useState<Step>("idle");
   const [baseUrl, setBaseUrl] = useState("");
@@ -80,11 +92,7 @@ export function ConnectWizardPage() {
         });
         if (cancelled) return;
         if (resp.ok) {
-          if (isMobileTauri()) {
-            navigateToDashboard(creds.base_url);
-          } else {
-            void navigate({ to: "/overview" });
-          }
+          navigateToDashboard(creds.base_url);
         } else {
           await clearCredentials();
         }
@@ -93,7 +101,7 @@ export function ConnectWizardPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [navigate]);
+  }, []);
 
   function handleManualSubmit() {
     const url = baseUrl.trim().replace(/\/$/, "");
