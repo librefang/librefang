@@ -6,7 +6,7 @@ WORKDIR /build
 COPY crates/librefang-api/dashboard ./dashboard
 WORKDIR /build/dashboard
 RUN corepack enable \
-    && pnpm install --frozen-lockfile --config.strict-dep-builds=false \
+    && pnpm install --frozen-lockfile \
     && pnpm run build
 
 # Stage 2: Build Rust binary
@@ -55,6 +55,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 \
     gosu \
     && rm -rf /var/lib/apt/lists/*
+RUN addgroup --system --gid 1001 librefang && \
+    adduser --system --uid 1001 --ingroup librefang librefang
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
