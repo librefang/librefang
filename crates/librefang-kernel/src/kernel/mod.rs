@@ -65,12 +65,7 @@ pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
 // Per-task trigger recursion depth (bug #3780)
 // ---------------------------------------------------------------------------
 
-/// Per-task trigger-chain recursion depth counter.
-///
-/// Declared at module level so it has a true `'static` key, as required by
-/// `tokio::task_local!`.  Each independent event-processing task establishes
-/// its own scope via `PUBLISH_EVENT_DEPTH.scope(Cell::new(0), future)`,
-/// keeping depth counts isolated between concurrent chains.
+/// Per-task trigger-chain recursion depth; module-level for the `'static` key required by `tokio::task_local!`.
 tokio::task_local! {
     static PUBLISH_EVENT_DEPTH: std::cell::Cell<u32>;
 }
@@ -11075,26 +11070,10 @@ system_prompt = "You are a helpful assistant."
     /// Any matching triggers will dispatch messages to the subscribing agents.
     /// Returns the list of trigger matches that were dispatched.
     /// Includes depth limiting to prevent circular trigger chains.
-    ///
-    /// # Depth tracking — per-task, not global (bug #3780)
-    ///
-    /// Previously a `static AtomicU32` was shared across every concurrent
-    /// event chain: chain A's depth increments could push chain B over the
-    /// limit even though B had no circular dependency.  We now use a
-    /// `tokio::task_local!` cell (`PUBLISH_EVENT_DEPTH`, defined at module
-    /// level) so each independent task maintains its own counter.
-    ///
-    /// * Top-level call (no scope active): wraps the body in
-    ///   `PUBLISH_EVENT_DEPTH.scope(Cell::new(0), …)`.
-    /// * Recursive call (scope already active in this task): reads and
-    ///   mutates the existing `Cell` directly, without opening a new scope
-    ///   (which would shadow the outer counter and reset it to 0).
     pub async fn publish_event(&self, event: Event) -> Vec<crate::triggers::TriggerMatch> {
         let already_scoped = PUBLISH_EVENT_DEPTH.try_with(|_| ()).is_ok();
 
         if already_scoped {
-            // Recursive invocation from within the same task — reuse the
-            // existing scope so the depth accumulates correctly.
             self.publish_event_inner(event).await
         } else {
             // Top-level invocation — establish an isolated per-chain scope.
@@ -11104,10 +11083,7 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
-    /// Inner implementation of [`publish_event`].
-    ///
-    /// Requires `PUBLISH_EVENT_DEPTH` task-local to be active in the calling
-    /// task (guaranteed by [`publish_event`]).
+    /// Inner body of [`publish_event`]; requires `PUBLISH_EVENT_DEPTH` scope to be active.
     async fn publish_event_inner(
         &self,
         event: Event,
@@ -11115,7 +11091,6 @@ system_prompt = "You are a helpful assistant."
         let cfg = self.config.load_full();
         let max_trigger_depth = cfg.triggers.max_depth as u32;
 
-        // Read and increment the per-task depth counter.
         let depth = PUBLISH_EVENT_DEPTH.with(|c| {
             let d = c.get();
             c.set(d + 1);
@@ -11136,8 +11111,7 @@ system_prompt = "You are a helpful assistant."
         struct DepthGuard;
         impl Drop for DepthGuard {
             fn drop(&mut self) {
-                // `PUBLISH_EVENT_DEPTH` is always active when DepthGuard is
-                // alive (we only create it after the early-exit check above).
+                // Guard is only created after the early-exit check, so the scope is always active.
                 let _ = PUBLISH_EVENT_DEPTH.try_with(|c| c.set(c.get().saturating_sub(1)));
             }
         }

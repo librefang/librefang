@@ -20,23 +20,13 @@ pub struct EventBus {
     agent_channels: DashMap<AgentId, broadcast::Sender<Event>>,
     /// Event history ring buffer.
     history: Arc<RwLock<VecDeque<Event>>>,
-    /// Count of events where the intended recipient agent had no active
-    /// receiver.  Incremented when an agent-targeted send finds the
-    /// per-agent broadcast channel with no live subscribers (bug #3793).
-    ///
-    /// Note: tokio `broadcast::Sender::send` returns `Err` only when
-    /// there are *no receivers* — the channel is a ring buffer that never
-    /// rejects the sender; slow receivers get `RecvError::Lagged` instead.
-    /// We therefore track the "no-receiver" condition as a drop because
-    /// the event would not reach any consumer.
+    /// Count of events dropped because the per-agent channel had no active receiver.
     dropped_count: AtomicU64,
     /// Timestamp of the last drop warning log (for rate-limiting).
     last_drop_warn: std::sync::Mutex<std::time::Instant>,
 }
 
-/// Return a short human-readable label for an `EventPayload` variant.
-/// Used in drop-warning log fields so operators can identify which event
-/// types are being silently lost without decoding the full payload.
+/// Maps an `EventPayload` variant to a short label for drop-warning log fields.
 fn payload_kind(payload: &EventPayload) -> &'static str {
     match payload {
         EventPayload::Message(_) => "Message",
@@ -65,23 +55,6 @@ impl EventBus {
     }
 
     /// Publish an event to the bus.
-    ///
-    /// # Drop semantics (bug #3793)
-    ///
-    /// `tokio::broadcast` is a *ring buffer*: the sender never blocks and
-    /// never returns an error because the channel is "full".  Instead, slow
-    /// receivers are skipped with `RecvError::Lagged`.  `Sender::send`
-    /// returns `Err` **only** when there are zero active receivers.
-    ///
-    /// We therefore distinguish two cases:
-    ///
-    /// * **Global broadcast / pattern / system channels** — it is normal for
-    ///   these to have no subscribers during early boot or when no agent is
-    ///   listening.  A failed send is logged at `debug` level only.
-    /// * **Per-agent channels** — if a channel entry exists but has no
-    ///   receiver, the agent has disconnected without cleaning up.  This is
-    ///   a genuine drop that warrants a `warn!` with event-type information
-    ///   so operators can diagnose which event kinds are lost.
     pub async fn publish(&self, event: Event) {
         debug!(
             event_id = %event.id,
@@ -103,12 +76,9 @@ impl EventBus {
         match &event.target {
             EventTarget::Agent(agent_id) => {
                 if let Some(sender) = self.agent_channels.get(agent_id) {
-                    // Per-agent channel: Err means no active receiver for this
-                    // specific agent — the event is genuinely lost.
                     if sender.send(event.clone()).is_err() {
                         let total =
                             self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-                        // Rate-limit to at most one warning per 10 seconds.
                         if let Ok(mut last) = self.last_drop_warn.lock() {
                             if last.elapsed() >= std::time::Duration::from_secs(10) {
                                 warn!(
@@ -125,8 +95,6 @@ impl EventBus {
                 }
             }
             EventTarget::Broadcast => {
-                // Global broadcast: no-receiver is expected when no system
-                // subscriber is registered; log at debug only.
                 if self.sender.send(event.clone()).is_err() {
                     debug!(
                         event_id = %event.id,
@@ -157,7 +125,6 @@ impl EventBus {
                 }
             }
             EventTarget::Pattern(_pattern) => {
-                // No-receiver on the pattern channel is non-critical.
                 if self.sender.send(event.clone()).is_err() {
                     debug!(
                         event_id = %event.id,
@@ -167,7 +134,6 @@ impl EventBus {
                 }
             }
             EventTarget::System => {
-                // No-receiver on the system channel is non-critical.
                 if self.sender.send(event.clone()).is_err() {
                     debug!(
                         event_id = %event.id,

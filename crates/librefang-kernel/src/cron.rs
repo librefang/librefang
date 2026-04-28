@@ -572,36 +572,11 @@ pub fn compute_next_run_after(
                                         .next()
                                         .map(|dt| dt.with_timezone(&Utc));
 
-                                    // DST observability (bug #3831):
-                                    //
-                                    // The `cron` crate iterates in the target timezone using
-                                    // `chrono_tz`, which already handles DST correctly:
-                                    //
-                                    //  • Spring-forward (clocks skip 2:00–3:00 locally):
-                                    //    `chrono_tz` returns `MappedLocalTime::None` for times
-                                    //    in the gap.  The cron iterator skips those instants and
-                                    //    advances to the next valid occurrence.  The job silently
-                                    //    fires late or not at all on that day.
-                                    //
-                                    //  • Fall-back (clocks repeat 1:00–2:00 locally):
-                                    //    `chrono_tz` returns `MappedLocalTime::Ambiguous`.  The
-                                    //    cron iterator picks the *first* occurrence (pre-fold),
-                                    //    so the job fires once on the earlier UTC equivalent and
-                                    //    then advances normally — the second occurrence is
-                                    //    skipped.
-                                    //
-                                    // Both cases are handled safely but invisibly.  Emit a
-                                    // `warn!` so operators know when a scheduled time is in a
-                                    // DST transition window and the actual fire time was adjusted.
+                                    // Warn when a DST boundary is crossed: spring-forward may
+                                    // silently skip a scheduled local time; fall-back picks the
+                                    // earlier UTC occurrence.
                                     if let Some(next) = result {
                                         let next_local = next.with_timezone(&timezone);
-                                        // Compare UTC offsets in seconds to detect a DST
-                                        // boundary crossing between the reference time and
-                                        // the computed next-fire.  We avoid importing the
-                                        // `chrono::Offset` trait by using the chrono
-                                        // `DateTime::offset()` return value's seconds_east()
-                                        // helper, which is available directly on
-                                        // `chrono_tz::TzOffset` via `OffsetComponents`.
                                         let base_utc_secs = (base_local.naive_utc()
                                             - base_local.naive_local())
                                         .num_seconds();
@@ -609,10 +584,6 @@ pub fn compute_next_run_after(
                                             - next_local.naive_local())
                                         .num_seconds();
                                         if base_utc_secs != next_utc_secs {
-                                            // The UTC offset changed between the reference time
-                                            // and the computed next-fire — a DST boundary was
-                                            // crossed.  Warn with the adjusted UTC time so
-                                            // operators can reconcile with their intent.
                                             warn!(
                                                 expr = %expr,
                                                 timezone = %tz_str,
