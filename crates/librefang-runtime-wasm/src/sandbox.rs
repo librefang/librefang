@@ -835,7 +835,10 @@ mod tests {
         assert!(!sanitized.contains('\r'), "CR must be replaced");
         // CRLF → single space; bare LF/CR → pilcrow
         assert!(sanitized.contains(' '), "CRLF should become a space");
-        assert!(sanitized.contains('\u{21b5}'), "bare LF/CR should become pilcrow");
+        assert!(
+            sanitized.contains('\u{21b5}'),
+            "bare LF/CR should become pilcrow"
+        );
     }
 
     #[test]
