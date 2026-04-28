@@ -2886,6 +2886,11 @@
           "description": "Redirect URL for the OAuth2 authorization code flow callback. Defaults to `http://127.0.0.1:4545/api/auth/callback`.",
           "type": "string"
         },
+        "require_email_verified": {
+          "default": true,
+          "description": "Require `email_verified = true` in the OIDC ID token before allowing login. Defaults to `true`. Set to `false` only if your identity provider does not set this claim. When `true`, logins where the claim is absent or false are rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).",
+          "type": "boolean"
+        },
         "scopes": {
           "default": [
             "openid",
@@ -5533,6 +5538,14 @@
           "default": "http://127.0.0.1:4545/api/auth/callback",
           "description": "OAuth2 redirect URI. Defaults to `http://127.0.0.1:4545/api/auth/callback`.",
           "type": "string"
+        },
+        "require_email_verified": {
+          "default": null,
+          "description": "Override the global `require_email_verified` setting for this provider. `None` means inherit from `ExternalAuthConfig::require_email_verified`. Set to `false` only if this specific provider does not issue `email_verified` claims (e.g. GitHub's user API does not include the field for OAuth2 flows).",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "scopes": {
           "default": [

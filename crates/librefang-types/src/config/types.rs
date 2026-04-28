@@ -3711,6 +3711,12 @@ pub struct ExternalAuthConfig {
     /// When configured, these take precedence over the top-level single-provider fields.
     #[serde(default)]
     pub providers: Vec<OidcProvider>,
+    /// Require `email_verified = true` in the OIDC ID token before allowing login.
+    /// Defaults to `true`. Set to `false` only if your identity provider does not
+    /// set this claim. When `true`, logins where the claim is absent or false are
+    /// rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).
+    #[serde(default = "default_true")]
+    pub require_email_verified: bool,
 }
 
 /// Configuration for a single OIDC/OAuth2 provider.
@@ -3758,6 +3764,12 @@ pub struct OidcProvider {
     /// JWT audience claim to validate.
     #[serde(default)]
     pub audience: String,
+    /// Override the global `require_email_verified` setting for this provider.
+    /// `None` means inherit from `ExternalAuthConfig::require_email_verified`.
+    /// Set to `false` only if this specific provider does not issue `email_verified`
+    /// claims (e.g. GitHub's user API does not include the field for OAuth2 flows).
+    #[serde(default)]
+    pub require_email_verified: Option<bool>,
 }
 
 fn default_oauth_client_secret_env() -> String {
@@ -3793,6 +3805,7 @@ impl Default for ExternalAuthConfig {
             audience: String::new(),
             session_ttl_secs: default_session_ttl(),
             providers: Vec::new(),
+            require_email_verified: true,
         }
     }
 }

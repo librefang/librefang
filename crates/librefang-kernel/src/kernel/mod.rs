@@ -658,6 +658,13 @@ pub struct LibreFangKernel {
     /// don't take effect on the active filter (the hot-reload action is a
     /// no-op with a warning).
     pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
+    /// Serialises all recovery-code redemption attempts so the
+    /// read-verify-write sequence is atomic within the process.
+    /// Fixes the TOCTOU race described in issue #3560: without this lock a
+    /// concurrent second request that reads the same code list before the
+    /// first request has written the updated list can redeem the same code
+    /// twice.
+    vault_recovery_codes_mutex: std::sync::Mutex<()>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1385,6 +1392,45 @@ impl LibreFangKernel {
         vault
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
+    }
+
+    /// Atomically redeem a TOTP recovery code.
+    ///
+    /// Acquires `vault_recovery_codes_mutex`, reads the stored code list,
+    /// verifies `code`, removes it from the list, and writes back the
+    /// updated list — all under the lock.  This prevents the TOCTOU race
+    /// in issue #3560 where two concurrent requests could both succeed with
+    /// the same code before either had written the updated (shortened) list.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — code matched and was consumed (vault updated).
+    /// - `Ok(false)` — code did not match (vault unchanged).
+    /// - `Err(e)`    — vault read/write error, or vault_set failed (#3633).
+    pub fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
+        // Hold the mutex for the entire read-verify-write sequence.
+        let _guard = self
+            .vault_recovery_codes_mutex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let stored = match self.vault_get("totp_recovery_codes") {
+            Some(s) => s,
+            None => return Err("No recovery codes configured".to_string()),
+        };
+
+        match crate::approval::ApprovalManager::verify_recovery_code(&stored, code) {
+            Ok((true, updated)) => {
+                // #3633: if the vault write fails, treat the attempt as failed
+                // rather than granting access with a still-valid code.
+                self.vault_set("totp_recovery_codes", &updated).map_err(|e| {
+                    warn!("vault_set failed when consuming recovery code: {e}");
+                    "Internal error persisting recovery code consumption".to_string()
+                })?;
+                Ok(true)
+            }
+            Ok((false, _)) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Workflow engine.
@@ -3092,6 +3138,7 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
+            vault_recovery_codes_mutex: std::sync::Mutex::new(()),
         };
 
         // Initialize proactive memory system (mem0-style) from config.

@@ -296,6 +296,10 @@ pub struct ResolvedProvider {
     pub allowed_domains: Vec<String>,
     #[serde(skip)]
     pub audience: String,
+    /// Whether to require `email_verified: true` in the ID token / userinfo
+    /// response before allowing login.  Defaults to `true` (#3703).
+    #[serde(skip)]
+    pub require_email_verified: bool,
 }
 
 // ── Token exchange response ─────────────────────────────────────────────
@@ -838,6 +842,44 @@ async fn handle_code_exchange(
         }
     };
 
+    // SECURITY (#3703): Require email_verified = true before allowing login.
+    // Without this check, a provider that supports unverified email addresses
+    // can be exploited to claim an address in `allowed_domains` without actually
+    // owning that address.
+    if provider.require_email_verified {
+        match claims.email_verified {
+            Some(true) => {} // verified — allow login to proceed
+            Some(false) => {
+                warn!(
+                    sub = %claims.sub,
+                    provider = %provider.id,
+                    "OIDC login rejected: email_verified = false"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Email address not verified by identity provider"
+                    })),
+                )
+                    .into_response();
+            }
+            None => {
+                warn!(
+                    sub = %claims.sub,
+                    provider = %provider.id,
+                    "OIDC login rejected: email_verified claim absent"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Email address not verified by identity provider"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // Check allowed domains.
     if !provider.allowed_domains.is_empty() {
         if let Some(ref email) = claims.email {
@@ -1337,7 +1379,7 @@ pub(crate) async fn resolve_providers(
 
     // Multi-provider mode.
     for provider in &config.providers {
-        match resolve_single_provider(provider).await {
+        match resolve_single_provider(provider, config.require_email_verified).await {
             Ok(p) => resolved.push(p),
             Err(e) => warn!(
                 provider_id = %provider.id,
@@ -1368,6 +1410,7 @@ pub(crate) async fn resolve_providers(
                     } else {
                         config.audience.clone()
                     },
+                    require_email_verified: config.require_email_verified,
                 });
             }
             Err(e) => warn!(error = %e, "Failed to resolve legacy OIDC provider"),
@@ -1379,6 +1422,7 @@ pub(crate) async fn resolve_providers(
 
 async fn resolve_single_provider(
     provider: &librefang_types::config::OidcProvider,
+    global_require_email_verified: bool,
 ) -> Result<ResolvedProvider, String> {
     let display_name = if provider.display_name.is_empty() {
         provider.id.clone()
@@ -1391,6 +1435,11 @@ async fn resolve_single_provider(
     } else {
         provider.audience.clone()
     };
+
+    // Per-provider override takes precedence over the global setting.
+    let require_email_verified = provider
+        .require_email_verified
+        .unwrap_or(global_require_email_verified);
 
     // If explicit URLs are provided, use them directly (e.g., GitHub).
     if !provider.auth_url.is_empty() && !provider.token_url.is_empty() {
@@ -1407,6 +1456,7 @@ async fn resolve_single_provider(
             client_secret_env: provider.client_secret_env.clone(),
             allowed_domains: provider.allowed_domains.clone(),
             audience,
+            require_email_verified,
         });
     }
 
@@ -1448,6 +1498,7 @@ async fn resolve_single_provider(
         client_secret_env: provider.client_secret_env.clone(),
         allowed_domains: provider.allowed_domains.clone(),
         audience,
+        require_email_verified,
     })
 }
 
@@ -1886,6 +1937,7 @@ mod tests {
                 scopes: vec!["read:user".to_string()],
                 allowed_domains: vec![],
                 audience: String::new(),
+                require_email_verified: None,
             }],
             ..Default::default()
         };
@@ -1917,6 +1969,7 @@ mod tests {
                 scopes: vec!["openid".to_string()],
                 allowed_domains: vec![],
                 audience: String::new(),
+                require_email_verified: None,
             }],
             ..Default::default()
         };
@@ -1958,6 +2011,7 @@ mod tests {
                     scopes: vec!["openid".to_string()],
                     allowed_domains: vec![],
                     audience: String::new(),
+                    require_email_verified: None,
                 },
                 librefang_types::config::OidcProvider {
                     id: "bad".to_string(),
@@ -1973,6 +2027,7 @@ mod tests {
                     scopes: vec!["openid".to_string()],
                     allowed_domains: vec![],
                     audience: String::new(),
+                    require_email_verified: None,
                 },
             ],
             ..Default::default()

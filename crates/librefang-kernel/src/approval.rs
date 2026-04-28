@@ -915,7 +915,13 @@ impl ApprovalManager {
     }
 
     /// Record a TOTP verification failure.
-    pub fn record_totp_failure(&self, sender_id: &str) {
+    ///
+    /// Returns `Ok(())` if the failure was recorded and persisted to the
+    /// database, or `Err(())` if the database write failed. Callers MUST
+    /// treat `Err(())` as a rejection — if we cannot persist the counter we
+    /// cannot enforce the brute-force cap across restarts, so the safest
+    /// course is to deny the request (fail-secure, fix for #3372 / #3584).
+    pub fn record_totp_failure(&self, sender_id: &str) -> Result<(), ()> {
         let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
         let entry = failures.entry(sender_id.to_string()).or_insert((0, None));
         // Reset counter if lockout window expired
@@ -939,7 +945,8 @@ impl ApprovalManager {
         }
         let (count, locked_at_instant) = *entry;
         drop(failures);
-        // Persist lockout state so it survives a daemon restart
+        // Persist lockout state so it survives a daemon restart.
+        // If the DB write fails, return Err so callers can reject fail-secure.
         let locked_at_unix = locked_at_instant.map(|t| {
             let elapsed = t.elapsed().as_secs();
             std::time::SystemTime::now()
@@ -948,13 +955,24 @@ impl ApprovalManager {
                 .as_secs()
                 .saturating_sub(elapsed) as i64
         });
-        self.persist_totp_lockout_save(sender_id, count, locked_at_unix);
+        self.persist_totp_lockout_save(sender_id, count, locked_at_unix)
     }
 
-    fn persist_totp_lockout_save(&self, sender_id: &str, failures: u32, locked_at: Option<i64>) {
-        let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
-        let _ = conn.execute(
+    fn persist_totp_lockout_save(
+        &self,
+        sender_id: &str,
+        failures: u32,
+        locked_at: Option<i64>,
+    ) -> Result<(), ()> {
+        let Some(db) = &self.audit_db else {
+            // No DB configured — in-memory only, accept the failure record.
+            return Ok(());
+        };
+        let Ok(conn) = db.lock() else {
+            warn!(sender_id, "TOTP lockout DB unavailable; rejecting attempt fail-secure");
+            return Err(());
+        };
+        let result = conn.execute(
             "INSERT INTO totp_lockout (sender_id, failures, locked_at)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(sender_id) DO UPDATE SET
@@ -962,6 +980,14 @@ impl ApprovalManager {
                  locked_at = excluded.locked_at",
             rusqlite::params![sender_id, failures as i64, locked_at],
         );
+        if let Err(e) = result {
+            warn!(
+                sender_id,
+                "Failed to persist TOTP failure counter to DB: {e}; rejecting attempt fail-secure"
+            );
+            return Err(());
+        }
+        Ok(())
     }
 
     fn persist_totp_lockout_clear(&self, sender_id: &str) {
