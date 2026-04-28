@@ -2448,6 +2448,24 @@ pub async fn totp_setup(
         }
     }
 
+    // Reject overwrite of a pending (not yet confirmed) TOTP enrollment.
+    // `totp_secret` present but `totp_confirmed` != "true" means a setup
+    // was initiated by a previous call but the confirm step was never completed.
+    // Allowing a second setup call here would silently discard the first QR
+    // code, making the first caller's authenticator app permanently invalid
+    // without any indication.
+    let pending_setup = state.kernel.vault_get("totp_secret").is_some()
+        && state.kernel.vault_get("totp_confirmed").as_deref() != Some("true");
+    if pending_setup {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "TOTP enrollment already in progress — confirm the existing setup or revoke it first",
+                "status": "pending_confirmation",
+            })),
+        );
+    }
+
     let (secret_base32, otpauth_uri, qr_base64) =
         match librefang_kernel::approval::ApprovalManager::generate_totp_secret(
             &totp_issuer,

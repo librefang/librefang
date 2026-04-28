@@ -115,7 +115,11 @@ impl Tab {
 }
 
 enum Backend {
-    Daemon { base_url: String },
+    Daemon {
+        base_url: String,
+        /// API key read from config.toml `api_key`, forwarded to every HTTP request.
+        api_key: Option<String>,
+    },
     InProcess { kernel: Arc<LibreFangKernel> },
     None,
 }
@@ -123,7 +127,10 @@ enum Backend {
 impl Backend {
     fn to_ref(&self) -> Option<BackendRef> {
         match self {
-            Backend::Daemon { base_url } => Some(BackendRef::Daemon(base_url.clone())),
+            Backend::Daemon { base_url, api_key } => Some(BackendRef::Daemon {
+                base_url: base_url.clone(),
+                api_key: api_key.clone(),
+            }),
             Backend::InProcess { kernel } => Some(BackendRef::InProcess(kernel.clone())),
             Backend::None => None,
         }
@@ -994,7 +1001,7 @@ impl App {
 
     fn refresh_agents(&mut self) {
         match &self.backend {
-            Backend::Daemon { base_url } => {
+            Backend::Daemon { base_url, .. } => {
                 self.agents.load_daemon_agents(base_url);
             }
             Backend::InProcess { kernel } => {
@@ -1274,6 +1281,7 @@ impl App {
                 if let Some(ref url) = self.welcome.daemon_url {
                     self.backend = Backend::Daemon {
                         base_url: url.clone(),
+                        api_key: crate::read_api_key(),
                     };
                     self.agents.reset();
                     self.enter_main_phase();
@@ -1398,11 +1406,21 @@ impl App {
                 if let Some(backend) = self.backend.to_ref() {
                     let tx = self.event_tx.clone();
                     std::thread::spawn(move || {
-                        if let event::BackendRef::Daemon(base_url) = backend {
-                            let client = crate::http_client::client_builder()
-                                .timeout(std::time::Duration::from_secs(10))
-                                .build()
-                                .ok();
+                        if let event::BackendRef::Daemon { base_url, api_key } = backend {
+                            let client = {
+                                let mut builder = crate::http_client::client_builder()
+                                    .timeout(std::time::Duration::from_secs(10));
+                                if let Some(ref key) = api_key {
+                                    let mut headers = reqwest::header::HeaderMap::new();
+                                    if let Ok(val) = reqwest::header::HeaderValue::from_str(
+                                        &format!("Bearer {key}"),
+                                    ) {
+                                        headers.insert(reqwest::header::AUTHORIZATION, val);
+                                    }
+                                    builder = builder.default_headers(headers);
+                                }
+                                builder.build().ok()
+                            };
                             if let Some(client) = client {
                                 let mut fields = serde_json::Map::new();
                                 for (k, v) in &values {
@@ -1747,7 +1765,7 @@ impl App {
         self.chat.agent_name = name.clone();
         self.chat.mode_label = "daemon".to_string();
 
-        if let Backend::Daemon { ref base_url } = self.backend {
+        if let Backend::Daemon { ref base_url, .. } = self.backend {
             let client = crate::daemon_client();
             if let Ok(resp) = client.get(format!("{base_url}/api/agents/{id}")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -1804,11 +1822,12 @@ impl App {
         self.chat.status_msg = None;
 
         match (&self.backend, &self.chat_target) {
-            (Backend::Daemon { base_url }, Some(target)) if target.agent_id_daemon.is_some() => {
+            (Backend::Daemon { base_url, api_key }, Some(target)) if target.agent_id_daemon.is_some() => {
                 event::spawn_daemon_stream(
                     base_url.clone(),
                     target.agent_id_daemon.as_ref().unwrap().clone(),
                     message,
+                    api_key.clone(),
                     self.event_tx.clone(),
                 );
             }
@@ -1831,9 +1850,9 @@ impl App {
 
     fn spawn_agent(&mut self, toml_content: String) {
         match &self.backend {
-            Backend::Daemon { base_url } => {
+            Backend::Daemon { base_url, api_key } => {
                 self.agents.sub = agents::AgentSubScreen::Spawning;
-                event::spawn_daemon_agent(base_url.clone(), toml_content, self.event_tx.clone());
+                event::spawn_daemon_agent(base_url.clone(), toml_content, api_key.clone(), self.event_tx.clone());
             }
             Backend::InProcess { kernel } => {
                 let manifest: librefang_types::agent::AgentManifest =
@@ -1865,7 +1884,7 @@ impl App {
 
     fn open_model_picker(&mut self) {
         let models = match &self.backend {
-            Backend::Daemon { base_url } => {
+            Backend::Daemon { base_url, .. } => {
                 let client = crate::daemon_client();
                 match client.get(format!("{base_url}/api/models")).send() {
                     Ok(resp) => match resp.json::<serde_json::Value>() {
@@ -1925,7 +1944,7 @@ impl App {
         }
 
         match (&self.backend, &self.chat_target) {
-            (Backend::Daemon { base_url }, Some(target)) => {
+            (Backend::Daemon { base_url, .. }, Some(target)) => {
                 if let Some(ref agent_id) = target.agent_id_daemon {
                     let client = crate::daemon_client();
                     let url = format!("{base_url}/api/agents/{agent_id}/model");
@@ -2032,7 +2051,7 @@ impl App {
             "/status" => {
                 let mut s = Vec::new();
                 match &self.backend {
-                    Backend::Daemon { base_url } => {
+                    Backend::Daemon { base_url, .. } => {
                         s.push(format!("Mode: daemon ({base_url})"));
                         if let Some(ref t) = self.chat_target {
                             s.push(format!("Agent: {}", t.agent_name));
@@ -2052,7 +2071,7 @@ impl App {
             "/agents" => {
                 let mut lines = Vec::new();
                 match &self.backend {
-                    Backend::Daemon { base_url } => {
+                    Backend::Daemon { base_url, .. } => {
                         let client = crate::daemon_client();
                         if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
                             if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -2109,7 +2128,7 @@ impl App {
                 if let Some(ref target) = self.chat_target {
                     let name = target.agent_name.clone();
                     match &self.backend {
-                        Backend::Daemon { base_url } => {
+                        Backend::Daemon { base_url, .. } => {
                             if let Some(ref id) = target.agent_id_daemon {
                                 let client = crate::daemon_client();
                                 let url = format!("{base_url}/api/agents/{id}");
