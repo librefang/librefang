@@ -1158,7 +1158,7 @@ pub async fn build_router(
     // (which was applied above to `app`). Tower layers wrap the router they
     // are attached to; a layer added to `app` after `.nest()` would not
     // cover the nested router. 1 MiB is generous for any webhook payload
-    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks.
+    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks (#3813).
     const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
     let channel_webhook_state = state.webhook_router.clone();
     let channel_routes = Router::new()
