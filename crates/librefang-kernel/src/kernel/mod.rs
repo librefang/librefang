@@ -793,7 +793,7 @@ impl LibreFangKernel {
     /// runtime via [`update_budget_config`], so callers always see the
     /// latest values set through the API.
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        self.budget_config.read().unwrap().clone()
+        self.budget_config.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Safely mutate the runtime budget configuration.
@@ -802,7 +802,7 @@ impl LibreFangKernel {
     /// All writes are serialised through an `RwLock` write-guard, which
     /// eliminates the data-race hazard of the old raw-pointer approach.
     pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut guard = self.budget_config.write().unwrap();
+        let mut guard = self.budget_config.write().unwrap_or_else(|p| p.into_inner());
         f(&mut guard);
     }
 
@@ -12831,10 +12831,14 @@ system_prompt = "You are a helpful assistant."
 
         // Update agent states to Suspended in persistent storage (not delete)
         for entry in self.registry.list() {
-            let _ = self.registry.set_state(entry.id, AgentState::Suspended);
+            if let Err(e) = self.registry.set_state(entry.id, AgentState::Suspended) {
+                tracing::error!(agent_id = %entry.id, "failed to set agent state to Suspended on shutdown: {e}");
+            }
             // Re-save with Suspended state for clean resume on next boot
             if let Some(updated) = self.registry.get(entry.id) {
-                let _ = self.memory.save_agent(&updated);
+                if let Err(e) = self.memory.save_agent(&updated) {
+                    tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
+                }
             }
         }
 

@@ -424,7 +424,10 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = resp.text().await.unwrap_or_else(|e| {
+                    tracing::warn!("failed to read Anthropic error body: {e}");
+                    String::new()
+                });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
                     .unwrap_or(body);
@@ -549,7 +552,10 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
+                let body = resp.text().await.unwrap_or_else(|e| {
+                    tracing::warn!("failed to read Anthropic error body: {e}");
+                    String::new()
+                });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
                     .unwrap_or(body);

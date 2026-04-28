@@ -208,7 +208,7 @@ impl CredentialPool {
         // Lock the entire inner state so that the RoundRobin index read and
         // the credential selection happen atomically — no other thread can
         // advance the index between reading it and using it.
-        let mut inner = self.inner.lock().expect("credential pool lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match self.strategy {
             PoolStrategy::FillFirst => Self::acquire_fill_first(&inner.credentials),
             PoolStrategy::RoundRobin => {
@@ -243,7 +243,7 @@ impl CredentialPool {
     /// exhausted (402).  The credential is placed in cooldown for
     /// `exhausted_ttl`.
     pub fn mark_exhausted(&self, api_key: &str) {
-        let mut inner = self.inner.lock().expect("credential pool lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let until = Instant::now() + self.exhausted_ttl;
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.exhausted_until = Some(until);
@@ -254,7 +254,7 @@ impl CredentialPool {
     /// credential's `request_count` and clears any leftover exhaustion marker
     /// (e.g. if a provider recovered before the TTL expired).
     pub fn mark_success(&self, api_key: &str) {
-        let mut inner = self.inner.lock().expect("credential pool lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(c) = inner.credentials.iter_mut().find(|c| c.api_key == api_key) {
             c.request_count = c.request_count.saturating_add(1);
             // Always clear the exhaustion marker on success — the key is working
@@ -265,7 +265,7 @@ impl CredentialPool {
 
     /// Number of currently available (non-exhausted) credentials.
     pub fn available_count(&self) -> usize {
-        let inner = self.inner.lock().expect("credential pool lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner
             .credentials
             .iter()
@@ -275,7 +275,7 @@ impl CredentialPool {
 
     /// Total number of credentials in the pool (available + exhausted).
     pub fn total_count(&self) -> usize {
-        let inner = self.inner.lock().expect("credential pool lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.credentials.len()
     }
 
@@ -286,7 +286,7 @@ impl CredentialPool {
     /// and exhaustion status.  The list is sorted by priority descending,
     /// matching the internal ordering.
     pub fn snapshot(&self) -> Vec<CredentialSnapshot> {
-        let inner = self.inner.lock().expect("credential pool lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner
             .credentials
             .iter()
