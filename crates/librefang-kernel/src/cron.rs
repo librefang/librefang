@@ -476,7 +476,7 @@ impl CronScheduler {
     ///
     /// Introduced as a fix for #3828 (PR #3923). A previous duplicate
     /// `warn_missed_fires` method (no-arg, PR #3906) that both logged and
-    /// rescheduled overdue jobs has been removed (#4030); this is now the
+    /// rescheduled overdue jobs has been removed (PR #4033, closes #4030); this is now the
     /// sole missed-fire reporter.
     pub fn log_missed_fires_since(&self, since: chrono::DateTime<Utc>) {
         let now = Utc::now();
