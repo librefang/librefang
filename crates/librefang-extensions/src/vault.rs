@@ -749,8 +749,7 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             let nonce = Nonce::from_slice(&nonce_bytes);
             match cipher.decrypt(nonce, ciphertext.as_slice()) {
                 Ok(plaintext) => {
-                    let key_str =
-                        String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
                     return Ok(Zeroizing::new(key_str));
                 }
                 Err(_) => {
@@ -771,8 +770,7 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
                     let plaintext = legacy_cipher
                         .decrypt(nonce, ciphertext.as_slice())
                         .map_err(|e| format!("decrypt: {e}"))?;
-                    let key_str =
-                        String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
                     // Re-wrap with the new fingerprint to migrate this vault
                     // off the recoverable derivation. Best-effort: a write
                     // failure leaves the vault on legacy derivation, which is
