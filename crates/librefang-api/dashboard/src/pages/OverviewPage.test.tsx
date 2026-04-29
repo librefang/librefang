@@ -9,6 +9,7 @@ import { useMcpServers } from "../lib/queries/mcp";
 import { usePeers } from "../lib/queries/network";
 import { useSchedules } from "../lib/queries/schedules";
 import { useSessions } from "../lib/queries/sessions";
+import { useBudgetStatus } from "../lib/queries/analytics";
 
 vi.mock("../lib/queries/overview", () => ({
   useDashboardSnapshot: vi.fn(),
@@ -39,6 +40,10 @@ vi.mock("../lib/queries/sessions", () => ({
   useSessions: vi.fn(),
 }));
 
+vi.mock("../lib/queries/analytics", () => ({
+  useBudgetStatus: vi.fn(),
+}));
+
 vi.mock("react-i18next", async () => {
   const actual = await vi.importActual<typeof import("react-i18next")>(
     "react-i18next",
@@ -63,6 +68,7 @@ const useMcpServersMock = useMcpServers as unknown as ReturnType<typeof vi.fn>;
 const usePeersMock = usePeers as unknown as ReturnType<typeof vi.fn>;
 const useSchedulesMock = useSchedules as unknown as ReturnType<typeof vi.fn>;
 const useSessionsMock = useSessions as unknown as ReturnType<typeof vi.fn>;
+const useBudgetStatusMock = useBudgetStatus as unknown as ReturnType<typeof vi.fn>;
 
 function setQuickInitDefault(): void {
   useQuickInitMock.mockReturnValue({
@@ -79,6 +85,7 @@ function setSidecarHooksDefault(): void {
   usePeersMock.mockReturnValue({ data: [] });
   useSchedulesMock.mockReturnValue({ data: [] });
   useSessionsMock.mockReturnValue({ data: [] });
+  useBudgetStatusMock.mockReturnValue({ data: undefined });
 }
 
 function renderPage(): void {
