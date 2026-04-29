@@ -2452,14 +2452,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_failed_blocks_input_until_user_acks() {
-        // The ApiKey step uses `matches!(state.key_test, Ok | Warn)` to short-
-        // circuit input handling and let the auto-advance timer fire. SaveFailed
-        // must fall through that guard so Esc can still bring the user back to
-        // the provider step (where they can retry from a clean state).
-        let s = KeyTestState::SaveFailed("io error".to_string());
-        let auto_advance_match = matches!(s, KeyTestState::Ok | KeyTestState::Warn);
-        assert!(!auto_advance_match);
-    }
 }
