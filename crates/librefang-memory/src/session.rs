@@ -4,6 +4,47 @@ use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+/// Derive a short display label for a session from its first user message.
+///
+/// Used as a fallback when a session has no explicit `label` set (the common
+/// case — labels are only set when a user/agent explicitly names a session).
+/// Returns `None` if the session has no user message yet, so callers can
+/// keep the field nullable for fully empty sessions.
+fn derive_session_label(messages: &[Message]) -> Option<String> {
+    const MAX_LEN: usize = 60;
+    let first_user = messages.iter().find(|m| m.role == Role::User)?;
+    let text = match &first_user.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Blocks(blocks) => {
+            let mut buf = String::new();
+            for block in blocks {
+                if let ContentBlock::Text { text, .. } = block {
+                    if !buf.is_empty() {
+                        buf.push(' ');
+                    }
+                    buf.push_str(text);
+                    if buf.len() >= MAX_LEN {
+                        break;
+                    }
+                }
+            }
+            buf
+        }
+    };
+    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let truncated = if normalized.chars().count() > MAX_LEN {
+        let mut t: String = normalized.chars().take(MAX_LEN).collect();
+        t.push('…');
+        t
+    } else {
+        normalized
+    };
+    Some(truncated)
+}
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -434,23 +475,32 @@ impl SessionStore {
     }
 
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
+    ///
+    /// The two `DELETE`s run inside a single transaction so a failure on
+    /// either side rolls back the other and leaves the agent's history
+    /// either fully intact or fully gone — never half-deleted with FTS
+    /// orphans pointing at missing rows (#3470).
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let agent_id_str = agent_id.0.to_string();
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.execute(
             "DELETE FROM sessions WHERE agent_id = ?1",
             rusqlite::params![agent_id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        if let Err(e) = conn.execute(
+        tx.execute(
             "DELETE FROM sessions_fts WHERE agent_id = ?1",
             rusqlite::params![agent_id_str],
-        ) {
-            warn!(agent_id = %agent_id_str, error = %e, "Failed to delete FTS entries for agent; orphans left in sessions_fts");
-        }
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -469,6 +519,13 @@ impl SessionStore {
     }
 
     /// List all sessions with metadata (session_id, agent_id, message_count, created_at).
+    ///
+    /// `label` resolution: an explicit user-set label wins; otherwise a
+    /// snippet of the first user message's text is returned so list views
+    /// (Overview "Recent sessions", Sessions page, etc.) have something
+    /// readable instead of "(no label)" on every row. The Messages blob is
+    /// already being deserialized for `message_count`, so this adds no
+    /// extra round-trip per row.
     pub fn list_sessions(&self) -> LibreFangResult<Vec<serde_json::Value>> {
         let conn = self
             .conn
@@ -476,7 +533,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, agent_id, messages, created_at, label FROM sessions ORDER BY created_at DESC",
+                "SELECT id, agent_id, messages, context_window_tokens, created_at, label FROM sessions ORDER BY created_at DESC",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -485,18 +542,20 @@ impl SessionStore {
                 let session_id: String = row.get(0)?;
                 let agent_id: String = row.get(1)?;
                 let messages_blob: Vec<u8> = row.get(2)?;
-                let created_at: String = row.get(3)?;
-                let label: Option<String> = row.get(4)?;
-                // Deserialize just to count messages
-                let msg_count = rmp_serde::from_slice::<Vec<Message>>(&messages_blob)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let context_window_tokens: i64 = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let label: Option<String> = row.get(5)?;
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).unwrap_or_default();
+                let msg_count = messages.len();
+                let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
                 Ok(serde_json::json!({
                     "session_id": session_id,
                     "agent_id": agent_id,
                     "message_count": msg_count,
+                    "context_window_tokens": context_window_tokens.max(0),
                     "created_at": created_at,
-                    "label": label,
+                    "label": resolved_label,
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -607,14 +666,15 @@ impl SessionStore {
                 let messages_blob: Vec<u8> = row.get(1)?;
                 let created_at: String = row.get(2)?;
                 let label: Option<String> = row.get(3)?;
-                let msg_count = rmp_serde::from_slice::<Vec<Message>>(&messages_blob)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).unwrap_or_default();
+                let msg_count = messages.len();
+                let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
                 Ok(serde_json::json!({
                     "session_id": session_id,
                     "message_count": msg_count,
                     "created_at": created_at,
-                    "label": label,
+                    "label": resolved_label,
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
