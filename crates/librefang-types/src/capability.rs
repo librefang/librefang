@@ -527,6 +527,31 @@ mod tests {
         assert!(glob_matches("C:\\data\\*", "C:/data/report.csv"));
     }
 
+    /// Cross-separator traversal: a forward-slash grant on Windows must
+    /// still reject backslash-encoded `..` traversal in the value.  Both
+    /// separators count as segment boundaries, so `..` always lands in
+    /// its own segment and the segment matcher refuses to expand `*` past
+    /// it — regardless of which separator the grant or value happens to
+    /// use.
+    #[test]
+    fn test_glob_matches_cross_separator_traversal_rejected() {
+        // Forward-slash grant, backslash-encoded traversal in the value.
+        assert!(!glob_matches(
+            "C:/data/*",
+            "C:\\data\\..\\..\\Windows\\evil"
+        ));
+        // Backslash grant, forward-slash-encoded traversal in the value.
+        assert!(!glob_matches(
+            "C:\\data\\*",
+            "C:/data/../../Windows/evil"
+        ));
+        // And the trivially-mixed form an attacker might try.
+        assert!(!glob_matches(
+            "C:/data/*",
+            "C:/data/..\\..\\Windows\\evil"
+        ));
+    }
+
     // Verifies the resolution strategy used in tool_timeout_secs_for:
     // when multiple glob patterns match, longest pattern (most specific) wins.
     #[test]
