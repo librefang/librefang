@@ -3850,16 +3850,26 @@ fn sanitize_extension(ext: &str) -> String {
     }
 }
 
-/// Validate that a URL uses an allowed scheme (http or https).
+/// Validate that a URL is safe for the daemon to fetch on behalf of an
+/// inbound channel message (#3442).
+///
+/// Delegates to [`crate::http_client::validate_url_for_fetch`], which
+/// enforces:
+/// * `http`/`https` scheme only — rejects `file://`, `ftp://`,
+///   `javascript:`, `data:`, etc.
+/// * No IPv4/IPv6 literal in any private, loopback, link-local,
+///   unique-local, multicast, reserved, or cloud-metadata range —
+///   including the IPv4-mapped (`::ffff:x.x.x.x`) and NAT64
+///   (`64:ff9b::x.x.x.x`) wire-equivalent forms.
+/// * No internal hostname (`localhost`, `*.local`,
+///   `metadata.google.internal`, `169.254.169.254`).
+///
+/// Without this guard, a forged inbound message containing
+/// `attachment.url = "http://169.254.169.254/latest/meta-data/..."`
+/// or `"http://127.0.0.1:4545/api/agents"` would have its body fetched
+/// and base64'd into the agent's LLM context.
 fn validate_url_scheme(url: &str) -> Result<(), String> {
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Ok(())
-    } else {
-        Err(format!(
-            "Rejected URL with unsupported scheme: {}",
-            url.split(':').next().unwrap_or("unknown")
-        ))
-    }
+    crate::http_client::validate_url_for_fetch(url)
 }
 
 /// Download a file from a URL to disk with streaming and size cap.
@@ -4084,25 +4094,16 @@ async fn download_image_to_blocks(
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // Validate URL scheme — only allow http/https to prevent SSRF via file:// etc.
-    match url::Url::parse(url) {
-        Ok(parsed) => match parsed.scheme() {
-            "http" | "https" => {}
-            scheme => {
-                warn!("Rejecting image download with disallowed scheme: {scheme}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download rejected: unsupported URL scheme '{scheme}']"),
-                    provider_metadata: None,
-                }];
-            }
-        },
-        Err(e) => {
-            warn!("Rejecting image download with invalid URL: {e}");
-            return vec![ContentBlock::Text {
-                text: "[Image download rejected: invalid URL]".to_string(),
-                provider_metadata: None,
-            }];
-        }
+    // SSRF guard (#3442): reject not just non-http/https schemes but also
+    // any URL that points at a loopback, private, link-local, or cloud
+    // metadata target.  A forged inbound message could otherwise smuggle
+    // `http://169.254.169.254/...` into the LLM context as an "image".
+    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
+        warn!("Rejecting image download: {reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[Image download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
     }
 
     let client = crate::http_client::new_client();
@@ -6789,6 +6790,28 @@ mod tests {
             assert!(validate_url_scheme("javascript:alert(1)").is_err());
             assert!(validate_url_scheme("data:text/plain,hello").is_err());
             assert!(validate_url_scheme("/local/path").is_err());
+        }
+
+        /// #3442: an inbound channel message may not smuggle a loopback,
+        /// private, link-local, or cloud-metadata URL through the
+        /// attachment-download path.  Pre-fix this checked scheme only.
+        #[test]
+        fn test_validate_url_scheme_blocks_ssrf_targets() {
+            for url in [
+                "http://127.0.0.1/admin",
+                "http://localhost/admin",
+                "http://169.254.169.254/latest/meta-data/",
+                "http://10.0.0.1/internal",
+                "http://192.168.1.1/router",
+                "http://[::1]/admin",
+                "http://[::ffff:169.254.169.254]/imds",
+                "http://metadata.google.internal/v1/instance",
+            ] {
+                assert!(
+                    validate_url_scheme(url).is_err(),
+                    "expected SSRF reject for {url}"
+                );
+            }
         }
 
         #[tokio::test]

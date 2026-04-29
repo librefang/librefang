@@ -256,11 +256,30 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 /// Parses the URL, extracts the host, and delegates to [`is_ssrf_blocked_host`].
 /// Returns `Ok(())` when the URL is safe, or `Err(reason)` when blocked.
 ///
+/// Also rejects:
+/// * Non-`http`/`https` schemes — `file://`, `ftp://`, etc. would otherwise
+///   reach `reqwest` and be served from the local filesystem or a bare-TCP
+///   gateway.
+/// * URLs with a userinfo component (`user[:pass]@host`). `host_str()`
+///   returns the part after `@`, so `http://allowed.com@169.254.169.254/`
+///   would pass the host check and then `reqwest` would actually connect to
+///   the IMDS literal — the same bypass closed for the wasm host fetch in
+///   #3527 / PR #4099.
+///
 /// Public so callers outside this module (e.g. the kernel OAuth provider's
-/// `try_refresh`) can re-validate stored endpoint URLs before making outbound
-/// requests against values written before policy tightened.
+/// `try_refresh`, the API-layer token exchange) can re-validate stored
+/// endpoint URLs before making outbound requests against values written
+/// before policy tightened.
 pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
     let parsed = Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("scheme '{scheme}' is not allowed")),
+    }
+    // Userinfo bypass — see #3527.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URLs with userinfo are not permitted".to_string());
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
@@ -451,7 +470,9 @@ pub fn parse_authorization_server_metadata(
     let raw: AuthorizationServerMetadata =
         serde_json::from_str(body).map_err(|e| format!("Failed to parse metadata JSON: {e}"))?;
 
-    // SSRF guard — validate every discovered endpoint URL.
+    // SSRF guard — validate every discovered endpoint URL. Use the shared
+    // `is_ssrf_blocked_url` so scheme + userinfo + host checks stay in sync
+    // across every callsite (parser, kernel try_refresh, API token-exchange).
     for (label, url_str) in [
         (
             "authorization_endpoint",
@@ -459,24 +480,13 @@ pub fn parse_authorization_server_metadata(
         ),
         ("token_endpoint", raw.token_endpoint.as_str()),
     ] {
-        let parsed = Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| format!("{label} has no host"))?;
-        if is_ssrf_blocked_host(host) {
-            return Err(format!("SSRF: {label} host '{host}' is a blocked address"));
+        if let Err(reason) = is_ssrf_blocked_url(url_str) {
+            return Err(format!("SSRF: {label} rejected: {reason}"));
         }
     }
     if let Some(reg_ep) = raw.registration_endpoint.as_deref() {
-        let parsed = Url::parse(reg_ep)
-            .map_err(|e| format!("registration_endpoint is not a valid URL: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| "registration_endpoint has no host".to_string())?;
-        if is_ssrf_blocked_host(host) {
-            return Err(format!(
-                "SSRF: registration_endpoint host '{host}' is a blocked address"
-            ));
+        if let Err(reason) = is_ssrf_blocked_url(reg_ep) {
+            return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
         }
     }
 
@@ -1106,5 +1116,55 @@ mod tests {
         let ids: Vec<String> = (0..10).map(|_| generate_flow_id()).collect();
         let unique: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
         assert_eq!(unique.len(), ids.len(), "duplicate flow IDs generated");
+    }
+
+    // -- #3623: is_ssrf_blocked_url scheme + userinfo coverage --
+
+    #[test]
+    fn is_ssrf_blocked_url_rejects_userinfo() {
+        // The bypass: host_str() returns "allowed.com", but reqwest connects
+        // to 169.254.169.254 (the IMDS literal after the @).
+        assert!(is_ssrf_blocked_url("http://allowed.com@169.254.169.254/").is_err());
+        assert!(is_ssrf_blocked_url("http://user:pass@127.0.0.1/x").is_err());
+        // Even if both halves are public, userinfo is still rejected.
+        assert!(is_ssrf_blocked_url("http://user@example.com/").is_err());
+    }
+
+    #[test]
+    fn is_ssrf_blocked_url_rejects_non_http_schemes() {
+        assert!(is_ssrf_blocked_url("file:///etc/passwd").is_err());
+        assert!(is_ssrf_blocked_url("ftp://example.com/x").is_err());
+        assert!(is_ssrf_blocked_url("gopher://example.com/").is_err());
+    }
+
+    #[test]
+    fn is_ssrf_blocked_url_allows_plain_public() {
+        assert!(is_ssrf_blocked_url("https://auth.example.com/token").is_ok());
+        assert!(is_ssrf_blocked_url("http://auth.example.com:8443/authorize").is_ok());
+    }
+
+    #[test]
+    fn parse_authorization_server_metadata_rejects_userinfo_endpoint() {
+        // Rogue MCP server tries to smuggle userinfo to bypass the host check.
+        let body = r#"{
+            "authorization_endpoint": "https://allowed.com@127.0.0.1/authorize",
+            "token_endpoint": "https://auth.example.com/token"
+        }"#;
+        let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
+        assert!(result.is_err(), "userinfo authorization_endpoint must be rejected");
+    }
+
+    #[test]
+    fn parse_authorization_server_metadata_rejects_imds_registration_endpoint() {
+        let body = r#"{
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "registration_endpoint": "http://169.254.169.254/latest/api/token"
+        }"#;
+        let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
+        assert!(
+            result.is_err(),
+            "registration_endpoint pointing at IMDS must be rejected"
+        );
     }
 }

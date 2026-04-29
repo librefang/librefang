@@ -562,6 +562,16 @@ pub async fn auth_callback(
             return auth_failed("Token endpoint missing from vault.");
         }
     };
+    // SSRF guard (#3623): re-validate the stored token_endpoint before the
+    // outbound code exchange.  The parser checks at discovery time, but the
+    // value sat in the vault between then and now and may predate a tightening
+    // of the SSRF policy — the kernel's `try_refresh` already does this; this
+    // is the matching guard for the auth-code path.
+    if let Err(reason) = mcp_oauth::is_ssrf_blocked_url(&token_endpoint) {
+        return auth_failed(format!(
+            "SSRF: token_endpoint rejected for code exchange: {reason}"
+        ));
+    }
 
     let client_id = load("client_id");
     let redirect_uri = match load("redirect_uri") {

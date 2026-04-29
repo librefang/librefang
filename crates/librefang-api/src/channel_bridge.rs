@@ -3132,8 +3132,25 @@ pub async fn start_channel_bridge_with_config(
             }
             DingTalkReceiveMode::Webhook => {
                 if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-                    let secret =
-                        read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
+                    // #3441: refuse to register a webhook adapter with an empty
+                    // signing secret.  An empty secret would still reject all
+                    // verifications (HMAC of an empty key fails the equality
+                    // check), but this is loud rather than silent — a misconfig
+                    // here means every inbound message is dropped, and the
+                    // operator should know at boot.
+                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
+                        Some(s) if !s.is_empty() => s,
+                        _ => {
+                            tracing::error!(
+                                env = %dt_config.secret_env,
+                                "DingTalk webhook adapter requires a non-empty signing secret \
+                                 ({} unset or empty); refusing to register adapter (default-deny). \
+                                 Set the env var or switch receive_mode to \"stream\".",
+                                dt_config.secret_env
+                            );
+                            continue;
+                        }
+                    };
                     let adapter = Arc::new(
                         DingTalkAdapter::new(token, secret, dt_config.webhook_port)
                             .with_account_id(dt_config.account_id.clone()),
