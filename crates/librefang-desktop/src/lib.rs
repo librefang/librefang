@@ -55,7 +55,10 @@ pub(crate) fn validate_server_url(url: &str) -> Result<(), String> {
             None => return Err(format!("Malformed IPv6 host in URL: {url}")),
         }
     } else {
-        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
     };
 
     if host.is_empty() {

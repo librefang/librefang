@@ -5,8 +5,7 @@ use std::path::PathBuf;
 const BUILD_RS_PATH: &str = "build.rs";
 
 fn read_build_rs() -> String {
-    let manifest_dir =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let path = manifest_dir.join(BUILD_RS_PATH);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
