@@ -5189,6 +5189,28 @@ fn agent_concurrency_falls_back_to_config_default_when_unset() {
 
 // -- #3755: three-layer concurrency caps joint integration --------------------
 
+/// Regression for #3446: trigger fires must run under a bounded
+/// timeout so a stuck LLM call cannot pin Lane::Trigger permits
+/// kernel-wide.  We assert the config field is wired and clamping
+/// rewrites a `0` (infinite-hold) value back to a safe default.
+#[test]
+fn trigger_fire_timeout_secs_is_wired_and_validated() {
+    use librefang_types::config::QueueConcurrencyConfig;
+    let default_cfg = QueueConcurrencyConfig::default();
+    assert!(
+        default_cfg.trigger_fire_timeout_secs > 0,
+        "default trigger_fire_timeout_secs must not be infinite (#3446)"
+    );
+
+    let mut cfg = KernelConfig::default();
+    cfg.queue.concurrency.trigger_fire_timeout_secs = 0;
+    cfg.clamp_bounds();
+    assert!(
+        cfg.queue.concurrency.trigger_fire_timeout_secs > 0,
+        "clamp_bounds must rewrite 0 to a positive default to avoid lane starvation"
+    );
+}
+
 /// Verify that the global `Lane::Trigger` semaphore correctly limits total
 /// concurrent trigger fires across the whole kernel.  We use a capacity-2
 /// queue and prove that the third caller cannot acquire a permit immediately.

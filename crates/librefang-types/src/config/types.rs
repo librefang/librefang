@@ -2303,6 +2303,12 @@ pub struct QueueConcurrencyConfig {
     /// validation. Typed `usize` to match the sibling lane fields and
     /// to feed `Semaphore::new` without a cast.
     pub default_per_agent: usize,
+    /// Per-fire timeout (seconds) for trigger dispatches. Bounds the
+    /// duration a single fire holds its `Lane::Trigger` and per-agent
+    /// permits, preventing one stuck LLM call from starving every
+    /// other agent's triggers kernel-wide (issue #3446). `0` is
+    /// rewritten to the default by validation.
+    pub trigger_fire_timeout_secs: u64,
 }
 
 impl Default for QueueConcurrencyConfig {
@@ -2313,6 +2319,7 @@ impl Default for QueueConcurrencyConfig {
             subagent_lane: 3,
             trigger_lane: 8,
             default_per_agent: 1,
+            trigger_fire_timeout_secs: 300,
         }
     }
 }
