@@ -61,6 +61,10 @@ impl OpenAIDriver {
             }),
             None => librefang_http::proxied_client(),
         };
+        // #3477: self-hosted OpenAI-compat endpoints (Ollama, etc.) often
+        // include a trailing slash; concatenating "/chat/completions" then
+        // produces "//chat/completions" which most servers 504 on.
+        let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
@@ -1425,7 +1429,8 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
 
-                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens
+                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens.
+                // Add a small backoff to avoid a tight retry loop (#3758).
                 if status == 400
                     && body.contains("max_tokens")
                     && (body.contains("unsupported_parameter")
@@ -1437,10 +1442,14 @@ impl LlmDriver for OpenAIDriver {
                     warn!(model = %oai_request.model, "Switching to max_completion_tokens for this model (stream)");
                     oai_request.max_tokens = None;
                     oai_request.max_completion_tokens = Some(val);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
-                // Auto-cap max_tokens when model rejects our value
+                // Auto-cap max_tokens when model rejects our value (#3758: add backoff).
                 if status == 400 && body.contains("max_tokens") && attempt < max_retries {
                     let current = oai_request
                         .max_tokens
@@ -1453,6 +1462,10 @@ impl LlmDriver for OpenAIDriver {
                     } else {
                         oai_request.max_tokens = Some(cap);
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -2263,6 +2276,15 @@ mod tests {
     fn test_openai_driver_creation() {
         let driver = OpenAIDriver::new("test-key".to_string(), "http://localhost".to_string());
         assert_eq!(driver.api_key.as_str(), "test-key");
+    }
+
+    // #3477: trailing slash on base_url must not produce "//chat/completions".
+    #[test]
+    fn test_openai_base_url_strips_trailing_slash() {
+        let driver = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1/".to_string());
+        assert_eq!(driver.base_url, "http://localhost:11434/v1");
+        let multi = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1///".to_string());
+        assert_eq!(multi.base_url, "http://localhost:11434/v1");
     }
 
     #[test]

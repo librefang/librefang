@@ -1294,6 +1294,10 @@ pub async fn run_hook_json(
     // Capture PID before moving `child` into the async block so we can read
     // peak RSS from /proc/{pid}/status just before wait() reaps the process.
     let child_pid = child.id();
+    // #3534: streaming per-stream cap. Without this, a malicious plugin can
+    // push GiB of stdout into the daemon's RAM before the post-exit 4 MiB
+    // check fires. Mirrors the host_shell_exec pattern from #3529.
+    const HOOK_STREAM_BYTE_CAP: usize = 1024 * 1024;
     let result = tokio::time::timeout(Duration::from_secs(effective_timeout), async {
         let stdout = child
             .stdout
@@ -1312,28 +1316,44 @@ pub async fn run_hook_json(
         // block the daemon waiting on stdout while the hook is blocked on stderr.
         let stdout_fut = async {
             let mut lines: Vec<String> = Vec::new();
+            let mut total: usize = 0;
             let mut line = String::new();
+            let mut overflowed = false;
             loop {
                 line.clear();
                 match stdout_reader.read_line(&mut line).await {
                     Ok(0) => break,
-                    Ok(_) => lines.push(line.trim_end().to_string()),
+                    Ok(n) => {
+                        total = total.saturating_add(n);
+                        if total > HOOK_STREAM_BYTE_CAP {
+                            overflowed = true;
+                            break;
+                        }
+                        lines.push(line.trim_end().to_string());
+                    }
                     Err(e) => {
                         warn!("hook stdout read error: {e}");
                         break;
                     }
                 }
             }
-            lines
+            (lines, overflowed)
         };
         let stderr_fut = async {
             let mut text = String::new();
+            let mut total: usize = 0;
             let mut err_line = String::new();
+            let mut overflowed = false;
             loop {
                 err_line.clear();
                 match stderr_reader.read_line(&mut err_line).await {
                     Ok(0) => break,
-                    Ok(_) => {
+                    Ok(n) => {
+                        total = total.saturating_add(n);
+                        if total > HOOK_STREAM_BYTE_CAP {
+                            overflowed = true;
+                            break;
+                        }
                         // Stream each non-empty line to tracing as it arrives so
                         // operators can monitor long-running hooks live (#3256).
                         // The full line stays in `text` either way — the
@@ -1351,9 +1371,21 @@ pub async fn run_hook_json(
                     Err(_) => break,
                 }
             }
-            text
+            (text, overflowed)
         };
-        let (stdout_lines, stderr_text) = tokio::join!(stdout_fut, stderr_fut);
+        let ((stdout_lines, stdout_over), (stderr_text, stderr_over)) =
+            tokio::join!(stdout_fut, stderr_fut);
+
+        // Either stream blew the cap → kill the child so wait() returns
+        // promptly and we surface a clear error instead of OOMing.
+        if stdout_over || stderr_over {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(PluginRuntimeError::InvalidOutput(format!(
+                "Hook output exceeded {} bytes per stream; child killed",
+                HOOK_STREAM_BYTE_CAP
+            )));
+        }
 
         // Read peak RSS before wait() reaps the process and removes /proc/{pid}.
         if let Some(pid) = child_pid {

@@ -211,6 +211,11 @@ struct GeminiUsageMetadata {
     prompt_token_count: u64,
     #[serde(default)]
     candidates_token_count: u64,
+    // Thinking-model reasoning tokens (#3479). Gemini bills these as output
+    // tokens, but reports them in a separate field. Missing for non-thinking
+    // models — `#[serde(default)]` keeps it at 0 there.
+    #[serde(default)]
+    thoughts_token_count: u64,
 }
 
 /// Gemini API error response.
@@ -541,7 +546,9 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         .usage_metadata
         .map(|u| TokenUsage {
             input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
+            // Thinking models bill thoughts as output (#3479); fold them in
+            // so metering doesn't undercount by 5-25x on reasoning runs.
+            output_tokens: u.candidates_token_count + u.thoughts_token_count,
             ..Default::default()
         })
         .unwrap_or_default();
@@ -634,7 +641,9 @@ pub(crate) async fn stream_gemini_sse(
 
             if let Some(ref u) = json.usage_metadata {
                 usage.input_tokens = u.prompt_token_count;
-                usage.output_tokens = u.candidates_token_count;
+                // #3479: include thinking tokens in output (Gemini bills them
+                // as output but reports them separately).
+                usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
             }
 
             for candidate in &json.candidates {
@@ -1063,7 +1072,8 @@ impl LlmDriver for GeminiDriver {
                     // Extract usage from each chunk (last one wins)
                     if let Some(ref u) = json.usage_metadata {
                         usage.input_tokens = u.prompt_token_count;
-                        usage.output_tokens = u.candidates_token_count;
+                        // #3479: thinking tokens are billed as output.
+                        usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
                     }
 
                     for candidate in &json.candidates {
@@ -1302,6 +1312,28 @@ mod tests {
         assert_eq!(json["generationConfig"]["maxOutputTokens"], 1024);
     }
 
+    // #3479: thoughtsTokenCount must fold into output_tokens for thinking
+    // models, otherwise metering undercounts spend by 5-25x.
+    #[test]
+    fn test_gemini_thoughts_tokens_folded_into_output() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{"text": "answer"}] },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 200
+            }
+        });
+        let resp: GeminiResponse = serde_json::from_value(json).unwrap();
+        let completion = convert_response(resp).unwrap();
+        // 5 visible + 200 thoughts = 205 billed output tokens.
+        assert_eq!(completion.usage.output_tokens, 205);
+        assert_eq!(completion.usage.input_tokens, 10);
+    }
+
     #[test]
     fn test_gemini_response_deserialization() {
         let json = serde_json::json!({
@@ -1456,6 +1488,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 5,
                 candidates_token_count: 3,
+                thoughts_token_count: 0,
             }),
         };
 
@@ -2099,6 +2132,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 10,
                 candidates_token_count: 8,
+                thoughts_token_count: 0,
             }),
         };
 

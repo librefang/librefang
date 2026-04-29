@@ -393,6 +393,10 @@ pub trait LlmDriver: Send + Sync {
 
     /// Stream a completion request, sending incremental events to the channel.
     /// Returns the full response when complete. Default wraps `complete()`.
+    ///
+    /// #3543: propagate `tx.send` errors. When the receiver is dropped (client
+    /// disconnect, abort, etc.) we treat it as cancellation and return an
+    /// error so the caller stops driving more work.
     async fn stream(
         &self,
         request: CompletionRequest,
@@ -401,14 +405,16 @@ pub trait LlmDriver: Send + Sync {
         let response = self.complete(request).await?;
         let text = response.text();
         if !text.is_empty() {
-            let _ = tx.send(StreamEvent::TextDelta { text }).await;
+            tx.send(StreamEvent::TextDelta { text })
+                .await
+                .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
         }
-        let _ = tx
-            .send(StreamEvent::ContentComplete {
-                stop_reason: response.stop_reason,
-                usage: response.usage,
-            })
-            .await;
+        tx.send(StreamEvent::ContentComplete {
+            stop_reason: response.stop_reason,
+            usage: response.usage,
+        })
+        .await
+        .map_err(|_| LlmError::Http("stream receiver dropped".to_string()))?;
         Ok(response)
     }
 
@@ -748,6 +754,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // #3543: dropping the receiver must surface as an error rather than being
+    // silently swallowed, otherwise callers keep driving cancelled work.
+    #[tokio::test]
+    async fn test_default_stream_errors_when_receiver_dropped() {
+        use tokio::sync::mpsc;
+
+        struct FakeDriver;
+
+        #[async_trait]
+        impl LlmDriver for FakeDriver {
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                Ok(CompletionResponse {
+                    content: vec![ContentBlock::Text {
+                        text: "hi".to_string(),
+                        provider_metadata: None,
+                    }],
+                    stop_reason: StopReason::EndTurn,
+                    tool_calls: vec![],
+                    usage: TokenUsage::default(),
+                })
+            }
+        }
+
+        let driver = FakeDriver;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let request = CompletionRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1,
+            temperature: 0.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            cache_ttl: None,
+            response_format: None,
+            timeout_secs: None,
+            extra_body: None,
+            agent_id: None,
+        };
+        let err = driver.stream(request, tx).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Http(ref m) if m.contains("receiver dropped")),
+            "expected receiver-dropped error, got: {err:?}"
+        );
     }
 }
 

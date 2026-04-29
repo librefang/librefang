@@ -428,9 +428,12 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
@@ -560,9 +563,12 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
