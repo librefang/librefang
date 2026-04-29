@@ -241,14 +241,7 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
-    /// Return the agent's `group_trigger_patterns` (already-escaped regex
-    /// patterns), drawn from `manifest.channel_overrides.group_trigger_patterns`.
-    ///
-    /// The previous name `get_agent_aliases` was misleading: callers reading
-    /// "aliases" expected plain names like `"Rodelo"` and would re-escape
-    /// the result — but the `KernelBridgeAdapter` impl returns regex patterns
-    /// like `(?i)\bRodelo\b`, so re-escaping would corrupt them. Renaming
-    /// surfaces the actual return contract.
+    /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
     async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
     }
@@ -1892,22 +1885,8 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .unwrap_or(&message.sender.platform_id)
 }
 
-/// Record this message's sender into the persistent group roster.
-///
-/// #4079 added `RosterStore` and the `roster_upsert` trait method but never
-/// wired it up — `RosterStore` stayed empty for every install. Without a
-/// channel adapter providing a full participant list (which only the
-/// WhatsApp gateway does, via `sock.groupMetadata`), the next-best signal
-/// we have is "this user just spoke", so we accumulate the roster from
-/// the senders we observe over time. DM senders are skipped — there's no
-/// useful "group" to record them under.
-///
-/// We require `metadata[SENDER_USER_ID_KEY]` to be explicitly set so we
-/// don't accidentally store the group's own platform_id (which is what
-/// `message.sender.platform_id` is for group messages — see
-/// `parse_telegram_message`). Adapters that don't yet plumb the sender's
-/// real user id silently no-op here.
-async fn upsert_sender_into_roster(handle: &dyn ChannelBridgeHandle, message: &ChannelMessage) {
+/// Persists the observed group sender; skips DMs and messages without SENDER_USER_ID_KEY to avoid storing the group's own platform_id.
+async fn upsert_sender_into_roster(handle: &Arc<dyn ChannelBridgeHandle>, message: &ChannelMessage) {
     if !message.is_group {
         return;
     }
@@ -3402,8 +3381,6 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
-    // Accumulate group senders into RosterStore (no-op for DMs / adapters
-    // that don't plumb sender_user_id). See #4079 follow-up.
     upsert_sender_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
@@ -4444,8 +4421,6 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
-    // Accumulate group senders into RosterStore (no-op for DMs / adapters
-    // that don't plumb sender_user_id). See #4079 follow-up.
     upsert_sender_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
