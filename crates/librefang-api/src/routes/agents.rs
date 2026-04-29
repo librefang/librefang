@@ -1323,12 +1323,33 @@ fn mime_from_url(url: &str) -> Option<String> {
 /// disconnect cancels the kernel call and releases per-agent locks +
 /// LLM bandwidth instead of letting the round-trip finish unobserved
 /// (#3464).
-struct AbortOnDrop(tokio::task::AbortHandle);
+///
+/// `disarm()` releases the abort handle without aborting — call it when
+/// the spawned task has already produced its observable output and the
+/// remaining work (metering settle, canonical session append, audit log
+/// write) MUST run to completion. The streaming path uses this once
+/// `ContentComplete` has reached the client, so the natural end of the
+/// SSE stream (which drops the unfold state and hence the guard) does
+/// not race-cancel post-stream cleanup.
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl AbortOnDrop {
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Release the abort permission without aborting.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
-        if !self.0.is_finished() {
-            self.0.abort();
+        if let Some(handle) = self.0.take() {
+            if !handle.is_finished() {
+                handle.abort();
+            }
         }
     }
 }
@@ -1340,7 +1361,7 @@ where
     T: Send + 'static,
 {
     let handle = tokio::spawn(fut);
-    let _guard = AbortOnDrop(handle.abort_handle());
+    let _guard = AbortOnDrop::new(handle.abort_handle());
     handle.await
 }
 
@@ -2266,7 +2287,18 @@ pub async fn send_message_stream(
     // disconnects, axum drops the SSE response future, which drops the
     // unfold state and this guard, aborting the spawned LLM task and
     // releasing per-agent locks immediately (#3464).
-    let abort_guard = AbortOnDrop(handle.abort_handle());
+    //
+    // CRITICAL: the kernel task does substantial post-stream work AFTER
+    // the agent loop emits `ContentComplete` — token-reservation settle,
+    // canonical session append, JSONL mirror, metering record, audit
+    // log, lifecycle bus publish, experiment recording. We MUST disarm
+    // the guard the moment we observe `ContentComplete`, otherwise the
+    // natural end of the SSE stream (sender drained → caller_rx returns
+    // None → unfold ends → guard drops) races against the post-stream
+    // cleanup and silently aborts settle/audit/canonical writes,
+    // leaking token reservations and dropping the user's last turn from
+    // history.
+    let abort_guard = AbortOnDrop::new(handle.abort_handle());
 
     // Defense against the agent loop emitting the same text span twice in a
     // single streaming turn (observed when multi-iteration loops re-assert a
@@ -2274,7 +2306,7 @@ pub async fn send_message_stream(
     // legitimate repetitions across turns stay unaffected.
     let sse_stream = stream::unfold(
         (rx, StreamDedup::new(), abort_guard),
-        |(mut rx, mut dedup, abort_guard)| async move {
+        |(mut rx, mut dedup, mut abort_guard)| async move {
             loop {
                 let event = rx.recv().await?;
                 let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
@@ -2301,16 +2333,25 @@ pub async fn send_message_stream(
                         .event("tool_result")
                         .json_data(serde_json::json!({"tool": name, "input": input}))
                         .unwrap_or_else(|_| Event::default().data("error")),
-                    StreamEvent::ContentComplete { usage, .. } => Event::default()
-                        .event("done")
-                        .json_data(serde_json::json!({
-                            "done": true,
-                            "usage": {
-                                "input_tokens": usage.input_tokens,
-                                "output_tokens": usage.output_tokens,
-                            }
-                        }))
-                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::ContentComplete { usage, .. } => {
+                        // The LLM stream is done — every byte the client
+                        // cares about has been emitted. Release the abort
+                        // permission BEFORE we yield the `done` event so
+                        // the kernel task is free to finish settle /
+                        // canonical / audit work even if the SSE stream
+                        // ends a few milliseconds later (#3464).
+                        abort_guard.disarm();
+                        Event::default()
+                            .event("done")
+                            .json_data(serde_json::json!({
+                                "done": true,
+                                "usage": {
+                                    "input_tokens": usage.input_tokens,
+                                    "output_tokens": usage.output_tokens,
+                                }
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("error"))
+                    }
                     StreamEvent::PhaseChange { phase, detail } => Event::default()
                         .event("phase")
                         .json_data(serde_json::json!({
@@ -6181,6 +6222,39 @@ mod tests {
         assert!(
             !observed_completion.load(std::sync::atomic::Ordering::Relaxed),
             "inner task must not run to completion after cancellation"
+        );
+    }
+
+    /// #3464 — once `disarm()` has been called, dropping the guard MUST
+    /// NOT abort the spawned task. This is the streaming path's
+    /// invariant: after `ContentComplete` reaches the client, the
+    /// kernel still runs settle-reservation / canonical-append / audit
+    /// writes; if the SSE stream ends a few ms later and the guard
+    /// drops, those side-effects must complete instead of being
+    /// silently cancelled.
+    #[tokio::test]
+    async fn abort_on_drop_after_disarm_does_not_abort_task() {
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_inner = completed.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            completed_inner.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let mut guard = AbortOnDrop::new(handle.abort_handle());
+        // Simulate observing `ContentComplete`: release abort permission.
+        guard.disarm();
+        // Drop the guard immediately, simulating SSE stream end racing
+        // ahead of the kernel post-stream cleanup.
+        drop(guard);
+
+        // The task must still be allowed to finish.
+        let _ = handle.await;
+        assert!(
+            completed.load(std::sync::atomic::Ordering::Relaxed),
+            "disarmed guard must NOT abort the task on drop — \
+             post-stream settle/audit work would be silently cancelled"
         );
     }
 }
