@@ -151,7 +151,7 @@ hex = "0.4"
 k256 = { version = "0.13", features = ["schnorr"] }
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-rsa = "0.9"
+rsa = "0.9.6"
 rand = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 
