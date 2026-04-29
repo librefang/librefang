@@ -74,6 +74,71 @@ tokio::task_local! {
     static PUBLISH_EVENT_DEPTH: std::cell::Cell<u32>;
 }
 
+/// Extract a `(user_text, assistant_text)` seed pair for session-label
+/// generation.  Returns `None` when the session lacks at least one
+/// non-empty user message AND one non-empty assistant message — there
+/// is nothing to title until both sides have spoken once.
+fn extract_label_seed(messages: &[librefang_types::message::Message]) -> Option<(String, String)> {
+    use librefang_types::message::{ContentBlock, MessageContent, Role};
+
+    fn text_of(m: &librefang_types::message::Message) -> String {
+        match &m.content {
+            MessageContent::Text(t) => t.trim().to_string(),
+            MessageContent::Blocks(blocks) => {
+                let mut buf = String::new();
+                for b in blocks {
+                    if let ContentBlock::Text { text, .. } = b {
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                        buf.push_str(text.trim());
+                    }
+                }
+                buf
+            }
+        }
+    }
+
+    let user = messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(text_of)
+        .filter(|s| !s.is_empty())?;
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .map(text_of)
+        .filter(|s| !s.is_empty())?;
+    Some((user, assistant))
+}
+
+/// Clean up a raw model-generated title: strip surrounding quotes,
+/// keep only the first line, and cap at 60 chars (UTF-8 safe).  Models
+/// occasionally prefix with `Title:` or wrap in quotes despite the
+/// prompt — the cleanup keeps the column rendering tidy without
+/// rejecting otherwise-valid titles.
+fn sanitize_session_title(raw: &str) -> String {
+    let first_line = raw.lines().next().unwrap_or("").trim();
+    // Strip a leading "Title:" / "title:" prefix some models add.
+    let without_prefix = first_line
+        .strip_prefix("Title:")
+        .or_else(|| first_line.strip_prefix("title:"))
+        .unwrap_or(first_line)
+        .trim();
+    // Strip surrounding ASCII quotes / single quotes / backticks.
+    let trimmed = without_prefix
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    // Cap at 60 chars (UTF-8 safe) — same ceiling derive_session_label
+    // uses, so list views don't shift width when one path beats the
+    // other.
+    librefang_types::truncate_str(trimmed, 60)
+        .trim()
+        .to_string()
+}
+
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
 /// API listens on a wildcard address.
@@ -8157,6 +8222,12 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Fire-and-forget: ask the auxiliary cheap-tier model to generate a
+        // short title for this session if it doesn't have one yet.  Spawned
+        // AFTER the response is delivered so it never competes with the
+        // user's turn for model attention; failures / timeouts are silent.
+        self.spawn_session_label_generation(agent_id, effective_session_id);
+
         Ok(result)
     }
 
@@ -8305,8 +8376,14 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.memory.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate the error so callers see a half-failed reset instead
+        // of silently leaving orphan rows in `sessions` / `sessions_fts`
+        // (#3470). The deletion itself is transactional inside
+        // `delete_agent_sessions`.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -8367,8 +8444,12 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.memory.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate so a failed reboot is visible instead of silently
+        // leaving the old history in place (#3470).
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session
         let new_session = self
@@ -8428,11 +8509,16 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete all regular sessions
-        let _ = self.memory.delete_agent_sessions(agent_id);
-
-        // Delete canonical (cross-channel) session
-        let _ = self.memory.delete_canonical_session(agent_id);
+        // Delete all regular sessions then the canonical (cross-channel)
+        // session. Propagate either failure: a half-cleared agent leaves
+        // orphan rows in `sessions` / `sessions_fts` / `canonical_sessions`
+        // and is the silent-data-loss vector behind #3470.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
+        self.memory
+            .delete_canonical_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -11263,6 +11349,137 @@ system_prompt = "You are a helpful assistant."
         router::invalidate_hand_route_cache();
     }
 
+    /// Auto-generate a short session title via the auxiliary cheap-tier
+    /// LLM and persist it to `sessions.label`. Fire-and-forget — runs in
+    /// a tokio task so the originating turn is never blocked.
+    ///
+    /// No-op when:
+    /// - the session already has a label (user-set or previously generated)
+    /// - the session lacks at least one non-empty user + one non-empty
+    ///   assistant message (nothing to summarise yet)
+    /// - the aux driver call fails or times out
+    /// - the model returns empty / all-whitespace text
+    pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
+        let memory = Arc::clone(&self.memory);
+        let aux = self.aux_client.load_full();
+        tokio::spawn(async move {
+            // Bail early if the label is already set — preserves user
+            // overrides and prevents repeated billing on the same session.
+            let session = match memory.get_session(session_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => return,
+                Err(e) => {
+                    debug!(
+                        session_id = %session_id.0,
+                        error = %e,
+                        "session-label: failed to load session"
+                    );
+                    return;
+                }
+            };
+            if session.label.is_some() {
+                return;
+            }
+            let Some((user_text, assistant_text)) = extract_label_seed(&session.messages) else {
+                return;
+            };
+
+            let resolution = aux.resolve(librefang_types::config::AuxTask::Title);
+            let driver = resolution.driver;
+            // When the chain resolved a concrete (provider, model) use it; if
+            // we fell back to the primary driver `resolved` is empty — the
+            // driver will pick its own configured model.
+            let model = resolution
+                .resolved
+                .first()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+
+            let prompt = format!(
+                "Conversation so far:\nUser: {user}\nAssistant: {asst}\n\n\
+                 Write a 3 to 6 word title for this conversation. \
+                 Reply with the title text only — no quotes, no punctuation, no prefix.",
+                user = librefang_types::truncate_str(&user_text, 800),
+                asst = librefang_types::truncate_str(&assistant_text, 800),
+            );
+
+            let req = CompletionRequest {
+                model,
+                messages: vec![librefang_types::message::Message::user(prompt)],
+                tools: vec![],
+                max_tokens: 32,
+                temperature: 0.2,
+                system: Some(
+                    "You generate short, descriptive session titles. \
+                     Reply with the title text only."
+                        .to_string(),
+                ),
+                thinking: None,
+                prompt_caching: false,
+                cache_ttl: None,
+                response_format: None,
+                timeout_secs: None,
+                extra_body: None,
+                agent_id: Some(agent_id.to_string()),
+            };
+
+            let resp = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                driver.complete(req),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %session_id.0,
+                        error = %e,
+                        "session-label: aux LLM call failed"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %session_id.0,
+                        "session-label: aux LLM call timed out (10s)"
+                    );
+                    return;
+                }
+            };
+
+            let title = sanitize_session_title(&resp.text());
+            if title.is_empty() {
+                return;
+            }
+
+            // Re-check the label right before writing — a concurrent
+            // user-set label via PUT /api/sessions/:id/label must win.
+            if let Ok(Some(s)) = memory.get_session(session_id) {
+                if s.label.is_some() {
+                    return;
+                }
+            }
+
+            if let Err(e) = memory.set_session_label(session_id, Some(&title)) {
+                debug!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    error = %e,
+                    "session-label: failed to persist label"
+                );
+            } else {
+                info!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    title = %title,
+                    "Auto-generated session label"
+                );
+            }
+        });
+    }
+
     /// Lightweight one-shot LLM call for classification tasks (e.g., reply precheck).
     ///
     /// Uses the default driver with low max_tokens and 0 temperature.
@@ -12172,6 +12389,67 @@ system_prompt = "You are a helpful assistant."
                     }
                 }
             });
+        }
+
+        // Periodic DB retention sweep — hard-deletes soft-deleted memories
+        // (#3467), finished task_queue rows (#3466), and approval_audit
+        // rows (#3468). Runs once a day on the same cadence as the audit
+        // prune below; each sub-step is independent so a config of `0` for
+        // any one of them only disables that step. Failures only log; the
+        // sweep is best-effort and re-runs at the next interval.
+        {
+            let memory_retention = cfg.memory.soft_delete_retention_days;
+            let queue_retention = cfg.queue.task_queue_retention_days;
+            let approval_retention = cfg.approval.audit_retention_days;
+            let any_enabled = memory_retention > 0 || queue_retention > 0 || approval_retention > 0;
+            if any_enabled {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        if memory_retention > 0 {
+                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
+                                Ok(n) if n > 0 => info!(
+                                    "Memory retention: hard-deleted {n} soft-deleted memories \
+                                     (older than {memory_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Memory retention sweep failed: {e}"),
+                            }
+                        }
+                        if queue_retention > 0 {
+                            match kernel.memory.task_prune_finished(queue_retention).await {
+                                Ok(n) if n > 0 => info!(
+                                    "Task queue retention: pruned {n} finished tasks \
+                                     (older than {queue_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Task queue retention sweep failed: {e}"),
+                            }
+                        }
+                        if approval_retention > 0 {
+                            let n = kernel.approval_manager.prune_audit(approval_retention);
+                            if n > 0 {
+                                info!(
+                                    "Approval audit retention: pruned {n} rows \
+                                     (older than {approval_retention} days)"
+                                );
+                            }
+                        }
+                    }
+                });
+                info!(
+                    "DB retention sweep scheduled daily \
+                     (memory={memory_retention}d, task_queue={queue_retention}d, \
+                     approval_audit={approval_retention}d)"
+                );
+            }
         }
 
         // Periodic audit log pruning (daily, respects audit.retention_days)
