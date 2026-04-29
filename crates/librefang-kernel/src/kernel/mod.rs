@@ -18516,12 +18516,15 @@ impl LibreFangKernel {
         decision: &librefang_types::approval::ApprovalDecision,
         result: &librefang_types::tool::ToolResult,
     ) -> bool {
-        let senders: Vec<((AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>)> =
-            self.injection_senders
-                .iter()
-                .filter(|e| e.key().0 == *agent_id)
-                .map(|e| (*e.key(), e.value().clone()))
-                .collect();
+        let senders: Vec<(
+            (AgentId, SessionId),
+            tokio::sync::mpsc::Sender<AgentLoopSignal>,
+        )> = self
+            .injection_senders
+            .iter()
+            .filter(|e| e.key().0 == *agent_id)
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
 
         if senders.is_empty() {
             debug!(
