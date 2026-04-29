@@ -807,45 +807,19 @@ pub struct A2aClient {
 
 impl A2aClient {
     /// Create a new A2A client with an empty SSRF allowlist.
-    ///
-    /// Each redirect target is re-validated through
-    /// [`crate::web_fetch::check_ssrf`] so an attacker-controlled public host
-    /// cannot 302-redirect us into a private IP, loopback, or cloud-metadata
-    /// endpoint (#3782). Callers that have access to the operator's
-    /// `web.fetch.ssrf_allowed_hosts` should prefer
-    /// [`Self::new_with_allowlist`] so legitimate redirects to allowlisted
-    /// internal hosts still work.
     pub fn new() -> Self {
         Self::new_with_allowlist(Vec::new())
     }
 
-    /// Create a new A2A client that re-validates each redirect hop through
-    /// [`crate::web_fetch::check_ssrf`] against the supplied allowlist.
-    ///
-    /// `allowed_hosts` mirrors the entry-point check in
-    /// `librefang-api::routes::network::is_url_safe_for_ssrf` so a redirect
-    /// to a deliberately allowlisted internal A2A peer (e.g. a CIDR or glob
-    /// in `web.fetch.ssrf_allowed_hosts`) still succeeds, while every other
-    /// private / loopback / cloud-metadata target is rejected with a closed
-    /// connection.
+    /// Create a new A2A client; every redirect hop is re-validated via `check_ssrf` (#3782).
     pub fn new_with_allowlist(allowed_hosts: Vec<String>) -> Self {
-        // Captured once and re-used for every redirect attempt across every
-        // request issued through this client.
-        let allowed = allowed_hosts;
         let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            // Mirror reqwest's default cap so a redirect loop can't spin
-            // forever even if every hop happens to validate.
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many redirects");
             }
-            // Re-run the same SSRF check the API layer ran on the original
-            // URL.  Without this an attacker-controlled host can reply with
-            // `302 Location: http://169.254.169.254/...` (cloud metadata) or
-            // `http://127.0.0.1:4545/...` (loopback re-entry against the
-            // daemon's own privileged endpoints) and the carefully written
-            // entry-point defences are silently bypassed (#3782).
+            // Re-validate every hop; a 302 response can otherwise bypass the entry-point SSRF check.
             let target = attempt.url().as_str().to_owned();
-            match crate::web_fetch::check_ssrf(&target, &allowed) {
+            match crate::web_fetch::check_ssrf(&target, &allowed_hosts) {
                 Ok(_) => attempt.follow(),
                 Err(reason) => {
                     attempt.error(format!("A2A SSRF blocked redirect to {target}: {reason}"))
@@ -1489,34 +1463,13 @@ mod tests {
             );
         }
     }
-    /// Regression test for #3782 — A2A SSRF redirect bypass.
-    ///
-    /// Threat model: an attacker controls a public host that the operator
-    /// types into `/api/a2a/discover` (or that is allowlisted via
-    /// `web.fetch.ssrf_allowed_hosts`).  The operator-typed URL passes the
-    /// entry-point SSRF check, but the attacker replies with
-    /// `302 Location: http://169.254.169.254/...` — the AWS / Azure
-    /// instance-metadata service.  Before this fix, reqwest's default
-    /// redirect policy followed it silently; the carefully written
-    /// IPv4-mapped-IPv6 / cloud-metadata defences on the entry path were
-    /// completely bypassed.
-    ///
-    /// We bind one local TCP listener that pretends to be the public peer,
-    /// allowlist its loopback address so the test scaffolding survives the
-    /// initial request, and have it respond 302 to the AWS metadata IP.
-    /// The redirect policy installed by `A2aClient::new_with_allowlist`
-    /// must re-run `check_ssrf` on the target and reject it
-    /// unconditionally — `169.254.0.0/16` is on the absolute deny-list
-    /// (`is_cloud_metadata_ip`) and cannot be allowlisted away.
+    /// Regression: 302 redirect to cloud-metadata IP must be blocked even when the originating host is allowlisted (#3782).
     #[tokio::test]
     async fn redirect_to_cloud_metadata_is_blocked_by_ssrf_revalidation() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        // Stand-in for the attacker-controlled public host.  We allowlist
-        // `127.0.0.1` below so the policy's own loopback check doesn't
-        // reject this listener; cloud-metadata IPs cannot be allowlisted
-        // away and remain blocked.
+        // TCP listener that replies 302 → cloud-metadata IP; allowlisted so the initial connect succeeds.
         let attacker = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let attacker_addr = attacker.local_addr().unwrap();
 
@@ -1524,9 +1477,6 @@ mod tests {
             let (mut stream, _) = attacker.accept().await.unwrap();
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf).await;
-            // 302 Location: AWS / Azure / cloud metadata service.  Any IP
-            // in 169.254.0.0/16 triggers the unconditional cloud-metadata
-            // block in `check_ssrf`.
             let response = concat!(
                 "HTTP/1.1 302 Found\r\n",
                 "Location: http://169.254.169.254/latest/meta-data/iam/security-credentials/\r\n",
@@ -1539,12 +1489,7 @@ mod tests {
             let _ = stream.shutdown().await;
         });
 
-        // Allowlist `127.0.0.1` so the redirect policy's loopback check
-        // does not falsely flag a legitimate redirect from the attacker
-        // host back to its own well-known path (would never happen in a
-        // real deployment, but matters here because we're driving the
-        // initial request to loopback for test reachability).  The cloud
-        // metadata redirect must still be blocked.
+        // 127.0.0.1 allowlisted for test reachability; 169.254.0.0/16 is unconditionally blocked.
         let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
         let url = format!("http://{}", attacker_addr);
         let result = client.discover(&url).await;
@@ -1553,14 +1498,6 @@ mod tests {
 
         let err = result
             .expect_err("discover() must fail when the peer 302-redirects to a cloud metadata IP");
-        // The redirect policy returned `attempt.error(...)`, which reqwest
-        // surfaces as a `reqwest::Error` of kind `Redirect`.  Whether the
-        // custom error string survives `Display` depends on reqwest's
-        // internals, so we only assert on the strongest invariant: the
-        // call must NOT have succeeded with a card fetched from the
-        // metadata endpoint.  Any error variant (including connect failure
-        // on the redirect target) is acceptable — what matters is the
-        // attacker's redirect was not silently followed and parsed.
         assert!(
             err.starts_with("A2A discovery failed:") || err.contains("redirect"),
             "expected an A2A request failure, got: {err}"
