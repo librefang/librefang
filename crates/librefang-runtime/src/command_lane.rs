@@ -103,7 +103,11 @@ impl CommandQueue {
     /// detached `tokio::spawn` task — the returned `Arc<Semaphore>` is
     /// cheap to clone.
     pub fn semaphore_for_lane(&self, lane: Lane) -> Arc<Semaphore> {
-        self.slot(lane).read().unwrap_or_else(|e| e.into_inner()).sem.clone()
+        self.slot(lane)
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .sem
+            .clone()
     }
 
     /// Atomically swap in a fresh semaphore for `lane` sized to `new_capacity`

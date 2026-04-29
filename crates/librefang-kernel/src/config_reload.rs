@@ -680,7 +680,10 @@ mod tests {
         let mut b = default_cfg();
         b.queue.concurrency.trigger_lane = a.queue.concurrency.trigger_lane.saturating_add(4);
         let plan = build_reload_plan(&a, &b);
-        assert!(!plan.restart_required, "queue.concurrency must be hot-reloadable");
+        assert!(
+            !plan.restart_required,
+            "queue.concurrency must be hot-reloadable"
+        );
         assert!(
             plan.hot_actions
                 .contains(&HotAction::UpdateQueueConcurrency),

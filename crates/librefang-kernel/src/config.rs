@@ -799,7 +799,11 @@ mod tests {
         assert_eq!(config.log_level, "debug");
         // Defaults preserved (the typos didn't take effect).
         assert!(
-            (config.memory.decay_rate - librefang_types::config::KernelConfig::default().memory.decay_rate).abs()
+            (config.memory.decay_rate
+                - librefang_types::config::KernelConfig::default()
+                    .memory
+                    .decay_rate)
+                .abs()
                 < f32::EPSILON
         );
     }

@@ -4916,14 +4916,14 @@ system_prompt = "You are a helpful assistant."
             match self.model_catalog.read() {
                 Ok(catalog) => MeteringEngine::estimate_cost_with_catalog(
                     &catalog,
-                    &entry.manifest.model.name,
+                    &entry.manifest.model.model,
                     est_in,
                     max_out,
                     0,
                     0,
                 ),
                 Err(_) => MeteringEngine::estimate_cost(
-                    &entry.manifest.model.name,
+                    &entry.manifest.model.model,
                     est_in,
                     max_out,
                     0,
