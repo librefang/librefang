@@ -4071,6 +4071,23 @@ system_prompt = "You are a helpful assistant."
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
         let name = manifest.name.clone();
+
+        // SECURITY (#3533): reject manifest `module` strings that escape
+        // the LibreFang home dir (absolute paths, `..` traversal, drive
+        // letters). Without this a hostile agent.toml could ship
+        // `module = "python:/etc/passwd.py"` and the host interpreter
+        // would happily exec it under the agent's capabilities.
+        if let Err(reason) =
+            librefang_runtime::python_runtime::validate_module_string(&manifest.module)
+        {
+            warn!(agent = %name, %reason, "Rejecting spawn — invalid module path");
+            return Err(KernelError::LibreFang(
+                librefang_types::error::LibreFangError::Internal(format!(
+                    "Invalid module path: {reason}"
+                )),
+            ));
+        }
+
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves
         // session history associations in SQLite. Child agents spawned at

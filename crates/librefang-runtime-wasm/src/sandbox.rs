@@ -73,6 +73,38 @@ impl std::fmt::Display for WallClockTimeout {
 
 impl std::error::Error for WallClockTimeout {}
 
+/// Per-method fuel reservation for `host_call` (#3532).
+///
+/// Wasm fuel only meters guest instructions, so without these
+/// reservations a guest can fan out arbitrarily many host LLM calls,
+/// outbound fetches, or child agent spawns under a token budget meant
+/// to cap CPU. Each cost is an upper-bound estimate of the host-side
+/// resource the call may consume — the goal is to make the
+/// per-invocation `fuel_limit` a real ceiling on host cost, not just
+/// guest CPU.
+///
+/// Calibration: with the default `fuel_limit = 1_000_000` (sandbox
+/// default), the LLM-bearing path `agent_send` is bounded to ~10
+/// invocations per guest run, `agent_spawn` to ~5, and `net_fetch` to
+/// ~200 — sane upper bounds for skill-shaped workloads. Pure-host
+/// methods (`time_now`, `kv_*`, `env_read`, `fs_*`) charge nothing so
+/// existing benign skills stay within budget.
+pub(crate) fn host_call_fuel_cost(method: &str) -> u64 {
+    match method {
+        // LLM-bearing fanout — `send_to_agent` triggers a downstream
+        // agent loop that may itself call providers. Highest cost.
+        "agent_send" => 100_000,
+        // `spawn_agent_checked` registers a new agent and (depending on
+        // schedule) immediately runs it. Treat as an LLM-bearing call.
+        "agent_spawn" => 200_000,
+        // Outbound HTTP — bandwidth + provider rate-limit budget.
+        "net_fetch" => 5_000,
+        // Shell exec spawns a subprocess; CPU + audit volume.
+        "shell_exec" => 5_000,
+        _ => 0,
+    }
+}
+
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -671,6 +703,29 @@ impl WasmSandbox {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+
+        // SECURITY (#3532): every host call is a denial-of-wallet vector if
+        // it touches an external resource (LLM tokens, outbound HTTP,
+        // cross-agent fanout). Wasm guest fuel only meters guest
+        // instructions, so a tight loop of `agent_send` / `net_fetch` /
+        // `agent_spawn` consumes effectively zero fuel while burning real
+        // money. Charge a method-keyed fuel reservation BEFORE dispatch so
+        // the per-invocation `fuel_limit` actually caps host-side cost.
+        let cost = host_call_fuel_cost(&method);
+        if cost > 0 {
+            let remaining = caller.get_fuel().unwrap_or(0);
+            if remaining < cost {
+                let response = serde_json::json!({
+                    "error": format!(
+                        "host fuel exhausted for {method} (need {cost}, have {remaining}); \
+                         denial-of-wallet guard"
+                    )
+                });
+                return Self::write_guest_json(caller, &response);
+            }
+            let _ = caller.set_fuel(remaining - cost);
+        }
+
         let response = host_functions::dispatch(caller.data(), &method, &params);
 
         Self::write_guest_json(caller, &response)
@@ -809,6 +864,30 @@ mod tests {
         assert_eq!(config.fuel_limit, 1_000_000);
         assert_eq!(config.max_memory_bytes, 16 * 1024 * 1024);
         assert!(config.capabilities.is_empty());
+    }
+
+    /// Regression for #3532: host calls that touch external resources
+    /// (LLM tokens, outbound HTTP, child agent spawn) must charge a
+    /// non-zero fuel cost so the sandbox `fuel_limit` is a real ceiling
+    /// on host-side spend, not just guest CPU. Pure-host calls remain
+    /// free so existing benign skills don't regress.
+    #[test]
+    fn test_host_call_fuel_cost_table_covers_dow_methods() {
+        assert!(host_call_fuel_cost("agent_send") > 0);
+        assert!(host_call_fuel_cost("agent_spawn") > 0);
+        assert!(host_call_fuel_cost("net_fetch") > 0);
+        assert!(host_call_fuel_cost("shell_exec") > 0);
+
+        // Pure-host methods stay free.
+        assert_eq!(host_call_fuel_cost("time_now"), 0);
+        assert_eq!(host_call_fuel_cost("kv_get"), 0);
+        assert_eq!(host_call_fuel_cost("kv_set"), 0);
+        assert_eq!(host_call_fuel_cost("env_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_write"), 0);
+        assert_eq!(host_call_fuel_cost("fs_list"), 0);
+        // Unknown method also free; capability check catches it.
+        assert_eq!(host_call_fuel_cost("unknown_method"), 0);
     }
 
     #[test]

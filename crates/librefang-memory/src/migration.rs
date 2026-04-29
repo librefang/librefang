@@ -71,6 +71,29 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
 
+    // Audit-trail consistency check (#3538): user_version must match the
+    // count of distinct rows in `migrations`. A mismatch means an earlier
+    // migration applied schema changes without recording the audit row,
+    // which silently breaks `SELECT version FROM migrations` operator
+    // tooling. Log loudly but don't fail boot — pre-fix DBs in the wild
+    // already drift, and refusing to start would be worse than warning.
+    let final_version = get_schema_version(conn);
+    let row_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT version) FROM migrations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(-1);
+    if row_count >= 0 && (row_count as u32) != final_version {
+        tracing::error!(
+            user_version = final_version,
+            audit_rows = row_count,
+            "Migration audit drift: user_version != count(migrations); \
+             some migration applied DDL without recording its audit row"
+        );
+    }
+
     Ok(())
 }
 
@@ -501,7 +524,15 @@ fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_experiment_variants_experiment ON experiment_variants(experiment_id);
         CREATE INDEX IF NOT EXISTS idx_experiment_metrics_variant ON experiment_metrics(variant_id);
         ",
-    )
+    )?;
+    // Audit row (#3538): every applied migration must produce a row in
+    // `migrations` so `user_version` and the audit trail stay aligned.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (13, datetime('now'), 'Add prompt versioning, experiments, variants, metrics tables')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Version 14: Add latency_ms column to usage_events for model performance tracking.
@@ -603,6 +634,12 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
         "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // Audit row (#3538): keep migrations table in sync with user_version.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (17, datetime('now'), 'Persistent approval audit log')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -613,7 +650,14 @@ fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
             failures   INTEGER NOT NULL DEFAULT 0,
             locked_at  INTEGER             -- Unix timestamp (seconds) when lockout started, NULL if below threshold
         );",
-    )
+    )?;
+    // Audit row (#3538): keep migrations table in sync with user_version.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (18, datetime('now'), 'Add totp_lockout table for second-factor brute-force protection')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Version 19: Add `provider` column to usage_events so the metering engine
@@ -974,6 +1018,46 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap(); // Should not error
+    }
+
+    #[test]
+    fn test_every_migration_records_audit_row() {
+        // Regression for #3538: each migration must insert into the
+        // `migrations` table so that user_version and the audit trail
+        // never drift. The startup check at the end of run_migrations
+        // logs an error on drift; this test catches it before merge.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let user_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT version) FROM migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            user_version as i64, row_count,
+            "user_version ({user_version}) != distinct migration audit rows ({row_count})"
+        );
+
+        // Every version 1..=user_version must appear in the audit table.
+        for v in 1..=user_version {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [v],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                exists >= 1,
+                "migration v{v} is applied (user_version={user_version}) but has no audit row"
+            );
+        }
     }
 
     #[test]

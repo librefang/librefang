@@ -2161,6 +2161,36 @@ mod tests {
         );
     }
 
+    /// Regression for #3473 (dup of #3781): GET /a2a/tasks/{id}/status must
+    /// also require auth. The status endpoint exposes per-task progress
+    /// signals usable for side-channel inference even before the full
+    /// transcript is fetched, so it has to share the auth gate.
+    #[tokio::test]
+    async fn a2a_task_status_requires_auth() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}/status", get(|| async { "task status" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/tasks/some-uuid-1234/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /a2a/tasks/{{id}}/status must require auth (#3473 dup of #3781)"
+        );
+    }
+
     /// GET /a2a/tasks/{id} must allow access with a valid bearer token.
     #[tokio::test]
     async fn a2a_task_transcript_accessible_with_valid_token() {
