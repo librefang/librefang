@@ -158,6 +158,22 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
         return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
     }
 
+    // SECURITY (#3527): reject URLs containing userinfo. The authority
+    // grammar `user[:pass]@host` lets an attacker make our string-based host
+    // extraction look at `host_in_userinfo` while reqwest connects to the
+    // real authority host (e.g. `http://allowed.com:80@169.254.169.254/`
+    // would resolve `allowed.com` past SSRF checks but actually fetch IMDS).
+    // Detect the `@` inside the authority component (between `://` and the
+    // next `/`, `?`, or `#`) and refuse outright.
+    if let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) {
+        let authority_end = after_scheme
+            .find(|c: char| c == '/' || c == '?' || c == '#')
+            .unwrap_or(after_scheme.len());
+        if after_scheme[..authority_end].contains('@') {
+            return Err(json!({"error": "SSRF blocked: URLs with userinfo are not permitted"}));
+        }
+    }
+
     let host = extract_host_from_url(url);
     let hostname = host.split(':').next().unwrap_or(&host);
 
@@ -493,7 +509,7 @@ const WASM_SHELL_SAFE_ENV_VARS: &[&str] = &[
 /// etc. — regardless of how tightly its Wasm fuel and epoch budget were
 /// capped. This closes that exfiltration hole while leaving the capability
 /// gate above untouched.
-fn sanitize_shell_env(cmd: &mut std::process::Command) {
+fn sanitize_shell_env(cmd: &mut tokio::process::Command) {
     cmd.env_clear();
     for var in WASM_SHELL_SAFE_ENV_VARS {
         if let Ok(val) = std::env::var(var) {
@@ -516,6 +532,14 @@ fn sanitize_shell_env(cmd: &mut std::process::Command) {
     }
 }
 
+/// Wall-clock timeout per `shell_exec` invocation (#3529). Longer-running
+/// guest jobs must be split — the host MUST NOT be parked indefinitely.
+const SHELL_EXEC_TIMEOUT_SECS: u64 = 30;
+/// Per-stream byte cap for child stdout/stderr (#3529). Child is killed
+/// the moment either stream exceeds this, so a guest cannot exhaust host
+/// memory with `yes` or `dd if=/dev/zero`.
+const SHELL_EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
 fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let command = match params.get("command").and_then(|c| c.as_str()) {
         Some(c) => c,
@@ -528,35 +552,115 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
         return e;
     }
 
-    let args: Vec<&str> = params
+    let args: Vec<String> = params
         .get("args")
         .and_then(|a| a.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
+    let command = command.to_string();
+    let handle = state.tokio_handle.clone();
+
+    // Bridge to async so we can use tokio::process (timeout, kill_on_drop,
+    // chunked output cap). spawn_blocking inside the WASM sandbox is the
+    // outer parking point; block_in_place keeps the scheduler progressing
+    // (matches the host_net_fetch pattern).
+    tokio::task::block_in_place(|| {
+        handle.block_on(async move { run_shell_exec(&command, &args).await })
+    })
+}
+
+async fn run_shell_exec(command: &str, args: &[String]) -> serde_json::Value {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
     // Command::new does NOT use a shell — safe from shell injection.
-    // Each argument is passed directly to the process.
-    let mut cmd = std::process::Command::new(command);
-    cmd.args(&args);
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(args);
     sanitize_shell_env(&mut cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // CREATE_NO_WINDOW; tokio Command exposes this directly on Windows.
+        cmd.creation_flags(0x0800_0000);
     }
-    match cmd.output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return json!({"error": format!("shell_exec failed to spawn: {e}")}),
+    };
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    // Bounded readers. If a stream exceeds the cap we abort the child.
+    async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+        reader: &mut R,
+        cap: usize,
+    ) -> std::io::Result<(Vec<u8>, bool)> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok((buf, false));
+            }
+            if buf.len() + n > cap {
+                let take = cap.saturating_sub(buf.len());
+                buf.extend_from_slice(&chunk[..take]);
+                return Ok((buf, true));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    let timeout = std::time::Duration::from_secs(SHELL_EXEC_TIMEOUT_SECS);
+    let exec = async {
+        let (stdout_res, stderr_res) = tokio::join!(
+            read_capped(&mut stdout_pipe, SHELL_EXEC_MAX_OUTPUT_BYTES),
+            read_capped(&mut stderr_pipe, SHELL_EXEC_MAX_OUTPUT_BYTES),
+        );
+        let (stdout_bytes, stdout_truncated) = stdout_res?;
+        let (stderr_bytes, stderr_truncated) = stderr_res?;
+        let truncated = stdout_truncated || stderr_truncated;
+        if truncated {
+            // Output cap exceeded — kill before waiting on exit.
+            let _ = child.start_kill();
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, stdout_bytes, stderr_bytes, truncated))
+    };
+
+    match tokio::time::timeout(timeout, exec).await {
+        Ok(Ok((status, stdout_bytes, stderr_bytes, truncated))) => {
+            if truncated {
+                return json!({"error": format!(
+                    "shell_exec output exceeded {SHELL_EXEC_MAX_OUTPUT_BYTES} bytes; child killed"
+                )});
+            }
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             json!({
                 "ok": {
-                    "exit_code": output.status.code(),
+                    "exit_code": status.code(),
                     "stdout": stdout,
                     "stderr": stderr,
                 }
             })
         }
-        Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
+        Ok(Err(e)) => json!({"error": format!("shell_exec failed: {e}")}),
+        Err(_) => {
+            // child + pipes drop here → kill_on_drop reaps the subprocess.
+            json!({"error": format!(
+                "shell_exec timed out after {SHELL_EXEC_TIMEOUT_SECS}s; child killed"
+            )})
+        }
     }
 }
 
@@ -908,7 +1012,7 @@ mod tests {
     /// fake secret into the parent environment, drive the host call, and
     /// verify that the child's `env` output does not contain it.
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shell_exec_strips_parent_env_secrets() {
         // Use a unique key per run so concurrent tests don't collide.
         let key = format!("LF_WASM_FAKE_SECRET_{}", std::process::id());
@@ -948,6 +1052,36 @@ mod tests {
         assert!(
             stdout.contains("PATH="),
             "WASM shell_exec child must still see PATH; got stdout:\n{stdout}"
+        );
+    }
+
+    /// Regression for #3529: a runaway child must be killed once it
+    /// exceeds the per-stream output cap. `yes` floods stdout indefinitely;
+    /// without the cap + kill_on_drop the host would happily fill memory.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shell_exec_kills_child_on_output_cap() {
+        let state = test_state(vec![Capability::ShellExec("/usr/bin/yes".to_string())]);
+        let started = std::time::Instant::now();
+        let result = host_shell_exec(
+            &state,
+            &json!({
+                "command": "/usr/bin/yes",
+                "args": [],
+            }),
+        );
+        let elapsed = started.elapsed();
+        let err = result["error"]
+            .as_str()
+            .expect("expected output-cap error");
+        assert!(
+            err.contains("output exceeded"),
+            "expected output-cap kill, got: {err}"
+        );
+        // Must have aborted well before the 30s timeout fires.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "child not killed promptly; elapsed = {elapsed:?}"
         );
     }
 
@@ -1305,6 +1439,35 @@ mod tests {
         assert!(is_ssrf_target("file:///etc/passwd").is_err());
         assert!(is_ssrf_target("gopher://evil.com").is_err());
         assert!(is_ssrf_target("ftp://example.com").is_err());
+    }
+
+    /// Regression for #3527: any URL containing userinfo (`user[:pass]@host`)
+    /// in the authority must be rejected outright. Without this, an attacker
+    /// could make extract_host_from_url see a benign host while reqwest
+    /// connects to the real authority host (e.g. cloud IMDS).
+    #[test]
+    fn test_ssrf_rejects_urls_with_userinfo() {
+        // Bare userinfo, attacker-controlled real host
+        let r = is_ssrf_target("http://x@169.254.169.254/");
+        assert!(r.is_err(), "must reject userinfo URLs");
+        let err = r.unwrap_err()["error"].as_str().unwrap_or("").to_string();
+        assert!(err.contains("userinfo"), "wrong error: {err}");
+
+        // user:pass form
+        assert!(is_ssrf_target("http://user:pass@127.0.0.1/").is_err());
+
+        // The exact bypass shape: parser-confusing host:port@evil
+        assert!(is_ssrf_target("http://allowed.com:80@169.254.169.254/").is_err());
+        assert!(is_ssrf_target("https://allowed.com@127.0.0.1:9000/x").is_err());
+
+        // Userinfo with empty password is still userinfo
+        assert!(is_ssrf_target("http://user:@8.8.8.8/").is_err());
+
+        // `@` later in the path is fine
+        assert!(is_ssrf_target("https://api.openai.com/v1/users/me@example").is_ok());
+
+        // `@` in query string is fine
+        assert!(is_ssrf_target("https://api.openai.com/?email=me@example.com").is_ok());
     }
 
     #[test]
