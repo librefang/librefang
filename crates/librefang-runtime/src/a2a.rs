@@ -915,8 +915,8 @@ impl A2aClient {
 
         // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
         let bytes = read_capped_body(response, MAX_AGENT_CARD_BYTES, "A2A discovery").await?;
-        let card: AgentCard = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Invalid Agent Card: {e}"))?;
+        let card: AgentCard =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid Agent Card: {e}"))?;
 
         info!(agent = %card.name, skills = card.skills.len(), "Discovered A2A agent");
         Ok(card)
@@ -956,8 +956,8 @@ impl A2aClient {
 
         // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
         let bytes = read_capped_body(response, MAX_A2A_TASK_BYTES, "A2A send_task").await?;
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Invalid A2A response: {e}"))?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid A2A response: {e}"))?;
 
         if let Some(result) = body.get("result") {
             serde_json::from_value(result.clone())
@@ -994,8 +994,8 @@ impl A2aClient {
 
         // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
         let bytes = read_capped_body(response, MAX_A2A_TASK_BYTES, "A2A get_task").await?;
-        let body: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Invalid A2A response: {e}"))?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid A2A response: {e}"))?;
 
         if let Some(result) = body.get("result") {
             serde_json::from_value(result.clone()).map_err(|e| format!("Invalid A2A task: {e}"))
