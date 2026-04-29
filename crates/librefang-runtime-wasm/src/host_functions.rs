@@ -63,6 +63,34 @@ fn check_capability(
             return Ok(());
         }
     }
+    // macOS aliases /tmp -> /private/tmp at the filesystem level, so
+    // safe_resolve_path's canonicalize() converts a guest-supplied
+    // "/tmp/foo" into "/private/tmp/foo" before the capability check.
+    // A natural user-facing grant of FileRead("/tmp/*") then never
+    // matches because the value the matcher sees is rooted at
+    // /private/tmp.  Same pattern applies to FileWrite.  Retry with
+    // the /private prefix stripped from the canonical value so the
+    // grant works the way operators expect on macOS.  Audit of #3925
+    // flagged this; it only affects the /private/tmp -> /tmp aliasing,
+    // not arbitrary symlink dereferencing.
+    if cfg!(target_os = "macos") {
+        let aliased = match required {
+            Capability::FileRead(p) => p
+                .strip_prefix("/private/tmp/")
+                .map(|rest| Capability::FileRead(format!("/tmp/{rest}"))),
+            Capability::FileWrite(p) => p
+                .strip_prefix("/private/tmp/")
+                .map(|rest| Capability::FileWrite(format!("/tmp/{rest}"))),
+            _ => None,
+        };
+        if let Some(aliased) = aliased {
+            for granted in capabilities {
+                if capability_matches(granted, &aliased) {
+                    return Ok(());
+                }
+            }
+        }
+    }
     Err(json!({"error": format!("Capability denied: {required:?}")}))
 }
 
