@@ -1062,9 +1062,7 @@ mod tests {
             }),
         );
         let elapsed = started.elapsed();
-        let err = result["error"]
-            .as_str()
-            .expect("expected output-cap error");
+        let err = result["error"].as_str().expect("expected output-cap error");
         assert!(
             err.contains("output exceeded"),
             "expected output-cap kill, got: {err}"
