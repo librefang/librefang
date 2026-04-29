@@ -663,7 +663,7 @@ async fn summarize_messages(
 
     let request = CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message {
+        messages: std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Text {
                 text: summarize_prompt,
@@ -671,7 +671,7 @@ async fn summarize_messages(
             }]),
             pinned: false,
             timestamp: None,
-        }],
+        }]),
         tools: vec![],
         max_tokens: config.max_summary_tokens,
         temperature: 0.3,
@@ -789,7 +789,7 @@ async fn summarize_in_chunks(
 
     let merge_request = CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message {
+        messages: std::sync::Arc::new(vec![Message {
             role: Role::User,
             content: MessageContent::Blocks(vec![ContentBlock::Text {
                 text: merge_prompt,
@@ -797,7 +797,7 @@ async fn summarize_in_chunks(
             }]),
             pinned: false,
             timestamp: None,
-        }],
+        }]),
         tools: vec![],
         max_tokens: config.max_summary_tokens,
         temperature: 0.3,

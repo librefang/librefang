@@ -226,6 +226,24 @@ impl QualityGate {
     }
 }
 
+/// Cache compiled `MatchesRegex` patterns so quality gates evaluated on every
+/// workflow step don't pay the per-call `Regex::new` cost (#3491).
+static QUALITY_REGEX_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, regex_lite::Regex>>,
+> = std::sync::OnceLock::new();
+
+fn matches_quality_regex(pattern: &str, output: &str) -> bool {
+    let cache = QUALITY_REGEX_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let entry = map.entry(pattern.to_string()).or_insert_with(|| {
+        regex_lite::Regex::new(pattern).unwrap_or_else(|_| {
+            // Never-match sentinel: an invalid pattern fails the gate forever.
+            regex_lite::Regex::new("(?!x)x").expect("static never-match regex compiles")
+        })
+    });
+    entry.is_match(output)
+}
+
 impl QualityCheck {
     /// Returns `true` when the check passes for the given output.
     pub fn passes(&self, output: &str) -> bool {
@@ -234,9 +252,7 @@ impl QualityCheck {
             QualityCheck::NotContains(s) => !output.to_lowercase().contains(&s.to_lowercase()),
             QualityCheck::MinLength(n) => output.len() >= *n,
             QualityCheck::MaxLength(n) => output.len() <= *n,
-            QualityCheck::MatchesRegex(pattern) => regex_lite::Regex::new(pattern)
-                .map(|re| re.is_match(output))
-                .unwrap_or(false),
+            QualityCheck::MatchesRegex(pattern) => matches_quality_regex(pattern, output),
             QualityCheck::All(checks) => checks.iter().all(|c| c.passes(output)),
             QualityCheck::Any(checks) => checks.iter().any(|c| c.passes(output)),
         }

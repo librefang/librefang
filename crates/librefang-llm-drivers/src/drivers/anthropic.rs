@@ -1384,7 +1384,7 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![tool_a, tool_b],
             max_tokens: 100,
             temperature: 0.0,
@@ -1422,7 +1422,7 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1462,13 +1462,13 @@ mod tests {
     fn multi_turn_rolling_window_stamps_last_three() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
+            ]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1511,14 +1511,14 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3"),
                 Message::assistant("a3 (last)"),
-            ],
+            ]),
             tools: vec![tool.clone(), tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1565,7 +1565,7 @@ mod tests {
         }]);
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![tool_result_msg],
+            messages: std::sync::Arc::new(vec![tool_result_msg]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1601,7 +1601,7 @@ mod tests {
     fn system_block_always_stamped_when_caching_on() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")], // dummy: api requires >=1 user msg
+            messages: std::sync::Arc::new(vec![Message::user("hi")]), // dummy: api requires >=1 user msg
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1637,11 +1637,11 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2 (last)"),
-            ],
+            ]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1683,7 +1683,7 @@ mod tests {
     fn ttl_default_omits_ttl_field_and_skips_beta_header() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1715,7 +1715,7 @@ mod tests {
     fn test_messages_cache_control_absent_when_caching_off() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1821,13 +1821,13 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
+            ]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1912,7 +1912,7 @@ mod tests {
     fn test_tools_cache_control_empty_tools_list() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,

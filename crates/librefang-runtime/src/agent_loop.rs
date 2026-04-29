@@ -2592,7 +2592,9 @@ async fn generate_search_queries(
 
     let request = CompletionRequest {
         model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
-        messages: vec![Message::user(format!("{history}\nUser: {user_message}"))],
+        messages: std::sync::Arc::new(vec![Message::user(format!(
+            "{history}\nUser: {user_message}"
+        ))]),
         tools: vec![],
         max_tokens: 200,
         temperature: 0.0,
@@ -3515,9 +3517,11 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Wrap messages once per turn — call_with_retry's `request.clone()`
+        // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
+            messages: std::sync::Arc::new(messages.clone()),
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
@@ -4914,9 +4918,10 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
+            messages: std::sync::Arc::new(messages.clone()),
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
@@ -5991,9 +5996,11 @@ fn recover_text_tool_calls(text: &str, available_tools: &[ToolDefinition]) -> Ve
     // The parameters value is HTML-entity-escaped JSON (&quot; etc.).
     {
         use regex_lite::Regex;
-        // Match both self-closing <function ... /> and <function ...></function>
-        let re =
-            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap();
+        // Cached: this parser runs on every LLM response (#3491).
+        static FUNCTION_TAG_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap()
+        });
+        let re = &*FUNCTION_TAG_RE;
         for caps in re.captures_iter(text) {
             let tool_name = caps.get(1).unwrap().as_str();
             let raw_params = caps.get(2).unwrap().as_str();

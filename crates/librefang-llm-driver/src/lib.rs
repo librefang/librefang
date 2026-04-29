@@ -213,7 +213,13 @@ pub struct CompletionRequest {
     /// Model identifier.
     pub model: String,
     /// Conversation messages.
-    pub messages: Vec<Message>,
+    ///
+    /// Wrapped in `Arc` so cloning the request (e.g. retry on rate-limit
+    /// inside `call_with_retry`) only bumps a refcount instead of deep-copying
+    /// 200-600 KB of message history every turn (#3766). All driver code
+    /// reads through `&request.messages` / `request.messages.iter()`, both
+    /// of which auto-deref through `Arc<Vec<_>>`.
+    pub messages: std::sync::Arc<Vec<Message>>,
     /// Available tools the model can use.
     pub tools: Vec<ToolDefinition>,
     /// Maximum tokens to generate.
@@ -725,7 +731,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
         let request = CompletionRequest {
             model: "test".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,

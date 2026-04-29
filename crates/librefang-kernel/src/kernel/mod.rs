@@ -7123,7 +7123,7 @@ system_prompt = "You are a helpful assistant."
 
         let request = CompletionRequest {
             model: String::new(), // use driver default
-            messages: vec![Message::user(message.to_string())],
+            messages: std::sync::Arc::new(vec![Message::user(message.to_string())]),
             tools: vec![],
             max_tokens: 20,
             temperature: 0.0,
@@ -7922,7 +7922,9 @@ system_prompt = "You are a helpful assistant."
             // Build a probe request to score complexity
             let probe = CompletionRequest {
                 model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
-                messages: vec![librefang_types::message::Message::user(message)],
+                messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
+                    message,
+                )]),
                 tools: tools.clone(),
                 max_tokens: manifest.model.max_tokens,
                 temperature: manifest.model.temperature,
@@ -11747,7 +11749,7 @@ system_prompt = "You are a helpful assistant."
 
         let request = CompletionRequest {
             model: model.to_string(),
-            messages: vec![Message::user(prompt.to_string())],
+            messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
             tools: vec![],
             max_tokens: 10,
             temperature: 0.0,
@@ -15276,7 +15278,7 @@ system_prompt = "You are a helpful assistant."
         let model_for_review = strip_provider_prefix(&default_model.model, &default_model.provider);
         let request = CompletionRequest {
             model: model_for_review,
-            messages: vec![Message::user(user_msg)],
+            messages: std::sync::Arc::new(vec![Message::user(user_msg)]),
             tools: vec![],
             max_tokens: 2000,
             temperature: 0.0,
@@ -15652,7 +15654,13 @@ system_prompt = "You are a helpful assistant."
     /// 3. Return None if no valid JSON object can be found
     fn extract_json_from_llm_response(text: &str) -> Option<String> {
         // Strategy 1: Extract from Markdown code block (```json ... ``` or ``` ... ```)
-        let code_block_re = regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{.*?\})\s*```").ok()?;
+        // Cached: this runs on every structured-output LLM response (#3491).
+        static CODE_BLOCK_RE: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{.*?\})\s*```")
+                    .expect("static json code-block regex compiles")
+            });
+        let code_block_re: &regex::Regex = &CODE_BLOCK_RE;
         if let Some(caps) = code_block_re.captures(text) {
             let candidate = caps.get(1)?.as_str().to_string();
             if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {

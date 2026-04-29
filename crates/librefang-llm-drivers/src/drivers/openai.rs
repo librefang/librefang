@@ -2369,12 +2369,12 @@ mod tests {
         let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
         let request = CompletionRequest {
             model: "qwen3:8b".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,
@@ -2397,12 +2397,12 @@ mod tests {
         let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
         let request = CompletionRequest {
             model: "qwen3:8b".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,
@@ -2425,12 +2425,12 @@ mod tests {
         let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
         let request = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,

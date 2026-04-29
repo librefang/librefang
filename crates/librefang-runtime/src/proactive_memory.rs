@@ -402,9 +402,9 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // (libre-code's `extractMemories` shape); that's a separate PR.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![librefang_types::message::Message::user(format!(
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(format!(
                 "Extract memories from this conversation:\n\n{conversation_text}"
-            ))],
+            ))]),
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.1,
@@ -556,7 +556,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // fires dozens of times per session.
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![librefang_types::message::Message::user(user_msg)],
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(user_msg)]),
             tools: Vec::new(),
             max_tokens: 256,
             temperature: 0.0,

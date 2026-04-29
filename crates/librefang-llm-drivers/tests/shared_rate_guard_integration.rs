@@ -88,7 +88,7 @@ async fn spawn_stub_429_server() -> (String, Arc<AtomicUsize>) {
 fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message::user("hello")],
+        messages: std::sync::Arc::new(vec![Message::user("hello")]),
         tools: Vec::new(),
         max_tokens: 16,
         temperature: 0.0,

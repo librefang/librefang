@@ -364,7 +364,8 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Default returns None (event subscription not available).
     async fn subscribe_events(
         &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>>
+    {
         None
     }
 
@@ -1271,7 +1272,7 @@ impl BridgeManager {
                     result = rx.recv() => {
                         match result {
                             Ok(event) => {
-                                if let librefang_types::event::EventPayload::ApprovalRequested(ref approval) = event.payload {
+                                if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
                                     let msg = format!(
                                         "Approval required for agent {}\n\
                                          Tool: {}\n\

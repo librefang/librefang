@@ -1456,7 +1456,7 @@ mod tests {
     fn test_convert_tools() {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![ToolDefinition {
                 name: "web_search".to_string(),
                 description: "Search the web".to_string(),
@@ -1489,7 +1489,7 @@ mod tests {
     fn test_convert_tools_empty() {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,

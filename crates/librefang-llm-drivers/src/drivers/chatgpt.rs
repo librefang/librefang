@@ -1118,12 +1118,12 @@ mod tests {
     fn test_build_responses_request_basic() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hello".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.7,
@@ -1148,7 +1148,7 @@ mod tests {
     fn test_build_responses_request_system_merged() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message {
                     role: Role::System,
                     content: MessageContent::Text("System prompt.".to_string()),
@@ -1161,7 +1161,7 @@ mod tests {
                     pinned: false,
                     timestamp: None,
                 },
-            ],
+            ]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,
@@ -1185,12 +1185,12 @@ mod tests {
     fn test_build_responses_request_appends_json_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,
@@ -1213,12 +1213,12 @@ mod tests {
     fn test_build_responses_request_appends_json_schema_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,

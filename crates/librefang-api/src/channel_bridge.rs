@@ -1629,7 +1629,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn subscribe_events(
         &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>>
+    {
         Some(self.kernel.event_bus_ref().subscribe_all())
     }
 

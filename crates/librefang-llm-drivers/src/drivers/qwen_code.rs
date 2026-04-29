@@ -1052,12 +1052,12 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen3-coder".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hello"),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1093,7 +1093,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1107,7 +1107,7 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1176,7 +1176,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
                     media_type: "image/png".to_string(),
@@ -1184,7 +1184,7 @@ mod tests {
                 }]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1271,7 +1271,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1286,7 +1286,7 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1323,7 +1323,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "qwen-code/qwen-vl-max".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![ContentBlock::ImageFile {
                     media_type: "image/png".to_string(),
@@ -1331,7 +1331,7 @@ mod tests {
                 }]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
