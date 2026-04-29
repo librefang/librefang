@@ -795,7 +795,9 @@ pub async fn a2a_discover_external(
         return ApiErrorResponse::bad_request(reason).into_json_tuple();
     }
 
-    let client = librefang_runtime::a2a::A2aClient::new();
+    // Use the same allowlist for redirect re-validation so the SSRF defence
+    // covers every hop, not just the operator-supplied URL (#3782).
+    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.discover(&url).await {
         Ok(card) => {
             // SECURITY (Bug #3786): Warn that we have no cryptographic proof
@@ -923,7 +925,9 @@ pub async fn a2a_send_external(
         return ApiErrorResponse::bad_request(reason).into_json_tuple();
     }
 
-    let client = librefang_runtime::a2a::A2aClient::new();
+    // Use the same allowlist for redirect re-validation so the SSRF defence
+    // covers every hop, not just the operator-supplied URL (#3782).
+    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.send_task(&url, &message, session_id).await {
         Ok(task) => (
             StatusCode::OK,
@@ -973,7 +977,9 @@ pub async fn a2a_external_task_status(
         return ApiErrorResponse::bad_request(reason).into_json_tuple();
     }
 
-    let client = librefang_runtime::a2a::A2aClient::new();
+    // Use the same allowlist for redirect re-validation so the SSRF defence
+    // covers every hop, not just the operator-supplied URL (#3782).
+    let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.get_task(&url, &task_id).await {
         Ok(task) => (
             StatusCode::OK,
