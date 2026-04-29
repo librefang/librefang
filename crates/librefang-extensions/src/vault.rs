@@ -647,8 +647,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
             serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
 
         // Atomic write with mode 0600 on Unix; non-Unix relies on OS ACLs.
-        let tmp_path =
-            keyring_path.with_extension(format!("keyring.tmp.{}", std::process::id()));
+        let tmp_path = keyring_path.with_extension(format!("keyring.tmp.{}", std::process::id()));
         let result = (|| -> std::io::Result<()> {
             use std::io::Write as _;
             let mut opts = std::fs::OpenOptions::new();
