@@ -144,7 +144,7 @@ xtask                       Automatyzacja budowania
 
 ## Kluczowe Funkcje
 
-**57 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 44 innych. [Pełna lista](https://docs.librefang.ai/integrations/channels)
+**45 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 32 innych. [Pełna lista](https://docs.librefang.ai/integrations/channels)
 
 **28 Dostawców LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama i 20 innych. Inteligentny routing, automatyczny fallback, śledzenie kosztów. [Szczegóły](https://docs.librefang.ai/configuration/providers)
 
