@@ -381,18 +381,21 @@ impl SemanticStore {
             });
         }
 
-        // If we have a query embedding, re-rank by cosine similarity
+        // If we have a query embedding, re-rank by cosine similarity.
+        // Non-comparable vectors (dim mismatch, zero magnitude) sort to
+        // the bottom (-1.0 sentinel) instead of being treated as 0.0,
+        // which would have ranked them above genuinely orthogonal hits.
         if let Some(qe) = query_embedding {
             fragments.sort_by(|a, b| {
                 let sim_a = a
                     .embedding
                     .as_deref()
-                    .map(|e| cosine_similarity(qe, e))
+                    .and_then(|e| cosine_similarity(qe, e))
                     .unwrap_or(-1.0);
                 let sim_b = b
                     .embedding
                     .as_deref()
-                    .map(|e| cosine_similarity(qe, e))
+                    .and_then(|e| cosine_similarity(qe, e))
                     .unwrap_or(-1.0);
                 sim_b
                     .partial_cmp(&sim_a)
@@ -908,9 +911,12 @@ fn escape_like(s: &str) -> String {
 }
 
 /// Compute cosine similarity between two vectors.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+///
+/// Returns `None` for non-comparable vectors (dim mismatch, empty, zero
+/// magnitude). Callers must handle `None` explicitly — see #3536.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
@@ -922,9 +928,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     let denom = norm_a.sqrt() * norm_b.sqrt();
     if denom < f32::EPSILON {
-        0.0
+        None
     } else {
-        dot / denom
+        Some(dot / denom)
     }
 }
 
@@ -1049,7 +1055,16 @@ impl VectorStore for SqliteVectorStore {
             let (id, content, meta_str, emb_bytes) =
                 row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let emb = embedding_from_bytes(&emb_bytes);
-            let score = cosine_similarity(query_embedding, &emb);
+            // Skip non-comparable rows (dim mismatch from re-embedding,
+            // zero vector). Including them with score=0.0 would let them
+            // outrank genuinely orthogonal hits and pollute the result set.
+            let Some(score) = cosine_similarity(query_embedding, &emb) else {
+                tracing::debug!(
+                    memory_id = %id,
+                    "skipping vector candidate: dim mismatch or zero magnitude"
+                );
+                continue;
+            };
             let metadata: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&meta_str).unwrap_or_default();
             results.push(VectorSearchResult {

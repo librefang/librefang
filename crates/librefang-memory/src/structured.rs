@@ -361,12 +361,15 @@ impl StructuredStore {
     /// after agent deletion. All DELETEs run inside a single transaction so
     /// a mid-cascade failure leaves no half-removed state.
     ///
+    /// NOTE: most callers should use [`MemorySubstrate::remove_agent`]
+    /// instead, which wraps sessions + structured cascade in one tx (#3501).
+    /// This method does NOT touch `sessions` / `sessions_fts`.
+    ///
     /// Tables covered: agents, kv_store, task_queue, memories,
     /// canonical_sessions, audit_entries, usage_events, entities, relations,
     /// approval_audit, prompt_versions, prompt_experiments (plus their
     /// dependent experiment_variants and experiment_metrics rows), and
-    /// events via source_agent. sessions / sessions_fts are handled by
-    /// the caller (MemorySubstrate::remove_agent via SessionStore).
+    /// events via source_agent.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self
             .conn

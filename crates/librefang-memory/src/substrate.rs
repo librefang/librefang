@@ -176,20 +176,72 @@ impl MemorySubstrate {
         self.structured.load_agent(agent_id)
     }
 
-    /// Remove an agent from persistent storage and cascade-delete sessions.
+    /// Remove an agent and cascade-delete every agent-scoped row in a
+    /// single transaction.
+    ///
+    /// Pre-fix (#3501) sessions and structured rows were deleted in
+    /// independent locks/transactions: a failure between the two would
+    /// orphan whichever side had not run yet. Now all DELETEs share one
+    /// `unchecked_transaction` — partial cascade rolls back to the
+    /// pre-call state.
+    ///
+    /// `sessions_fts` is intentionally outside the rollback path: an FTS
+    /// failure logs a warning rather than aborting the cascade, because
+    /// the user-visible `agents` row removal is the primary contract and
+    /// FTS orphans are recoverable by a rebuild.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        // Delete associated sessions first. Log on failure rather than
-        // silently swallowing — the agent row will still be removed, but
-        // the caller should know about the orphaned session rows so the
-        // inconsistency is at least observable.
-        if let Err(e) = self.sessions.delete_agent_sessions(agent_id) {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let id = agent_id.0.to_string();
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // Order matters: subquery-scoped deletes must run BEFORE their
+        // parent rows are cleared, otherwise `IN (SELECT ...)` matches
+        // nothing. `agents` last so foreign-key-style references are
+        // resolved first.
+        for stmt in [
+            "DELETE FROM experiment_metrics \
+             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+            "DELETE FROM experiment_variants \
+             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+            "DELETE FROM prompt_experiments WHERE agent_id = ?1",
+            "DELETE FROM prompt_versions WHERE agent_id = ?1",
+            "DELETE FROM approval_audit WHERE agent_id = ?1",
+            "DELETE FROM audit_entries WHERE agent_id = ?1",
+            "DELETE FROM usage_events WHERE agent_id = ?1",
+            "DELETE FROM memories WHERE agent_id = ?1",
+            "DELETE FROM sessions WHERE agent_id = ?1",
+            "DELETE FROM canonical_sessions WHERE agent_id = ?1",
+            "DELETE FROM kv_store WHERE agent_id = ?1",
+            "DELETE FROM task_queue WHERE agent_id = ?1",
+            "DELETE FROM entities WHERE agent_id = ?1",
+            "DELETE FROM relations WHERE agent_id = ?1",
+            "DELETE FROM events WHERE source_agent = ?1",
+            "DELETE FROM agents WHERE id = ?1",
+        ] {
+            tx.execute(stmt, rusqlite::params![id])
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        }
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // FTS index cleanup outside the tx: it's a derived index and a
+        // failure shouldn't undo the user-visible agent removal.
+        if let Err(e) = conn.execute(
+            "DELETE FROM sessions_fts WHERE agent_id = ?1",
+            rusqlite::params![id],
+        ) {
             tracing::warn!(
                 %agent_id,
                 error = %e,
-                "Failed to cascade-delete sessions for agent; session rows may be orphaned",
+                "Failed to clear sessions_fts entries; FTS may need rebuild",
             );
         }
-        self.structured.remove_agent(agent_id)
+        Ok(())
     }
 
     /// Load all agent entries from persistent storage.
@@ -1769,5 +1821,64 @@ mod tests {
             finished_at.is_none(),
             "reset to pending must clear finished_at"
         );
+    }
+
+    /// #3501: `remove_agent` cascade-deletes sessions, memories, and the
+    /// agent row in a single transaction. Pre-fix the cascade ran across
+    /// multiple independent locks: a partial failure between the two
+    /// could orphan sessions whose agent had already been removed.
+    #[tokio::test]
+    async fn test_remove_agent_cascades_sessions_and_memories() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent_id = AgentId::new();
+
+        // Seed: a session and a memory under this agent.
+        let session = substrate.create_session(agent_id).unwrap();
+        substrate
+            .remember(
+                agent_id,
+                "remember me",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Sanity: both rows exist.
+        assert!(substrate.get_session(session.id).unwrap().is_some());
+        let pre_count: i64 = substrate
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pre_count, 1);
+
+        substrate.remove_agent(agent_id).unwrap();
+
+        // Sessions, memories, and the agent row must all be gone.
+        let conn = substrate.conn.lock().unwrap();
+        let session_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session_count, 0, "sessions must cascade-delete");
+
+        let memory_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(memory_count, 0, "memories must cascade-delete");
     }
 }

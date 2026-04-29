@@ -930,10 +930,13 @@ fn provider_default_key_env(provider: &str) -> &'static str {
 
 /// Compute cosine similarity between two vectors.
 ///
-/// Returns a value in [-1.0, 1.0] where 1.0 = identical direction.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Returns `Some(score)` in `[-1.0, 1.0]` where `1.0` = identical
+/// direction. Returns `None` when the vectors are not comparable
+/// (empty, dim mismatch, or zero magnitude). Callers must handle
+/// `None` explicitly — see #3536.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
 
     let mut dot = 0.0f32;
@@ -948,9 +951,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
     let denom = norm_a.sqrt() * norm_b.sqrt();
     if denom < f32::EPSILON {
-        0.0
+        None
     } else {
-        dot / denom
+        Some(dot / denom)
     }
 }
 
@@ -979,7 +982,7 @@ mod tests {
     fn test_cosine_similarity_identical() {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("identical vectors are comparable");
         assert!((sim - 1.0).abs() < 1e-6);
     }
 
@@ -987,7 +990,7 @@ mod tests {
     fn test_cosine_similarity_orthogonal() {
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("orthogonal vectors are comparable");
         assert!(sim.abs() < 1e-6);
     }
 
@@ -995,7 +998,7 @@ mod tests {
     fn test_cosine_similarity_opposite() {
         let a = vec![1.0, 0.0];
         let b = vec![-1.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("opposite vectors are comparable");
         assert!((sim + 1.0).abs() < 1e-6);
     }
 
@@ -1003,26 +1006,35 @@ mod tests {
     fn test_cosine_similarity_real_vectors() {
         let a = vec![0.1, 0.2, 0.3, 0.4];
         let b = vec![0.1, 0.2, 0.3, 0.4];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("real vectors are comparable");
         assert!((sim - 1.0).abs() < 1e-5);
 
         let c = vec![0.4, 0.3, 0.2, 0.1];
-        let sim2 = cosine_similarity(&a, &c);
+        let sim2 = cosine_similarity(&a, &c).expect("non-zero vectors are comparable");
         assert!(sim2 > 0.0 && sim2 < 1.0); // Similar but not identical
     }
 
     #[test]
     fn test_cosine_similarity_empty() {
-        let sim = cosine_similarity(&[], &[]);
-        assert_eq!(sim, 0.0);
+        // Empty vectors are not comparable — None, not 0.0.
+        assert_eq!(cosine_similarity(&[], &[]), None);
     }
 
     #[test]
     fn test_cosine_similarity_length_mismatch() {
+        // Dim mismatch is not comparable — None, not 0.0.
         let a = vec![1.0, 2.0];
         let b = vec![1.0, 2.0, 3.0];
-        let sim = cosine_similarity(&a, &b);
-        assert_eq!(sim, 0.0);
+        assert_eq!(cosine_similarity(&a, &b), None);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        // Zero magnitude → undefined direction → None (not 0.0).
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), None);
+        assert_eq!(cosine_similarity(&b, &a), None);
     }
 
     #[test]

@@ -536,7 +536,7 @@ impl SessionStore {
     /// The two `DELETE`s run inside a single transaction so a failure on
     /// either side rolls back the other and leaves the agent's history
     /// either fully intact or fully gone — never half-deleted with FTS
-    /// orphans pointing at missing rows (#3470).
+    /// orphans pointing at missing rows (#3470, #3501).
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let mut conn = self
             .conn
