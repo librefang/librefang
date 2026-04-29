@@ -3,6 +3,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import {
   AlertTriangle,
+  CheckCircle2,
   ChevronRight,
   Clock,
   Filter,
@@ -182,6 +183,11 @@ interface AlertItem {
   title: string;
   sub: string;
   page?: string;
+  /** ISO timestamp the alert was triggered at, when the source has one.
+   *  Rendered as a relative time on the right edge of the row; omitted
+   *  for sources where no event timestamp exists (mcp degraded,
+   *  approvals count, generic health checks). */
+  triggered_at?: string;
 }
 
 const ALERT_KIND_TINT: Record<AlertKind, { color: string; bg: string }> = {
@@ -298,10 +304,11 @@ export function OverviewPage() {
             defaultValue: "{{name}} failed",
             name: a.name,
           }),
-          sub: a.last_active
-            ? `${t("overview.col.last_active", { defaultValue: "Last active" })} · ${formatRelativeTime(a.last_active)}`
-            : t("overview.alerts.agent_failed_sub", { defaultValue: "Restart from Agents page" }),
+          sub: t("overview.alerts.agent_failed_sub", {
+            defaultValue: "Restart from Agents page",
+          }),
           page: "/agents",
+          triggered_at: a.last_active,
         });
       }
     }
@@ -625,26 +632,44 @@ export function OverviewPage() {
                 ) : null
               }
             >
-              {t("overview.alerts.title", { defaultValue: "Alerts" })} ·{" "}
-              {visibleAlerts.length} {t("overview.alerts.active", { defaultValue: "active" })}
+              {t("overview.alerts.title", { defaultValue: "Alerts" })}
+              {visibleAlerts.length > 0 ? (
+                <>
+                  {" · "}
+                  {visibleAlerts.length}{" "}
+                  {t("overview.alerts.active", { defaultValue: "active" })}
+                </>
+              ) : null}
             </SectionLabel>
           </div>
           <div className="flex flex-col">
             {shownAlerts.length === 0 ? (
-              <div className="px-4 py-5 text-center text-text-dim text-xs border-t border-border-subtle">
+              <div className="px-4 py-6 flex flex-col items-center gap-2 border-t border-border-subtle">
+                <div
+                  className="w-9 h-9 rounded-full grid place-items-center"
+                  style={{
+                    background: "rgba(34,197,94,0.12)",
+                    color: "var(--color-success)",
+                  }}
+                >
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div className="text-[12.5px] font-medium text-text-main">
+                  {t("overview.alerts.systems_ok", {
+                    defaultValue: "All systems operational",
+                  })}
+                </div>
                 {dismissedAlerts.length > 0 ? (
-                  <>
-                    {t("overview.alerts.all_clear", { defaultValue: "All clear." })}{" "}
-                    <button
-                      onClick={() => setDismissedAlerts([])}
-                      className="bg-transparent border-0 text-brand text-xs cursor-pointer hover:underline"
-                    >
-                      {t("overview.alerts.restore", { defaultValue: "Restore" })}
-                    </button>
-                  </>
-                ) : (
-                  t("overview.alerts.all_clear", { defaultValue: "All clear." })
-                )}
+                  <button
+                    onClick={() => setDismissedAlerts([])}
+                    className="bg-transparent border-0 text-brand text-[11px] cursor-pointer hover:underline"
+                  >
+                    {t("overview.alerts.restore_count", {
+                      defaultValue: "Restore {{count}} dismissed",
+                      count: dismissedAlerts.length,
+                    })}
+                  </button>
+                ) : null}
               </div>
             ) : null}
             {shownAlerts.map((alert) => {
@@ -666,7 +691,16 @@ export function OverviewPage() {
                     <Icon className="w-[13px] h-[13px]" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[12.5px] font-medium truncate text-text-main">{alert.title}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 text-[12.5px] font-medium truncate text-text-main">
+                        {alert.title}
+                      </div>
+                      {alert.triggered_at ? (
+                        <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
+                          {formatRelativeTime(alert.triggered_at)}
+                        </span>
+                      ) : null}
+                    </div>
                     <div className="text-[11px] text-text-dim mt-0.5 truncate">{alert.sub}</div>
                   </div>
                   <ChevronRight className="w-3 h-3 mt-1 text-text-dim/60 shrink-0" />
