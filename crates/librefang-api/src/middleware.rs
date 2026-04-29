@@ -2075,7 +2075,7 @@ mod tests {
     // ---- Bug #3680: GET /api/logs/stream must require auth even when
     // ---- require_auth_for_reads = false -------------------------------
     //
-    // Before #3939 the SSE endpoint was unconditionally appended to
+    // Before #3909 the SSE endpoint was unconditionally appended to
     // `dashboard_read_public` (`|| path == "/api/logs/stream"`) so any
     // operator who explicitly set `require_auth_for_reads = false` (the
     // documented escape hatch for an external auth proxy) lost auth on
