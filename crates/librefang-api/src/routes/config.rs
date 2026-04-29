@@ -149,15 +149,6 @@ fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
         || env_set(&web.perplexity.api_key_env)
 }
 
-/// Build the redacted `web` object the `/api/config` GET endpoint returns.
-///
-/// This must include EVERY provider sub-table the dashboard's "config save"
-/// flow can write back. Issue #4016 was caused by `searxng` and `jina` being
-/// missing here even though both have working struct definitions and serde
-/// derives: the dashboard PUTs `web.searxng = { url = "..." }`, the value
-/// hits disk and reload, but the next refresh of `/api/config` returned a
-/// `web` map without those keys, so the UI rendered the field as empty and
-/// users perceived the save as silently failing.
 fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
     serde_json::json!({
         "search_provider": format!("{:?}", web.search_provider),
@@ -2460,11 +2451,6 @@ mod web_search_configured_tests {
 
 #[cfg(test)]
 mod redacted_web_tests {
-    //! Regression tests for issue #4016 — every search-provider sub-table the
-    //! dashboard knows how to write back through `/api/config/set` must round-
-    //! trip through the `/api/config` GET response. If a key is missing here
-    //! the dashboard sees `undefined` after a successful save and reports the
-    //! save as silently failed (the user-visible bug from #4016).
     use super::redacted_web;
     use librefang_types::config::WebConfig;
 
@@ -2505,9 +2491,7 @@ mod redacted_web_tests {
     #[test]
     fn redacted_web_lists_all_provider_subtables() {
         let v = redacted_web(&WebConfig::default());
-        // Every variant of `SearchProvider` that owns a config sub-table must
-        // appear here. `duck_duck_go` and `auto` are stateless so they are
-        // intentionally absent — they have no fields to surface.
+        // `duck_duck_go` and `auto` are stateless — no fields to surface.
         for key in &["brave", "tavily", "perplexity", "jina", "searxng", "fetch"] {
             assert!(
                 v.get(key).is_some(),
@@ -2519,11 +2503,6 @@ mod redacted_web_tests {
 
 #[cfg(test)]
 mod searxng_config_parse_tests {
-    //! Regression tests for issue #4016: the user reported that adding
-    //! `[web.searxng] url = "..."` to `~/.librefang/config.toml` and restarting
-    //! prevented the dashboard from connecting. Confirm that every shape the
-    //! reporter could plausibly have used — including the exact text from the
-    //! issue body — deserialises cleanly into `KernelConfig`.
     use librefang_types::config::KernelConfig;
 
     #[test]
@@ -2548,9 +2527,6 @@ url = "http://192.168.10.21:8888"
 
     #[test]
     fn issue_4016_searxng_alongside_init_template_layout_parses() {
-        // Mirrors the layout `librefang init` produces: top-level scalars,
-        // `[default_model]`, `[web]`, `[web.fetch]`, then the user appends
-        // `[web.searxng]` to the bottom.
         let toml_src = r#"
 log_level = "info"
 api_listen = "127.0.0.1:4545"
@@ -2577,9 +2553,6 @@ url = "https://search.example.com"
 
     #[test]
     fn issue_4016_inline_table_form_from_dashboard_save_parses() {
-        // The shape `/api/config/set` writes when the dashboard PUTs
-        // `path=web.searxng, value={"url":"..."}` (json_to_toml_edit_value
-        // builds an inline table for the JSON object).
         let toml_src = r#"
 [web]
 search_provider = "auto"
