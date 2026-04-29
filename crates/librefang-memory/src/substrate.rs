@@ -1599,7 +1599,10 @@ mod tests {
             .task_post("t", "d", Some("worker"), None)
             .await
             .unwrap();
-        let _ = substrate.task_claim("worker", Some("worker")).await.unwrap();
+        let _ = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
         substrate.task_complete(&task_id, "ok").await.unwrap();
 
         let conn = substrate.conn.lock().unwrap();
@@ -1610,7 +1613,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(finished_at.is_some(), "task_complete must stamp finished_at");
+        assert!(
+            finished_at.is_some(),
+            "task_complete must stamp finished_at"
+        );
     }
 
     #[tokio::test]
