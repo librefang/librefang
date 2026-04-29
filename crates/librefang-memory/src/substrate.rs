@@ -1076,18 +1076,29 @@ impl MemorySubstrate {
             let db = conn
                 .lock()
                 .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let now_unix = chrono::Utc::now().timestamp();
             let rows = match new_status.as_str() {
+                // Reset to pending: clear `finished_at` so a previous
+                // `failed` stamp (line 985) doesn't make the row look
+                // immediately prune-eligible if it later fails again
+                // before the timestamp is refreshed (#3466).
                 "pending" => db.execute(
                     "UPDATE task_queue \
-                     SET status = 'pending', claimed_at = NULL, assigned_to = '' \
+                     SET status = 'pending', claimed_at = NULL, assigned_to = '', \
+                         finished_at = NULL \
                      WHERE id = ?1 AND status IN ('in_progress', 'failed')",
                     rusqlite::params![task_id],
                 ),
+                // Cancellation is a terminal transition like complete/fail,
+                // so it MUST stamp `finished_at` — otherwise the retention
+                // sweep's `finished_at IS NOT NULL` filter excludes
+                // cancelled rows forever and `task_queue` grows unbounded
+                // for any agent that uses cancel (#3466).
                 "cancelled" => db.execute(
                     "UPDATE task_queue \
-                     SET status = 'cancelled' \
+                     SET status = 'cancelled', finished_at = ?2 \
                      WHERE id = ?1 AND status NOT IN ('completed', 'cancelled')",
-                    rusqlite::params![task_id],
+                    rusqlite::params![task_id, now_unix],
                 ),
                 _ => {
                     return Err(LibreFangError::InvalidInput(format!(
@@ -1654,5 +1665,84 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let pruned = substrate.task_prune_finished(0).await.unwrap();
         assert_eq!(pruned, 0);
+    }
+
+    /// `task_update_status("cancelled")` must stamp `finished_at`,
+    /// otherwise cancelled rows are excluded from the retention sweep
+    /// forever (sweep filters by `finished_at IS NOT NULL`) and the
+    /// queue table grows unbounded for any agent that uses cancel
+    /// (#3466).
+    #[tokio::test]
+    async fn test_task_cancel_stamps_finished_at() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+
+        let changed = substrate
+            .task_update_status(&task_id, "cancelled")
+            .await
+            .unwrap();
+        assert!(changed, "cancellation of a pending task must update");
+
+        let conn = substrate.conn.lock().unwrap();
+        let (status, finished_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finished_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert!(
+            finished_at.is_some(),
+            "task_update_status('cancelled') must stamp finished_at so the \
+             retention sweep can hard-delete the row later"
+        );
+    }
+
+    /// Reset-to-pending must clear `finished_at`. Otherwise a row that
+    /// was failed once and reset would carry a stale `finished_at`, and
+    /// the next failure could leave it eligible for prune sooner than
+    /// the configured retention window if the new fail path's stamp
+    /// got skipped for any reason.
+    #[tokio::test]
+    async fn test_task_reset_to_pending_clears_finished_at() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+
+        // Force a `failed` row with a stale `finished_at` directly.
+        {
+            let conn = substrate.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE task_queue SET status = 'failed', finished_at = ?2 WHERE id = ?1",
+                rusqlite::params![&task_id, chrono::Utc::now().timestamp() - 86_400],
+            )
+            .unwrap();
+        }
+
+        let changed = substrate
+            .task_update_status(&task_id, "pending")
+            .await
+            .unwrap();
+        assert!(changed);
+
+        let conn = substrate.conn.lock().unwrap();
+        let (status, finished_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finished_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert!(
+            finished_at.is_none(),
+            "reset to pending must clear finished_at"
+        );
     }
 }
