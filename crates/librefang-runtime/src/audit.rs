@@ -576,7 +576,76 @@ impl AuditLog {
                         &entry.hash,
                     ],
                 ) {
-                    Ok(_) => persisted_to_db = true,
+                    Ok(_) => {
+                        persisted_to_db = true;
+                        // Piggy-back recovery: while we still hold the
+                        // DB connection lock and the buffer guard,
+                        // opportunistically retry the oldest few
+                        // entries that previously failed.  A transient
+                        // outage (disk full, locked DB, schema swap
+                        // mid-write) parks rows in `non_persisted_seqs`;
+                        // without a retry path they sit there forever
+                        // until process exit, and the trim block keeps
+                        // them in memory permanently — slow leak.
+                        // Once the DB starts accepting writes again
+                        // we backfill in small batches so a successful
+                        // user-action write also drains the backlog.
+                        const RETRY_BATCH: usize = 16;
+                        let mut dirty = self
+                            .non_persisted_seqs
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        if !dirty.is_empty() {
+                            let mut to_retry: Vec<u64> =
+                                dirty.iter().copied().collect();
+                            to_retry.sort();
+                            to_retry.truncate(RETRY_BATCH);
+                            for retry_seq in to_retry {
+                                let Some(re) = entries.iter().find(|e| e.seq == retry_seq) else {
+                                    // Entry was trimmed before we could
+                                    // retry it — pre-trim sweep should
+                                    // not happen because the trim block
+                                    // refuses dirty rows, but if it does
+                                    // we'd otherwise track this seq
+                                    // forever.  Drop it.
+                                    dirty.remove(&retry_seq);
+                                    continue;
+                                };
+                                let r = conn.execute(
+                                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                    rusqlite::params![
+                                        re.seq as i64,
+                                        &re.timestamp,
+                                        &re.agent_id,
+                                        re.action.to_string(),
+                                        &re.detail,
+                                        &re.outcome,
+                                        re.user_id.map(|u| u.to_string()),
+                                        re.channel.as_deref(),
+                                        &re.prev_hash,
+                                        &re.hash,
+                                    ],
+                                );
+                                match r {
+                                    Ok(_) => {
+                                        dirty.remove(&retry_seq);
+                                        tracing::info!(
+                                            seq = retry_seq,
+                                            "Audit DB recovered — backfilled previously-failed entry"
+                                        );
+                                    }
+                                    Err(_) => {
+                                        // Still failing; abort the batch
+                                        // rather than thrash the same DB
+                                        // error N times in this scope.
+                                        // The next successful write will
+                                        // try again.
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Err(e) => {
                         // Pre-#3957 the trim block silently dropped these
                         // entries off the front of the buffer; they were
