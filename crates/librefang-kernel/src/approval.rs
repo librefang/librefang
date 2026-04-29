@@ -180,6 +180,9 @@ impl ApprovalManager {
     }
 
     /// Persist a new pending approval to the database so it survives restarts.
+    ///
+    /// Also writes a `pending` audit row so submission is observable even when
+    /// the daemon dies before resolution (#3611).
     fn db_insert_pending(&self, req: &ApprovalRequest) {
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.lock() else { return };
@@ -198,6 +201,45 @@ impl ApprovalManager {
             ],
         ) {
             warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
+        }
+        // Audit row at submission so a crash mid-flight still shows the request.
+        let entry = ApprovalAuditEntry {
+            id: Uuid::new_v4().to_string(),
+            request_id: req.id.to_string(),
+            agent_id: req.agent_id.clone(),
+            tool_name: req.tool_name.clone(),
+            description: req.description.clone(),
+            action_summary: req.action_summary.clone(),
+            risk_level: serde_json::to_string(&req.risk_level)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string(),
+            decision: "pending".to_string(),
+            decided_by: None,
+            decided_at: req.requested_at.to_rfc3339(),
+            requested_at: req.requested_at.to_rfc3339(),
+            feedback: None,
+            second_factor_used: false,
+        };
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO approval_audit (id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback, second_factor_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                entry.id,
+                entry.request_id,
+                entry.agent_id,
+                entry.tool_name,
+                entry.description,
+                entry.action_summary,
+                entry.risk_level,
+                entry.decision,
+                entry.decided_by,
+                entry.decided_at,
+                entry.requested_at,
+                entry.feedback,
+                entry.second_factor_used,
+            ],
+        ) {
+            warn!(request_id = %req.id, error = %e, "Failed to write pending audit entry");
         }
     }
 
@@ -2886,5 +2928,40 @@ mod tests {
         // Cleanup.
         let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
         let _ = mgr.resolve(id3, ApprovalDecision::Denied, None, false, None);
+    }
+
+    #[tokio::test]
+    async fn submission_writes_pending_audit_row_and_persists_pending_table() {
+        // #3611: a daemon crash mid-flight must not erase the audit trail.
+        // Submission writes a `pending` row immediately so the request is
+        // observable even if resolve / expire never runs.
+        let mgr = Arc::new(make_manager_with_db());
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-3611".to_string(),
+            tool_use_id: "tool-3611".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "echo hi"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+        };
+        let req = make_session_request("agent-3611", "sess-3611");
+        let request_id = mgr.submit_request(req, deferred).unwrap();
+
+        // Audit row exists with `pending` decision before any resolve.
+        let audit = mgr.query_audit(50, 0, Some("agent-3611"), None);
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.request_id == request_id.to_string() && e.decision == "pending"),
+            "submission must write a pending audit row, got: {audit:?}"
+        );
+
+        // Pending row also lives in the dedicated table (cross-restart survival).
+        assert!(mgr.get_pending(request_id).is_some());
     }
 }
