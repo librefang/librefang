@@ -109,7 +109,11 @@ fn load_env_file(path: &Path) {
     }
 }
 
-/// Parse a single `KEY=VALUE` line. Handles optional quotes.
+/// Parse a single `KEY=VALUE` line. Handles optional quotes and undoes
+/// the `\\` / `\n` / `\r` / `\"` escape sequences emitted by
+/// [`escape_env_value`] so values written by the dashboard round-trip
+/// byte-identically (#3790). Single-quoted values are taken literally,
+/// matching shell semantics.
 fn parse_env_line(line: &str) -> Option<(String, String)> {
     let eq_pos = line.find('=')?;
     let key = line[..eq_pos].trim().to_string();
@@ -119,15 +123,65 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {
         return None;
     }
 
-    // Strip matching quotes
-    if ((value.starts_with('"') && value.ends_with('"'))
-        || (value.starts_with('\'') && value.ends_with('\'')))
-        && value.len() >= 2
-    {
-        value = value[1..value.len() - 1].to_string();
+    // Strip matching quotes and remember which kind we stripped, so we
+    // only undo escapes inside double quotes (single-quoted = literal).
+    let mut was_double_quoted = false;
+    if value.len() >= 2 {
+        if value.starts_with('"') && value.ends_with('"') {
+            value = value[1..value.len() - 1].to_string();
+            was_double_quoted = true;
+        } else if value.starts_with('\'') && value.ends_with('\'') {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+
+    if was_double_quoted {
+        value = unescape_env_value(&value);
     }
 
     Some((key, value))
+}
+
+/// Escape a `.env` value so that newlines, carriage returns, backslashes
+/// and double quotes survive a write→read round-trip without splitting
+/// the value across lines or being misread as escape sequences (#3790).
+///
+/// Backslash MUST be replaced first, otherwise the `\n` inserted by the
+/// newline replacement gets a leading `\\` and decodes back as a literal
+/// `\n` instead of a newline.
+fn escape_env_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('"', "\\\"")
+}
+
+/// Inverse of [`escape_env_value`]. Walks the input once so we never
+/// double-decode an embedded `\\` (e.g. the input `\\n` must decode to
+/// the literal two-character `\n`, not a real newline).
+fn unescape_env_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            // Unknown escape: keep both chars verbatim so we don't lose data.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Upsert a key in `$LIBREFANG_HOME/.env`.
@@ -212,8 +266,23 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
     content.push_str("# Do not edit while the daemon is running.\n\n");
 
     for (key, value) in entries {
-        if value.contains(' ') || value.contains('#') || value.contains('"') {
-            content.push_str(&format!("{key}=\"{}\"\n", value.replace('"', "\\\"")));
+        // A value needs quoting if it contains ANY character that would
+        // confuse a dotenv reader, including newline / CR (which would
+        // otherwise split the value into bogus extra `KEY=...` lines —
+        // #3790). Always escape inside the quotes so backslash, double
+        // quote, newline and CR round-trip via [`parse_env_line`].
+        let needs_quoting = value.contains(' ')
+            || value.contains('#')
+            || value.contains('"')
+            || value.contains('\\')
+            || value.contains('\n')
+            || value.contains('\r')
+            || value.contains('\'')
+            || value.contains('=')
+            || value.contains('$');
+        if needs_quoting {
+            let escaped = escape_env_value(value);
+            content.push_str(&format!("{key}=\"{escaped}\"\n"));
         } else {
             content.push_str(&format!("{key}={value}\n"));
         }
@@ -310,6 +379,57 @@ mod tests {
     fn test_load_env_file_nonexistent() {
         // Should not panic
         load_env_file(&PathBuf::from("/nonexistent/.env"));
+    }
+
+    /// Regression for #3790: a value containing a literal newline must
+    /// be written as a single `KEY="..."` line (escaped) and must round
+    /// trip back to the original bytes via `parse_env_line`.
+    #[test]
+    fn write_env_file_escapes_newlines_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "PEM_KEY".to_string(),
+            "-----BEGIN PRIVATE KEY-----\nABC\nDEF\n-----END PRIVATE KEY-----".to_string(),
+        );
+        entries.insert("PLAIN".to_string(), "simple".to_string());
+        entries.insert("BACKSLASH".to_string(), r"a\b\c".to_string());
+        entries.insert("QUOTED".to_string(), r#"has "quotes""#.to_string());
+        write_env_file(&path, &entries).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Header is two comment lines + blank line; every entry must occupy
+        // exactly one line (no embedded newline leaks).
+        let key_lines: Vec<&str> = raw.lines().filter(|l| l.contains('=')).collect();
+        assert_eq!(
+            key_lines.len(),
+            entries.len(),
+            "expected one line per key; raw:\n{raw}"
+        );
+
+        // Round-trip: re-parse and ensure values match exactly.
+        let parsed = read_env_file(&path);
+        for (k, v) in &entries {
+            assert_eq!(
+                parsed.get(k).map(String::as_str),
+                Some(v.as_str()),
+                "round-trip mismatch for {k}: wrote {v:?}, read {:?}",
+                parsed.get(k)
+            );
+        }
+    }
+
+    /// Backslash MUST round-trip correctly — the escape ordering bug from
+    /// #3790 caused `\\\n` to decode as a real newline.
+    #[test]
+    fn escape_unescape_backslash_then_newline() {
+        let raw = "\\\n";
+        let escaped = escape_env_value(raw);
+        // \  →  \\, \n → \n  ⇒  \\\n
+        assert_eq!(escaped, r"\\\n");
+        assert!(!escaped.contains('\n'));
+        assert_eq!(unescape_env_value(&escaped), raw);
     }
 
     /// `load_env_file` must not override existing process env vars —
