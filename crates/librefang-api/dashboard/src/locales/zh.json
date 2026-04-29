@@ -197,7 +197,43 @@
     "setup_button": "初始化",
     "setup_running": "初始化中...",
     "setup_wizard": "使用向导",
-    "last_updated": "最后更新"
+    "last_updated": "最后更新",
+    "recent_sessions": "最近会话",
+    "alerts": {
+      "title": "告警",
+      "active": "条活跃",
+      "show_less": "收起",
+      "all_clear": "一切正常。",
+      "restore": "恢复",
+      "agent_failed": "{{name}} 已失败",
+      "agent_failed_sub": "请到 Agents 页重启",
+      "mcp_degraded": "{{count}} 个 MCP 服务器降级",
+      "connected": "已连接",
+      "approvals_pending": "{{count}} 个待审批",
+      "approvals_pending_sub": "前往审批队列处理",
+      "degraded": "降级"
+    },
+    "col": {
+      "task": "任务",
+      "msgs": "消息数",
+      "started": "开始时间",
+      "no_label": "(无标题)"
+    },
+    "system": {
+      "runtime": "运行时",
+      "memory": "记忆",
+      "scheduler": "调度",
+      "mcp": "MCP",
+      "network": "网络",
+      "audit": "审计",
+      "audit_value": "仅追加 · 正常",
+      "active": "条活跃",
+      "no_schedules": "暂无计划",
+      "servers": "个服务器",
+      "degraded": "降级",
+      "peers": "个节点",
+      "no_peers": "暂无节点"
+    }
   },
   "agents": {
     "title": "智能体",

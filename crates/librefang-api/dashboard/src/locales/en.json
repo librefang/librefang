@@ -198,7 +198,43 @@
     "setup_button": "Initialize",
     "setup_running": "Initializing...",
     "setup_wizard": "Use Wizard",
-    "last_updated": "Last updated"
+    "last_updated": "Last updated",
+    "recent_sessions": "Recent sessions",
+    "alerts": {
+      "title": "Alerts",
+      "active": "active",
+      "show_less": "Show less",
+      "all_clear": "All clear.",
+      "restore": "Restore",
+      "agent_failed": "{{name}} failed",
+      "agent_failed_sub": "Restart from Agents page",
+      "mcp_degraded": "{{count}} MCP server(s) degraded",
+      "connected": "connected",
+      "approvals_pending": "{{count}} approval(s) pending",
+      "approvals_pending_sub": "Review in Approvals queue",
+      "degraded": "Degraded"
+    },
+    "col": {
+      "task": "Task",
+      "msgs": "Msgs",
+      "started": "Started",
+      "no_label": "(no label)"
+    },
+    "system": {
+      "runtime": "Runtime",
+      "memory": "Memory",
+      "scheduler": "Scheduler",
+      "mcp": "MCP",
+      "network": "Network",
+      "audit": "Audit",
+      "audit_value": "append-only · OK",
+      "active": "active",
+      "no_schedules": "no schedules",
+      "servers": "servers",
+      "degraded": "deg",
+      "peers": "peers",
+      "no_peers": "no peers"
+    }
   },
   "agents": {
     "title": "Agents",

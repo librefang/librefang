@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useTranslation } from "react-i18next";
 import {
+  AlertTriangle,
   ChevronRight,
+  Clock,
   Filter,
   Plus,
   RefreshCw,
@@ -16,10 +18,14 @@ import { SectionLabel } from "../components/ui/SectionLabel";
 import { Sparkline } from "../components/ui/Sparkline";
 import { Button } from "../components/ui/Button";
 import { ErrorState } from "../components/ui/ErrorState";
-import { isProviderAvailable } from "../lib/status";
 import { formatRelativeTime } from "../lib/datetime";
 import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import { useQuickInit } from "../lib/mutations/overview";
+import { useApprovalCount } from "../lib/queries/approvals";
+import { useMcpServers } from "../lib/queries/mcp";
+import { usePeers } from "../lib/queries/network";
+import { useSchedules } from "../lib/queries/schedules";
+import { useSessions } from "../lib/queries/sessions";
 
 // Sample series for sparkline / cost chart trend until backend exposes them.
 // Replace with snapshot fields once /api/usage/daily / /api/sessions/density land.
@@ -91,12 +97,38 @@ function pillKindForState(state?: string): "running" | "idle" | "error" | "pendi
   }
 }
 
+function pillKindForSessionStatus(status?: string): "ok" | "error" | "pending" {
+  if (status === "error" || status === "failed") return "error";
+  if (status === "pending" || status === "running") return "pending";
+  return "ok";
+}
+
+type AlertKind = "error" | "warning" | "pending";
+interface AlertItem {
+  id: string;
+  kind: AlertKind;
+  title: string;
+  sub: string;
+  page?: string;
+}
+
+const ALERT_KIND_TINT: Record<AlertKind, { color: string; bg: string }> = {
+  error:   { color: "#fb7185", bg: "rgba(251,113,133,0.12)" },
+  warning: { color: "#fbbf24", bg: "rgba(251,191,36,0.12)" },
+  pending: { color: "#fbbf24", bg: "rgba(251,191,36,0.10)" },
+};
+
 export function OverviewPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const snapshotQuery = useDashboardSnapshot();
   const versionQuery = useVersionInfo();
   const quickInitMutation = useQuickInit();
+  const approvalCountQuery = useApprovalCount();
+  const mcpServersQuery = useMcpServers();
+  const peersQuery = usePeers();
+  const schedulesQuery = useSchedules();
+  const sessionsQuery = useSessions();
 
   const snapshot = snapshotQuery.data ?? null;
   const versionInfo = versionQuery.data;
@@ -106,6 +138,8 @@ export function OverviewPage() {
 
   const [range, setRange] = useState<Range>("30d");
   const [updatedTick, setUpdatedTick] = useState(0);
+  const [dismissedAlerts, setDismissedAlerts] = useState<string[]>([]);
+  const [showAllAlerts, setShowAllAlerts] = useState(false);
 
   useEffect(() => {
     const id = window.setInterval(() => setUpdatedTick((x) => x + 1), 1000);
@@ -125,18 +159,16 @@ export function OverviewPage() {
   const agentsError   = useMemo(() => agents.filter((a) => a.state === "failed" || a.state === "error").length, [agents]);
   const agentsTotal   = snapshot?.status?.agent_count ?? agents.length;
 
-  const providersTotal = snapshot?.providers?.length ?? 0;
-  const providersReady = useMemo(
-    () => snapshot?.providers?.filter((p) => isProviderAvailable(p.auth_status)).length ?? 0,
-    [snapshot?.providers],
-  );
-  const channelsReady = useMemo(
-    () => snapshot?.channels?.filter((c) => c.configured).length ?? 0,
-    [snapshot?.channels],
-  );
-  const channelsTotal = snapshot?.channels?.length ?? 0;
-  const skillsCount   = snapshot?.skillCount ?? 0;
-  const workflowCount = snapshot?.workflowCount ?? 0;
+  const mcpConfiguredCount = mcpServersQuery.data?.total_configured
+    ?? mcpServersQuery.data?.configured?.length ?? 0;
+  const mcpConnectedCount  = mcpServersQuery.data?.total_connected
+    ?? mcpServersQuery.data?.connected?.filter((c) => c.connected).length ?? 0;
+  const mcpDegradedCount   = Math.max(0, mcpConfiguredCount - mcpConnectedCount);
+
+  const peersCount       = peersQuery.data?.length ?? 0;
+  const schedulesCount   = schedulesQuery.data?.length ?? 0;
+  const pendingApprovals = approvalCountQuery.data ?? 0;
+
   const sessionsCount = snapshot?.status?.session_count ?? 0;
 
   const rangeData = RANGE_DATA[range];
@@ -149,14 +181,140 @@ export function OverviewPage() {
     [agents],
   );
 
-  // System tile health — drawn from real snapshot data.
+  // Map of agent id -> name so the recent-sessions table can show agent names
+  // without an extra round-trip per row.
+  const agentNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const a of agents) m.set(a.id, a.name);
+    return m;
+  }, [agents]);
+
+  const recentSessions = useMemo(
+    () => (sessionsQuery.data ?? [])
+      .slice()
+      .sort((a, b) => {
+        const ta = a.created_at ? Date.parse(a.created_at) : 0;
+        const tb = b.created_at ? Date.parse(b.created_at) : 0;
+        return tb - ta;
+      })
+      .slice(0, 7),
+    [sessionsQuery.data],
+  );
+
+  // Alerts — derived from snapshot + live queries. Order: errors first,
+  // then warnings, then pending. Each alert is dismissible and the panel
+  // collapses to 3 visible by default.
+  const alerts = useMemo<AlertItem[]>(() => {
+    const out: AlertItem[] = [];
+    for (const a of agents) {
+      if (a.state === "failed" || a.state === "error") {
+        out.push({
+          id: `agent-${a.id}`,
+          kind: "error",
+          title: t("overview.alerts.agent_failed", {
+            defaultValue: "{{name}} failed",
+            name: a.name,
+          }),
+          sub: a.last_active
+            ? `${t("overview.col.last_active", { defaultValue: "Last active" })} · ${formatRelativeTime(a.last_active)}`
+            : t("overview.alerts.agent_failed_sub", { defaultValue: "Restart from Agents page" }),
+          page: "/agents",
+        });
+      }
+    }
+    if (mcpDegradedCount > 0) {
+      out.push({
+        id: "mcp-degraded",
+        kind: "warning",
+        title: t("overview.alerts.mcp_degraded", {
+          defaultValue: "{{count}} MCP server(s) degraded",
+          count: mcpDegradedCount,
+        }),
+        sub: `${mcpConnectedCount}/${mcpConfiguredCount} ${t("overview.alerts.connected", { defaultValue: "connected" })}`,
+        page: "/mcp",
+      });
+    }
+    for (const c of snapshot?.health?.checks ?? []) {
+      if (c.status !== "ok") {
+        out.push({
+          id: `health-${c.name}`,
+          kind: "warning",
+          title: c.name,
+          sub: c.status ?? t("overview.alerts.degraded", { defaultValue: "Degraded" }),
+          page: "/runtime",
+        });
+      }
+    }
+    if (pendingApprovals > 0) {
+      out.push({
+        id: "approvals-pending",
+        kind: "pending",
+        title: t("overview.alerts.approvals_pending", {
+          defaultValue: "{{count}} approval(s) pending",
+          count: pendingApprovals,
+        }),
+        sub: t("overview.alerts.approvals_pending_sub", {
+          defaultValue: "Review in Approvals queue",
+        }),
+        page: "/approvals",
+      });
+    }
+    return out;
+  }, [agents, mcpDegradedCount, mcpConnectedCount, mcpConfiguredCount, snapshot?.health?.checks, pendingApprovals, t]);
+
+  const visibleAlerts = useMemo(
+    () => alerts.filter((a) => !dismissedAlerts.includes(a.id)),
+    [alerts, dismissedAlerts],
+  );
+  const shownAlerts = showAllAlerts ? visibleAlerts : visibleAlerts.slice(0, 3);
+
+  const dismissAlert = (id: string) =>
+    setDismissedAlerts((cur) => (cur.includes(id) ? cur : [...cur, id]));
+
+  // System tile health — drawn from real snapshot data + live runtime queries.
   const systemTiles = [
-    { label: t("overview.system.runtime"),   value: versionInfo?.version ?? snapshot?.status?.version ?? "-", dot: snapshot?.health?.status === "ok" ? "ok" : "warn", page: "/runtime" },
-    { label: t("overview.system.providers"), value: `${providersReady}/${providersTotal} ${t("overview.system.ready").toLowerCase()}`, dot: providersReady === providersTotal && providersTotal > 0 ? "ok" : "warn", page: "/providers" },
-    { label: t("overview.system.channels"),  value: `${channelsReady}/${channelsTotal} ${t("overview.system.configured").toLowerCase()}`, dot: channelsReady > 0 ? "ok" : "warn", page: "/channels" },
-    { label: t("overview.system.skills"),    value: `${skillsCount} ${t("overview.system.installed").toLowerCase()}`, dot: "ok", page: "/skills" },
-    { label: t("overview.system.workflows"), value: `${workflowCount} ${t("overview.system.defined").toLowerCase()}`, dot: "ok", page: "/canvas" },
-    { label: t("overview.system.memory"),    value: snapshot?.status?.memory_used_mb != null ? `${snapshot.status.memory_used_mb} MB` : "-", dot: "ok", page: "/memory" },
+    {
+      label: t("overview.system.runtime"),
+      value: versionInfo?.version ?? snapshot?.status?.version ?? "-",
+      dot: snapshot?.health?.status === "ok" ? "ok" : "warn",
+      page: "/runtime",
+    },
+    {
+      label: t("overview.system.scheduler", { defaultValue: "Scheduler" }),
+      value: schedulesCount > 0
+        ? `cron · ${schedulesCount} ${t("overview.system.active", { defaultValue: "active" })}`
+        : t("overview.system.no_schedules", { defaultValue: "no schedules" }),
+      dot: "ok",
+      page: "/scheduler",
+    },
+    {
+      label: t("overview.system.mcp", { defaultValue: "MCP" }),
+      value: `${mcpConfiguredCount} ${t("overview.system.servers", { defaultValue: "servers" })}${mcpDegradedCount > 0 ? ` · ${mcpDegradedCount} ${t("overview.system.degraded", { defaultValue: "deg" })}` : ""}`,
+      dot: mcpDegradedCount > 0 ? "warn" : "ok",
+      page: "/mcp",
+    },
+    {
+      label: t("overview.system.network", { defaultValue: "Network" }),
+      value: peersCount > 0
+        ? `${peersCount} ${t("overview.system.peers", { defaultValue: "peers" })}`
+        : t("overview.system.no_peers", { defaultValue: "no peers" }),
+      dot: "ok",
+      page: "/network",
+    },
+    {
+      label: t("overview.system.memory"),
+      value: snapshot?.status?.memory_used_mb != null
+        ? `${snapshot.status.memory_used_mb} MB · sqlite`
+        : "sqlite",
+      dot: "ok",
+      page: "/memory",
+    },
+    {
+      label: t("overview.system.audit", { defaultValue: "Audit" }),
+      value: t("overview.system.audit_value", { defaultValue: "append-only · OK" }),
+      dot: "ok",
+      page: "/audit",
+    },
   ] as const;
 
   const refresh = () => void snapshotQuery.refetch();
@@ -345,59 +503,94 @@ export function OverviewPage() {
           </div>
         </Card>
 
-        {/* Health checks */}
+        {/* Alerts — derived from agents/MCP/approvals. Mirrors the design's
+            sidebar Alerts panel; dismissible items, View all / Show less. */}
         <Card padding="none" className="surface-lit">
           <div className="px-4 pt-3.5">
             <SectionLabel
               action={
-                <button
-                  onClick={() => navigate({ to: "/runtime" })}
-                  className="bg-transparent border-0 text-brand text-[11px] cursor-pointer hover:underline"
-                >
-                  {t("overview.view_all", { defaultValue: "View all" })}
-                </button>
+                visibleAlerts.length > 3 ? (
+                  <button
+                    onClick={() => setShowAllAlerts((x) => !x)}
+                    className="bg-transparent border-0 text-brand text-[11px] cursor-pointer hover:underline"
+                  >
+                    {showAllAlerts
+                      ? t("overview.alerts.show_less", { defaultValue: "Show less" })
+                      : t("overview.view_all", { defaultValue: "View all" })}
+                  </button>
+                ) : null
               }
             >
-              {t("overview.health_checks", { defaultValue: "Health checks" })} ·{" "}
-              {snapshot?.health?.checks?.length ?? 0}
+              {t("overview.alerts.title", { defaultValue: "Alerts" })} ·{" "}
+              {visibleAlerts.length} {t("overview.alerts.active", { defaultValue: "active" })}
             </SectionLabel>
           </div>
           <div className="flex flex-col">
-            {(snapshot?.health?.checks ?? []).slice(0, 5).map((check, i) => (
-              <div
-                key={`${check.name}-${i}`}
-                className="px-4 py-2.5 flex items-center gap-2.5 border-t border-border-subtle"
-              >
-                <Pill kind={check.status === "ok" ? "ok" : "error"} dot size="sm">
-                  {check.status === "ok" ? "OK" : "WARN"}
-                </Pill>
-                <div className="flex-1 min-w-0">
-                  <div className="text-[12.5px] font-medium truncate">{check.name}</div>
-                  {check.message ? (
-                    <div className="text-[11px] text-text-dim mt-0.5 truncate">{check.message}</div>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-            {!snapshot?.health?.checks?.length ? (
+            {shownAlerts.length === 0 ? (
               <div className="px-4 py-5 text-center text-text-dim text-xs border-t border-border-subtle">
-                {t("common.daemon_online", { defaultValue: "Daemon online" })}
+                {dismissedAlerts.length > 0 ? (
+                  <>
+                    {t("overview.alerts.all_clear", { defaultValue: "All clear." })}{" "}
+                    <button
+                      onClick={() => setDismissedAlerts([])}
+                      className="bg-transparent border-0 text-brand text-xs cursor-pointer hover:underline"
+                    >
+                      {t("overview.alerts.restore", { defaultValue: "Restore" })}
+                    </button>
+                  </>
+                ) : (
+                  t("overview.alerts.all_clear", { defaultValue: "All clear." })
+                )}
               </div>
             ) : null}
+            {shownAlerts.map((alert) => {
+              const tint = ALERT_KIND_TINT[alert.kind];
+              const Icon = alert.kind === "pending" ? Clock : AlertTriangle;
+              return (
+                <button
+                  key={alert.id}
+                  onClick={() => {
+                    if (alert.page) navigate({ to: alert.page as never });
+                    dismissAlert(alert.id);
+                  }}
+                  className="px-4 py-2.5 flex items-start gap-2.5 border-t border-border-subtle bg-transparent text-left cursor-pointer hover:bg-main/30 transition-colors"
+                >
+                  <div
+                    className="w-6 h-6 rounded-md grid place-items-center shrink-0"
+                    style={{ background: tint.bg, color: tint.color }}
+                  >
+                    <Icon className="w-[13px] h-[13px]" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12.5px] font-medium truncate text-text-main">{alert.title}</div>
+                    <div className="text-[11px] text-text-dim mt-0.5 truncate">{alert.sub}</div>
+                  </div>
+                  <ChevronRight className="w-3 h-3 mt-1 text-text-dim/60 shrink-0" />
+                </button>
+              );
+            })}
           </div>
         </Card>
       </div>
 
-      {/* Recent agents (table-style) */}
+      {/* Recent sessions — Agent · Task · Msgs · time-ago. Falls back to a
+          recent-agents view when the daemon hasn't surfaced any sessions yet
+          (e.g. fresh install) so the row never goes empty. */}
       <Card padding="none" className="surface-lit">
         <div className="px-4 pt-3.5 pb-2 flex items-center justify-between">
-          <SectionLabel className="!mb-0">{t("overview.recent_agents", { defaultValue: "Recent agents" })}</SectionLabel>
+          <SectionLabel className="!mb-0">
+            {recentSessions.length > 0
+              ? t("overview.recent_sessions", { defaultValue: "Recent sessions" })
+              : t("overview.recent_agents", { defaultValue: "Recent agents" })}
+          </SectionLabel>
           <div className="flex items-center gap-3">
             <span className="font-mono text-[11px] text-text-dim/80">
               {t("overview.updated", { defaultValue: "updated" })} · {updatedAgo}
             </span>
             <button
-              onClick={() => navigate({ to: "/agents" })}
+              onClick={() => navigate({
+                to: recentSessions.length > 0 ? "/sessions" : "/agents",
+              } as never)}
               className="bg-transparent border-0 text-brand text-[11px] cursor-pointer hover:underline"
             >
               {t("overview.view_all", { defaultValue: "View all" })}
@@ -405,51 +598,100 @@ export function OverviewPage() {
           </div>
         </div>
         <div className="overflow-hidden">
-          <table className="w-full border-collapse text-[12.5px]">
-            <thead>
-              <tr className="text-text-dim/80 text-left text-[10.5px] uppercase tracking-[0.08em]">
-                <th className="px-4 py-1.5 font-semibold">{t("overview.col.agent", { defaultValue: "Agent" })}</th>
-                <th className="px-2 py-1.5 font-semibold">{t("overview.col.model", { defaultValue: "Model" })}</th>
-                <th className="px-2 py-1.5 font-semibold hidden md:table-cell">{t("overview.col.profile", { defaultValue: "Profile" })}</th>
-                <th className="px-2 py-1.5 font-semibold hidden md:table-cell">{t("overview.col.mode", { defaultValue: "Mode" })}</th>
-                <th className="px-4 py-1.5 font-semibold text-right">{t("overview.col.last_active", { defaultValue: "Last active" })}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentAgents.length === 0 && !isLoading ? (
-                <tr>
-                  <td colSpan={5} className="px-4 py-5 text-center text-text-dim text-xs border-t border-border-subtle">
-                    {t("overview.no_active_agents", { defaultValue: "No agents yet" })}
-                  </td>
+          {recentSessions.length > 0 ? (
+            <table className="w-full border-collapse text-[12.5px]">
+              <thead>
+                <tr className="text-text-dim/80 text-left text-[10.5px] uppercase tracking-[0.08em]">
+                  <th className="px-4 py-1.5 font-semibold">{t("overview.col.agent", { defaultValue: "Agent" })}</th>
+                  <th className="px-2 py-1.5 font-semibold">{t("overview.col.task", { defaultValue: "Task" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell font-mono">{t("overview.col.msgs", { defaultValue: "Msgs" })}</th>
+                  <th className="px-4 py-1.5 font-semibold text-right">{t("overview.col.started", { defaultValue: "Started" })}</th>
                 </tr>
-              ) : null}
-              {recentAgents.map((agent) => (
-                <tr
-                  key={agent.id}
-                  onClick={() => navigate({ to: "/agents" })}
-                  className="border-t border-border-subtle cursor-pointer hover:bg-main/30 transition-colors"
-                >
-                  <td className="px-4 py-2">
-                    <div className="flex items-center gap-2">
-                      <Pill kind={pillKindForState(agent.state)} dot size="sm">
-                        <span className="sr-only">{agent.state}</span>
-                      </Pill>
-                      <span className="font-mono text-[12px]">{agent.name}</span>
-                    </div>
-                  </td>
-                  <td className="px-2 py-2 text-text-main truncate max-w-[200px]">
-                    <span className="font-mono text-[11.5px]">{agent.model_name ?? "-"}</span>
-                  </td>
-                  <td className="px-2 py-2 text-text-dim hidden md:table-cell">{agent.profile ?? "-"}</td>
-                  <td className="px-2 py-2 text-text-dim hidden md:table-cell">{agent.mode ?? "-"}</td>
-                  <td className="px-4 py-2 text-right text-text-dim/80 font-mono text-[11px]">
-                    {agent.last_active ? formatRelativeTime(agent.last_active) : "-"}
-                    <ChevronRight className="inline w-3 h-3 ml-1 -mt-0.5 text-text-dim/60" />
-                  </td>
+              </thead>
+              <tbody>
+                {recentSessions.map((session) => {
+                  const agentName = session.agent_id
+                    ? agentNameById.get(session.agent_id) ?? session.agent_id
+                    : "—";
+                  const status = session.active ? "running" : "ok";
+                  return (
+                    <tr
+                      key={session.session_id}
+                      onClick={() => navigate({ to: "/sessions" } as never)}
+                      className="border-t border-border-subtle cursor-pointer hover:bg-main/30 transition-colors"
+                    >
+                      <td className="px-4 py-2">
+                        <div className="flex items-center gap-2">
+                          <Pill kind={pillKindForSessionStatus(status)} dot size="sm">
+                            <span className="sr-only">{status}</span>
+                          </Pill>
+                          <span className="font-mono text-[12px]">{agentName}</span>
+                        </div>
+                      </td>
+                      <td className="px-2 py-2 text-text-main">
+                        <span className="block max-w-[120px] md:max-w-[280px] overflow-hidden text-ellipsis whitespace-nowrap">
+                          {session.label ?? t("overview.col.no_label", { defaultValue: "(no label)" })}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 text-text-dim hidden md:table-cell font-mono text-[11.5px]">
+                        {session.message_count ?? 0}
+                      </td>
+                      <td className="px-4 py-2 text-right text-text-dim/80 font-mono text-[11px]">
+                        {session.created_at ? formatRelativeTime(session.created_at) : "-"}
+                        <ChevronRight className="inline w-3 h-3 ml-1 -mt-0.5 text-text-dim/60" />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          ) : (
+            <table className="w-full border-collapse text-[12.5px]">
+              <thead>
+                <tr className="text-text-dim/80 text-left text-[10.5px] uppercase tracking-[0.08em]">
+                  <th className="px-4 py-1.5 font-semibold">{t("overview.col.agent", { defaultValue: "Agent" })}</th>
+                  <th className="px-2 py-1.5 font-semibold">{t("overview.col.model", { defaultValue: "Model" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell">{t("overview.col.profile", { defaultValue: "Profile" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell">{t("overview.col.mode", { defaultValue: "Mode" })}</th>
+                  <th className="px-4 py-1.5 font-semibold text-right">{t("overview.col.last_active", { defaultValue: "Last active" })}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {recentAgents.length === 0 && !isLoading ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-5 text-center text-text-dim text-xs border-t border-border-subtle">
+                      {t("overview.no_active_agents", { defaultValue: "No agents yet" })}
+                    </td>
+                  </tr>
+                ) : null}
+                {recentAgents.map((agent) => (
+                  <tr
+                    key={agent.id}
+                    onClick={() => navigate({ to: "/agents" })}
+                    className="border-t border-border-subtle cursor-pointer hover:bg-main/30 transition-colors"
+                  >
+                    <td className="px-4 py-2">
+                      <div className="flex items-center gap-2">
+                        <Pill kind={pillKindForState(agent.state)} dot size="sm">
+                          <span className="sr-only">{agent.state}</span>
+                        </Pill>
+                        <span className="font-mono text-[12px]">{agent.name}</span>
+                      </div>
+                    </td>
+                    <td className="px-2 py-2 text-text-main truncate max-w-[200px]">
+                      <span className="font-mono text-[11.5px]">{agent.model_name ?? "-"}</span>
+                    </td>
+                    <td className="px-2 py-2 text-text-dim hidden md:table-cell">{agent.profile ?? "-"}</td>
+                    <td className="px-2 py-2 text-text-dim hidden md:table-cell">{agent.mode ?? "-"}</td>
+                    <td className="px-4 py-2 text-right text-text-dim/80 font-mono text-[11px]">
+                      {agent.last_active ? formatRelativeTime(agent.last_active) : "-"}
+                      <ChevronRight className="inline w-3 h-3 ml-1 -mt-0.5 text-text-dim/60" />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </Card>
 
