@@ -253,8 +253,7 @@ fn validate_input_against_schema(
                     continue;
                 };
                 if let Some(type_node) = prop_schema.get("type") {
-                    check_type(val, type_node)
-                        .map_err(|e| format!("property '{key}': {e}"))?;
+                    check_type(val, type_node).map_err(|e| format!("property '{key}': {e}"))?;
                 }
             }
         }
@@ -593,45 +592,46 @@ async fn execute_python(
         drop(stdin);
     }
 
-    let (status, stdout_bytes, stderr_bytes) =
-        match drain_child_with_caps(child, timeout_dur).await? {
-            DrainOutcome::TimedOut { timeout_secs } => {
-                error!(
-                    script = %script_path.display(),
-                    timeout_secs,
-                    "Python skill timed out"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!("Python skill timed out after {timeout_secs}s; child killed"),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                truncated: true, ..
-            } => {
-                error!(
-                    script = %script_path.display(),
-                    cap_bytes = SKILL_MAX_OUTPUT_BYTES,
-                    "Python skill output exceeded cap; child killed (#3455)"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!(
-                            "Python skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                        ),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                status,
-                stdout,
-                stderr,
-                truncated: false,
-            } => (status, stdout, stderr),
-        };
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
+            error!(
+                script = %script_path.display(),
+                timeout_secs,
+                "Python skill timed out"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!("Python skill timed out after {timeout_secs}s; child killed"),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            truncated: true, ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Python skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!(
+                        "Python skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
+                    ),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
+    };
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes);
@@ -747,45 +747,46 @@ async fn execute_node(
         drop(stdin);
     }
 
-    let (status, stdout_bytes, stderr_bytes) =
-        match drain_child_with_caps(child, timeout_dur).await? {
-            DrainOutcome::TimedOut { timeout_secs } => {
-                error!(
-                    script = %script_path.display(),
-                    timeout_secs,
-                    "Node.js skill timed out"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!("Node.js skill timed out after {timeout_secs}s; child killed"),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                truncated: true, ..
-            } => {
-                error!(
-                    script = %script_path.display(),
-                    cap_bytes = SKILL_MAX_OUTPUT_BYTES,
-                    "Node.js skill output exceeded cap; child killed (#3455)"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!(
-                            "Node.js skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                        ),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                status,
-                stdout,
-                stderr,
-                truncated: false,
-            } => (status, stdout, stderr),
-        };
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
+            error!(
+                script = %script_path.display(),
+                timeout_secs,
+                "Node.js skill timed out"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!("Node.js skill timed out after {timeout_secs}s; child killed"),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            truncated: true, ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Node.js skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!(
+                        "Node.js skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
+                    ),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
+    };
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes);
@@ -900,45 +901,46 @@ async fn execute_shell(
         drop(stdin);
     }
 
-    let (status, stdout_bytes, stderr_bytes) =
-        match drain_child_with_caps(child, timeout_dur).await? {
-            DrainOutcome::TimedOut { timeout_secs } => {
-                error!(
-                    script = %script_path.display(),
-                    timeout_secs,
-                    "Shell skill timed out"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!("Shell skill timed out after {timeout_secs}s; child killed"),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                truncated: true, ..
-            } => {
-                error!(
-                    script = %script_path.display(),
-                    cap_bytes = SKILL_MAX_OUTPUT_BYTES,
-                    "Shell skill output exceeded cap; child killed (#3455)"
-                );
-                return Ok(SkillToolResult {
-                    output: serde_json::json!({
-                        "error": format!(
-                            "Shell skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                        ),
-                    }),
-                    is_error: true,
-                });
-            }
-            DrainOutcome::Completed {
-                status,
-                stdout,
-                stderr,
-                truncated: false,
-            } => (status, stdout, stderr),
-        };
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
+            error!(
+                script = %script_path.display(),
+                timeout_secs,
+                "Shell skill timed out"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!("Shell skill timed out after {timeout_secs}s; child killed"),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            truncated: true, ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Shell skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: serde_json::json!({
+                    "error": format!(
+                        "Shell skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
+                    ),
+                }),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
+    };
 
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr_bytes);
@@ -1723,15 +1725,15 @@ echo '{"greeting": "hello from shell"}'
     fn test_validate_input_no_schema_passes() {
         // Empty / missing schemas accept any input — back-compat for skills
         // that ship no input_schema.
-        assert!(
-            validate_input_against_schema(&serde_json::json!({"x": 1}), &serde_json::json!({}))
-                .is_ok()
-        );
         assert!(validate_input_against_schema(
-            &serde_json::json!(null),
-            &serde_json::json!(null)
+            &serde_json::json!({"x": 1}),
+            &serde_json::json!({})
         )
         .is_ok());
+        assert!(
+            validate_input_against_schema(&serde_json::json!(null), &serde_json::json!(null))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1741,8 +1743,7 @@ echo '{"greeting": "hello from shell"}'
             "properties": { "url": { "type": "string" } },
             "required": ["url"],
         });
-        let err =
-            validate_input_against_schema(&serde_json::json!({}), &schema).unwrap_err();
+        let err = validate_input_against_schema(&serde_json::json!({}), &schema).unwrap_err();
         assert!(err.contains("required property 'url'"), "got: {err}");
     }
 
@@ -1765,8 +1766,8 @@ echo '{"greeting": "hello from shell"}'
             "type": "object",
             "properties": { "n": { "type": "integer" } },
         });
-        let err = validate_input_against_schema(&serde_json::json!({"n": "abc"}), &schema)
-            .unwrap_err();
+        let err =
+            validate_input_against_schema(&serde_json::json!({"n": "abc"}), &schema).unwrap_err();
         assert!(err.contains("property 'n'"), "got: {err}");
         assert!(err.contains("integer"), "got: {err}");
     }
@@ -1787,8 +1788,8 @@ echo '{"greeting": "hello from shell"}'
             "type": "object",
             "properties": { "n": { "type": "integer" } },
         });
-        let err = validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema)
-            .unwrap_err();
+        let err =
+            validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema).unwrap_err();
         assert!(err.contains("property 'n'"), "got: {err}");
     }
 
@@ -1798,12 +1799,8 @@ echo '{"greeting": "hello from shell"}'
             "type": "object",
             "properties": { "n": { "type": "number" } },
         });
-        assert!(
-            validate_input_against_schema(&serde_json::json!({"n": 1}), &schema).is_ok()
-        );
-        assert!(
-            validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema).is_ok()
-        );
+        assert!(validate_input_against_schema(&serde_json::json!({"n": 1}), &schema).is_ok());
+        assert!(validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema).is_ok());
     }
 
     #[test]
@@ -1813,12 +1810,8 @@ echo '{"greeting": "hello from shell"}'
             "type": "object",
             "properties": { "n": { "type": ["string", "null"] } },
         });
-        assert!(
-            validate_input_against_schema(&serde_json::json!({"n": "x"}), &schema).is_ok()
-        );
-        assert!(
-            validate_input_against_schema(&serde_json::json!({"n": null}), &schema).is_ok()
-        );
+        assert!(validate_input_against_schema(&serde_json::json!({"n": "x"}), &schema).is_ok());
+        assert!(validate_input_against_schema(&serde_json::json!({"n": null}), &schema).is_ok());
         assert!(validate_input_against_schema(&serde_json::json!({"n": 1}), &schema).is_err());
     }
 
@@ -1849,7 +1842,11 @@ echo '{"greeting": "hello from shell"}'
         let dir = TempDir::new().unwrap();
         // Subprocess deliberately not present — the input check must short-circuit
         // before we ever try to spawn the runtime.
-        std::fs::write(dir.path().join("run.sh"), "#!/bin/bash\necho should_not_run\n").unwrap();
+        std::fs::write(
+            dir.path().join("run.sh"),
+            "#!/bin/bash\necho should_not_run\n",
+        )
+        .unwrap();
 
         let manifest = SkillManifest {
             skill: SkillMeta {
