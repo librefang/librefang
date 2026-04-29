@@ -1257,4 +1257,42 @@ mod tests {
         assert!(column_exists(&conn, "entities", "agent_id"));
         assert!(column_exists(&conn, "relations", "agent_id"));
     }
+
+    #[test]
+    fn test_migrate_v10_only_entities_alter_applied() {
+        // #3452 follow-up — also cover the asymmetric crash: entities ALTER
+        // landed but relations ALTER didn't.  The per-ALTER `column_exists`
+        // guards in migrate_v10 must skip entities and apply relations.
+        let conn = Connection::open_in_memory().unwrap();
+        macro_rules! step {
+            ($v:expr, $f:expr) => {{
+                let tx = conn.unchecked_transaction().unwrap();
+                $f(&tx).unwrap();
+                set_schema_version(&tx, $v).unwrap();
+                tx.commit().unwrap();
+            }};
+        }
+        step!(1, migrate_v1);
+        step!(2, migrate_v2);
+        step!(3, migrate_v3);
+        step!(4, migrate_v4);
+        step!(5, migrate_v5);
+        step!(6, migrate_v6);
+        step!(7, migrate_v7);
+        step!(8, migrate_v8);
+        step!(9, migrate_v9);
+        // Only entities ALTER pre-applied; relations ALTER did not run.
+        conn.execute(
+            "ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .unwrap();
+        assert!(column_exists(&conn, "entities", "agent_id"));
+        assert!(!column_exists(&conn, "relations", "agent_id"));
+
+        run_migrations(&conn).expect("v10 must skip entities ALTER and apply relations ALTER");
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+        assert!(column_exists(&conn, "entities", "agent_id"));
+        assert!(column_exists(&conn, "relations", "agent_id"));
+    }
 }

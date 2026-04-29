@@ -142,10 +142,17 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 }
 
                 // Skip files quarantined by a previous failed empty-file move.
+                // Match the exact suffix shape `*.quarantined.YYYYMMDD_HHMMSS`
+                // (optionally with a `.NNNN` nanosecond tiebreaker) instead
+                // of a loose substring, so a user file named e.g.
+                // `2024_quarantined.notes.txt` is NOT silently skipped.
+                // Operator note: `.quarantined.*` siblings are NEVER cleaned
+                // up automatically — long-running daemons may need periodic
+                // manual `rm` if the inbox dir keeps producing them.
                 if path
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .is_some_and(|s| s.contains(".quarantined."))
+                    .is_some_and(is_quarantine_filename)
                 {
                     continue;
                 }
@@ -360,6 +367,35 @@ async fn quarantine_in_place(src: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Tight match for the exact suffix shape `quarantine_in_place` produces:
+/// `<original>.quarantined.YYYYMMDD_HHMMSS` optionally followed by
+/// `.NNNNNNNNNNNNNNNNNNN` (nanosecond tiebreaker on second-collision). This
+/// narrower form avoids skipping user files that happen to contain the
+/// substring `.quarantined.` for unrelated reasons.
+fn is_quarantine_filename(name: &str) -> bool {
+    let Some((_, after)) = name.rsplit_once(".quarantined.") else {
+        return false;
+    };
+    // First segment must be 15 chars in `YYYYMMDD_HHMMSS` shape.
+    let mut iter = after.splitn(2, '.');
+    let ts = iter.next().unwrap_or("");
+    if ts.len() != 15 {
+        return false;
+    }
+    let bytes = ts.as_bytes();
+    if !(bytes[0..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'_'
+        && bytes[9..15].iter().all(u8::is_ascii_digit))
+    {
+        return false;
+    }
+    // Optional trailing `.NNN...` nanos suffix, if present must be all digits.
+    match iter.next() {
+        None => true,
+        Some(nanos) => !nanos.is_empty() && nanos.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
 /// Heuristic to identify text files by extension.
 fn is_text_file(path: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
@@ -543,6 +579,27 @@ mod tests {
             entries.iter().any(|n| n.contains(".quarantined.")),
             "expected a .quarantined.* sibling, got {entries:?}"
         );
+    }
+
+    #[test]
+    fn test_is_quarantine_filename_matches_only_real_quarantine_shape() {
+        // Real quarantine names from quarantine_in_place — must match.
+        assert!(is_quarantine_filename(
+            "msg.txt.quarantined.20260101_120000"
+        ));
+        assert!(is_quarantine_filename(
+            "msg.txt.quarantined.20260101_120000.123456789"
+        ));
+        // Bare files — must NOT match.
+        assert!(!is_quarantine_filename("msg.txt"));
+        assert!(!is_quarantine_filename("notes.md"));
+        // User files that happen to contain the substring — must NOT match
+        // (this is the false-positive bug the loose `.contains(...)` had).
+        assert!(!is_quarantine_filename("2024_quarantined.notes.txt"));
+        assert!(!is_quarantine_filename("a.quarantined.b"));
+        assert!(!is_quarantine_filename("a.quarantined.20260101_12000")); // 14 chars, wrong length
+        assert!(!is_quarantine_filename("a.quarantined.20260101-120000")); // wrong separator
+        assert!(!is_quarantine_filename("a.quarantined.20260101_120000.abc")); // non-numeric nanos
     }
 
     #[test]

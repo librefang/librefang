@@ -16,7 +16,7 @@ use crate::clawhub::{
 use crate::SkillError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Default Skillhub API base URL.
 pub const DEFAULT_SKILLHUB_URL: &str = "https://skillhub.tencent.com/api/v1";
@@ -317,7 +317,18 @@ impl SkillhubClient {
             if let Err(e) = patch_result {
                 // Clean up the half-installed skill: it has the wrong source
                 // provenance recorded and would mislead upgrade/sync logic.
-                let _ = std::fs::remove_dir_all(&skill_dir);
+                // Don't swallow the cleanup failure too — operator needs to
+                // know if a manual `rm -rf` is required.
+                if let Err(cleanup_err) = std::fs::remove_dir_all(&skill_dir) {
+                    warn!(
+                        slug = %slug,
+                        skill_dir = %skill_dir.display(),
+                        error = %cleanup_err,
+                        "Skillhub: provenance patch failed AND cleanup failed; \
+                         skill directory left on disk with wrong source provenance, \
+                         manual rm needed"
+                    );
+                }
                 return Err(e);
             }
         }
