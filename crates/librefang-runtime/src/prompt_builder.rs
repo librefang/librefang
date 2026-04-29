@@ -2232,10 +2232,13 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n##").next())
             .unwrap_or("");
-        let has_hh_mm = date_section
-            .as_bytes()
-            .windows(5)
-            .any(|w| w[2] == b':' && w[0].is_ascii_digit() && w[1].is_ascii_digit() && w[3].is_ascii_digit() && w[4].is_ascii_digit());
+        let has_hh_mm = date_section.as_bytes().windows(5).any(|w| {
+            w[2] == b':'
+                && w[0].is_ascii_digit()
+                && w[1].is_ascii_digit()
+                && w[3].is_ascii_digit()
+                && w[4].is_ascii_digit()
+        });
         assert!(
             !has_hh_mm,
             "## Current Date section must not embed a HH:MM timestamp. Got: {date_section:?}"
