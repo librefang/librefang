@@ -110,6 +110,20 @@ pub async fn list_models(
     //   - Custom-tier models (user-added via /api/models/custom) always pass
     //     through — they're explicit user intent, not catalog inheritance.
     use std::collections::HashSet;
+    // Both sides may or may not carry the `:latest` Ollama tag suffix:
+    // - Static catalog entries for Ollama models are sometimes shipped as
+    //   bare names (`llama3.2`) and sometimes as tagged names (`llama3.2:latest`).
+    // - Ollama's `/api/tags` always returns the tagged form. Lemonade /
+    //   LM Studio / vLLM (which all share this provider slot per #3191)
+    //   return the bare ID with no tag.
+    // We therefore index every discovered name twice — once verbatim, once
+    // with a trailing `:latest` stripped — and look up catalog IDs the
+    // same way. Pre-fix, a static `llama3.2` entry was hidden when the
+    // probe returned `llama3.2:latest`, even though both refer to the
+    // same model on the same server.
+    fn strip_latest(s: &str) -> &str {
+        s.strip_suffix(":latest").unwrap_or(s)
+    }
     let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
         .list_providers()
         .iter()
@@ -119,11 +133,12 @@ pub async fn list_models(
             if !probe.reachable || probe.discovered_models.is_empty() {
                 return None;
             }
-            let set: HashSet<String> = probe
-                .discovered_models
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect();
+            let mut set: HashSet<String> = HashSet::new();
+            for s in &probe.discovered_models {
+                let lower = s.to_lowercase();
+                set.insert(strip_latest(&lower).to_string());
+                set.insert(lower);
+            }
             Some((p.id.to_lowercase(), set))
         })
         .collect();
@@ -151,9 +166,13 @@ pub async fn list_models(
                 }
             }
             // Live-discovered filter for local providers (see comment above).
+            // Compare both verbatim and `:latest`-stripped to bridge the
+            // Ollama-tag vs OpenAI-shape (Lemonade/LM Studio/vLLM) gap.
             if m.tier != librefang_types::model_catalog::ModelTier::Custom {
                 if let Some(live_set) = live_models_per_provider.get(&m.provider.to_lowercase()) {
-                    if !live_set.contains(&m.id.to_lowercase()) {
+                    let lower = m.id.to_lowercase();
+                    let bare = strip_latest(&lower);
+                    if !live_set.contains(&lower) && !live_set.contains(bare) {
                         return false;
                     }
                 }
