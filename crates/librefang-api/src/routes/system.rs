@@ -2751,10 +2751,8 @@ pub async fn totp_revoke(
             // Don't count toward the lockout — the code itself isn't
             // wrong, it's already-spent.  Return the same 400 shape so
             // the caller can't distinguish "already used" from "wrong".
-            return ApiErrorResponse::bad_request(
-                "TOTP code already used. Wait for a new code.",
-            )
-            .into_json_tuple();
+            return ApiErrorResponse::bad_request("TOTP code already used. Wait for a new code.")
+                .into_json_tuple();
         }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {

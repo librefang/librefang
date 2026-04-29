@@ -635,8 +635,7 @@ impl AuditLog {
             let overflow = entries.len() - MAX_AUDIT_ENTRIES;
             let new_anchor = entries[overflow - 1].hash.clone();
             {
-                let mut anchor =
-                    self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
                 *anchor = Some(new_anchor);
             }
             entries.drain(..overflow);

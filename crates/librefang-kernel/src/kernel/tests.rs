@@ -4116,7 +4116,12 @@ async fn test_push_notification_health_check_failed_falls_back_to_alert_channels
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive", None)
+        .push_notification(
+            "agent-xyz",
+            "health_check_failed",
+            "agent unresponsive",
+            None,
+        )
         .await;
 
     let recorded = sent.lock().unwrap().clone();
@@ -4165,7 +4170,12 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("worker-7", "health_check_failed", "agent unresponsive", None)
+        .push_notification(
+            "worker-7",
+            "health_check_failed",
+            "agent unresponsive",
+            None,
+        )
         .await;
 
     let recorded = sent.lock().unwrap().clone();
@@ -4199,7 +4209,12 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive", None)
+        .push_notification(
+            "agent-xyz",
+            "health_check_failed",
+            "agent unresponsive",
+            None,
+        )
         .await;
 
     assert!(
@@ -4245,7 +4260,12 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "totally_made_up_event", "should not deliver", None)
+        .push_notification(
+            "agent-xyz",
+            "totally_made_up_event",
+            "should not deliver",
+            None,
+        )
         .await;
 
     assert!(
@@ -4299,9 +4319,8 @@ async fn test_push_notification_appends_session_suffix_when_provided() {
 
     let recorded = sent.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1, "exactly one alert delivered");
-    let expected = format!(
-        "ops:Agent \"x\" exited after 3 consecutive tool failures [session={session_id}]"
-    );
+    let expected =
+        format!("ops:Agent \"x\" exited after 3 consecutive tool failures [session={session_id}]");
     assert_eq!(
         recorded[0], expected,
         "session-scoped alert must include [session=<uuid>] suffix"
