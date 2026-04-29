@@ -103,4 +103,24 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "totp_used_codes_v1",
         sql: include_str!("sql/015_totp_used_codes.surql"),
     },
+    Migration {
+        version: 16,
+        name: "pending_approvals_v1",
+        sql: include_str!("sql/016_pending_approvals.surql"),
+    },
+    Migration {
+        version: 17,
+        name: "oauth_used_nonces_v1",
+        sql: include_str!("sql/017_oauth_used_nonces.surql"),
+    },
+    Migration {
+        version: 18,
+        name: "group_roster_v1",
+        sql: include_str!("sql/018_group_roster.surql"),
+    },
+    Migration {
+        version: 19,
+        name: "retention_timestamps_v1",
+        sql: include_str!("sql/019_retention_timestamps.surql"),
+    },
 ];

@@ -1,4 +1,11 @@
+// `start_background_agents()` spawns 17 closures whose async-block layouts
+// the compiler folds into a single type-resolution query.  After
+// `TriggerId` gained `PartialOrd, Ord` (#4067), one of those layouts
+// exceeded the default recursion limit of 128.  The compiler explicitly
+// suggests this attribute; bumping to 256 leaves headroom for further
+// trait-bound additions on kernel-internal types.
 #![recursion_limit = "256"]
+
 //! Audit retention M7: kernel boot wires the periodic trim task and the
 //! self-audit `RetentionTrim` row lands when a trim cycle actually drops
 //! entries.

@@ -6,7 +6,7 @@
 <h3 align="center">自由的 Agent 操作系统 — Libre 意味着自由</h3>
 
 <p align="center">
-  使用 Rust 构建的开源 Agent OS。14 个 crate。2,100+ 测试。零 clippy 警告。
+  使用 Rust 构建的开源 Agent OS。24 个 crate。2,100+ 测试。零 clippy 警告。
 </p>
 
 <p align="center">
@@ -53,11 +53,11 @@ curl -fsSL https://librefang.ai/install.sh | sh
 # 或通过 Cargo 安装
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
-# 初始化（引导你完成服务商配置）
-librefang init
-
-# 启动 — 控制台 http://localhost:4545
+# 启动 — 首次运行时自动初始化，仪表盘位于 http://localhost:4545
 librefang start
+
+# 或者手动运行设置向导以进行交互式的提供商选择
+# librefang init
 ```
 
 <details>
@@ -92,26 +92,12 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands：为你工作的智能体
 
-**Hands** 是预置的自主能力包，按计划独立运行，无需提示。内置 14 个：
+**Hands** 是一种自主的能力包，无需输入提示词即可按计划独立运行。每个 Hand 由一个 `HAND.toml` 清单、一个系统提示词（system prompt）以及从您配置的环境中加载的可选 `SKILL.md` 文件来定义 `hands_dir`。
 
-| Hand | 功能 |
-|------|------|
-| **Researcher** | 深度研究 — 多源交叉引用、CRAAP 可信度评估、带引用的报告 |
-| **Collector** | OSINT 监控 — 变化检测、情感追踪、知识图谱 |
-| **Predictor** | 超级预测 — 带置信区间的校准预测 |
-| **Strategist** | 战略分析 — 市场研究、竞争情报、商业规划 |
-| **Analytics** | 数据分析 — 数据采集、分析、可视化、自动报告 |
-| **Trader** | 市场情报 — 多信号分析、风险管理、投资组合分析 |
-| **Lead** | 潜客发现 — 网络研究、评分、去重、合格线索交付 |
-| **Twitter** | 自主 X/Twitter — 内容创作、定时发布、审批队列 |
-| **Reddit** | Reddit 管理 — 子版块监控、发帖、互动追踪 |
-| **LinkedIn** | LinkedIn 管理 — 内容创作、社交拓展、职业互动 |
-| **Clip** | YouTube 转短视频 — 裁剪精华、字幕、AI 配音 |
-| **Browser** | Web 自动化 — 基于 Playwright，购买操作强制审批 |
-| **API Tester** | API 测试 — 端点发现、验证、负载测试、回归检测 |
-| **DevOps** | DevOps 自动化 — CI/CD、基础设施监控、事件响应 |
+Hand 的定义示例（Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps）可以在[社区的 Hands 仓库](https://github.com/librefang-registry/hands)中找到。
 
 ```bash
+# 安装一个社区 Hand，然后：
 librefang hand activate researcher   # 立即开始工作
 librefang hand status researcher     # 查看进度
 librefang hand list                  # 查看所有 Hands
@@ -121,30 +107,46 @@ librefang hand list                  # 查看所有 Hands
 
 ## 架构
 
-14 个 Rust crate，模块化内核设计。
+24 个 Rust crate + xtask，模块化内核设计。
 
 ```
-librefang-kernel      编排、工作流、计量、RBAC、调度、预算
-librefang-runtime     智能体循环、3 个 LLM 驱动器、53 个工具、WASM 沙箱、MCP、A2A
-librefang-api         140+ REST/WS/SSE 端点、OpenAI 兼容 API、控制台
-librefang-channels    40 个消息适配器，速率限制、DM/群组策略
-librefang-memory      SQLite 持久化、向量嵌入、会话、压缩
-librefang-types       核心类型、污点追踪、Ed25519 签名、模型目录
-librefang-skills      60 个内置技能、SKILL.md 解析器、FangHub 市场
-librefang-hands       14 个自主 Hands、HAND.toml 解析器、生命周期管理
-librefang-extensions  25 个 MCP 模板、AES-256-GCM 保险库、OAuth2 PKCE
-librefang-wire        OFP P2P 协议、HMAC-SHA256 双向认证
-librefang-cli         CLI、守护进程管理、TUI 控制台、MCP 服务器模式
-librefang-desktop     Tauri 2.0 原生应用（托盘、通知、快捷键）
-librefang-migrate     OpenClaw、LangChain、AutoGPT 迁移引擎
-xtask                 构建自动化
+librefang-kernel            编排、工作流、计量、RBAC、调度、预算
+librefang-runtime           智能体循环、3 个 LLM 驱动器、53 个工具、WASM 沙箱、MCP、A2A
+librefang-api               140+ REST/WS/SSE 端点、OpenAI 兼容 API、控制台
+librefang-channels          40 个消息适配器，速率限制、DM/群组策略
+librefang-memory            SQLite 持久化、向量嵌入、会话、压缩
+librefang-types             核心类型、污点追踪、Ed25519 签名、模型目录
+librefang-skills            60 个内置技能、SKILL.md 解析器、FangHub 市场
+librefang-hands             个自主 Hands、HAND.toml 解析器、生命周期管理
+librefang-extensions        25 个 MCP 模板、AES-256-GCM 保险库、OAuth2 PKCE
+librefang-wire              OFP P2P 协议、HMAC-SHA256 双向认证
+librefang-cli               CLI、守护进程管理、TUI 控制台、MCP 服务器模式
+librefang-desktop           Tauri 2.0 原生应用（托盘、通知、快捷键）
+librefang-migrate           OpenClaw、LangChain、AutoGPT 迁移引擎
+librefang-http              共享 HTTP 客户端构建器、代理、TLS 回退（fallback）
+librefang-testing           测试基础设施：模拟（mock）内核、模拟 LLM 驱动程序以及 API 路由测试工具
+librefang-telemetry         的 OpenTelemetry + Prometheus 指标埋点（instrumentation）
+librefang-llm-driver        的 LLM 驱动程序 trait 及共享类型
+librefang-llm-drivers       trait 的具体 LLM 提供商驱动程序（anthropic、openai、gemini 等）
+librefang-runtime-mcp       运行时的 MCP（Model Context Protocol）客户端
+librefang-kernel-handle     内核进行进程内调用的 KernelHandle trait
+librefang-runtime-wasm      运行时的 WASM 技能沙盒（sandbox）
+librefang-kernel-router     内核的 Hand/Template 路由引擎
+librefang-runtime-oauth     运行时驱动程序的 OAuth 流程（ChatGPT、GitHub Copilot）
+librefang-kernel-metering   内核的成本计量和配额执行
+xtask                       构建自动化
 ```
+> **OFP wire 是 plaintext-by-design。** HMAC-SHA256 双向认证 + 每条消息的
+> HMAC + nonce 重放保护涵盖了针对 *主动* 攻击者的防御，但帧的内容
+> 未经加密。对于跨网络联邦，请在私有
+> 覆盖网络（如 WireGuard、Tailscale、SSH 隧道）或服务网格 mTLS 层之后运行 OFP。
+> 详情: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
 
 ## 核心特性
 
-**40 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](https://docs.librefang.ai/integrations/channels)
+**45 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](https://docs.librefang.ai/integrations/channels)
 
-**27 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](https://docs.librefang.ai/configuration/providers)
+**28 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](https://docs.librefang.ai/configuration/providers)
 
 **16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 

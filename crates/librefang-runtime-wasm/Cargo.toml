@@ -15,3 +15,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

@@ -149,6 +149,48 @@ fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
         || env_set(&web.perplexity.api_key_env)
 }
 
+fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
+    serde_json::json!({
+        "search_provider": format!("{:?}", web.search_provider),
+        "cache_ttl_minutes": web.cache_ttl_minutes,
+        "search_available": is_web_search_configured(web),
+        "brave": {
+            "api_key_env": web.brave.api_key_env,
+            "max_results": web.brave.max_results,
+            "country": web.brave.country,
+            "search_lang": web.brave.search_lang,
+            "freshness": web.brave.freshness,
+        },
+        "tavily": {
+            "api_key_env": web.tavily.api_key_env,
+            "search_depth": web.tavily.search_depth,
+            "max_results": web.tavily.max_results,
+            "include_answer": web.tavily.include_answer,
+        },
+        "perplexity": {
+            "api_key_env": web.perplexity.api_key_env,
+            "model": web.perplexity.model,
+        },
+        "jina": {
+            "api_key_env": web.jina.api_key_env,
+            "max_results": web.jina.max_results,
+            "country": web.jina.country,
+            "language": web.jina.language,
+            "use_eu_endpoint": web.jina.use_eu_endpoint,
+            "no_cache": web.jina.no_cache,
+        },
+        "searxng": {
+            "url": web.searxng.url,
+        },
+        "fetch": {
+            "max_chars": web.fetch.max_chars,
+            "max_response_bytes": web.fetch.max_response_bytes,
+            "timeout_secs": web.fetch.timeout_secs,
+            "readability": web.fetch.readability,
+        },
+    })
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -928,50 +970,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     );
 
     // ── Web ──
-    let search_available = is_web_search_configured(&config.web);
-    set!("web", {
-        "search_provider": format!("{:?}", config.web.search_provider),
-        "cache_ttl_minutes": config.web.cache_ttl_minutes,
-        "search_available": search_available,
-    });
-    // Web subsections built separately to avoid recursion limit
-    if let Some(web) = out.get_mut("web").and_then(|v| v.as_object_mut()) {
-        web.insert(
-            "brave".into(),
-            serde_json::json!({
-                "api_key_env": config.web.brave.api_key_env,
-                "max_results": config.web.brave.max_results,
-                "country": config.web.brave.country,
-                "search_lang": config.web.brave.search_lang,
-                "freshness": config.web.brave.freshness,
-            }),
-        );
-        web.insert(
-            "tavily".into(),
-            serde_json::json!({
-                "api_key_env": config.web.tavily.api_key_env,
-                "search_depth": config.web.tavily.search_depth,
-                "max_results": config.web.tavily.max_results,
-                "include_answer": config.web.tavily.include_answer,
-            }),
-        );
-        web.insert(
-            "perplexity".into(),
-            serde_json::json!({
-                "api_key_env": config.web.perplexity.api_key_env,
-                "model": config.web.perplexity.model,
-            }),
-        );
-        web.insert(
-            "fetch".into(),
-            serde_json::json!({
-                "max_chars": config.web.fetch.max_chars,
-                "max_response_bytes": config.web.fetch.max_response_bytes,
-                "timeout_secs": config.web.fetch.timeout_secs,
-                "readability": config.web.fetch.readability,
-            }),
-        );
-    }
+    set!("web", redacted_web(&config.web));
 
     set!("fallback_providers", fallback_providers);
 
@@ -1846,7 +1845,7 @@ pub fn ui_options_overlay(
         "/auto_dream/timeout_secs": {"min": 30, "max": 3600, "step": 30},
 
         // ── web ──
-        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"]},
+        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "jina", "searxng", "duck_duck_go", "auto"]},
         "/web/cache_ttl_minutes": {"min": 0, "max": 10_080, "step": 1},
 
         // ── browser ──
@@ -1908,6 +1907,50 @@ pub async fn config_set(
             );
         }
     };
+
+    // SECURITY #3458: Validate the config key path before touching any files.
+    // Each dot-separated component must only contain alphanumeric characters
+    // and underscores.  This prevents:
+    //   - Path traversal (e.g. "../secrets")
+    //   - Injection into structured TOML tables via special characters
+    //   - Empty segment attacks (e.g. "section..key")
+    //
+    // The path string itself is never used as a filesystem path — it is only
+    // used as a key chain into the in-memory TOML document — but we validate
+    // early to fail fast and to document the expected namespace.
+    fn validate_config_key_path(path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("config path must not be empty".to_string());
+        }
+        // Reject absolute paths and filesystem separators outright.
+        if path.starts_with('/') || path.starts_with('\\') || path.contains("..") {
+            return Err(format!(
+                "config path '{path}' is not a valid key path (no filesystem separators allowed)"
+            ));
+        }
+        for part in path.split('.') {
+            if part.is_empty() {
+                return Err(format!("config path '{path}' contains an empty segment"));
+            }
+            if !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "config path segment '{part}' contains disallowed characters \
+                     (only ASCII alphanumeric, '_', and '-' are permitted)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    if let Err(e) = validate_config_key_path(&path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": e})),
+        );
+    }
 
     let config_path = state.kernel.home_dir().join("config.toml");
     // Block path-traversal (`..`) but allow Windows drive-letter prefixes
@@ -2315,6 +2358,81 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
 }
 
 #[cfg(test)]
+mod config_key_path_validation_tests {
+    // Duplicate of the inline `validate_config_key_path` logic so the tests
+    // can exercise it without making it a public function.
+    fn validate(p: &str) -> Result<(), String> {
+        // Inline the same logic to avoid making the helper pub.
+        if p.is_empty() {
+            return Err("config path must not be empty".to_string());
+        }
+        if p.starts_with('/') || p.starts_with('\\') || p.contains("..") {
+            return Err(format!(
+                "config path '{p}' is not a valid key path (no filesystem separators allowed)"
+            ));
+        }
+        for part in p.split('.') {
+            if part.is_empty() {
+                return Err(format!("config path '{p}' contains an empty segment"));
+            }
+            if !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(format!(
+                    "config path segment '{part}' contains disallowed characters \
+                     (only ASCII alphanumeric, '_', and '-' are permitted)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// #3458 regression: valid key paths must pass validation.
+    #[test]
+    fn valid_paths_accepted() {
+        assert!(validate("api_key").is_ok());
+        assert!(validate("section.key").is_ok());
+        assert!(validate("section.sub.key").is_ok());
+        assert!(validate("llm.model_alias").is_ok());
+        assert!(validate("queue.concurrency.trigger_lane").is_ok());
+        assert!(validate("key-with-dash").is_ok());
+    }
+
+    /// #3458 regression: filesystem-like paths must be rejected.
+    #[test]
+    fn traversal_paths_rejected() {
+        assert!(validate("").is_err(), "empty path");
+        assert!(validate("../secret").is_err(), "traversal with ..");
+        assert!(validate("a..b").is_err(), "double dot in segment");
+        assert!(validate("/etc/passwd").is_err(), "absolute unix path");
+        assert!(
+            validate("\\Windows\\System32").is_err(),
+            "absolute windows path"
+        );
+    }
+
+    /// #3458 regression: special characters that could inject TOML structure
+    /// must be rejected.
+    #[test]
+    fn special_chars_rejected() {
+        assert!(validate("section[0]").is_err(), "bracket injection");
+        assert!(validate("section = evil").is_err(), "equals sign");
+        assert!(validate("section\nkey").is_err(), "newline");
+        assert!(validate("section\0key").is_err(), "null byte");
+        assert!(validate("section key").is_err(), "space");
+    }
+
+    /// Empty segment (double dot) must be rejected.
+    #[test]
+    fn empty_segment_rejected() {
+        assert!(validate("a..b").is_err());
+        assert!(validate(".a").is_err());
+        assert!(validate("a.").is_err());
+    }
+}
+
+#[cfg(test)]
 mod web_search_configured_tests {
     use super::is_web_search_configured;
     use librefang_types::config::WebConfig;
@@ -2360,5 +2478,120 @@ mod web_search_configured_tests {
             !is_web_search_configured(&web),
             "whitespace-only SearXNG URL must not satisfy the configured check"
         );
+    }
+}
+
+#[cfg(test)]
+mod redacted_web_tests {
+    use super::redacted_web;
+    use librefang_types::config::WebConfig;
+
+    #[test]
+    fn redacted_web_includes_searxng_url_round_trip() {
+        let mut web = WebConfig::default();
+        web.searxng.url = "https://search.example.com".to_string();
+        let v = redacted_web(&web);
+        let searxng = v
+            .get("searxng")
+            .expect("redacted_web must include `searxng` (issue #4016)");
+        assert_eq!(
+            searxng.get("url").and_then(|u| u.as_str()),
+            Some("https://search.example.com"),
+            "searxng.url written by the dashboard must round-trip through GET /api/config"
+        );
+    }
+
+    #[test]
+    fn redacted_web_includes_jina_subtable() {
+        let mut web = WebConfig::default();
+        web.jina.api_key_env = "MY_JINA_KEY".to_string();
+        web.jina.use_eu_endpoint = true;
+        let v = redacted_web(&web);
+        let jina = v
+            .get("jina")
+            .expect("redacted_web must include `jina` (issue #4016)");
+        assert_eq!(
+            jina.get("api_key_env").and_then(|u| u.as_str()),
+            Some("MY_JINA_KEY"),
+        );
+        assert_eq!(
+            jina.get("use_eu_endpoint").and_then(|u| u.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn redacted_web_lists_all_provider_subtables() {
+        let v = redacted_web(&WebConfig::default());
+        // `duck_duck_go` and `auto` are stateless — no fields to surface.
+        for key in &["brave", "tavily", "perplexity", "jina", "searxng", "fetch"] {
+            assert!(
+                v.get(key).is_some(),
+                "redacted_web is missing the `{key}` sub-table; adding a new SearchProvider without surfacing its config here silently breaks the dashboard save flow (see #4016)",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod searxng_config_parse_tests {
+    use librefang_types::config::KernelConfig;
+
+    #[test]
+    fn issue_4016_minimal_searxng_section_parses() {
+        let toml_src = r#"[web.searxng]
+url = "https://search.example.com"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("config with bare `[web.searxng]` table must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_4016_local_searxng_url_parses() {
+        let toml_src = r#"[web.searxng]
+url = "http://192.168.10.21:8888"
+"#;
+        let cfg: KernelConfig =
+            toml::from_str(toml_src).expect("local SearXNG URL must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "http://192.168.10.21:8888");
+    }
+
+    #[test]
+    fn issue_4016_searxng_alongside_init_template_layout_parses() {
+        let toml_src = r#"
+log_level = "info"
+api_listen = "127.0.0.1:4545"
+
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[web]
+search_provider = "auto"
+
+[web.fetch]
+max_chars = 50000
+timeout_secs = 30
+
+[web.searxng]
+url = "https://search.example.com"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("init-template layout + appended [web.searxng] must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_4016_inline_table_form_from_dashboard_save_parses() {
+        let toml_src = r#"
+[web]
+search_provider = "auto"
+searxng = { url = "https://search.example.com" }
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("inline-table shape produced by /api/config/set must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
     }
 }

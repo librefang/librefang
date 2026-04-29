@@ -16,6 +16,17 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+/// Hard cap on the number of audit entries kept in memory.
+///
+/// When `record_with_context` appends an entry that would push the in-memory
+/// buffer above this ceiling, the oldest entries are drained from the front so
+/// only the most recent `MAX_AUDIT_ENTRIES` survive. This prevents unbounded
+/// memory growth in long-running daemons that lack a configured retention
+/// policy. The cap applies only to the in-memory window; entries have already
+/// been persisted to SQLite before the drain, so forensic completeness is
+/// preserved on disk.
+const MAX_AUDIT_ENTRIES: usize = 10_000;
+
 /// Categories of auditable actions within the agent runtime.
 ///
 /// **Hash-chain stability:** the variant name is folded into the per-entry
@@ -536,9 +547,33 @@ impl AuditLog {
         // Persist to database if available. Schema v22 added the
         // `user_id` / `channel` columns; old NULL rows keep working
         // because the hash function omits absent fields.
-        if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
-                let _ = conn.execute(
+        //
+        // CRITICAL: chain integrity requires that the in-memory tip and
+        // the persisted tail agree at all times.  If the SQLite INSERT
+        // fails but we still push the entry into `entries` and advance
+        // `tip`, the next record() reads the new tip, hashes it into
+        // the next entry's `prev_hash`, and writes *that* row to disk.
+        // After a restart, `with_db()` reloads the DB and finds an
+        // entry whose `prev_hash` points at a row that was never
+        // persisted — `verify_integrity()` then reports
+        // `chain break at seq N` on every subsequent boot, and the
+        // operator has to run `audit-reset` to recover.
+        //
+        // The earlier in-memory `non_persisted_seqs` queue (#4050)
+        // tried to delay this corruption by retrying inside the
+        // process, but the queue lived only in memory — any restart
+        // (graceful or otherwise) before the retry succeeded
+        // committed the broken on-disk chain.
+        //
+        // We invert the trade-off: a transient DB write failure drops
+        // the audit event and leaves chain state untouched.  The ERROR
+        // log below is the operator's signal to investigate.  The
+        // next call uses the same `seq` (since `entries.last()` did
+        // not advance) with a fresh timestamp and tries again.
+        let persisted = match self.db.as_ref() {
+            None => true, // pure in-memory mode: memory IS the source of truth
+            Some(db) => match db.lock() {
+                Ok(conn) => match conn.execute(
                     "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
                         entry.seq as i64,
@@ -547,17 +582,64 @@ impl AuditLog {
                         entry.action.to_string(),
                         &entry.detail,
                         &entry.outcome,
-                        entry.user_id.map(|u| u.to_string()),
+                        entry.user_id.as_ref().map(|u| u.to_string()),
                         entry.channel.as_deref(),
                         &entry.prev_hash,
                         &entry.hash,
                     ],
-                );
-            }
+                ) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            seq = entry.seq,
+                            agent_id = %entry.agent_id,
+                            action = %entry.action,
+                            error = %e,
+                            "Audit DB INSERT failed; chain NOT advanced. \
+                             Entry dropped to preserve on-disk chain integrity. \
+                             Investigate disk space, permissions, or DB state."
+                        );
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        seq = entry.seq,
+                        "Audit DB mutex poisoned ({e:?}); chain NOT advanced."
+                    );
+                    false
+                }
+            },
+        };
+
+        if !persisted {
+            // Drop locks without mutating; caller's discarded return
+            // value is the (uncommitted) hash, mirroring the success
+            // path's signature.  The next record() will reuse the same
+            // `seq` because `entries.last()` is unchanged.
+            return hash;
         }
 
         entries.push(entry);
         *tip = hash.clone();
+
+        // Hard cap: if the in-memory buffer grew beyond MAX_AUDIT_ENTRIES,
+        // drain the oldest prefix.  Every entry in `entries` is now
+        // known to be persisted on disk (the only path that pushes is
+        // the success branch above), so dropping the prefix loses no
+        // forensic data — a restart would reload the same rows from
+        // SQLite anyway.  We update `chain_anchor` to the hash of the
+        // last dropped entry so `verify_integrity()` keeps working
+        // across the trim boundary.
+        if entries.len() > MAX_AUDIT_ENTRIES {
+            let overflow = entries.len() - MAX_AUDIT_ENTRIES;
+            let new_anchor = entries[overflow - 1].hash.clone();
+            {
+                let mut anchor = self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                *anchor = Some(new_anchor);
+            }
+            entries.drain(..overflow);
+        }
 
         // Advance the external anchor so a later DB rewrite is detectable.
         // The anchor stores the post-push count so `verify_integrity`
@@ -1994,5 +2076,106 @@ mod tests {
         // No leftover .tmp file.
         let tmp = anchor_path.with_extension("anchor.tmp");
         assert!(!tmp.exists(), "tempfile should have been renamed away");
+    }
+
+    /// Regression for the chain-break-on-restart class of bugs
+    /// (#4078 reproduction): when a SQLite INSERT fails, the in-memory
+    /// chain MUST NOT advance.  Previous behaviour (#4050) pushed the
+    /// entry into the in-memory buffer regardless and tracked the
+    /// failed seq for later in-process retry, but the retry queue lived
+    /// only in memory — restart before recovery left an on-disk row
+    /// whose `prev_hash` pointed at a never-persisted hash, and every
+    /// subsequent boot logged `chain break at seq N`.
+    #[test]
+    fn test_db_failure_does_not_advance_in_memory_chain() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let log = AuditLog::with_db(Arc::clone(&db));
+        log.record("a", AuditAction::ToolInvoke, "first", "ok");
+        assert_eq!(log.len(), 1);
+        let tip_after_first = log.tip_hash();
+
+        // Provoke a transient persistence failure by dropping the
+        // table.  The next record() will hit `no such table:
+        // audit_entries` from `conn.execute()`.
+        db.lock()
+            .unwrap()
+            .execute("DROP TABLE audit_entries", [])
+            .unwrap();
+
+        log.record("a", AuditAction::ToolInvoke, "would-be-lost", "ok");
+
+        assert_eq!(
+            log.len(),
+            1,
+            "in-memory chain must not advance when the DB INSERT fails"
+        );
+        assert_eq!(
+            log.tip_hash(),
+            tip_after_first,
+            "tip must not advance when the DB INSERT fails"
+        );
+
+        // Recreate the table to simulate the operator fixing the DB.
+        db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        // The single seq=0 row from before the drop is gone, but the
+        // in-memory entries vector still holds it.  Re-insert by
+        // recording a fresh event: we expect seq=1 (entries.last+1).
+        // The DB will end up with a single seq=1 row — that's a known
+        // gap (the DROP wiped seq=0), but the chain is internally
+        // consistent: seq=1's prev_hash = hash(seq=0), and with_db()
+        // recovers that as chain_anchor (first entry's prev_hash ≠
+        // genesis → anchor = that hash), so verify_integrity() passes.
+        log.record("a", AuditAction::ToolInvoke, "after-recovery", "ok");
+        assert_eq!(log.len(), 2);
+        assert!(log.verify_integrity().is_ok());
+
+        // Restart simulation: a fresh AuditLog reading from the DB
+        // sees only the post-recovery row, and verify_integrity must
+        // succeed because the chain anchor recovery from `prev_hash`
+        // handles the dropped seq=0 prefix.
+        drop(log);
+        let log2 = AuditLog::with_db(db);
+        assert_eq!(
+            log2.len(),
+            1,
+            "DB should hold only the successfully-persisted row"
+        );
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "reloaded chain must verify since no broken entry ever reached disk"
+        );
     }
 }

@@ -50,9 +50,7 @@ pub fn save_preference(pref: &ConnectionPreference) {
 #[tauri::command]
 pub async fn test_connection(url: String) -> Result<serde_json::Value, String> {
     let url = url.trim_end_matches('/').to_string();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
+    crate::validate_server_url(&url)?;
 
     let health_url = format!("{url}/api/health");
     let client = reqwest::Client::builder()
@@ -85,9 +83,7 @@ pub async fn connect_remote(
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let url = url.trim_end_matches('/').to_string();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
+    crate::validate_server_url(&url)?;
 
     // Verify server is reachable before committing to the connection.
     let health_url = format!("{url}/api/health");
@@ -115,17 +111,17 @@ pub async fn connect_remote(
     // Update interior-mutable managed state (registered once at startup).
     let app = window.app_handle();
     if let Some(state) = app.try_state::<crate::ServerUrlState>() {
-        *state.0.write().unwrap() = url.clone();
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = url.clone();
     }
     if let Some(state) = app.try_state::<crate::RemoteMode>() {
-        *state.0.write().unwrap() = true;
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = true;
     }
     // Clear local-only state when switching to remote.
     if let Some(state) = app.try_state::<crate::PortState>() {
-        *state.0.write().unwrap() = None;
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
     if let Some(state) = app.try_state::<crate::KernelState>() {
-        *state.0.write().unwrap() = None;
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     info!("Connecting to remote server: {url}");
@@ -167,19 +163,19 @@ pub async fn start_local(
 
     // Update interior-mutable managed state (registered once at startup).
     if let Some(state) = app.try_state::<crate::PortState>() {
-        *state.0.write().unwrap() = Some(port);
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = Some(port);
     }
     if let Some(state) = app.try_state::<crate::KernelState>() {
-        *state.0.write().unwrap() = Some(crate::KernelInner {
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = Some(crate::KernelInner {
             kernel: handle.kernel.clone(),
             started_at: Instant::now(),
         });
     }
     if let Some(state) = app.try_state::<crate::ServerUrlState>() {
-        *state.0.write().unwrap() = url.clone();
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = url.clone();
     }
     if let Some(state) = app.try_state::<crate::RemoteMode>() {
-        *state.0.write().unwrap() = false;
+        *state.0.write().unwrap_or_else(|p| p.into_inner()) = false;
     }
 
     // Store the ServerHandle for shutdown
@@ -190,7 +186,7 @@ pub async fn start_local(
 
     // Start event forwarding for native notifications
     if let Some(ks) = app.try_state::<crate::KernelState>() {
-        let guard = ks.0.read().unwrap();
+        let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
         if let Some(ref inner) = *guard {
             let app_handle = app.clone();
             let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();

@@ -650,6 +650,37 @@ pub trait KernelHandle: Send + Sync {
         Err("run_forked_agent_oneshot not available in this KernelHandle".to_string())
     }
 
+    /// Upsert a group roster member (channel bridge → persistent storage).
+    fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// List group roster members for a (channel, chat_id) pair.
+    fn roster_members(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Remove a member from the group roster.
+    fn roster_remove_member(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Fire an `agent:step` external hook event.
     /// Called by the runtime at the start of each agent loop iteration.
     fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}

@@ -170,6 +170,10 @@ impl TestAppState {
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: std::sync::Arc::new(
+                librefang_api::rate_limiter::AuthLoginLimiter::new(),
+            ),
+            gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
         })
     }
 }

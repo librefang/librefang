@@ -908,6 +908,11 @@ pub struct RateLimitConfig {
     /// Flush text buffer when it exceeds this many characters. Default: 200.
     #[serde(default = "default_ws_debounce_chars")]
     pub ws_debounce_chars: usize,
+    /// Max login attempts per IP per 15-minute window on auth endpoints
+    /// (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10.
+    /// Set to 0 to disable the per-IP auth rate limiter.
+    #[serde(default = "default_auth_rate_limit_per_ip")]
+    pub auth_rate_limit_per_ip: u32,
 }
 
 fn default_api_requests_per_minute() -> u32 {
@@ -934,6 +939,9 @@ fn default_ws_debounce_ms() -> u64 {
 fn default_ws_debounce_chars() -> usize {
     200
 }
+fn default_auth_rate_limit_per_ip() -> u32 {
+    10
+}
 
 impl Default for RateLimitConfig {
     fn default() -> Self {
@@ -946,6 +954,7 @@ impl Default for RateLimitConfig {
             ws_idle_timeout_secs: default_ws_idle_timeout_secs(),
             ws_debounce_ms: default_ws_debounce_ms(),
             ws_debounce_chars: default_ws_debounce_chars(),
+            auth_rate_limit_per_ip: default_auth_rate_limit_per_ip(),
         }
     }
 }
@@ -2244,6 +2253,15 @@ pub struct QueueConfig {
     /// Per-lane concurrency limits.
     #[serde(default)]
     pub concurrency: QueueConcurrencyConfig,
+    /// How many days to keep `completed` / `failed` / `cancelled` rows in
+    /// `task_queue` before the periodic retention sweep hard-deletes them.
+    /// Default: 7. Set to 0 to disable pruning (queue grows forever — #3466).
+    #[serde(default = "default_task_queue_retention_days")]
+    pub task_queue_retention_days: u64,
+}
+
+fn default_task_queue_retention_days() -> u64 {
+    7
 }
 
 impl Default for QueueConfig {
@@ -2253,6 +2271,7 @@ impl Default for QueueConfig {
             max_depth_global: 0,
             task_ttl_secs: 3600,
             concurrency: QueueConcurrencyConfig::default(),
+            task_queue_retention_days: default_task_queue_retention_days(),
         }
     }
 }
@@ -2787,8 +2806,10 @@ pub struct KernelConfig {
     #[serde(default)]
     pub pairing: PairingConfig,
     /// Auth profiles for key rotation (provider name → profiles).
+    /// Uses `BTreeMap` for deterministic serialisation order (avoids prompt-cache
+    /// invalidation when the same providers are configured across restarts; see #3757).
     #[serde(default)]
-    pub auth_profiles: HashMap<String, Vec<AuthProfile>>,
+    pub auth_profiles: BTreeMap<String, Vec<AuthProfile>>,
     /// Extended thinking configuration.
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
@@ -2797,13 +2818,15 @@ pub struct KernelConfig {
     pub budget: BudgetConfig,
     /// Provider base URL overrides (provider ID → custom base URL).
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_urls: HashMap<String, String>,
+    pub provider_urls: BTreeMap<String, String>,
     /// Per-provider proxy URL overrides (provider ID → proxy URL).
     /// Allows routing specific providers through a proxy while others connect directly.
     /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_proxy_urls: HashMap<String, String>,
+    pub provider_proxy_urls: BTreeMap<String, String>,
     /// Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).
     ///
     /// Overrides the HTTP client's default read timeout for LLM API requests to the
@@ -2812,19 +2835,22 @@ pub struct KernelConfig {
     ///
     /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.).
     /// CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_request_timeout_secs: HashMap<String, u64>,
+    pub provider_request_timeout_secs: BTreeMap<String, u64>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_regions: HashMap<String, String>,
+    pub provider_regions: BTreeMap<String, String>,
     /// Provider API key env var overrides (provider ID → env var name).
     /// For custom/unknown providers, maps the provider name to the environment
     /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_api_keys: HashMap<String, String>,
+    pub provider_api_keys: BTreeMap<String, String>,
     /// Interval in seconds between reachability probes of local providers
     /// (Ollama, vLLM, LM Studio, lemonade).
     ///
@@ -3038,22 +3064,27 @@ pub struct KernelConfig {
 )]
 #[serde(rename_all = "lowercase")]
 pub enum SanitizeMode {
-    /// No checking — all messages pass through (default).
-    #[default]
+    /// No checking — all messages pass through. Set `mode = "off"` in
+    /// `[sanitize]` to opt out of prompt-injection detection.
     Off,
     /// Log a warning but allow the message through.
     Warn,
-    /// Reject the message and send an error to the user.
+    /// Reject the message and send an error to the user (default).
+    #[default]
     Block,
 }
 
 /// Configuration for channel input sanitization / prompt-injection detection.
 ///
+/// The sanitizer is **enabled by default** (mode = "block"). To opt out set
+/// `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:
+///
 /// ```toml
 /// [sanitize]
-/// mode = "warn"           # off | warn | block
+/// mode = "block"          # off | warn | block  (default: block)
 /// max_message_length = 32768
 /// custom_block_patterns = ["(?i)secret\\s+code"]
+/// # disable_input_sanitizer = true  # emergency opt-out
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -3064,14 +3095,20 @@ pub struct SanitizeConfig {
     pub max_message_length: usize,
     /// Additional regex patterns that should trigger a block/warn.
     pub custom_block_patterns: Vec<String>,
+    /// Emergency opt-out: set to `true` to disable all input sanitization.
+    /// Not recommended for production — prefer `mode = "warn"` for monitoring
+    /// without blocking, or `mode = "off"` for a softer disable.
+    #[serde(default)]
+    pub disable_input_sanitizer: bool,
 }
 
 impl Default for SanitizeConfig {
     fn default() -> Self {
         Self {
-            mode: SanitizeMode::Off,
+            mode: SanitizeMode::Block,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 }
@@ -3802,6 +3839,12 @@ pub struct ExternalAuthConfig {
     /// When configured, these take precedence over the top-level single-provider fields.
     #[serde(default)]
     pub providers: Vec<OidcProvider>,
+    /// Require `email_verified = true` in the OIDC ID token before allowing login.
+    /// Defaults to `true`. Set to `false` only if your identity provider does not
+    /// set this claim. When `true`, logins where the claim is absent or false are
+    /// rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).
+    #[serde(default = "default_true")]
+    pub require_email_verified: bool,
 }
 
 /// Configuration for a single OIDC/OAuth2 provider.
@@ -3849,6 +3892,12 @@ pub struct OidcProvider {
     /// JWT audience claim to validate.
     #[serde(default)]
     pub audience: String,
+    /// Override the global `require_email_verified` setting for this provider.
+    /// `None` means inherit from `ExternalAuthConfig::require_email_verified`.
+    /// Set to `false` only if this specific provider does not issue `email_verified`
+    /// claims (e.g. GitHub's user API does not include the field for OAuth2 flows).
+    #[serde(default)]
+    pub require_email_verified: Option<bool>,
 }
 
 fn default_oauth_client_secret_env() -> String {
@@ -3884,6 +3933,7 @@ impl Default for ExternalAuthConfig {
             audience: String::new(),
             session_ttl_secs: default_session_ttl(),
             providers: Vec::new(),
+            require_email_verified: true,
         }
     }
 }
@@ -3970,6 +4020,11 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Default stale workflow run timeout in minutes (60 minutes = 1 hour).
+fn default_workflow_stale_timeout_minutes() -> u64 {
+    60
+}
+
 /// Default tool execution timeout in seconds (120s).
 fn default_tool_timeout_secs() -> u64 {
     120
@@ -3978,11 +4033,6 @@ fn default_tool_timeout_secs() -> u64 {
 /// Default maximum upload size in bytes (10 MB).
 fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
-}
-
-/// Default workflow stale timeout: 60 minutes.
-fn default_workflow_stale_timeout_minutes() -> u64 {
-    60
 }
 
 /// Default maximum concurrent background LLM calls.
@@ -4802,14 +4852,14 @@ impl Default for KernelConfig {
             tts: TtsConfig::default(),
             docker: DockerSandboxConfig::default(),
             pairing: PairingConfig::default(),
-            auth_profiles: HashMap::new(),
+            auth_profiles: BTreeMap::new(),
             thinking: None,
             budget: BudgetConfig::default(),
-            provider_urls: HashMap::new(),
-            provider_proxy_urls: HashMap::new(),
-            provider_request_timeout_secs: HashMap::new(),
-            provider_regions: HashMap::new(),
-            provider_api_keys: HashMap::new(),
+            provider_urls: BTreeMap::new(),
+            provider_proxy_urls: BTreeMap::new(),
+            provider_request_timeout_secs: BTreeMap::new(),
+            provider_regions: BTreeMap::new(),
+            provider_api_keys: BTreeMap::new(),
             local_probe_interval_secs: default_local_probe_interval_secs(),
             vertex_ai: VertexAiConfig::default(),
             azure_openai: AzureOpenAiConfig::default(),
@@ -5121,6 +5171,16 @@ pub struct MemoryConfig {
     /// Base URL for the HTTP vector store (used when `vector_backend = "http"`).
     #[serde(default)]
     pub vector_store_url: Option<String>,
+    /// How many days to keep soft-deleted memories (`deleted = 1`) before
+    /// the periodic retention sweep hard-deletes them and reclaims their
+    /// embedding BLOB. Default: 30. Set to 0 to disable hard-delete (rows
+    /// stay forever, leaking embedding storage — see #3467).
+    #[serde(default = "default_soft_delete_retention_days")]
+    pub soft_delete_retention_days: u64,
+}
+
+fn default_soft_delete_retention_days() -> u64 {
+    30
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -5165,6 +5225,7 @@ impl Default for MemoryConfig {
             chunking: ChunkConfig::default(),
             vector_backend: None,
             vector_store_url: None,
+            soft_delete_retention_days: default_soft_delete_retention_days(),
         }
     }
 }
@@ -5211,6 +5272,26 @@ pub struct NetworkConfig {
     pub max_peers: u32,
     /// Pre-shared secret for OFP HMAC authentication (required when network is enabled).
     pub shared_secret: String,
+    /// SECURITY (#3876): Maximum number of  requests a single OFP
+    /// peer may send per minute before being rate-limited.
+    ///
+    /// Each peer connection is tracked independently. Excess messages are
+    /// rejected with a 429 error response; a  is emitted with the
+    /// peer ID and current rate so operators can investigate abuse.
+    ///
+    /// Set to  to disable per-peer message rate limiting (not recommended
+    /// for production federations). Default: 60.
+    pub max_messages_per_peer_per_minute: u32,
+    /// SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.
+    ///
+    /// When set, the node tracks how many tokens each peer's
+    /// requests have consumed in the current hour window. If a peer exceeds
+    /// this budget the request is rejected with a 429 error.
+    ///
+    ///  means no per-peer token cap (default). Set to a value like
+    ///  to bound the LLM spend a single federated peer can force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_llm_tokens_per_peer_per_hour: Option<u64>,
 }
 
 impl Default for NetworkConfig {
@@ -5221,6 +5302,8 @@ impl Default for NetworkConfig {
             mdns_enabled: true,
             max_peers: 50,
             shared_secret: String::new(),
+            max_messages_per_peer_per_minute: 60,
+            max_llm_tokens_per_peer_per_hour: None,
         }
     }
 }
@@ -5240,6 +5323,14 @@ impl std::fmt::Debug for NetworkConfig {
                 } else {
                     "<redacted>"
                 },
+            )
+            .field(
+                "max_messages_per_peer_per_minute",
+                &self.max_messages_per_peer_per_minute,
+            )
+            .field(
+                "max_llm_tokens_per_peer_per_hour",
+                &self.max_llm_tokens_per_peer_per_hour,
             )
             .finish()
     }
@@ -5619,6 +5710,14 @@ pub struct SignalConfig {
     /// Poll interval in seconds for checking new messages (default: 2).
     #[serde(default = "default_signal_poll_interval_secs")]
     pub poll_interval_secs: u64,
+    /// Optional API key sent as `Authorization: Bearer <api_key>` on every request.
+    /// If absent, requests are sent without an Authorization header.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.
+    /// Defaults to `false`; set to `true` only when signal-cli runs on localhost.
+    #[serde(default)]
+    pub allow_local: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -5633,6 +5732,8 @@ impl Default for SignalConfig {
             account_id: None,
             default_agent: None,
             poll_interval_secs: default_signal_poll_interval_secs(),
+            api_key: None,
+            allow_local: false,
             overrides: ChannelOverrides::default(),
         }
     }
@@ -5750,9 +5851,13 @@ pub struct TeamsConfig {
     pub app_password_env: String,
     /// Env var name holding the outgoing webhook security token (base64-encoded).
     /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// If the env var is absent or empty, verification is skipped with a warning.
+    /// Required by default; setting `signature_required = false` opts out (dev only).
     #[serde(default)]
     pub security_token_env: String,
+    /// Reject adapter startup unless a security token is configured (default `true`).
+    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
+    #[serde(default = "default_true")]
+    pub signature_required: bool,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Allowed tenant IDs (empty = allow all).
@@ -5774,6 +5879,7 @@ impl Default for TeamsConfig {
             app_id: String::new(),
             app_password_env: "TEAMS_APP_PASSWORD".to_string(),
             security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
+            signature_required: true,
             webhook_port: 3978,
             allowed_tenants: vec![],
             account_id: None,

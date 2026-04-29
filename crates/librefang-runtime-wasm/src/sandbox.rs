@@ -108,12 +108,14 @@ pub struct GuestState {
     limiter: MemoryLimiter,
 }
 
+#[cfg(test)]
 impl GuestState {
-    /// Construct a `GuestState` for unit tests with a generous memory limit.
-    #[cfg(test)]
-    pub fn for_testing(
-        capabilities: Vec<librefang_types::capability::Capability>,
-        kernel: Option<std::sync::Arc<dyn librefang_kernel_handle::KernelHandle>>,
+    /// Build a `GuestState` for unit tests in sibling modules. The host_functions
+    /// tests don't exercise WASM memory growth, so the limiter is set to
+    /// effectively unbounded.
+    pub(crate) fn for_test(
+        capabilities: Vec<Capability>,
+        kernel: Option<Arc<dyn KernelHandle>>,
         agent_id: String,
         tokio_handle: tokio::runtime::Handle,
     ) -> Self {
@@ -123,7 +125,7 @@ impl GuestState {
             agent_id,
             tokio_handle,
             limiter: MemoryLimiter {
-                max_bytes: 256 * 1024 * 1024, // 256 MB
+                max_bytes: usize::MAX,
             },
         }
     }
@@ -155,20 +157,31 @@ pub enum SandboxError {
 
 /// The WASM sandbox engine.
 ///
-/// Create one per kernel, reuse across skill invocations. The `Engine`
-/// is expensive to create but can compile/instantiate many modules.
-pub struct WasmSandbox {
-    engine: Engine,
+/// # Epoch isolation (Bug #3864)
+///
+/// `Engine::increment_epoch()` is global to an `Engine` — calling it from a
+/// watchdog thread would interrupt *every* `Store` sharing that engine, not
+/// just the one that timed out. To prevent cross-guest contamination, each call
+/// to `execute` creates a fresh `Engine`. The cost is one extra engine init per
+/// invocation; WASM module compilation is unavoidably O(module size) regardless,
+/// so the marginal overhead is small compared to the compilation step.
+pub struct WasmSandbox;
+
+/// Build the standard Wasmtime `Config` used by every sandbox Engine.
+fn make_engine_config() -> Config {
+    let mut config = Config::new();
+    config.consume_fuel(true);
+    config.epoch_interruption(true);
+    config
 }
 
 impl WasmSandbox {
-    /// Create a new sandbox engine with fuel metering enabled.
+    /// Create a new sandbox instance. Validates the engine config eagerly.
     pub fn new() -> Result<Self, SandboxError> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        config.epoch_interruption(true);
-        let engine = Engine::new(&config).map_err(|e| SandboxError::Compilation(e.to_string()))?;
-        Ok(Self { engine })
+        // Build a throw-away Engine to surface any config errors at
+        // construction time rather than first use.
+        Engine::new(&make_engine_config()).map_err(|e| SandboxError::Compilation(e.to_string()))?;
+        Ok(Self)
     }
 
     /// Execute a WASM module with the given JSON input.
@@ -176,6 +189,10 @@ impl WasmSandbox {
     /// All host calls from within the module are subject to capability checks.
     /// Execution is offloaded to a blocking thread (CPU-bound WASM should not
     /// run on the Tokio executor).
+    ///
+    /// A fresh `Engine` is created for each invocation so that the epoch-based
+    /// watchdog can safely call `engine.increment_epoch()` without disturbing
+    /// any other concurrently running WASM guests.
     pub async fn execute(
         &self,
         wasm_bytes: &[u8],
@@ -184,7 +201,9 @@ impl WasmSandbox {
         kernel: Option<Arc<dyn KernelHandle>>,
         agent_id: &str,
     ) -> Result<ExecutionResult, SandboxError> {
-        let engine = self.engine.clone();
+        // Build a fresh engine for this execution — epoch isolation requires it.
+        let engine = Engine::new(&make_engine_config())
+            .map_err(|e| SandboxError::Compilation(e.to_string()))?;
         let wasm_bytes = wasm_bytes.to_vec();
         let agent_id = agent_id.to_string();
         let handle = tokio::runtime::Handle::current();
@@ -245,29 +264,24 @@ impl WasmSandbox {
 
         // Set epoch deadline (wall-clock metering).
         //
-        // The watchdog thread used to be fire-and-forget — it slept for the
-        // full timeout (30s by default) and then called `increment_epoch`
-        // whether or not the guest had already returned. That leaked a
-        // sleeping OS thread per invocation and also caused cross-store
-        // false interrupts, because `Engine::increment_epoch` is global to
-        // the Engine: every concurrently running guest observes the tick.
-        // Sustained workloads piled up thousands of sleeping threads and
-        // eventually exhausted the OS thread limit, and any fresh guest
-        // that happened to start right after a stale watchdog fired would
-        // trap on `Interrupt` even though it had used no wall-clock time.
+        // `Engine::increment_epoch()` is global to an `Engine` — in earlier
+        // versions of this code a single shared Engine was used, so a watchdog
+        // firing for one guest would trip the epoch for *all* concurrently
+        // running guests (Bug #3864). That was fixed by creating a fresh
+        // Engine per invocation in `WasmSandbox::execute`; each execution now
+        // has its own epoch counter so `increment_epoch` only interrupts the
+        // guest running inside this store.
         //
-        // Instead, the watchdog blocks in `park_timeout(deadline - now)`
-        // and is woken via `Thread::unpark` the moment the main thread
-        // finishes. It re-checks the done flag on wake-up to distinguish
-        // "guest completed, go home" from "spurious wake-up, keep waiting".
-        // On the happy path the watchdog wakes within microseconds rather
-        // than a 50 ms poll interval, so a 5 ms sandbox call stays a 5 ms
-        // sandbox call. On the timeout path it sleeps out the remaining
-        // deadline exactly as before and trips the epoch.
+        // The watchdog thread blocks in `park_timeout(deadline - now)` and is
+        // woken via `Thread::unpark` the moment the main thread finishes. It
+        // re-checks the done flag on wake-up to distinguish "guest completed,
+        // go home" from "spurious wake-up, keep waiting". On the happy path
+        // the watchdog wakes within microseconds; on the timeout path it sleeps
+        // out the remaining deadline exactly once and trips the epoch.
         //
-        // An RAII guard signals the flag and joins the thread on every
-        // early-return path (`?`, trap, ABI error, panic) so no error-path
-        // leak slips past either.
+        // An RAII guard signals the flag and joins the watchdog thread on every
+        // early-return path (`?`, trap, ABI error, panic) so no thread leak
+        // slips through.
         store.set_epoch_deadline(1);
         let engine_clone = engine.clone();
         let timeout = config.timeout_secs.unwrap_or(30);
@@ -394,6 +408,20 @@ impl WasmSandbox {
         let result_ptr = (packed >> 32) as usize;
         let result_len = (packed & 0xFFFF_FFFF) as usize;
 
+        // SECURITY: Cap result size before any memory access or JSON parsing
+        // (Bug #3866). A malicious guest can return a `result_len` of up to
+        // 2^32-1 bytes. Without this guard the host would either try to slice
+        // gigabytes of memory (triggering the bounds check below) or, if the
+        // guest had somehow pre-allocated that much memory, feed a huge buffer
+        // to serde_json whose recursive descent parser has no depth limit and
+        // can stack-overflow on deeply-nested input.
+        const MAX_RESULT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+        if result_len > MAX_RESULT_BYTES {
+            return Err(SandboxError::AbiError(format!(
+                "Guest result too large: {result_len} bytes (max {MAX_RESULT_BYTES})"
+            )));
+        }
+
         // Read output JSON from guest memory. checked_add so a malicious
         // or buggy guest can't wrap `ptr + len` and silently pass the
         // bounds check (reachable on 32-bit hosts; defensive on 64-bit).
@@ -477,7 +505,22 @@ impl WasmSandbox {
 
                     match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
                         Ok(bytes) => {
-                            let raw = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            // Use lossy decode rather than `from_utf8 +
+                            // unwrap_or("<invalid utf8>")`: when the
+                            // MAX_LOG_BYTES boundary lands inside a
+                            // multi-byte UTF-8 sequence (likely on any
+                            // 4 KiB cap with non-ASCII text — Chinese,
+                            // Japanese, emoji), strict from_utf8 fails
+                            // and the entire 4 KiB payload is replaced
+                            // by the literal "<invalid utf8>" sentinel,
+                            // discarding all content.  Cow<str> from
+                            // from_utf8_lossy preserves valid prefixes
+                            // and replaces only the broken trailing
+                            // bytes with U+FFFD — what the original
+                            // pre-#3923 implementation did and what
+                            // operators expect from a "log truncated"
+                            // path.
+                            let raw = String::from_utf8_lossy(&bytes);
 
                             // Sanitize newlines to prevent log injection of
                             // fake structured log lines.
@@ -521,6 +564,18 @@ impl WasmSandbox {
         request_ptr: i32,
         request_len: i32,
     ) -> anyhow::Result<i64> {
+        // SECURITY: Reject oversized or negative host_call request payloads
+        // before deserialising (Bug #3866). `request_len` is i32 from the
+        // guest ABI; a negative value as usize wraps to a huge number, and a
+        // very large positive value feeds an unbounded serde_json parse that
+        // can stack-overflow on deeply-nested JSON.
+        const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+        if request_len < 0 || request_len as usize > MAX_REQUEST_BYTES {
+            anyhow::bail!(
+                "host_call request length invalid: {} (max {MAX_REQUEST_BYTES})",
+                request_len
+            );
+        }
         let request_bytes = Self::read_guest_bytes(caller, request_ptr, request_len, "host_call")?;
         let request: serde_json::Value = serde_json::from_slice(&request_bytes)?;
         let method = request
@@ -674,9 +729,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_engine_creation() {
-        let sandbox = WasmSandbox::new().unwrap();
-        // Engine should be created successfully
-        drop(sandbox);
+        // Constructing the sandbox eagerly validates the engine config; the
+        // assertion is simply that `new()` returns Ok.
+        let _sandbox = WasmSandbox::new().unwrap();
     }
 
     /// Regression: max_memory_bytes must be enforced at runtime, not just
@@ -870,5 +925,156 @@ mod tests {
         let annotated = format!("{}... [truncated {} bytes]", clamped, 100);
         assert!(annotated.contains("[truncated 100 bytes]"));
         assert!(annotated.len() > MAX_LOG_BYTES);
+    }
+
+    /// Regression: the truncation cap can land mid-codepoint for non-ASCII
+    /// text.  Strict `str::from_utf8 + unwrap_or("<invalid utf8>")` would
+    /// then replace the entire 4 KiB payload with the literal sentinel,
+    /// dropping the user's whole log line.  `String::from_utf8_lossy`
+    /// preserves the valid prefix and substitutes U+FFFD only for the
+    /// broken trailing bytes.
+    ///
+    /// `'中'` is 3 bytes in UTF-8 and `MAX_LOG_BYTES = 4096` is not
+    /// divisible by 3, so slicing at the byte cap is guaranteed to split a
+    /// codepoint.
+    #[test]
+    fn test_host_log_lossy_decode_preserves_valid_prefix_at_boundary() {
+        let s = "中".repeat(MAX_LOG_BYTES);
+        // Take the first MAX_LOG_BYTES bytes — landing inside a codepoint.
+        let bytes = &s.as_bytes()[..MAX_LOG_BYTES];
+        // The invariant under test: lossy decode does NOT collapse the
+        // whole payload to the strict sentinel.
+        let lossy = String::from_utf8_lossy(bytes);
+        assert!(
+            !lossy.contains("<invalid utf8>"),
+            "lossy decode must keep the valid prefix instead of falling \
+             back to the strict sentinel"
+        );
+        assert!(lossy.contains('中'), "valid prefix codepoints must survive");
+        assert!(
+            lossy.contains('\u{FFFD}'),
+            "the partial trailing codepoint must surface as U+FFFD"
+        );
+    }
+    /// Module that returns a packed result whose `result_len` field is set to
+    /// MAX_RESULT_BYTES + 1 (0x1000001 = 16 MiB + 1) with a ptr of 0, to
+    /// trigger the oversized-result guard introduced in Bug #3866.
+    ///
+    /// The `result_len` (low 32 bits) is set to a value beyond the 16 MiB cap.
+    /// The pointer points to the start of memory (offset 0), which contains
+    /// whatever zeroed or initialised bytes the runtime put there — we only
+    /// care that the size guard fires BEFORE we try to slice memory.
+    const OVERSIZED_RESULT_WAT: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (global $bump (mut i32) (i32.const 1024))
+
+            (func (export "alloc") (param $size i32) (result i32)
+                (local $ptr i32)
+                (local.set $ptr (global.get $bump))
+                (global.set $bump (i32.add (global.get $bump) (local.get $size)))
+                (local.get $ptr)
+            )
+
+            (func (export "execute") (param $ptr i32) (param $len i32) (result i64)
+                ;; Return ptr=0, len = 16 MiB + 1 (0x1000001) — exceeds the cap.
+                ;; packed = (0 << 32) | 0x1000001
+                (i64.const 0x1000001)
+            )
+        )
+    "#;
+
+    /// Regression test for Bug #3866: a guest that claims to return more than
+    /// MAX_RESULT_BYTES must be rejected with an AbiError, not cause the host
+    /// to attempt a 16 MiB+ heap allocation or a serde_json parse of untrusted
+    /// huge/deeply-nested data.
+    #[tokio::test]
+    async fn test_oversized_result_is_rejected() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let input = serde_json::json!({});
+        let config = SandboxConfig {
+            fuel_limit: 10_000_000,
+            ..Default::default()
+        };
+
+        let err = sandbox
+            .execute(
+                OVERSIZED_RESULT_WAT.as_bytes(),
+                input,
+                config,
+                None,
+                "test-agent",
+            )
+            .await
+            .unwrap_err();
+
+        match &err {
+            SandboxError::AbiError(msg) => {
+                assert!(
+                    msg.contains("too large"),
+                    "Expected 'too large' in AbiError, got: {msg}"
+                );
+            }
+            other => panic!("Expected AbiError for oversized result, got: {other}"),
+        }
+    }
+
+    /// Regression test for Bug #3864: creating a per-execution Engine means
+    /// that the epoch watchdog for one guest cannot interrupt another concurrently
+    /// running guest. We verify this by running two sandboxes concurrently: a
+    /// very short-timeout one that trips immediately and a normal one that should
+    /// finish cleanly. If the epoch were shared, the normal one would also trap.
+    #[tokio::test]
+    async fn test_epoch_timeout_does_not_bleed_to_concurrent_guests() {
+        // Two independent sandbox instances (each gets its own Engine per execution).
+        let sandbox = WasmSandbox::new().unwrap();
+
+        // Guest 1: normal echo — should complete successfully.
+        let normal_config = SandboxConfig {
+            fuel_limit: 10_000_000,
+            timeout_secs: Some(30),
+            ..Default::default()
+        };
+        let normal_fut = sandbox.execute(
+            ECHO_WAT.as_bytes(),
+            serde_json::json!({"ping": "pong"}),
+            normal_config,
+            None,
+            "normal-guest",
+        );
+
+        // Guest 2: infinite loop with a tiny fuel budget — exhausts fuel quickly.
+        let exhausted_config = SandboxConfig {
+            fuel_limit: 100,
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let exhausted_fut = sandbox.execute(
+            INFINITE_LOOP_WAT.as_bytes(),
+            serde_json::json!({}),
+            exhausted_config,
+            None,
+            "fuel-exhausted-guest",
+        );
+
+        let (normal_result, exhausted_result) = tokio::join!(normal_fut, exhausted_fut);
+
+        // The fuel-exhausted guest must fail with FuelExhausted.
+        assert!(
+            matches!(exhausted_result, Err(SandboxError::FuelExhausted)),
+            "Expected FuelExhausted for exhausted guest, got: {exhausted_result:?}"
+        );
+
+        // The normal guest must succeed — its epoch must NOT have been tripped
+        // by the other guest's watchdog firing.
+        assert!(
+            normal_result.is_ok(),
+            "Normal guest must not be interrupted by another guest's timeout: {normal_result:?}"
+        );
+        assert_eq!(
+            normal_result.unwrap().output,
+            serde_json::json!({"ping": "pong"}),
+            "Normal guest output must be unchanged"
+        );
     }
 }

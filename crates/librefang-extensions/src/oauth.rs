@@ -126,8 +126,15 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     // Open browser
     info!("Opening browser for OAuth authorization...");
     if let Err(e) = open_browser(&auth_url) {
-        warn!("Could not open browser: {e}");
-        eprintln!("\nPlease open this URL in your browser:\n{auth_url}\n");
+        // Tracing is already initialized when we reach here (the daemon is
+        // running), so route through the structured logger instead of stderr.
+        // The URL is embedded in the log line so it reaches log files,
+        // OpenTelemetry, and Loki rather than being silently discarded in
+        // headless / daemon deployments.
+        warn!(
+            url = %auth_url,
+            "Could not open browser ({e}); open this URL manually to complete OAuth authorization"
+        );
     }
 
     // Wait for callback

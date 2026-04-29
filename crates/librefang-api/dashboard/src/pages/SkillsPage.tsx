@@ -579,6 +579,8 @@ function CreateSkillModal({
   );
 
   const handleCreate = async () => {
+    // Guard against double-submit: bail out if a creation is already in flight.
+    if (creating || createSkillMutation.isPending) return;
     setError("");
     if (!name.trim() || !description.trim()) {
       setError(
@@ -693,16 +695,16 @@ function CreateSkillModal({
           </Button>
           <Button
             onClick={handleCreate}
-            disabled={creating}
+            disabled={creating || createSkillMutation.isPending}
             leftIcon={
-              creating ? (
+              creating || createSkillMutation.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 <Plus className="w-4 h-4" />
               )
             }
           >
-            {creating
+            {creating || createSkillMutation.isPending
               ? t("common.creating", { defaultValue: "Creating..." })
               : t("common.create")}
           </Button>

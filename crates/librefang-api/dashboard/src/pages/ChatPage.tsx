@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocketUrl, sendAgentMessage, loadAgentSession } from "../api";
+import { buildAuthenticatedWebSocket, sendAgentMessage, loadAgentSession } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
@@ -141,18 +141,38 @@ function useWebSocket(
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
-  // Bug #3849: announce connection state changes to screen readers
-  const [ariaAnnouncement, setAriaAnnouncement] = useState("");
+  // Bug #3849 / audit of #3930: announce connection state changes
+  // to screen readers.  Use a (msg, nonce) tuple instead of a bare
+  // string so re-emitting the same announcement (e.g. two
+  // 'Disconnected — reconnecting…' lines after a transient flap)
+  // still triggers a React commit — bare-string state updates with
+  // the same value are no-ops, and the live-region textContent
+  // therefore doesn't change, so VoiceOver / NVDA / Orca skip the
+  // re-announcement.  The JSX applies key={ariaNonce} so the
+  // live-region node remounts on every announce, forcing
+  // re-announcement.
+  const [ariaState, setAriaState] = useState({ msg: "", nonce: 0 });
+  const ariaAnnouncement = ariaState.msg;
+  const ariaNonce = ariaState.nonce;
+  const setAriaAnnouncement = useCallback((msg: string) => {
+    setAriaState(prev => ({ msg, nonce: prev.nonce + 1 }));
+  }, []);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
   const onDropRef = useRef<(() => void) | null>(null);
-  // Bug #3847: store the current URL in a ref so the reconnect closure always
-  // reads the latest value rather than capturing the URL from the previous
-  // agent via a stale closure.
+  // Bug #3847: store the current URL + WS sub-protocols in refs so the
+  // reconnect closure always reads the latest values rather than capturing
+  // them from the previous agent via a stale closure.
   const urlRef = useRef<string>("");
+  const protocolsRef = useRef<string[]>([]);
   // Bug #3854: track whether we've hit a terminal auth-error state
   const authErrorRef = useRef(false);
+  // Audit of #3930: when retries are exhausted we used to silently
+  // park the connection forever; gaveUpRef lets the
+  // visibilitychange / online listeners below recover the socket
+  // when the user comes back or the network reappears.
+  const gaveUpRef = useRef(false);
   // Keep onAuthError in a ref to avoid triggering the effect when the caller
   // passes a fresh inline lambda on every render.
   const onAuthErrorRef = useRef(onAuthError);
@@ -173,18 +193,30 @@ function useWebSocket(
     const wsPath = sessionId
       ? `${base}?session_id=${encodeURIComponent(sessionId)}`
       : base;
-    // Bug #3847: keep urlRef current so the reconnect closure always uses
-    // the latest agent's URL even after an agent switch and reconnect cycle.
-    urlRef.current = buildAuthenticatedWebSocketUrl(wsPath);
+    // Bug #3847: keep urlRef + protocolsRef current so the reconnect closure
+    // always uses the latest agent's URL even after an agent switch and
+    // reconnect cycle. #3963 carries the bearer via WebSocket sub-protocols
+    // so the token never appears in the URL or proxy access logs.
+    {
+      const { url: latestUrl, protocols: latestProtocols } =
+        buildAuthenticatedWebSocket(wsPath);
+      urlRef.current = latestUrl;
+      protocolsRef.current = latestProtocols;
+    }
     retriesRef.current = 0;
     authErrorRef.current = false;
+    gaveUpRef.current = false;
 
     function connect() {
-      // Bug #3847: read from the ref, not the closed-over local variable, so
-      // we always target the current agent on reconnect.
+      // Bug #3847: read from the refs, not closed-over locals, so we always
+      // target the current agent on reconnect.
       const currentUrl = urlRef.current;
+      const currentProtocols = protocolsRef.current;
       try {
-        const ws = new WebSocket(currentUrl);
+        const ws = new WebSocket(
+          currentUrl,
+          currentProtocols.length > 0 ? currentProtocols : undefined,
+        );
 
         ws.onopen = () => {
           setWsConnected(true);
@@ -212,6 +244,12 @@ function useWebSocket(
 
           // Bug #3854: cap total retry attempts; surface an error after max
           if (retriesRef.current >= WS_MAX_RETRIES) {
+            // Mark the giveup state so the visibilitychange / online
+            // listeners below can wake the connection back up when the
+            // user returns or the network reappears — without a wakeup
+            // path the user is stuck on a dead WS until full page
+            // refresh (audit of #3930 caught the silent giveup).
+            gaveUpRef.current = true;
             const msg = "Connection failed — unable to reach the agent";
             setAriaAnnouncement(msg);
             onAuthErrorRef.current?.(msg);
@@ -239,10 +277,33 @@ function useWebSocket(
 
     connect();
 
+    // Recover from the retries-exhausted parked state when the tab
+    // becomes visible or the browser reports the network is back.
+    // Without these listeners the user is permanently stuck on a
+    // dead socket until they refresh the page (audit of #3930
+    // 'silent giveup' finding).  Auth-error termination is left
+    // alone — that genuinely needs a refresh to pick up new auth.
+    const wakeUp = () => {
+      if (authErrorRef.current) return;
+      if (!gaveUpRef.current) return;
+      gaveUpRef.current = false;
+      retriesRef.current = 0;
+      setAriaAnnouncement("Reconnecting…");
+      connect();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") wakeUp();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", wakeUp);
+
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", wakeUp);
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       retriesRef.current = 0;
       authErrorRef.current = false;
+      gaveUpRef.current = false;
       onDropRef.current = null;
       const ws = wsRef.current;
       if (ws) {
@@ -259,7 +320,7 @@ function useWebSocket(
     };
   }, [agentId, sessionId]);
 
-  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement };
+  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement, ariaNonce };
 }
 
 // Per-agent session cache — survives agent switches within the same page lifecycle
@@ -324,7 +385,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef, ariaAnnouncement } = useWebSocket(agentId, sessionId, onClearError);
+  const { ws, wsConnected, onDropRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -921,7 +982,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -2476,7 +2537,7 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
-  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -2705,7 +2766,7 @@ export function ChatPage() {
           new-message announcements are each surfaced independently — a single
           region with `||` would silence msgAriaAnnouncement whenever the WS
           connection string is non-empty. */}
-      <div aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
+      <div key={ariaNonce} aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
       {/* Header */}
       <header className="pb-2 sm:pb-4">

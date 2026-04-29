@@ -7339,6 +7339,7 @@ dependencies = [
  "http-body-util",
  "include_dir",
  "jsonwebtoken",
+ "libc",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
@@ -7840,6 +7841,7 @@ name = "librefang-runtime-wasm"
 version = "2026.4.28-beta7"
 dependencies = [
  "anyhow",
+ "async-trait",
  "librefang-http",
  "librefang-kernel-handle",
  "librefang-types",

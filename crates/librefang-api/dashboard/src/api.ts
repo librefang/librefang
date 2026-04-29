@@ -816,7 +816,14 @@ export function setOnUnauthorized(fn: (() => void) | null) {
 }
 
 export function getStoredApiKey(): string {
-  return localStorage.getItem("librefang-api-key") || "";
+  // #3620: Prefer sessionStorage (tab-scoped, not persisted to disk) over
+  // localStorage to reduce the XSS exfil window. Fall back to localStorage so
+  // tokens stored by older versions of the dashboard keep working.
+  return (
+    sessionStorage.getItem("librefang-api-key") ||
+    localStorage.getItem("librefang-api-key") ||
+    ""
+  );
 }
 
 export function authHeader(): HeadersInit {
@@ -838,14 +845,37 @@ function buildHeaders(headers?: HeadersInit): Headers {
   return merged;
 }
 
+/**
+ * Build an authenticated WebSocket connection (#3620, #3963).
+ *
+ * The token is passed via the `Sec-WebSocket-Protocol` header using a
+ * `bearer.<token>` sub-protocol instead of a `?token=` query parameter, so the
+ * token never appears in URLs, server access logs, browser history, or
+ * Referer headers.  The server reads the token from the first sub-protocol
+ * entry that starts with `bearer.` and echoes it back in the upgrade
+ * response (browsers reject the handshake otherwise).
+ *
+ * Returns `{ url, protocols }` — pass both to `new WebSocket(url, protocols)`.
+ */
+export function buildAuthenticatedWebSocket(path: string): {
+  url: string;
+  protocols: string[];
+} {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${proto}//${window.location.host}${path}`;
+  const token = getStoredApiKey();
+  const protocols = token ? [`bearer.${token}`] : [];
+  return { url, protocols };
+}
+
+/**
+ * @deprecated Use `buildAuthenticatedWebSocket()` to avoid leaking the token
+ * via the URL. This shim returns the URL without the token; callers must
+ * supply the bearer protocol separately.
+ */
 export function buildAuthenticatedWebSocketUrl(path: string): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = new URL(`${proto}//${window.location.host}${path}`);
-  const token = getStoredApiKey();
-  if (token) {
-    url.searchParams.set("token", token);
-  }
-  return url.toString();
+  return `${proto}//${window.location.host}${path}`;
 }
 
 async function parseError(response: Response): Promise<ApiError> {
@@ -1713,7 +1743,10 @@ export async function createWorkflow(payload: {
   }>;
   layout?: unknown;
 }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/workflows", payload);
+  return post<ApiActionResponse>("/api/workflows", payload).then((r) => ({
+    ...r,
+    id: r.id ?? (r as { workflow_id?: string }).workflow_id,
+  }));
 }
 
 export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {
@@ -2785,13 +2818,17 @@ export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
 }
 
 export function setApiKey(key: string) {
-  localStorage.setItem("librefang-api-key", key);
+  // #3620: Store in sessionStorage (tab-scoped, reduced XSS exposure) and
+  // remove any stale localStorage copy so the two stores don't diverge.
+  sessionStorage.setItem("librefang-api-key", key);
+  localStorage.removeItem("librefang-api-key");
   // Reset the 401-fired guard so future unauthorized responses
   // (e.g. after token expiry) can re-trigger the login dialog.
   _unauthorizedFired = false;
 }
 
 export function clearApiKey() {
+  sessionStorage.removeItem("librefang-api-key");
   localStorage.removeItem("librefang-api-key");
 }
 

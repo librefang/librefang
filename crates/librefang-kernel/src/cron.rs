@@ -79,6 +79,10 @@ pub struct CronScheduler {
     home_dir: PathBuf,
     /// Global cap on total jobs across all agents (atomic for hot-reload).
     max_total_jobs: AtomicUsize,
+    /// Serializes `persist()` writes so concurrent callers (cron loop, API
+    /// routes, spawned cron tasks) don't corrupt the tmp file by interleaving
+    /// `O_TRUNC`/write/rename on the same path.
+    persist_lock: std::sync::Mutex<()>,
 }
 
 impl CronScheduler {
@@ -93,6 +97,7 @@ impl CronScheduler {
             persist_path: home_dir.join("data").join("cron_jobs.json"),
             home_dir: home_dir.to_path_buf(),
             max_total_jobs: AtomicUsize::new(max_total_jobs),
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -124,7 +129,11 @@ impl CronScheduler {
     }
 
     /// Persist all jobs to disk via atomic write (write to `.tmp`, then rename).
+    ///
+    /// Serialized through `persist_lock` so concurrent callers can't both
+    /// `O_TRUNC` the same `.tmp` path and produce a torn file before rename.
     pub fn persist(&self) -> LibreFangResult<()> {
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let metas: Vec<JobMeta> = self.jobs.iter().map(|r| r.value().clone()).collect();
         let data = serde_json::to_string_pretty(&metas)
             .map_err(|e| LibreFangError::Internal(format!("Failed to serialize cron jobs: {e}")))?;
@@ -464,7 +473,13 @@ impl CronScheduler {
     /// (iterates up to 1440 times per job to avoid pathological inputs).
     /// `At` one-shot jobs that have already passed are silently ignored
     /// (they would have been removed on successful execution anyway).
-    pub fn warn_missed_fires(&self, since: chrono::DateTime<Utc>) {
+    ///
+    /// Distinct from [`Self::warn_missed_fires`] (no-arg), which both
+    /// logs and reschedules overdue jobs for catch-up firing. Both were
+    /// independently introduced as fixes for #3828 in PRs #3906 and
+    /// #3923 and ended up colliding on the same name; this one is the
+    /// since-windowed log-only variant.
+    pub fn log_missed_fires_since(&self, since: chrono::DateTime<Utc>) {
         let now = Utc::now();
         if since >= now {
             return;
@@ -533,12 +548,27 @@ impl CronScheduler {
 
     /// Record a skipped execution for a job (e.g. agent was Suspended).
     ///
-    /// Sets `last_status` to `"skipped"` without touching error counters or
-    /// removing one-shot jobs — the job remains scheduled for its next run.
+    /// Sets `last_status` to `"skipped"` without touching error counters.
+    ///
+    /// For recurring jobs the job remains scheduled at its next_run.
+    /// For one_shot jobs (At schedule, manual one-shot) the only
+    /// scheduled fire has now passed, so the job is removed from the
+    /// scheduler — otherwise compute_next_run_after pre-advances
+    /// next_run to far-future and the job lingers in jobs.json
+    /// forever, surfacing in /api/cron as inert garbage.  Audit of
+    /// #3923 caught this; remove on skip the same way record_success
+    /// does for one_shot.
     pub fn record_skipped(&self, id: CronJobId) {
-        if let Some(mut meta) = self.jobs.get_mut(&id) {
+        let should_remove = if let Some(mut meta) = self.jobs.get_mut(&id) {
             meta.last_status = Some("skipped: agent suspended".to_string());
             debug!(job_id = %id, "Cron job skipped (agent suspended)");
+            meta.one_shot
+        } else {
+            false
+        };
+        if should_remove {
+            self.jobs.remove(&id);
+            debug!(job_id = %id, "Removed one-shot cron job after skip");
         }
     }
 

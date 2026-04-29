@@ -856,6 +856,38 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(agent_id)
     }
 
+    async fn get_agent_group_trigger_patterns(&self, agent_id: AgentId) -> Vec<String> {
+        self.kernel
+            .agent_registry()
+            .get(agent_id)
+            .and_then(|entry| {
+                entry
+                    .manifest
+                    .channel_overrides
+                    .as_ref()
+                    .map(|ov| ov.group_trigger_patterns.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.kernel.memory_substrate().roster().upsert(
+            channel,
+            chat_id,
+            user_id,
+            display_name,
+            username,
+        );
+        Ok(())
+    }
+
     async fn uptime_info(&self) -> String {
         let uptime = self.started_at.elapsed();
         let agents = self.list_agents().await.unwrap_or_default();
@@ -1458,31 +1490,45 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     }
                     match totp_code {
                         Some(code) if ApprovalManager::is_recovery_code_format(code) => {
-                            // Recovery code
-                            match self.kernel.vault_get("totp_recovery_codes") {
-                                Some(stored) => {
-                                    match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                                        &stored,
-                                        code,
-                                    ) {
-                                        Ok((true, updated)) => {
-                                            let _ = self
-                                                .kernel
-                                                .vault_set("totp_recovery_codes", &updated);
-                                            true
-                                        }
-                                        Ok((false, _)) => {
-                                            self.kernel.approvals().record_totp_failure(sender_id);
-                                            return "Invalid recovery code.".into();
-                                        }
-                                        Err(e) => return format!("Recovery code error: {e}"),
+                            // Atomic redeem: read + verify + consume under
+                            // the kernel's recovery-code mutex.  The
+                            // earlier vault_get → verify → vault_set
+                            // triple let two concurrent channel approvals
+                            // both consume the same code (#3560 / #3943),
+                            // because nothing serialised the write.
+                            match self.kernel.vault_redeem_recovery_code(code) {
+                                Ok(true) => true,
+                                Ok(false) => {
+                                    // Fail-secure: if recording the failure
+                                    // hits a wedged audit DB, refuse the
+                                    // attempt rather than handing the
+                                    // attacker unlimited tries.  The HTTP
+                                    // path already does this.
+                                    if self
+                                        .kernel
+                                        .approvals()
+                                        .record_totp_failure(sender_id)
+                                        .is_err()
+                                    {
+                                        return "TOTP service temporarily unavailable.".into();
                                     }
+                                    return "Invalid recovery code.".into();
                                 }
-                                None => return "No recovery codes configured.".into(),
+                                Err(e) => return format!("Recovery code error: {e}"),
                             }
                         }
                         Some(code) => {
-                            // TOTP code
+                            // TOTP code — replay check first (#3952): if a
+                            // captured/screen-shared code was already used
+                            // within the 60s acceptance window, refuse it
+                            // even if the time-window math still validates.
+                            // The HTTP approval path checks this in
+                            // approve_request; the channel-bridge path was
+                            // missed in #3952 and remained vulnerable to
+                            // replay over Telegram / Slack / WhatsApp etc.
+                            if self.kernel.approvals().is_totp_code_used(code) {
+                                return "TOTP code already used. Wait for a new code.".into();
+                            }
                             let secret = match self.kernel.vault_get("totp_secret") {
                                 Some(s) => s,
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
@@ -1493,9 +1539,26 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 code,
                                 &totp_issuer,
                             ) {
-                                Ok(true) => true,
+                                Ok(true) => {
+                                    // Record consumption only after a true
+                                    // verify so a wrong code can still be
+                                    // tried again with the same digits at
+                                    // the next time-step.
+                                    self.kernel.approvals().record_totp_code_used(code);
+                                    true
+                                }
                                 Ok(false) => {
-                                    self.kernel.approvals().record_totp_failure(sender_id);
+                                    // Fail-secure parity with the HTTP path:
+                                    // a wedged audit DB must not silently
+                                    // grant unlimited TOTP attempts.
+                                    if self
+                                        .kernel
+                                        .approvals()
+                                        .record_totp_failure(sender_id)
+                                        .is_err()
+                                    {
+                                        return "TOTP service temporarily unavailable.".into();
+                                    }
                                     return "Invalid TOTP code.".into();
                                 }
                                 Err(e) => return format!("TOTP error: {e}"),
@@ -2331,20 +2394,29 @@ pub async fn start_channel_bridge_with_config(
     #[cfg(feature = "channel-signal")]
     for sig_config in config.signal.iter() {
         if !sig_config.phone_number.is_empty() {
-            let adapter = Arc::new(
-                SignalAdapter::new(
-                    sig_config.api_url.clone(),
-                    sig_config.phone_number.clone(),
-                    sig_config.allowed_users.clone(),
-                )
-                .with_account_id(sig_config.account_id.clone())
-                .with_poll_interval(sig_config.poll_interval_secs),
-            );
-            adapters.push((
-                adapter,
-                sig_config.default_agent.clone(),
-                sig_config.account_id.clone(),
-            ));
+            match SignalAdapter::with_options(
+                sig_config.api_url.clone(),
+                sig_config.phone_number.clone(),
+                sig_config.allowed_users.clone(),
+                sig_config.api_key.clone(),
+                sig_config.allow_local,
+            ) {
+                Ok(signal_adapter) => {
+                    let adapter = Arc::new(
+                        signal_adapter
+                            .with_account_id(sig_config.account_id.clone())
+                            .with_poll_interval(sig_config.poll_interval_secs),
+                    );
+                    adapters.push((
+                        adapter,
+                        sig_config.default_agent.clone(),
+                        sig_config.account_id.clone(),
+                    ));
+                }
+                Err(e) => {
+                    warn!("Signal channel disabled: {e}");
+                }
+            }
         } else {
             warn!("Signal configured but phone_number is empty, skipping");
         }
@@ -2406,6 +2478,39 @@ pub async fn start_channel_bridge_with_config(
             let security_token =
                 read_token(&tm_config.security_token_env, "Teams (security_token)")
                     .unwrap_or_default();
+            // Default-deny: unsigned webhooks let anyone forge Teams activities.
+            // Also reject when the token is present but cannot be base64-decoded
+            // or decodes to empty bytes — TeamsAdapter::new would otherwise
+            // silently fall back to security_token_key=None and skip
+            // signature verification at the webhook handler.
+            if tm_config.signature_required {
+                use base64::Engine;
+                let decoded = if security_token.is_empty() {
+                    Err("missing".to_string())
+                } else {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(security_token.as_bytes())
+                        .map_err(|e| format!("invalid base64: {e}"))
+                        .and_then(|b| {
+                            if b.is_empty() {
+                                Err("decodes to empty key".to_string())
+                            } else {
+                                Ok(b)
+                            }
+                        })
+                };
+                if let Err(reason) = decoded {
+                    tracing::error!(
+                        "Teams adapter for app_id={} refused: signature_required=true \
+                         but security_token_env '{}' is {reason}. Set the env var to a \
+                         valid base64-encoded outgoing-webhook token, or explicitly \
+                         set signature_required=false (NOT recommended).",
+                        tm_config.app_id,
+                        tm_config.security_token_env
+                    );
+                    continue;
+                }
+            }
             let adapter = Arc::new(
                 TeamsAdapter::new(
                     tm_config.app_id.clone(),

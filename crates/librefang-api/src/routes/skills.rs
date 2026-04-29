@@ -4929,6 +4929,12 @@ pub(crate) fn write_secret_env(
             "secret key must not contain newline characters",
         ));
     }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "secret value must not contain newline characters",
+        ));
+    }
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -5968,18 +5974,25 @@ bot_token_env = \"DISCORD_BOT_TOKEN\"
     }
 
     #[test]
-    fn write_secret_env_value_with_newline_stays_single_line() {
+    fn write_secret_env_value_with_newline_is_rejected() {
+        // Implementation tightened to reject newlines in the value rather
+        // than escape them — escape-into-single-line was the old behaviour
+        // (see this test's previous name) but it left a real injection
+        // surface for callers that didn't expect dotenv parsers to honour
+        // backslash sequences.  Now we fail-closed: caller must sanitise
+        // before passing.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("secrets.env");
-        write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        // Must not inject additional key-looking lines.
-        let key_lines: Vec<&str> = content.lines().filter(|l| l.contains('=')).collect();
-        assert_eq!(key_lines.len(), 1, "expected 1 key line, got: {content:?}");
+        let err = write_secret_env(&path, "API_KEY", "val\nwith\nnewlines").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(
-            key_lines[0].starts_with("API_KEY="),
-            "wrong key line: {}",
-            key_lines[0]
+            err.to_string().contains("newline"),
+            "error should mention newlines, got: {err}"
+        );
+        // No file should have been written.
+        assert!(
+            !path.exists(),
+            "secrets.env must not be created on validation error"
         );
     }
 }

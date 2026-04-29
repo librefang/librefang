@@ -577,6 +577,21 @@ impl FeishuAdapter {
                             );
                         }
 
+                        // Verify token on non-challenge events
+                        if let Some(ref expected_token) = *vt {
+                            let actual = payload["token"]
+                                .as_str()
+                                .or_else(|| payload["header"]["token"].as_str())
+                                .unwrap_or("");
+                            if actual != expected_token.as_str() {
+                                warn!("{}: invalid verification token on event", label);
+                                return (
+                                    axum::http::StatusCode::FORBIDDEN,
+                                    axum::Json(serde_json::json!({})),
+                                );
+                            }
+                        }
+
                         // Deduplicate by event_id
                         if is_duplicate_event(&payload, &seen) {
                             debug!("{label}: duplicate event, skipping");

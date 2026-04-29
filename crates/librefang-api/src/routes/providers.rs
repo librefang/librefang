@@ -71,6 +71,7 @@ use crate::types::ApiErrorResponse;
     get,
     path = "/api/models",
     tag = "models",
+    operation_id = "list_all_models",
     responses(
         (status = 200, description = "List available models", body = Vec<serde_json::Value>)
     )
@@ -109,6 +110,10 @@ pub async fn list_models(
     //   - Custom-tier models (user-added via /api/models/custom) always pass
     //     through — they're explicit user intent, not catalog inheritance.
     use std::collections::HashSet;
+    // Index each discovered name both verbatim and with `:latest` stripped so static entries survive whether Ollama returns `llama3.2` or `llama3.2:latest`.
+    fn strip_latest(s: &str) -> &str {
+        s.strip_suffix(":latest").unwrap_or(s)
+    }
     let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
         .list_providers()
         .iter()
@@ -118,11 +123,12 @@ pub async fn list_models(
             if !probe.reachable || probe.discovered_models.is_empty() {
                 return None;
             }
-            let set: HashSet<String> = probe
-                .discovered_models
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect();
+            let mut set: HashSet<String> = HashSet::new();
+            for s in &probe.discovered_models {
+                let lower = s.to_lowercase();
+                set.insert(strip_latest(&lower).to_string());
+                set.insert(lower);
+            }
             Some((p.id.to_lowercase(), set))
         })
         .collect();
@@ -152,7 +158,9 @@ pub async fn list_models(
             // Live-discovered filter for local providers (see comment above).
             if m.tier != librefang_types::model_catalog::ModelTier::Custom {
                 if let Some(live_set) = live_models_per_provider.get(&m.provider.to_lowercase()) {
-                    if !live_set.contains(&m.id.to_lowercase()) {
+                    let lower = m.id.to_lowercase();
+                    let bare = strip_latest(&lower);
+                    if !live_set.contains(&lower) && !live_set.contains(bare) {
                         return false;
                     }
                 }

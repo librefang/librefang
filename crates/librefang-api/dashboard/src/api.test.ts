@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  buildAuthenticatedWebSocketUrl,
+  buildAuthenticatedWebSocket,
   getAgentTools,
   getMetricsText,
   listTools,
@@ -11,7 +11,7 @@ import {
   verifyStoredAuth,
 } from "./api";
 
-class LocalStorageMock {
+class StorageMock {
   private store = new Map<string, string>();
 
   clear() {
@@ -33,11 +33,13 @@ class LocalStorageMock {
 
 describe("dashboard auth helpers", () => {
   const fetchMock = vi.fn();
-  const localStorageMock = new LocalStorageMock();
+  const localStorageMock = new StorageMock();
+  const sessionStorageMock = new StorageMock();
 
   beforeEach(() => {
     fetchMock.mockReset();
     localStorageMock.clear();
+    sessionStorageMock.clear();
 
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
@@ -46,6 +48,10 @@ describe("dashboard auth helpers", () => {
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
       value: localStorageMock,
+    });
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      value: sessionStorageMock,
     });
     Object.defineProperty(globalThis, "navigator", {
       configurable: true,
@@ -66,12 +72,25 @@ describe("dashboard auth helpers", () => {
     vi.restoreAllMocks();
   });
 
-  it("adds the stored token to websocket URLs", () => {
+  it("passes the stored token as a Sec-WebSocket-Protocol bearer sub-protocol", () => {
     setApiKey("secret-token");
 
-    expect(
-      buildAuthenticatedWebSocketUrl("/api/agents/abc/ws"),
-    ).toBe("ws://127.0.0.1:4545/api/agents/abc/ws?token=secret-token");
+    const { url, protocols } = buildAuthenticatedWebSocket("/api/agents/abc/ws");
+    expect(url).toBe("ws://127.0.0.1:4545/api/agents/abc/ws");
+    expect(protocols).toEqual(["bearer.secret-token"]);
+  });
+
+  it("returns empty protocols array when no token is stored", () => {
+    const { url, protocols } = buildAuthenticatedWebSocket("/api/agents/abc/ws");
+    expect(url).toBe("ws://127.0.0.1:4545/api/agents/abc/ws");
+    expect(protocols).toEqual([]);
+  });
+
+  it("stores the token in sessionStorage, not localStorage", () => {
+    setApiKey("secret-token");
+
+    expect(sessionStorageMock.getItem("librefang-api-key")).toBe("secret-token");
+    expect(localStorageMock.getItem("librefang-api-key")).toBeNull();
   });
 
   it("clears stale stored auth when the protected probe returns 401", async () => {
@@ -79,6 +98,7 @@ describe("dashboard auth helpers", () => {
     fetchMock.mockResolvedValue(new Response("", { status: 401 }));
 
     await expect(verifyStoredAuth()).resolves.toBe(false);
+    expect(sessionStorageMock.getItem("librefang-api-key")).toBeNull();
     expect(localStorageMock.getItem("librefang-api-key")).toBeNull();
   });
 

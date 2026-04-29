@@ -131,19 +131,59 @@ pub fn ws_query_param(uri: &Uri, key: &str) -> Option<String> {
 
 /// Extract the auth token from a WebSocket upgrade request.
 ///
-/// SECURITY (#3610): Only `Authorization: Bearer <token>` header is accepted.
-/// The `?token=` query-parameter form has been removed because query strings
-/// appear verbatim in proxy access logs, browser history, and server logs,
-/// leaking the credential. Clients must use the `Authorization` header during
-/// the HTTP upgrade handshake (before the WebSocket connection is established).
+/// SECURITY (#3610, #3963): Accepts EITHER:
+///   1. `Authorization: Bearer <token>` header (non-browser clients), OR
+///   2. `Sec-WebSocket-Protocol: bearer.<token>` sub-protocol (browser clients;
+///      browsers cannot set custom headers on the WS upgrade request).
+///
+/// The `?token=` query-parameter form was removed in #3610 because query
+/// strings appear verbatim in proxy access logs, browser history, and Referer
+/// headers, leaking the credential.
 ///
 /// The `uri` parameter is kept for API compatibility but is no longer consulted.
 pub fn ws_auth_token(headers: &HeaderMap, _uri: &Uri) -> Option<String> {
-    headers
+    if let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(ToOwned::to_owned)
+    {
+        return Some(token);
+    }
+
+    // Sec-WebSocket-Protocol trick (#3963): the dashboard sends
+    // `bearer.<token>` as a sub-protocol so the token never appears in URLs,
+    // proxy logs, browser history, or Referer headers. Handlers using this
+    // path MUST also call `ws_bearer_protocol` and pass the result to
+    // `WebSocketUpgrade::protocols(...)` so the server echoes the protocol
+    // back; browsers reject the handshake otherwise.
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(',')
+                .map(str::trim)
+                .find(|p| p.starts_with("bearer."))
+                .and_then(|p| p.strip_prefix("bearer."))
+                .map(ToOwned::to_owned)
+        })
+}
+
+/// If the client requested a `bearer.<token>` sub-protocol, return the exact
+/// protocol string (with `bearer.` prefix) so the WebSocket upgrade response
+/// can echo it back via `WebSocketUpgrade::protocols(...)`. Browsers REJECT
+/// WebSocket handshakes whose response does not echo at least one of the
+/// requested sub-protocols.
+pub fn ws_bearer_protocol(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(',')
+                .map(str::trim)
+                .find(|p| p.starts_with("bearer."))
+                .map(ToOwned::to_owned)
+        })
 }
 
 /// Validates the WebSocket `Origin` header against allowed origins.
@@ -468,10 +508,17 @@ pub async fn agent_ws(
     };
 
     let id_str = id.clone();
-    ws.on_upgrade(move |socket| {
-        handle_agent_ws(socket, state, agent_id, id_str, ip, guard, explicit_session)
-    })
-    .into_response()
+    // #3963: If the client authenticated via the `bearer.<token>` sub-protocol,
+    // we MUST echo it back; browsers reject the handshake otherwise.
+    let upgrade = match ws_bearer_protocol(&headers) {
+        Some(proto) => ws.protocols([proto]),
+        None => ws,
+    };
+    upgrade
+        .on_upgrade(move |socket| {
+            handle_agent_ws(socket, state, agent_id, id_str, ip, guard, explicit_session)
+        })
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

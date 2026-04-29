@@ -454,6 +454,10 @@ pub async fn agent_budget_status(
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
+///
+/// Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to
+/// eliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal
+/// dashboard polling at 100 agents. See #3684.
 #[utoipa::path(
     get,
     path = "/api/budget/agents",
@@ -465,13 +469,20 @@ pub async fn agent_budget_status(
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store =
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .agent_registry()
-        .list()
+
+    // Fetch all per-agent daily costs in a single GROUP BY query, then build a
+    // lookup map so the registry join below is O(n) not O(n²).
+    let daily_costs: std::collections::HashMap<_, _> = usage_store
+        .query_all_agents_daily()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let registry_entries = state.kernel.agent_registry().list();
+    let agents: Vec<serde_json::Value> = registry_entries
         .iter()
         .filter_map(|entry| {
-            let daily = usage_store.query_daily(entry.id).unwrap_or(0.0);
+            let daily = *daily_costs.get(&entry.id).unwrap_or(&0.0);
             if daily > 0.0 {
                 Some(serde_json::json!({
                     "agent_id": entry.id.to_string(),

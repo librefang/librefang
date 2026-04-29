@@ -4,6 +4,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use librefang_types::agent::{AgentEntry, AgentId, AgentMode, AgentState};
 use librefang_types::error::{LibreFangError, LibreFangResult};
+use std::sync::Arc;
 
 /// Registry of all agents in the kernel.
 pub struct AgentRegistry {
@@ -119,6 +120,41 @@ impl AgentRegistry {
     pub fn list(&self) -> Vec<AgentEntry> {
         let mut entries: Vec<AgentEntry> = self.agents.iter().map(|e| e.value().clone()).collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// List all agents as `Arc<AgentEntry>`, sorted by name.
+    ///
+    /// Prefer this over `list()` in hot paths (e.g. per-LLM-turn prompt
+    /// construction) where the returned entries are read-only. Callers share
+    /// ownership of the `Arc` without deep-cloning the underlying struct; only
+    /// one `AgentEntry::clone()` per entry happens here to create the `Arc`.
+    /// See #3685.
+    pub fn list_arcs(&self) -> Vec<Arc<AgentEntry>> {
+        let mut entries: Vec<Arc<AgentEntry>> = self
+            .agents
+            .iter()
+            .map(|e| Arc::new(e.value().clone()))
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// Projects `(name, state_debug, model)` per agent, sorted by name for prompt-cache stability.
+    pub fn peer_agents_summary(&self) -> Vec<(String, String, String)> {
+        let mut entries: Vec<(String, String, String)> = self
+            .agents
+            .iter()
+            .map(|e| {
+                let v = e.value();
+                (
+                    v.name.clone(),
+                    format!("{:?}", v.state),
+                    v.manifest.model.model.clone(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
         entries
     }
 
@@ -656,6 +692,23 @@ mod tests {
 
         let names: Vec<String> = registry.list().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn test_peer_agents_summary_is_sorted_and_projects_three_fields() {
+        let registry = AgentRegistry::new();
+        registry.register(test_entry("zeta")).unwrap();
+        registry.register(test_entry("alpha")).unwrap();
+        registry.register(test_entry("mu")).unwrap();
+
+        let summary = registry.peer_agents_summary();
+        let names: Vec<&str> = summary.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
+        for (name, state_debug, model) in &summary {
+            assert!(!name.is_empty());
+            assert!(!state_debug.is_empty());
+            assert!(!model.is_empty());
+        }
     }
 
     #[test]

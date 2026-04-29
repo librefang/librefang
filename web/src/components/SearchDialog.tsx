@@ -220,7 +220,7 @@ export default function SearchDialog({ open, onClose }: SearchDialogProps) {
     const path = raw.replace(/^https?:\/\/[^/]+/i, '').replace(/^\/+/, '').replace(/[?#].*$/, '')
     const segs = path.split('/').filter(Boolean)
     // Tolerate a leading lang prefix (zh/ja/...) when present.
-    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es'])
+    const langs = new Set(['zh', 'zh-TW', 'ja', 'ko', 'de', 'es', 'pl'])
     const [first, ...rest] = segs
     const parts = first && langs.has(first) ? rest : segs
     if (parts.length >= 2 && CATEGORIES.includes(parts[0] as RegistryCategory)) {

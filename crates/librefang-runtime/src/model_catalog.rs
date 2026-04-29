@@ -7,7 +7,7 @@ use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier,
     ProviderInfo,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::warn;
 
 /// The model catalog — registry of all known models and providers.
@@ -56,6 +56,36 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
         || lower.contains("marco-o1");
 
     (supports_vision, true, supports_thinking)
+}
+
+/// Resolve capabilities from the explicit Ollama ≥0.7 `capabilities` array, falling back to name heuristics when empty.
+fn resolve_discovered_capabilities(
+    name: &str,
+    families: Option<&[String]>,
+    capabilities: &[String],
+) -> (bool, bool, bool) {
+    if capabilities.is_empty() {
+        return infer_capabilities(name, families);
+    }
+    let is_embedding = capabilities
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("embedding"));
+    if is_embedding {
+        return (false, false, false);
+    }
+    let has_vision = capabilities
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("vision"));
+    let has_thinking = capabilities
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("thinking"));
+    // `tools`/`completion` is the default for any non-embedding chat model.
+    // Ollama ≥0.7 emits an explicit `tools` capability for tool-aware models;
+    // older daemons just emit `completion`. We treat any non-embedding model
+    // as tool-capable to preserve the prior behaviour (`!is_embedding`) and
+    // because most modern chat models expose tool calls via the OpenAI shape.
+    let supports_tools = true;
+    (has_vision, supports_tools, has_thinking)
 }
 
 #[cfg(test)]
@@ -708,7 +738,7 @@ impl ModelCatalog {
     /// Unknown providers are automatically added as custom OpenAI-compatible entries.
     /// Providers with explicit URL overrides are marked as configured since
     /// the user intentionally set them up (e.g. local proxies, custom endpoints).
-    pub fn apply_url_overrides(&mut self, overrides: &HashMap<String, String>) {
+    pub fn apply_url_overrides(&mut self, overrides: &BTreeMap<String, String>) {
         for (provider, url) in overrides {
             if self.set_provider_url(provider, url) {
                 // Mark as configured so models from this provider show as available
@@ -733,7 +763,7 @@ impl ModelCatalog {
     }
 
     /// Apply a batch of per-provider proxy URL overrides from config.
-    pub fn apply_proxy_url_overrides(&mut self, overrides: &HashMap<String, String>) {
+    pub fn apply_proxy_url_overrides(&mut self, overrides: &BTreeMap<String, String>) {
         for (provider, proxy_url) in overrides {
             self.set_provider_proxy_url(provider, proxy_url);
         }
@@ -748,9 +778,9 @@ impl ModelCatalog {
     /// Entries where the provider or region is not found are skipped with a warning.
     pub fn resolve_region_urls(
         &self,
-        region_selections: &HashMap<String, String>,
-    ) -> HashMap<String, String> {
-        let mut resolved = HashMap::new();
+        region_selections: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut resolved = BTreeMap::new();
         for (provider_id, region_name) in region_selections {
             if let Some(provider) = self.get_provider(provider_id) {
                 if let Some(region_cfg) = provider.regions.get(region_name) {
@@ -784,9 +814,9 @@ impl ModelCatalog {
     /// [`KernelConfig::resolve_api_key_env`] picks up region-specific env vars.
     pub fn resolve_region_api_keys(
         &self,
-        region_selections: &HashMap<String, String>,
-    ) -> HashMap<String, String> {
-        let mut resolved = HashMap::new();
+        region_selections: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut resolved = BTreeMap::new();
         for (provider_id, region_name) in region_selections {
             if let Some(provider) = self.get_provider(provider_id) {
                 if let Some(region_cfg) = provider.regions.get(region_name) {
@@ -828,30 +858,63 @@ impl ModelCatalog {
         provider: &str,
         model_info: &[crate::provider_health::DiscoveredModelInfo],
     ) {
-        let existing_ids: std::collections::HashSet<String> = self
-            .models
-            .iter()
-            .filter(|m| m.provider == provider)
-            .map(|m| m.id.to_lowercase())
-            .collect();
+        // Index existing entries for this provider by lowercase ID so we can
+        // both skip duplicates and selectively upgrade Local-tier entries
+        // whose capability flags were inferred from a stale signal (e.g.
+        // a previous probe before the user upgraded to Ollama ≥0.7, or a
+        // first probe that lacked the explicit `capabilities` array).
+        let mut existing_local: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut existing_non_local: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for (idx, m) in self.models.iter().enumerate() {
+            if m.provider != provider {
+                continue;
+            }
+            let key = m.id.to_lowercase();
+            if m.tier == ModelTier::Local {
+                existing_local.insert(key, idx);
+            } else {
+                existing_non_local.insert(key);
+            }
+        }
 
         let mut added = 0usize;
         for info in model_info {
-            if existing_ids.contains(&info.name.to_lowercase()) {
+            let key = info.name.to_lowercase();
+            // A registry-shipped (non-Local) entry already covers this ID —
+            // its curated metadata (pricing, context window, tested caps)
+            // takes precedence over what a local probe reports.
+            if existing_non_local.contains(&key) {
                 continue;
             }
-            // Use capabilities from probe when available (Ollama ≥0.7 native or
-            // heuristic fallback). Fall back to local name/families heuristics.
             let (supports_vision, supports_tools, supports_thinking) =
-                if !info.capabilities.is_empty() {
-                    let is_embedding = info.capabilities.iter().any(|c| c == "embedding");
-                    let has_vision = info.capabilities.iter().any(|c| c == "vision");
-                    let (_, _, supports_thinking) =
-                        infer_capabilities(&info.name, info.families.as_deref());
-                    (has_vision, !is_embedding, supports_thinking)
-                } else {
-                    infer_capabilities(&info.name, info.families.as_deref())
-                };
+                resolve_discovered_capabilities(
+                    &info.name,
+                    info.families.as_deref(),
+                    &info.capabilities,
+                );
+            // Upgrade the previously-discovered Local entry in place when the
+            // current probe reports stronger capabilities. We never downgrade:
+            // a transient probe that drops the `capabilities` array (e.g. an
+            // older proxy in front of an upgraded Ollama) must not flip a
+            // vision-capable model back to non-vision.
+            if let Some(&idx) = existing_local.get(&key) {
+                let entry = &mut self.models[idx];
+                if supports_vision {
+                    entry.supports_vision = true;
+                }
+                if supports_thinking {
+                    entry.supports_thinking = true;
+                }
+                if supports_tools {
+                    entry.supports_tools = true;
+                    if !entry.supports_streaming {
+                        entry.supports_streaming = true;
+                    }
+                }
+                continue;
+            }
             let display = format!("{} ({})", info.name, provider);
             self.models.push(ModelCatalogEntry {
                 id: info.name.clone(),
@@ -1772,6 +1835,130 @@ id = "acme"
         assert!(!llama.supports_thinking);
     }
 
+    /// Regression #4034: explicit `thinking`/`vision` capabilities from Ollama ≥0.7 must propagate for HF-imported models with opaque names.
+    #[test]
+    fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
+        let mut catalog = test_catalog();
+        let models = vec![DiscoveredModelInfo {
+            name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+            families: Some(vec!["gemma".to_string()]),
+            family: Some("gemma".to_string()),
+            parameter_size: None,
+            quantization_level: None,
+            size: None,
+            capabilities: vec![
+                "completion".to_string(),
+                "vision".to_string(),
+                "thinking".to_string(),
+                "tools".to_string(),
+            ],
+        }];
+        catalog.merge_discovered_models("ollama", &models);
+
+        let entry = catalog
+            .find_model("Gemma-4-26B-A4B-it-GGUF:latest")
+            .expect("HF-imported model must be added");
+        assert!(
+            entry.supports_vision,
+            "explicit `vision` capability must propagate"
+        );
+        assert!(
+            entry.supports_thinking,
+            "explicit `thinking` capability must propagate (pre-fix this was dropped)"
+        );
+        assert!(entry.supports_tools);
+    }
+
+    /// Regression #4034 part 2: a re-probe with explicit capabilities must upgrade an existing Local-tier entry in place (handles Ollama <0.7 → ≥0.7 upgrades).
+    #[test]
+    fn test_merge_upgrades_existing_local_entry_capabilities() {
+        let mut catalog = test_catalog();
+
+        // First probe: no explicit capabilities, plain chat model.
+        catalog.merge_discovered_models(
+            "ollama",
+            &[DiscoveredModelInfo {
+                name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            }],
+        );
+        let pre = catalog
+            .find_model("Gemma-4-26B-A4B-it-GGUF:latest")
+            .unwrap();
+        assert!(!pre.supports_vision);
+        assert!(!pre.supports_thinking);
+
+        // Second probe: now carries explicit capabilities.
+        catalog.merge_discovered_models(
+            "ollama",
+            &[DiscoveredModelInfo {
+                name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![
+                    "vision".to_string(),
+                    "thinking".to_string(),
+                    "tools".to_string(),
+                ],
+            }],
+        );
+        let post = catalog
+            .find_model("Gemma-4-26B-A4B-it-GGUF:latest")
+            .unwrap();
+        assert!(
+            post.supports_vision,
+            "second probe must upgrade vision flag"
+        );
+        assert!(
+            post.supports_thinking,
+            "second probe must upgrade thinking flag"
+        );
+        assert!(post.supports_tools);
+    }
+
+    /// Capability upgrades are monotonic — a transient probe with empty capabilities must not downgrade previously-detected vision/thinking flags.
+    #[test]
+    fn test_merge_never_downgrades_capabilities() {
+        let mut catalog = test_catalog();
+        catalog.merge_discovered_models(
+            "ollama",
+            &[DiscoveredModelInfo {
+                name: "vlm-model:latest".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec!["vision".to_string(), "thinking".to_string()],
+            }],
+        );
+        // Re-probe with empty capabilities — must NOT clear the previously
+        // detected `vision`/`thinking` flags.
+        catalog.merge_discovered_models(
+            "ollama",
+            &[DiscoveredModelInfo {
+                name: "vlm-model:latest".to_string(),
+                families: None,
+                family: None,
+                parameter_size: None,
+                quantization_level: None,
+                size: None,
+                capabilities: vec![],
+            }],
+        );
+        let entry = catalog.find_model("vlm-model:latest").unwrap();
+        assert!(entry.supports_vision, "must not downgrade vision");
+        assert!(entry.supports_thinking, "must not downgrade thinking");
+    }
+
     #[test]
     fn test_custom_model_keeps_assigned_provider() {
         let mut catalog = test_catalog();
@@ -2018,7 +2205,7 @@ id = "acme"
     #[test]
     fn test_apply_url_overrides() {
         let mut catalog = test_catalog();
-        let mut overrides = HashMap::new();
+        let mut overrides = BTreeMap::new();
         overrides.insert("ollama".to_string(), "http://10.0.0.5:11434/v1".to_string());
         overrides.insert("vllm".to_string(), "http://10.0.0.6:8000/v1".to_string());
         overrides.insert("nonexistent".to_string(), "http://nowhere".to_string());
@@ -2102,7 +2289,7 @@ supports_streaming = false
         let catalog = region_test_catalog();
 
         // Known provider + known region -> URL resolved
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("test-provider".to_string(), "us".to_string());
         let urls = catalog.resolve_region_urls(&sel);
         assert_eq!(
@@ -2131,7 +2318,7 @@ supports_streaming = false
         let catalog = region_test_catalog();
 
         // Region with api_key_env -> returned
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("test-provider".to_string(), "cn".to_string());
         let keys = catalog.resolve_region_api_keys(&sel);
         assert_eq!(
@@ -2155,7 +2342,7 @@ supports_streaming = false
     #[test]
     fn test_resolve_region_unknown_provider() {
         let catalog = region_test_catalog();
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("nonexistent".to_string(), "us".to_string());
         let urls = catalog.resolve_region_urls(&sel);
         assert!(urls.is_empty());

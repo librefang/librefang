@@ -7,6 +7,7 @@ use crate::chunker;
 use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
 use crate::migration::run_migrations;
+use crate::roster_store::RosterStore;
 use crate::semantic::SemanticStore;
 use crate::session::{Session, SessionStore};
 use crate::structured::StructuredStore;
@@ -35,6 +36,7 @@ pub struct MemorySubstrate {
     sessions: SessionStore,
     consolidation: ConsolidationEngine,
     usage: UsageStore,
+    roster: RosterStore,
     chunk_config: ChunkConfig,
 }
 
@@ -55,7 +57,9 @@ impl MemorySubstrate {
             "PRAGMA journal_mode=WAL; \
              PRAGMA busy_timeout=5000; \
              PRAGMA cache_size=-2000; \
-             PRAGMA mmap_size=0;",
+             PRAGMA mmap_size=0; \
+             PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -68,6 +72,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
@@ -85,6 +90,11 @@ impl MemorySubstrate {
     ) -> LibreFangResult<Self> {
         let conn =
             Connection::open_in_memory().map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; \
+             PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 
@@ -95,6 +105,7 @@ impl MemorySubstrate {
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
+            roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
             chunk_config,
         })
@@ -108,6 +119,11 @@ impl MemorySubstrate {
     /// Get a reference to the knowledge graph store.
     pub fn knowledge(&self) -> &KnowledgeStore {
         &self.knowledge
+    }
+
+    /// Get a reference to the group roster store.
+    pub fn roster(&self) -> &RosterStore {
+        &self.roster
     }
 
     /// Attach an external vector store backend to the semantic store.
@@ -145,6 +161,13 @@ impl MemorySubstrate {
         config: &librefang_types::config::MemoryDecayConfig,
     ) -> LibreFangResult<usize> {
         crate::decay::run_decay(&self.conn, config)
+    }
+
+    /// Hard-delete soft-deleted memories whose `deleted_at` is older than
+    /// `older_than_days` days. Reclaims embedding BLOBs that would otherwise
+    /// stay forever in soft-deleted rows (#3467).
+    pub fn prune_soft_deleted_memories(&self, older_than_days: u64) -> LibreFangResult<usize> {
+        crate::decay::prune_soft_deleted_memories(&self.conn, older_than_days)
     }
 
     /// Save an agent entry to persistent storage.
@@ -811,11 +834,14 @@ impl MemorySubstrate {
         let result = result.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let now = chrono::Utc::now().to_rfc3339();
+            let now_chrono = chrono::Utc::now();
+            let now = now_chrono.to_rfc3339();
+            let now_unix = now_chrono.timestamp();
             let db = conn.lock().map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            // `finished_at` is the unix-epoch column the retention sweep reads (#3466).
             let rows = db.execute(
-                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, claimed_at = NULL WHERE id = ?1",
-                rusqlite::params![task_id, result, now],
+                "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1",
+                rusqlite::params![task_id, result, now, now_unix],
             ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
             if rows == 0 {
                 return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
@@ -861,7 +887,8 @@ impl MemorySubstrate {
             let rows = db
                 .execute(
                     "UPDATE task_queue \
-                     SET status = 'pending', result = NULL, completed_at = NULL, claimed_at = NULL \
+                     SET status = 'pending', result = NULL, completed_at = NULL, \
+                         finished_at = NULL, claimed_at = NULL \
                      WHERE id = ?1 AND status IN ('completed', 'failed')",
                     rusqlite::params![task_id],
                 )
@@ -968,12 +995,14 @@ impl MemorySubstrate {
             for (id, retries) in &stuck {
                 let exhausted = max_retries > 0 && *retries >= max_retries;
                 if exhausted {
+                    let now_unix = chrono::Utc::now().timestamp();
                     db.execute(
                         "UPDATE task_queue \
                          SET status = 'failed', assigned_to = '', claimed_at = NULL, \
+                             finished_at = ?2, \
                              retry_count = retry_count + 1 \
                          WHERE id = ?1 AND status = 'in_progress'",
-                        rusqlite::params![id],
+                        rusqlite::params![id, now_unix],
                     )
                     .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                 } else {
@@ -1056,18 +1085,29 @@ impl MemorySubstrate {
             let db = conn
                 .lock()
                 .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let now_unix = chrono::Utc::now().timestamp();
             let rows = match new_status.as_str() {
+                // Reset to pending: clear `finished_at` so a previous
+                // `failed` stamp (line 985) doesn't make the row look
+                // immediately prune-eligible if it later fails again
+                // before the timestamp is refreshed (#3466).
                 "pending" => db.execute(
                     "UPDATE task_queue \
-                     SET status = 'pending', claimed_at = NULL, assigned_to = '' \
+                     SET status = 'pending', claimed_at = NULL, assigned_to = '', \
+                         finished_at = NULL \
                      WHERE id = ?1 AND status IN ('in_progress', 'failed')",
                     rusqlite::params![task_id],
                 ),
+                // Cancellation is a terminal transition like complete/fail,
+                // so it MUST stamp `finished_at` — otherwise the retention
+                // sweep's `finished_at IS NOT NULL` filter excludes
+                // cancelled rows forever and `task_queue` grows unbounded
+                // for any agent that uses cancel (#3466).
                 "cancelled" => db.execute(
                     "UPDATE task_queue \
-                     SET status = 'cancelled' \
+                     SET status = 'cancelled', finished_at = ?2 \
                      WHERE id = ?1 AND status NOT IN ('completed', 'cancelled')",
-                    rusqlite::params![task_id],
+                    rusqlite::params![task_id, now_unix],
                 ),
                 _ => {
                     return Err(LibreFangError::InvalidInput(format!(
@@ -1077,6 +1117,40 @@ impl MemorySubstrate {
             }
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
             Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Hard-delete `completed` / `failed` / `cancelled` rows whose
+    /// `finished_at` is older than `older_than_days` days. Bounds the
+    /// growth of `task_queue` so the queue table doesn't accumulate
+    /// every job since the daemon was first installed (#3466).
+    ///
+    /// Rows with `finished_at IS NULL` (legacy completions written
+    /// before migration v29) are ignored — they'll be picked up the
+    /// next time their status changes, or operators can backfill with
+    /// `UPDATE task_queue SET finished_at = strftime('%s','now') WHERE
+    /// status IN ('completed','failed','cancelled') AND finished_at IS NULL`.
+    pub async fn task_prune_finished(&self, older_than_days: u64) -> LibreFangResult<usize> {
+        if older_than_days == 0 {
+            return Ok(0);
+        }
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let cutoff = chrono::Utc::now().timestamp() - (older_than_days as i64) * 86_400;
+            let rows = db
+                .execute(
+                    "DELETE FROM task_queue \
+                     WHERE status IN ('completed', 'failed', 'cancelled') \
+                       AND finished_at IS NOT NULL AND finished_at < ?1",
+                    rusqlite::params![cutoff],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -1523,5 +1597,167 @@ mod tests {
         // With chunking disabled, should store as one entry.
         let results = substrate.recall("fox", 20, None).await.unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    /// `task_complete` must stamp `finished_at` so the retention sweep can
+    /// hard-delete the row later (#3466).
+    #[tokio::test]
+    async fn test_task_complete_stamps_finished_at() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+        let _ = substrate
+            .task_claim("worker", Some("worker"))
+            .await
+            .unwrap();
+        substrate.task_complete(&task_id, "ok").await.unwrap();
+
+        let conn = substrate.conn.lock().unwrap();
+        let finished_at: Option<i64> = conn
+            .query_row(
+                "SELECT finished_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            finished_at.is_some(),
+            "task_complete must stamp finished_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_prune_finished_respects_age_and_status() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let now_unix = chrono::Utc::now().timestamp();
+        let old_unix = now_unix - 30 * 86_400; // 30 days ago
+        let recent_unix = now_unix - 86_400; // 1 day ago
+
+        // Insert directly to control finished_at precisely.
+        {
+            let conn = substrate.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at, completed_at, finished_at) \
+                 VALUES ('old-done', 'a', 't', x'00', 'completed', ?1, ?1, ?2)",
+                rusqlite::params![chrono::Utc::now().to_rfc3339(), old_unix],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at, completed_at, finished_at) \
+                 VALUES ('old-failed', 'a', 't', x'00', 'failed', ?1, NULL, ?2)",
+                rusqlite::params![chrono::Utc::now().to_rfc3339(), old_unix],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at, completed_at, finished_at) \
+                 VALUES ('recent-done', 'a', 't', x'00', 'completed', ?1, ?1, ?2)",
+                rusqlite::params![chrono::Utc::now().to_rfc3339(), recent_unix],
+            )
+            .unwrap();
+            // Pending row must NEVER be pruned regardless of age.
+            conn.execute(
+                "INSERT INTO task_queue (id, agent_id, task_type, payload, status, created_at) \
+                 VALUES ('pending-old', 'a', 't', x'00', 'pending', ?1)",
+                rusqlite::params![chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        let pruned = substrate.task_prune_finished(7).await.unwrap();
+        assert_eq!(pruned, 2, "the two 30-day-old terminal rows should go");
+
+        let conn = substrate.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM task_queue", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "recent-done + pending-old remain");
+    }
+
+    #[tokio::test]
+    async fn test_task_prune_finished_zero_disabled() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let pruned = substrate.task_prune_finished(0).await.unwrap();
+        assert_eq!(pruned, 0);
+    }
+
+    /// `task_update_status("cancelled")` must stamp `finished_at`,
+    /// otherwise cancelled rows are excluded from the retention sweep
+    /// forever (sweep filters by `finished_at IS NOT NULL`) and the
+    /// queue table grows unbounded for any agent that uses cancel
+    /// (#3466).
+    #[tokio::test]
+    async fn test_task_cancel_stamps_finished_at() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+
+        let changed = substrate
+            .task_update_status(&task_id, "cancelled")
+            .await
+            .unwrap();
+        assert!(changed, "cancellation of a pending task must update");
+
+        let conn = substrate.conn.lock().unwrap();
+        let (status, finished_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finished_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "cancelled");
+        assert!(
+            finished_at.is_some(),
+            "task_update_status('cancelled') must stamp finished_at so the \
+             retention sweep can hard-delete the row later"
+        );
+    }
+
+    /// Reset-to-pending must clear `finished_at`. Otherwise a row that
+    /// was failed once and reset would carry a stale `finished_at`, and
+    /// the next failure could leave it eligible for prune sooner than
+    /// the configured retention window if the new fail path's stamp
+    /// got skipped for any reason.
+    #[tokio::test]
+    async fn test_task_reset_to_pending_clears_finished_at() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let task_id = substrate
+            .task_post("t", "d", Some("worker"), None)
+            .await
+            .unwrap();
+
+        // Force a `failed` row with a stale `finished_at` directly.
+        {
+            let conn = substrate.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE task_queue SET status = 'failed', finished_at = ?2 WHERE id = ?1",
+                rusqlite::params![&task_id, chrono::Utc::now().timestamp() - 86_400],
+            )
+            .unwrap();
+        }
+
+        let changed = substrate
+            .task_update_status(&task_id, "pending")
+            .await
+            .unwrap();
+        assert!(changed);
+
+        let conn = substrate.conn.lock().unwrap();
+        let (status, finished_at): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT status, finished_at FROM task_queue WHERE id = ?1",
+                rusqlite::params![&task_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert!(
+            finished_at.is_none(),
+            "reset to pending must clear finished_at"
+        );
     }
 }

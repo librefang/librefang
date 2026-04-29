@@ -16,7 +16,7 @@ use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use librefang_telemetry::metrics;
 
@@ -162,17 +162,22 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
 }
 
 /// Pull a caller-provided token from the standard locations the auth path
-/// understands: `Authorization: Bearer <x>` or `X-API-Key: <x>`. Bearer wins
-/// over X-API-Key — same precedence as the non-loopback flow at
-/// `auth(...)` line ~528. Returns `None` if no shape is present.
+/// understands. Precedence (matches the non-loopback flow at `auth(...)`):
+///   1. `Authorization: Bearer <x>`
+///   2. `X-API-Key: <x>`
+///   3. `Sec-WebSocket-Protocol: bearer.<x>` — WS upgrade fallback.
+///      Browsers cannot set custom headers on the WebSocket handshake, so
+///      the dashboard encodes the token as a sub-protocol entry that starts
+///      with `bearer.`. Without this branch the auth middleware (which runs
+///      before any WS handler) would 401-storm every dashboard ws (terminal,
+///      chat, agent stream). The matching ws handler echoes the protocol
+///      back via `WebSocketUpgrade::protocols(...)` so the browser accepts
+///      the handshake — see `ws::ws_bearer_protocol`.
 ///
-/// SECURITY: `?token=` query-string auth is intentionally NOT supported here.
+/// SECURITY: `?token=` query-string auth is intentionally NOT supported.
 /// Query parameters appear in server access logs, browser history, and HTTP
 /// Referer headers forwarded to third parties, making them unsuitable for
-/// carrying credentials on regular HTTP routes. WebSocket upgrades are the
-/// sole exception — browsers cannot set custom headers on WebSocket
-/// connections — and they handle `?token=` in `crate::ws::ws_auth_token`
-/// rather than going through this middleware path.
+/// carrying credentials.
 fn extract_request_token(request: &Request<Body>) -> Option<String> {
     let bearer = request
         .headers()
@@ -183,11 +188,27 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
     if bearer.is_some() {
         return bearer;
     }
-    request
+    if let Some(key) = request
         .headers()
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    {
+        return Some(key.to_string());
+    }
+    // WebSocket upgrade: sub-protocol entry of the form `bearer.<token>`.
+    // Multiple sub-protocols may be comma-separated; pick the first that
+    // starts with `bearer.`.
+    request
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(',')
+                .map(str::trim)
+                .find(|p| p.starts_with("bearer."))
+                .and_then(|p| p.strip_prefix("bearer."))
+                .map(str::to_string)
+        })
 }
 
 /// Request ID header name (standard).
@@ -238,8 +259,26 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    // GET 2xx — routine polling, keep out of INFO to reduce noise
-    if method == axum::http::Method::GET && status < 300 {
+    // 4xx/5xx elevated so auth storms and server faults surface; GET successes suppressed to avoid poll noise.
+    if status >= 500 {
+        error!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    } else if status >= 400 {
+        warn!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    } else if method == axum::http::Method::GET {
         debug!(
             request_id = %request_id,
             method = %method,
@@ -572,7 +611,8 @@ pub async fn auth(
             // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
             // task transcripts — require authentication (Bug #3781).
             || path == "/a2a/agents"
-            || path.starts_with("/api/uploads/")
+            // /api/uploads/* is intentionally NOT in the public list — uploads
+            // require authentication, UUID guessing is not access control (#3361).
             || path.starts_with("/api/auth/login")
             // UAR discovery endpoints — unauthenticated so external clients can enumerate
             || path.starts_with("/api/uar/discovery/"));
@@ -597,7 +637,10 @@ pub async fn auth(
             | "/api/budget/agents"
             | "/api/network/status"
             | "/api/a2a/agents"
-            | "/api/approvals"
+            // /api/approvals removed — list_approvals returns the same
+            // action_summary (pending shell command) the prefix carve
+            // protects against.  See the matching change to
+            // dashboard_read_prefix below.
             | "/api/channels"
             | "/api/hands"
             | "/api/hands/active"
@@ -609,8 +652,17 @@ pub async fn auth(
             | "/api/workflows"
             | "/api/auto-dream/status"
     );
+    // SECURITY #3367 + post-merge audit of #3941: every read path under
+    // /api/approvals/* exposes the same `action_summary` field (the
+    // pending shell command and arguments) — it is reachable through
+    // GET /approvals (list), GET /approvals/{id}, GET /approvals/audit,
+    // and the previously-carved /approvals/session/* tree.  #3941 only
+    // gated /api/approvals/session/, leaving the same payload
+    // unauthenticated through the sister endpoints.  Drop the prefix
+    // from the public allowlist entirely so the auth gate covers every
+    // approvals route; the dashboard already attaches credentials on
+    // every request via its api helper, so this is not a UX regression.
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
-        || path.starts_with("/api/approvals/")
         || path.starts_with("/api/hands/")
         || path.starts_with("/api/cron/");
     // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
@@ -2061,5 +2113,150 @@ mod tests {
             StatusCode::OK,
             "valid bearer token must allow access to /a2a/tasks/{{id}}"
         );
+    }
+
+    // ---- Bug #3680: GET /api/logs/stream must require auth even when
+    // ---- require_auth_for_reads = false -------------------------------
+    //
+    // Before #3909 the SSE endpoint was unconditionally appended to
+    // `dashboard_read_public` (`|| path == "/api/logs/stream"`) so any
+    // operator who explicitly set `require_auth_for_reads = false` (the
+    // documented escape hatch for an external auth proxy) lost auth on
+    // the log stream. The stream emits real-time tracing fields that can
+    // contain prompts, OAuth callback codes, MCP stderr, and bearer
+    // prefixes — a continuous credential leak. The fix removed the
+    // path from every public allowlist; this test locks that contract
+    // so a future refactor cannot silently re-introduce it.
+
+    /// GET /api/logs/stream must return 401 when `require_auth_for_reads`
+    /// is OFF — the SSE log stream is sensitive enough that the
+    /// "loosen reads" escape hatch must NOT apply to it.
+    #[tokio::test]
+    async fn logs_stream_requires_auth_even_when_reads_are_loosened() {
+        // Reproduce the deployment posture that exposed the bug:
+        // an api_key is configured, but the operator has opted out of
+        // auth-gating dashboard reads (e.g. fronting with an external
+        // auth proxy). /api/logs/stream MUST still require auth.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/logs/stream", get(|| async { "sse stream" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        // Simulate a remote (non-loopback) caller so the loopback
+        // short-circuit cannot mask the bug.
+        let addr: std::net::SocketAddr = "203.0.113.5:53000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/api/logs/stream")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /api/logs/stream must require auth — SSE leaks tracing \
+             fields with prompts, OAuth codes, and bearer prefixes"
+        );
+    }
+
+    /// Sanity check: /api/logs/stream with a valid bearer DOES go through.
+    /// Without this counter-test the regression test above could pass by
+    /// accident (e.g. if the route were globally blocked).
+    #[tokio::test]
+    async fn logs_stream_allows_authenticated_caller() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/logs/stream", get(|| async { "sse stream" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let addr: std::net::SocketAddr = "203.0.113.5:53000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/api/logs/stream")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid bearer token must allow access to /api/logs/stream"
+        );
+    }
+
+    /// Regression: #3367 — GET /api/approvals/session/{id} used to be
+    /// publicly readable via the `/api/approvals/` prefix in
+    /// `dashboard_read_prefix`. That endpoint returns pending approval
+    /// details including shell commands, so it must require authentication
+    /// even when `require_auth_for_reads` is off.
+    ///
+    /// Updated post-#3941 audit: every approvals read endpoint exposes
+    /// the same `action_summary` (pending shell command), so the entire
+    /// `/api/approvals/*` surface must be auth-gated, not just the
+    /// `/session/` sub-tree.
+    #[tokio::test]
+    async fn approvals_reads_require_auth() {
+        // Auth state: api_key configured, require_auth_for_reads OFF — this
+        // is the scenario where the bug was exploitable.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/approvals", get(|| async { "list" }))
+            .route(
+                "/api/approvals/session/{id}",
+                get(|| async { "pending approvals" }),
+            )
+            .route("/api/approvals/audit", get(|| async { "audit log" }))
+            .route("/api/approvals/{id}", get(|| async { "approval detail" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        for path in &[
+            "/api/approvals",
+            "/api/approvals/session/sess-abc-123",
+            "/api/approvals/audit",
+            "/api/approvals/some-approval-id",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must be auth-gated (returns action_summary)"
+            );
+        }
     }
 }

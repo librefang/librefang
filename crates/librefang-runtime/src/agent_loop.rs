@@ -181,6 +181,36 @@ fn clamp_max_history(requested: usize, agent: &str) -> usize {
     }
 }
 
+/// Run session repair on `session.messages` before persisting on failure paths.
+///
+/// When the agent loop exits via circuit breaker, max iterations, or timeout,
+/// the session history may contain orphaned `ToolUse` blocks with no matching
+/// `ToolResult`.  Providers that enforce strict pairing (Moonshot, OpenAI)
+/// then return 400 on next load, making the session permanently broken.
+///
+/// This helper replaces `session.messages` with the repaired copy so the
+/// persisted history is always well-formed.
+fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &str) {
+    let (repaired, stats) =
+        crate::session_repair::validate_and_repair_with_stats(&session.messages);
+    if stats != crate::session_repair::RepairStats::default() {
+        tracing::warn!(
+            agent_id,
+            reason,
+            orphaned_results_removed = stats.orphaned_results_removed,
+            empty_messages_removed = stats.empty_messages_removed,
+            messages_merged = stats.messages_merged,
+            results_reordered = stats.results_reordered,
+            synthetic_results_inserted = stats.synthetic_results_inserted,
+            duplicates_removed = stats.duplicates_removed,
+            misplaced_results_rescued = stats.misplaced_results_rescued,
+            positional_synthetic_inserted = stats.positional_synthetic_inserted,
+            "Session repair applied before save"
+        );
+    }
+    session.messages = repaired;
+}
+
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
 /// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
@@ -798,6 +828,7 @@ async fn execute_single_tool_call(
             } else {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
+            repair_session_before_save(ctx.session, ctx.agent_id_str, "circuit_breaker");
             if !ctx.opts.is_fork {
                 if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
                     warn!("Failed to save session on circuit break: {e}");
@@ -1078,6 +1109,34 @@ fn handle_mid_turn_signal(
         return None;
     };
 
+    // For approval-resolution signals, decide ownership BEFORE touching
+    // the staged turn. The kernel's `notify_agent_of_resolution` fans
+    // every resolved approval to all live sessions of the agent (because
+    // `DeferredToolExecution` does not carry a session id). If we run
+    // `pad_missing_results` + `commit` first and only check ownership
+    // after, every unrelated session gets its in-progress `tool_use`
+    // padded to `is_error=true` and persisted — the staged-pollution
+    // bug acknowledged in PR #4091's follow-up commit but not fixed
+    // there.
+    //
+    // Strategy: peek the signal's `tool_use_id` against this session's
+    // pending approvals (in `staged.tool_result_blocks`, in
+    // `session.messages`, and in the in-flight `messages` slice). If
+    // none of them carry the id with `WaitingApproval` status, the
+    // signal is for a sibling session — drop it silently without
+    // committing or padding. Drop is correct: sibling sessions consume
+    // their own copies of the same broadcast.
+    if let AgentLoopSignal::ApprovalResolved { tool_use_id, .. } = &signal {
+        if !session_owns_pending_approval(session, messages, staged, tool_use_id) {
+            debug!(
+                agent = %manifest_name,
+                tool_use_id = %tool_use_id,
+                "Ignoring broadcast approval resolution for tool_use_id not owned by this session"
+            );
+            return None;
+        }
+    }
+
     // Pad any tool_use_id that never produced a result, then commit the
     // staged assistant message + user{tool_results} atomically. After
     // this call, session.messages is guaranteed to have paired
@@ -1091,7 +1150,7 @@ fn handle_mid_turn_signal(
         "Mid-turn signal injected — interrupting tool execution"
     );
     let injected_text = match signal {
-        AgentLoopSignal::Message { content } => content,
+        AgentLoopSignal::Message { content } => Some(content),
         AgentLoopSignal::ApprovalResolved {
             tool_use_id,
             tool_name,
@@ -1100,7 +1159,14 @@ fn handle_mid_turn_signal(
             result_is_error,
             result_status,
         } => {
-            apply_approval_resolution_signal(
+            // Ownership was verified above. `apply_approval_resolution_signal`
+            // is guaranteed to find the matching WaitingApproval block
+            // (either in committed history or in just-committed staged
+            // results) and patch it in place. If for any reason it
+            // doesn't (race between fork/reset and resolution arrival),
+            // suppress the `[System]` text — same behaviour as the
+            // upstream PR #4091 fix.
+            let matched = apply_approval_resolution_signal(
                 session,
                 messages.as_mut_slice(),
                 &tool_use_id,
@@ -1108,17 +1174,91 @@ fn handle_mid_turn_signal(
                 result_is_error,
                 result_status,
             );
-            let result_preview = librefang_types::truncate_str(&result_content, 300);
-            format!(
-                "[System] Tool '{}' approval resolved ({}). Result: {}",
-                tool_name, decision, result_preview
-            )
+            if matched {
+                let result_preview = librefang_types::truncate_str(&result_content, 300);
+                Some(format!(
+                    "[System] Tool '{}' approval resolved ({}). Result: {}",
+                    tool_name, decision, result_preview
+                ))
+            } else {
+                // Ownership was verified before pad/commit; reaching
+                // here means the WaitingApproval block disappeared
+                // between the peek and the patch (fork/reset race).
+                debug!(
+                    agent = %manifest_name,
+                    tool_use_id = %tool_use_id,
+                    "Approval resolution arrived after WaitingApproval block disappeared (fork/reset race?)"
+                );
+                None
+            }
         }
     };
-    let inject_msg = Message::user(&injected_text);
-    session.messages.push(inject_msg.clone());
-    messages.push(inject_msg);
+    if let Some(text) = injected_text {
+        let inject_msg = Message::user(&text);
+        session.messages.push(inject_msg.clone());
+        messages.push(inject_msg);
+    }
     Some(flushed_outcomes)
+}
+
+/// Returns `true` if `tool_use_id` has a `WaitingApproval` `ToolResult`
+/// block in any of: the staged-but-not-yet-committed turn, the session's
+/// committed history, or the in-flight `messages` slice the LLM driver
+/// will see next.
+///
+/// Used by `handle_mid_turn_signal` to decide whether an
+/// `ApprovalResolved` broadcast is meant for THIS session before
+/// touching staged state. Without this check, a broadcast intended for a
+/// sibling session would force `pad_missing_results` + `commit` here,
+/// poisoning every unrelated session's in-progress `tool_use` with
+/// `is_error=true` — the residual injection_senders pollution
+/// acknowledged in PR #4091's follow-up commit (591ad4ec) and fixed
+/// here.
+fn session_owns_pending_approval(
+    session: &Session,
+    messages: &[Message],
+    staged: &StagedToolUseTurn,
+    tool_use_id: &str,
+) -> bool {
+    fn block_is_waiting_for(block: &ContentBlock, target: &str) -> bool {
+        matches!(
+            block,
+            ContentBlock::ToolResult { tool_use_id: id, status, .. }
+                if id == target
+                    && *status == librefang_types::tool::ToolExecutionStatus::WaitingApproval
+        )
+    }
+
+    fn message_carries_waiting(msg: &Message, target: &str) -> bool {
+        match &msg.content {
+            MessageContent::Blocks(blocks) => {
+                blocks.iter().any(|b| block_is_waiting_for(b, target))
+            }
+            _ => false,
+        }
+    }
+
+    if staged
+        .tool_result_blocks
+        .iter()
+        .any(|b| block_is_waiting_for(b, tool_use_id))
+    {
+        return true;
+    }
+    if session
+        .messages
+        .iter()
+        .any(|m| message_carries_waiting(m, tool_use_id))
+    {
+        return true;
+    }
+    if messages
+        .iter()
+        .any(|m| message_carries_waiting(m, tool_use_id))
+    {
+        return true;
+    }
+    false
 }
 
 fn finalize_tool_use_results(
@@ -1196,6 +1336,7 @@ fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) ->
     }
 }
 
+/// Patches `WaitingApproval` blocks in `session.messages` and the in-flight slice; returns `true` when at least one block was matched.
 fn apply_approval_resolution_signal(
     session: &mut Session,
     messages: &mut [Message],
@@ -1203,7 +1344,7 @@ fn apply_approval_resolution_signal(
     result_content: &str,
     result_is_error: bool,
     result_status: librefang_types::tool::ToolExecutionStatus,
-) {
+) -> bool {
     fn patch_message_blocks(
         msg: &mut Message,
         tool_use_id: &str,
@@ -1238,6 +1379,7 @@ fn apply_approval_resolution_signal(
         false
     }
 
+    let mut matched = false;
     for msg in session.messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1246,6 +1388,7 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
+            matched = true;
             break;
         }
     }
@@ -1257,9 +1400,11 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
+            matched = true;
             break;
         }
     }
+    matched
 }
 
 /// Strip images from all messages except the last user message.
@@ -3099,6 +3244,13 @@ pub async fn run_agent_loop(
         engine.update_model(&initial_model, ctx_window);
     }
 
+    // The system prompt is constant across all iterations but `CompletionRequest`
+    // takes it by value, so we clone it per-iteration.  Keep a single pre-cloned
+    // copy so each per-iteration clone is always from the same allocation rather
+    // than potentially going through Arc/mutex indirection on the original source.
+    // This is a minor but measurable improvement for long autonomous runs.
+    let system_prompt_snapshot = system_prompt.clone();
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
 
@@ -3305,7 +3457,9 @@ pub async fn run_agent_loop(
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
-            system: Some(system_prompt.clone()),
+            // Clone from the pre-built snapshot rather than the original to
+            // avoid redundant Arc-deref / string traversal on every iteration.
+            system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
             cache_ttl: None,
@@ -3850,6 +4004,7 @@ pub async fn run_agent_loop(
     // Save session before failing so conversation history is preserved.
     // Fork turns skip — they're ephemeral and must not pollute canonical
     // session history even when the loop bailed out.
+    repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
     if !opts.is_fork {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
@@ -4454,6 +4609,11 @@ pub async fn run_agent_loop_streaming(
         engine.update_model(&initial_model, ctx_window);
     }
 
+    // Pre-clone the system prompt for the streaming loop.  Identical rationale
+    // to the non-streaming path: constant across iterations, cloned per-LLM call
+    // because CompletionRequest takes ownership, so clone once up-front.
+    let system_prompt_snapshot = system_prompt.clone();
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
 
@@ -4662,7 +4822,8 @@ pub async fn run_agent_loop_streaming(
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
-            system: Some(system_prompt.clone()),
+            // Clone from pre-built snapshot (same rationale as non-streaming loop).
+            system: Some(system_prompt_snapshot.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
             cache_ttl: None,
@@ -4725,6 +4886,7 @@ pub async fn run_agent_loop_streaming(
                          Any partial output was already sent to the user.]"
                     );
                     session.messages.push(Message::assistant(note));
+                    repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
                     if !opts.is_fork {
                         if let Err(save_err) = memory.save_session_async(session).await {
                             warn!(
@@ -5270,6 +5432,7 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
+    repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
     if !opts.is_fork {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
@@ -6951,6 +7114,228 @@ mod tests {
             update_consecutive_hard_failures(&mut consecutive_all_failed, flushed_outcomes);
         assert_eq!(hard_error_count, 1);
         assert_eq!(consecutive_all_failed, 0);
+    }
+
+    /// Regression for the residual injection_senders pollution that PR
+    /// #4091's composite-key swap and 591ad4ec follow-up did NOT fix.
+    ///
+    /// Setup: two sessions belong to the same agent.
+    ///   - Session A has a `WaitingApproval` `ToolResult` for tool_use
+    ///     `T1` (an approval is pending).
+    ///   - Session B is mid-turn on a different `ToolUse` `T2` (staged,
+    ///     no approval pending, no result yet).
+    ///
+    /// The kernel's `notify_agent_of_resolution` broadcasts the
+    /// resolution of `T1` to BOTH sessions because
+    /// `DeferredToolExecution` carries no session id.
+    ///
+    /// Bug: before this fix, session B's `handle_mid_turn_signal` would
+    /// receive the `ApprovalResolved { tool_use_id: "T1" }` signal,
+    /// unconditionally call `pad_missing_results` (which marks `T2` as
+    /// `is_error=true` "[tool interrupted...]") and `commit` (which
+    /// persists that to `session.messages`), and only then notice that
+    /// `T1` doesn't belong to session B and skip the `[System]` text.
+    /// Net effect: every unrelated session of the same agent gets its
+    /// in-progress tool_use poisoned to error state.
+    ///
+    /// Fix: `handle_mid_turn_signal` peeks the signal's `tool_use_id`
+    /// against the session's pending `WaitingApproval` blocks BEFORE
+    /// touching staged state. When the id is unknown, drop the signal
+    /// silently — staged stays untouched, history stays clean.
+    #[test]
+    fn injection_resolution_does_not_pollute_other_sessions() {
+        let agent_id = librefang_types::agent::AgentId::new();
+
+        // Session B — mid-turn on T2, NO pending approval. The single
+        // staged tool_use has not yet produced a result; without the
+        // fix, the broadcast resolution will pad it to is_error=true
+        // and persist it.
+        let mut session_b = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+        };
+        let mut messages_b: Vec<Message> = Vec::new();
+        let mut staged_b = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "T2".to_string(),
+                    name: "ongoing_tool".to_string(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            tool_call_ids: vec![("T2".to_string(), "ongoing_tool".to_string())],
+            tool_result_blocks: Vec::new(),
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session_b.agent_id.to_string(),
+            committed: false,
+        };
+
+        // Channel mimicking session B's injection_senders entry. The
+        // kernel writes the same ApprovalResolved into every session's
+        // channel because the resolution carries no session id.
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(AgentLoopSignal::ApprovalResolved {
+            tool_use_id: "T1".to_string(), // belongs to session A, not B
+            tool_name: "dangerous_tool".to_string(),
+            decision: "approved".to_string(),
+            result_content: "approved and executed".to_string(),
+            result_is_error: false,
+            result_status: librefang_types::tool::ToolExecutionStatus::Completed,
+        })
+        .unwrap();
+        let pending = tokio::sync::Mutex::new(rx);
+
+        let outcome = handle_mid_turn_signal(
+            Some(&pending),
+            "test-agent",
+            &mut session_b,
+            &mut messages_b,
+            &mut staged_b,
+        );
+
+        // The signal does not belong to session B, so the handler must
+        // return None — no flush happened, no [System] text was
+        // injected, and most importantly the staged turn was left
+        // intact so session B can keep executing T2 normally.
+        assert!(
+            outcome.is_none(),
+            "broadcast resolution for unrelated session must be dropped without flushing"
+        );
+        assert!(
+            !staged_b.committed,
+            "staged turn must not be committed when the signal is for a different session"
+        );
+        assert!(
+            staged_b.tool_result_blocks.is_empty(),
+            "staged tool_result_blocks must NOT be padded with a synthetic \
+             is_error=true entry for T2 — that is the pollution this test guards against"
+        );
+        assert!(
+            session_b.messages.is_empty(),
+            "session B's history must be untouched by a broadcast for session A"
+        );
+        assert!(
+            messages_b.is_empty(),
+            "in-flight messages slice must be untouched by a broadcast for session A"
+        );
+    }
+
+    /// Companion to `injection_resolution_does_not_pollute_other_sessions`
+    /// — confirms the fix did NOT regress the matching-session path.
+    /// When the broadcast's `tool_use_id` IS owned by this session
+    /// (there's a `WaitingApproval` `ToolResult` block in committed
+    /// history for that id), the handler must still pad + commit the
+    /// staged turn, patch the waiting block, and inject the `[System]`
+    /// notice.
+    #[test]
+    fn injection_resolution_still_applies_when_session_owns_pending_approval() {
+        let agent_id = librefang_types::agent::AgentId::new();
+
+        // Session A — committed history carries a WaitingApproval
+        // ToolResult for T1.
+        let waiting = ContentBlock::ToolResult {
+            tool_use_id: "T1".to_string(),
+            tool_name: "dangerous_tool".to_string(),
+            content: "awaiting approval".to_string(),
+            is_error: true,
+            status: librefang_types::tool::ToolExecutionStatus::WaitingApproval,
+            approval_request_id: Some("approval-1".to_string()),
+        };
+        let mut session_a = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![waiting]),
+                pinned: false,
+                timestamp: None,
+            }],
+            context_window_tokens: 0,
+            label: None,
+        };
+        let mut messages_a = session_a.messages.clone();
+        let mut staged_a = StagedToolUseTurn {
+            assistant_msg: Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(Vec::new()),
+                pinned: false,
+                timestamp: None,
+            },
+            tool_call_ids: Vec::new(),
+            tool_result_blocks: Vec::new(),
+            rationale_text: None,
+            allowed_tool_names: Vec::new(),
+            caller_id_str: session_a.agent_id.to_string(),
+            committed: false,
+        };
+
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(AgentLoopSignal::ApprovalResolved {
+            tool_use_id: "T1".to_string(),
+            tool_name: "dangerous_tool".to_string(),
+            decision: "approved".to_string(),
+            result_content: "approved and executed".to_string(),
+            result_is_error: false,
+            result_status: librefang_types::tool::ToolExecutionStatus::Completed,
+        })
+        .unwrap();
+        let pending = tokio::sync::Mutex::new(rx);
+
+        let outcome = handle_mid_turn_signal(
+            Some(&pending),
+            "test-agent",
+            &mut session_a,
+            &mut messages_a,
+            &mut staged_a,
+        );
+
+        assert!(
+            outcome.is_some(),
+            "matching-session path must still flush and inject"
+        );
+        assert!(staged_a.committed, "staged must be committed on match");
+
+        // Original WaitingApproval block was patched in place to
+        // Completed/non-error.
+        match &session_a.messages[0].content {
+            MessageContent::Blocks(blocks) => match &blocks[0] {
+                ContentBlock::ToolResult {
+                    content,
+                    is_error,
+                    status,
+                    approval_request_id,
+                    ..
+                } => {
+                    assert_eq!(content, "approved and executed");
+                    assert!(!is_error);
+                    assert_eq!(
+                        *status,
+                        librefang_types::tool::ToolExecutionStatus::Completed
+                    );
+                    assert!(approval_request_id.is_none());
+                }
+                other => panic!("expected patched tool_result, got {other:?}"),
+            },
+            other => panic!("expected blocks message, got {other:?}"),
+        }
+
+        // Last message is the injected `[System] Tool '...' approval
+        // resolved` notice.
+        let last = session_a
+            .messages
+            .last()
+            .expect("expected at least the injected system notice");
+        let injected = last.content.text_content();
+        assert!(injected.contains("Tool 'dangerous_tool' approval resolved (approved)"));
+        assert!(injected.contains("approved and executed"));
     }
 
     /// Regression for issue #2067: auto_memorize sliced `session.messages`

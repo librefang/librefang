@@ -8,7 +8,7 @@ pub mod screens;
 pub mod theme;
 pub mod widgets;
 
-use event::{AppEvent, BackendRef};
+use event::{AppEvent, BackendRef, StreamCancelToken};
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -161,6 +161,9 @@ struct App {
 
     backend: Backend,
     chat_target: Option<ChatTarget>,
+    /// Cancellation token for the current background stream thread, if any.
+    /// Replaced (and the old one cancelled) each time a new stream is spawned.
+    stream_cancel: Option<StreamCancelToken>,
 
     // Screen states
     welcome: welcome::WelcomeState,
@@ -202,6 +205,7 @@ impl App {
             event_tx,
             backend: Backend::None,
             chat_target: None,
+            stream_cancel: None,
             welcome: welcome::WelcomeState::new(),
             wizard: wizard::WizardState::new(),
             agents: agents::AgentSelectState::new(),
@@ -237,6 +241,12 @@ impl App {
         match ev {
             AppEvent::Key(key) => self.handle_key(key),
             AppEvent::Tick => self.handle_tick(),
+            AppEvent::Resize(_w, _h) => {
+                // ratatui's backend queries the actual terminal size on the
+                // next draw — nothing explicit needed here; just having the
+                // event forwarded causes the main loop to redraw.
+            }
+            AppEvent::Paste(text) => self.handle_paste(text),
             AppEvent::Stream(stream_ev) => self.handle_stream(stream_ev),
             AppEvent::StreamDone(result) => self.handle_stream_done(result),
             AppEvent::KernelReady(kernel) => self.handle_kernel_ready(kernel),
@@ -620,6 +630,50 @@ impl App {
                 self.extensions.status_msg = format!("Reconnected {id}: {tools} tools");
                 self.refresh_extension_health();
             }
+
+            // ── Async chat helpers (previously blocked the event-loop thread) ──
+            AppEvent::ChatModelLabelLoaded { agent_id, label } => {
+                // The variant carries the agent id specifically so a late
+                // response from a previously-entered chat target can't
+                // clobber the current header.  Drop labels that don't
+                // match the current daemon target.
+                let still_current = self
+                    .chat_target
+                    .as_ref()
+                    .and_then(|t| t.agent_id_daemon.as_deref())
+                    .map(|cur| cur == agent_id.as_str())
+                    .unwrap_or(false);
+                if still_current {
+                    self.chat.model_label = label;
+                }
+            }
+            AppEvent::ChatModelsForPicker(models) => {
+                if models.is_empty() {
+                    self.chat
+                        .push_message(chat::Role::System, "No models available.".to_string());
+                } else {
+                    self.chat.model_picker_models = models;
+                    self.chat.model_picker_filter.clear();
+                    self.chat.model_picker_idx = 0;
+                    self.chat.show_model_picker = true;
+                }
+            }
+            AppEvent::ChatAgentListLoaded(lines) => {
+                let msg = if lines.is_empty() {
+                    "No agents running.".to_string()
+                } else {
+                    lines.join("\n")
+                };
+                self.chat.push_message(chat::Role::System, msg);
+            }
+        }
+    }
+
+    /// Insert pasted text into the active input field at once, avoiding the
+    /// per-character `KeyChar` storm that dropped characters before.
+    fn handle_paste(&mut self, text: String) {
+        if matches!(self.phase, Phase::Main) && self.active_tab == Tab::Chat {
+            self.chat.input.push_str(&text);
         }
     }
 
@@ -1378,6 +1432,10 @@ impl App {
         match action {
             chat::ChatAction::Continue => {}
             chat::ChatAction::Back => {
+                // Cancel any in-flight stream before leaving the chat screen.
+                if let Some(prev) = self.stream_cancel.take() {
+                    prev.cancel();
+                }
                 // In Main phase, go back to Agents tab
                 self.chat.reset();
                 self.chat_target = None;
@@ -1767,15 +1825,18 @@ impl App {
         self.chat.agent_name = name.clone();
         self.chat.mode_label = "daemon".to_string();
 
-        if let Backend::Daemon { ref base_url, .. } = self.backend {
-            let client = crate::daemon_client();
-            if let Ok(resp) = client.get(format!("{base_url}/api/agents/{id}")).send() {
-                if let Ok(body) = resp.json::<serde_json::Value>() {
-                    let provider = body["model_provider"].as_str().unwrap_or("?");
-                    let model = body["model_name"].as_str().unwrap_or("?");
-                    self.chat.model_label = format!("{provider}/{model}");
-                }
-            }
+        // Fetch model label asynchronously — avoids blocking the TUI event loop.
+        if let Backend::Daemon {
+            ref base_url,
+            ref api_key,
+        } = self.backend
+        {
+            event::spawn_fetch_agent_model_label(
+                base_url.clone(),
+                id.clone(),
+                api_key.clone(),
+                self.event_tx.clone(),
+            );
         }
 
         self.chat_target = Some(ChatTarget {
@@ -1817,39 +1878,47 @@ impl App {
     }
 
     fn send_message(&mut self, message: String) {
+        // Cancel any in-flight stream before starting a new one so stale
+        // events from the old thread do not corrupt the new session's state.
+        if let Some(prev) = self.stream_cancel.take() {
+            prev.cancel();
+        }
+
         self.chat.is_streaming = true;
         self.chat.thinking = true;
         self.chat.streaming_chars = 0;
         self.chat.last_tokens = None;
         self.chat.status_msg = None;
 
-        match (&self.backend, &self.chat_target) {
+        let token = match (&self.backend, &self.chat_target) {
             (Backend::Daemon { base_url, api_key }, Some(target))
                 if target.agent_id_daemon.is_some() =>
             {
-                event::spawn_daemon_stream(
+                Some(event::spawn_daemon_stream(
                     base_url.clone(),
                     target.agent_id_daemon.as_ref().unwrap().clone(),
                     message,
                     api_key.clone(),
                     self.event_tx.clone(),
-                );
+                ))
             }
             (Backend::InProcess { kernel }, Some(target))
                 if target.agent_id_inprocess.is_some() =>
             {
-                event::spawn_inprocess_stream(
+                Some(event::spawn_inprocess_stream(
                     kernel.clone(),
                     target.agent_id_inprocess.unwrap(),
                     message,
                     self.event_tx.clone(),
-                );
+                ))
             }
             _ => {
                 self.chat.is_streaming = false;
                 self.chat.status_msg = Some("No active connection".to_string());
+                None
             }
-        }
+        };
+        self.stream_cancel = token;
     }
 
     fn spawn_agent(&mut self, toml_content: String) {
@@ -1892,62 +1961,48 @@ impl App {
     // ─── Model picker ────────────────────────────────────────────────────────
 
     fn open_model_picker(&mut self) {
-        let models = match &self.backend {
-            Backend::Daemon { base_url, .. } => {
-                let client = crate::daemon_client();
-                match client.get(format!("{base_url}/api/models")).send() {
-                    Ok(resp) => match resp.json::<serde_json::Value>() {
-                        Ok(body) => body["models"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter(|m| m["available"].as_bool().unwrap_or(false))
-                                    .map(|m| chat::ModelEntry {
-                                        id: m["id"].as_str().unwrap_or("").to_string(),
-                                        display_name: m["display_name"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
-                                        tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        Err(_) => Vec::new(),
-                    },
-                    Err(_) => Vec::new(),
-                }
+        match &self.backend {
+            Backend::Daemon { base_url, api_key } => {
+                // Fetch model list asynchronously — avoids blocking the TUI event loop.
+                // The `ChatModelsForPicker` event handler will open the picker once loaded.
+                event::spawn_fetch_models_for_picker(
+                    base_url.clone(),
+                    api_key.clone(),
+                    self.event_tx.clone(),
+                );
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel
-                    .model_catalog_ref()
-                    .read()
-                    .unwrap_or_else(|p| p.into_inner());
-                catalog
-                    .available_models()
-                    .into_iter()
-                    .map(|e| chat::ModelEntry {
-                        id: e.id.clone(),
-                        display_name: e.display_name.clone(),
-                        provider: e.provider.clone(),
-                        tier: format!("{:?}", e.tier),
-                    })
-                    .collect()
+                let models = {
+                    let catalog = kernel
+                        .model_catalog_ref()
+                        .read()
+                        .unwrap_or_else(|p| p.into_inner());
+                    catalog
+                        .available_models()
+                        .into_iter()
+                        .map(|e| chat::ModelEntry {
+                            id: e.id.clone(),
+                            display_name: e.display_name.clone(),
+                            provider: e.provider.clone(),
+                            tier: format!("{:?}", e.tier),
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if models.is_empty() {
+                    self.chat
+                        .push_message(chat::Role::System, "No models available.".to_string());
+                    return;
+                }
+                self.chat.model_picker_models = models;
+                self.chat.model_picker_filter.clear();
+                self.chat.model_picker_idx = 0;
+                self.chat.show_model_picker = true;
             }
-            Backend::None => Vec::new(),
-        };
-
-        if models.is_empty() {
-            self.chat
-                .push_message(chat::Role::System, "No models available.".to_string());
-            return;
+            Backend::None => {
+                self.chat
+                    .push_message(chat::Role::System, "No models available.".to_string());
+            }
         }
-
-        self.chat.model_picker_models = models;
-        self.chat.model_picker_filter.clear();
-        self.chat.model_picker_idx = 0;
-        self.chat.show_model_picker = true;
     }
 
     fn switch_model(&mut self, model_id: &str) {
@@ -2081,49 +2136,43 @@ impl App {
                 self.chat.push_message(chat::Role::System, s.join("\n"));
             }
             "/agents" => {
-                let mut lines = Vec::new();
                 match &self.backend {
-                    Backend::Daemon { base_url, .. } => {
-                        let client = crate::daemon_client();
-                        if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
-                            if let Ok(body) = resp.json::<serde_json::Value>() {
-                                // Handle both old format (direct array) and new format ({ "items": [...] })
-                                let arr = if let Some(arr) = body.as_array() {
-                                    arr.clone()
-                                } else if let Some(items) =
-                                    body.get("items").and_then(|v| v.as_array())
-                                {
-                                    items.clone()
-                                } else {
-                                    Vec::new()
-                                };
-                                for a in arr {
-                                    lines.push(format!(
-                                        "{} [{}] {}",
-                                        a["name"].as_str().unwrap_or("?"),
-                                        a["state"].as_str().unwrap_or("?"),
-                                        a["model_name"].as_str().unwrap_or("?"),
-                                    ));
-                                }
-                            }
-                        }
+                    Backend::Daemon { base_url, api_key } => {
+                        // Fetch agent list asynchronously — avoids blocking the TUI event loop.
+                        // The `ChatAgentListLoaded` event handler will push the reply.
+                        event::spawn_fetch_agents_for_chat(
+                            base_url.clone(),
+                            api_key.clone(),
+                            self.event_tx.clone(),
+                        );
                     }
                     Backend::InProcess { kernel } => {
-                        for e in kernel.agent_registry().list() {
-                            lines.push(format!(
-                                "{} [{:?}] {}/{}",
-                                e.name, e.state, e.manifest.model.provider, e.manifest.model.model,
-                            ));
-                        }
+                        let lines: Vec<String> = kernel
+                            .agent_registry()
+                            .list()
+                            .into_iter()
+                            .map(|e| {
+                                format!(
+                                    "{} [{:?}] {}/{}",
+                                    e.name,
+                                    e.state,
+                                    e.manifest.model.provider,
+                                    e.manifest.model.model,
+                                )
+                            })
+                            .collect();
+                        let msg = if lines.is_empty() {
+                            "No agents running.".to_string()
+                        } else {
+                            lines.join("\n")
+                        };
+                        self.chat.push_message(chat::Role::System, msg);
                     }
-                    Backend::None => {}
+                    Backend::None => {
+                        self.chat
+                            .push_message(chat::Role::System, "No agents running.".to_string());
+                    }
                 }
-                let msg = if lines.is_empty() {
-                    "No agents running.".to_string()
-                } else {
-                    lines.join("\n")
-                };
-                self.chat.push_message(chat::Role::System, msg);
             }
             "/clear" => {
                 let name = self.chat.agent_name.clone();
@@ -2421,14 +2470,25 @@ impl App {
 
 /// Entry point for the TUI interactive mode.
 pub fn run(config: Option<PathBuf>) {
-    // Panic hook: always restore terminal
+    // Panic hook: always restore terminal (including bracketed paste)
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = ratatui::crossterm::execute!(
+            std::io::stdout(),
+            ratatui::crossterm::event::DisableBracketedPaste
+        );
         ratatui::restore();
         original_hook(info);
     }));
 
     let mut terminal = ratatui::init();
+
+    // Enable bracketed paste so multi-character pastes arrive as a single
+    // Paste event rather than thousands of individual Key events.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::EnableBracketedPaste
+    );
 
     // 50ms tick → 20fps spinner animation, snappy key response
     let (tx, rx) = event::spawn_event_thread(Duration::from_millis(50));
@@ -2464,5 +2524,10 @@ pub fn run(config: Option<PathBuf>) {
         }
     }
 
+    // Disable bracketed paste before restoring the terminal.
+    let _ = ratatui::crossterm::execute!(
+        std::io::stdout(),
+        ratatui::crossterm::event::DisableBracketedPaste
+    );
     ratatui::restore();
 }

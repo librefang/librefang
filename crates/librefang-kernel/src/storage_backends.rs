@@ -36,7 +36,7 @@ impl ApprovalStore for crate::approval::ApprovalManager {
     }
 
     fn record_totp_failure(&self, sender_id: &str) {
-        crate::approval::ApprovalManager::record_totp_failure(self, sender_id);
+        let _ = crate::approval::ApprovalManager::record_totp_failure(self, sender_id);
     }
 }
 

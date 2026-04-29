@@ -281,7 +281,12 @@ async fn execute_python(
         .current_dir(skill_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // SECURITY (#3624): Kill child when this task is dropped (e.g. on
+        // timeout or agent shutdown).  tokio::process::Child does NOT kill
+        // on drop by default — without this, a hung skill leaks the
+        // subprocess indefinitely and exhausts file descriptors.
+        .kill_on_drop(true);
 
     // SECURITY: Isolate environment to prevent secret leakage.
     // Skills are third-party code — they must not inherit API keys,
@@ -329,10 +334,25 @@ async fn execute_python(
         drop(stdin);
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| SkillError::ExecutionFailed(format!("Wait for Python: {e}")))?;
+    let timeout_dur = std::time::Duration::from_secs(120);
+    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(SkillError::ExecutionFailed(format!("Wait for Python: {e}")));
+        }
+        Err(_) => {
+            // wait_with_output() consumed `child`; the future is dropped here
+            // and kill_on_drop(true) on the Command terminates the process.
+            error!(
+                "Python skill timed out after 120s: {}",
+                script_path.display()
+            );
+            return Ok(SkillToolResult {
+                output: "Python skill timed out after 120 seconds".into(),
+                is_error: true,
+            });
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -406,7 +426,12 @@ async fn execute_node(
         .current_dir(skill_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // SECURITY (#3624): Kill child when this task is dropped (e.g. on
+        // timeout or agent shutdown).  tokio::process::Child does NOT kill
+        // on drop by default — without this, a hung skill leaks the
+        // subprocess indefinitely and exhausts file descriptors.
+        .kill_on_drop(true);
 
     // SECURITY: Isolate environment (same as Python — prevent secret leakage)
     cmd.env_clear();
@@ -442,10 +467,27 @@ async fn execute_node(
         drop(stdin);
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| SkillError::ExecutionFailed(format!("Wait for Node.js: {e}")))?;
+    let timeout_dur = std::time::Duration::from_secs(120);
+    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(SkillError::ExecutionFailed(format!(
+                "Wait for Node.js: {e}"
+            )));
+        }
+        Err(_) => {
+            // wait_with_output() consumed `child`; the future is dropped here
+            // and kill_on_drop(true) on the Command terminates the process.
+            error!(
+                "Node.js skill timed out after 120s: {}",
+                script_path.display()
+            );
+            return Ok(SkillToolResult {
+                output: "Node.js skill timed out after 120 seconds".into(),
+                is_error: true,
+            });
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -513,7 +555,12 @@ async fn execute_shell(
         .current_dir(skill_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // SECURITY (#3624): Kill child when this task is dropped (e.g. on
+        // timeout or agent shutdown).  tokio::process::Child does NOT kill
+        // on drop by default — without this, a hung skill leaks the
+        // subprocess indefinitely and exhausts file descriptors.
+        .kill_on_drop(true);
 
     // SECURITY: Isolate environment (same as Python/Node — prevent secret leakage)
     cmd.env_clear();

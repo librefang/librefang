@@ -6,7 +6,7 @@
 <h3 align="center">Wolnościowy System Operacyjny Agentów — Wolny, a nie tylko darmowy (Free as in Freedom)</h3>
 
 <p align="center">
-  Agentowy system operacyjny (Agent OS) typu open-source napisany w języku Rust. 14 paczek (crates). Ponad 2100 testów. Zero ostrzeżeń lintera Clippy.
+  Agentowy system operacyjny (Agent OS) typu open-source napisany w języku Rust. 24 paczek (crates). Ponad 2100 testów. Zero ostrzeżeń lintera Clippy.
 </p>
 
 <p align="center">
@@ -53,10 +53,10 @@ curl -fsSL https://librefang.ai/install.sh | sh
 # # Lub zainstaluj przez Cargo
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
-# Start — automatyczna inicjalizacja przy pierwszym uruchomieniu, dashboard pod adresem
+# Start — automatyczna inicjalizacja przy pierwszym uruchomieniu, panel nawigacyjny pod adresem http://localhost:4545
 librefang start
 
-# # Lub uruchom kreator konfiguracji ręcznie w celu wyboru dostawcy
+# Lub uruchom kreatora konfiguracji ręcznie w celu interaktywnego wyboru dostawcy
 # librefang init
 ```
 
@@ -92,26 +92,12 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands: Agenci, którzy pracują dla Ciebie
 
-**Hands** to wbudowane, autonomiczne pakiety możliwości, które działają niezależnie, zgodnie z harmonogramami i bez konieczności ciągłego promptowania. W zestawie znajduje się ich 14:
+**Hands** to pakiety autonomicznych możliwości, które działają niezależnie, zgodnie z harmonogramami, bez konieczności wprowadzania promptów. Każdy Hand jest definiowany przez manifest `HAND.toml`, prompt systemowy oraz opcjonalne pliki `SKILL.md` ładowane z Twojego skonfigurowanego `hands_dir`.
 
-| Hand | Co robi |
-|------|-------------|
-| **Researcher** | Dogłębny research — wieloźródłowy, ocena wiarygodności (CRAAP), raporty z cytowaniami |
-| **Collector** | Monitorowanie OSINT — wykrywanie zmian, śledzenie sentymentu, graf wiedzy |
-| **Predictor** | Superprognozowanie — skalibrowane predykcje z przedziałami ufności |
-| **Strategist** | Analiza strategii — badania rynku, wywiad konkurencji, planowanie biznesowe |
-| **Analytics** | Analityka danych — zbieranie, analiza, wizualizacja, zautomatyzowane raportowanie |
-| **Trader** | Inteligencja rynkowa — analiza wielu sygnałów, zarządzanie ryzykiem, analityka portfelowa |
-| **Lead** | Odkrywanie prospektów — research w sieci, scoring, deduplikacja, dostarczanie zakwalifikowanych leadów |
-| **Twitter** | Autonomiczny X/Twitter — tworzenie treści, harmonogramowanie, kolejka zatwierdzania |
-| **Reddit** | Menedżer Reddit — monitorowanie subredditów, postowanie, śledzenie zaangażowania |
-| **LinkedIn** | Menedżer LinkedIn — tworzenie treści, networking, zaangażowanie profesjonalne |
-| **Clip** | YouTube na pionowe shorty — wycinanie najlepszych momentów, napisy, lektor (voice-over) |
-| **Browser** | Automatyzacja przeglądarki — oparta na Playwright, obowiązkowa bramka zatwierdzania zakupów |
-| **API Tester** | Testowanie API — odkrywanie endpointów, walidacja, testy obciążeniowe, wykrywanie regresji |
-| **DevOps** | Automatyzacja DevOps — CI/CD, monitorowanie infrastruktury, reagowanie na incydenty |
+Przykładowe definicje Hand (Researcher, Collector, Predictor, Strategist, Analytics, Trader, Lead, Twitter, Reddit, LinkedIn, Clip, Browser, API Tester, DevOps) są dostępne w [repozytorium społecznościowym dla Hands](https://github.com/librefang/hands).
 
 ```bash
+# Zainstaluj społecznościowy Hand, a następnie:
 librefang hand activate researcher   # Rozpoczyna pracę natychmiast
 librefang hand status researcher     # Sprawdź postęp
 librefang hand list                  # Wyświetl wszystkie Hands
@@ -121,30 +107,46 @@ Zbuduj własnego: zdefiniuj `HAND.toml` + prompt systemowy + `SKILL.md`. [Przewo
 
 ## Architektura
 
-14 paczek (crates) w Rust, modułowa architektura jądra (kernel).
+24 paczek (crates) w Rust + xtask, modułowa architektura jądra (kernel).
 
 ```
-librefang-kernel      Orkiestracja, przepływy pracy, opomiarowanie, RBAC, scheduler, budżet
-librefang-runtime     Pętla agenta, 3 sterowniki LLM, 53 narzędzia, piaskownica WASM, MCP, A2A
-librefang-api         140+ endpointów REST/WS/SSE, API kompatybilne z OpenAI, dashboard
-librefang-channels    40 adapterów komunikacyjnych z limitowaniem liczby żądań, polityki DM/grupowe
-librefang-memory      Persystencja SQLite, osadzenia wektorowe, sesje, kompakcja
-librefang-types       Typy podstawowe, taint tracking, podpisywanie Ed25519, katalog modeli
-librefang-skills      60 wbudowanych umiejętności, parser SKILL.md, marketplace FangHub
-librefang-hands       14 autonomicznych Hands, parser HAND.toml, zarządzanie cyklem życia
-librefang-extensions  25 szablonów MCP, skarbiec AES-256-GCM, OAuth2 PKCE
-librefang-wire        Protokół OFP P2P, wzajemne uwierzytelnianie HMAC-SHA256
-librefang-cli         CLI, zarządzanie demonem, dashboard TUI, tryb serwera MCP
-librefang-desktop     Natywna aplikacja Tauri 2.0 (zasobnik systemowy, powiadomienia, skróty)
-librefang-migrate     Silnik migracji OpenClaw, LangChain i AutoGPT
-xtask                 Automatyzacja budowania
+librefang-kernel            Orkiestracja, przepływy pracy, opomiarowanie, RBAC, scheduler, budżet
+librefang-runtime           Pętla agenta, 3 sterowniki LLM, 53 narzędzia, piaskownica WASM, MCP, A2A
+librefang-api               140+ endpointów REST/WS/SSE, API kompatybilne z OpenAI, dashboard
+librefang-channels          40 adapterów komunikacyjnych z limitowaniem liczby żądań, polityki DM/grupowe
+librefang-memory            Persystencja SQLite, osadzenia wektorowe, sesje, kompakcja
+librefang-types             Typy podstawowe, taint tracking, podpisywanie Ed25519, katalog modeli
+librefang-skills            60 wbudowanych umiejętności, parser SKILL.md, marketplace FangHub
+librefang-hands             autonomicznych Hands, parser HAND.toml, zarządzanie cyklem życia
+librefang-extensions        25 szablonów MCP, skarbiec AES-256-GCM, OAuth2 PKCE
+librefang-wire              Protokół OFP P2P, wzajemne uwierzytelnianie HMAC-SHA256
+librefang-cli               CLI, zarządzanie demonem, dashboard TUI, tryb serwera MCP
+librefang-desktop           Natywna aplikacja Tauri 2.0 (zasobnik systemowy, powiadomienia, skróty)
+librefang-migrate           Silnik migracji OpenClaw, LangChain i AutoGPT
+librefang-http              Współdzielony kreator klienta HTTP, proxy, fallback TLS
+librefang-testing           Infrastruktura testowa: mockowany kernel, mockowany driver LLM i narzędzia do testowania tras API
+librefang-telemetry         Instrumentacja metryk OpenTelemetry + Prometheus dla LibreFang
+librefang-llm-driver        Trait drivera LLM i współdzielone typy dla LibreFang
+librefang-llm-drivers       Konkretne drivery dostawców LLM (anthropic, openai, gemini, …) implementujące trait librefang-llm-driver
+librefang-runtime-mcp       Klient MCP (Model Context Protocol) dla środowiska uruchomieniowego (runtime) LibreFang
+librefang-kernel-handle     Trait KernelHandle dla wywołań wewnątrzprocesowych (in-process) do kernela LibreFang
+librefang-runtime-wasm      Sandbox umiejętności (skills) WASM dla środowiska uruchomieniowego LibreFang
+librefang-kernel-router     Silnik routingu Hand/Template dla kernela LibreFang
+librefang-runtime-oauth     Przepływy OAuth (ChatGPT, GitHub Copilot) dla driverów środowiska uruchomieniowego LibreFang
+librefang-kernel-metering   Pomiar kosztów i egzekwowanie limitów (quota) dla kernela LibreFang
+xtask                       Automatyzacja budowania
 ```
+> **OFP wire to plaintext-by-design.** Wzajemne uwierzytelnianie HMAC-SHA256 + HMAC
+> dla każdej wiadomości + ochrona przed atakami typu replay (nonce) zabezpieczają przed *aktywnymi* atakującymi, ale zawartość ramek
+> nie jest szyfrowana. W przypadku cross-network federation, uruchamiaj OFP za prywatnym
+> overlayem (WireGuard, Tailscale, tunel SSH) lub warstwą mTLS typu service-mesh.
+> Szczegóły: [docs.librefang.ai/architecture/ofp-wire](https://docs.librefang.ai/architecture/ofp-wire)
 
 ## Kluczowe Funkcje
 
-**40 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 26 innych. [Pełna lista](https://docs.librefang.ai/integrations/channels)
+**45 Adapterów Kanałów** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky i 32 innych. [Pełna lista](https://docs.librefang.ai/integrations/channels)
 
-**27 Dostawców LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama i 20 innych. Inteligentny routing, automatyczny fallback, śledzenie kosztów. [Szczegóły](https://docs.librefang.ai/configuration/providers)
+**28 Dostawców LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama i 20 innych. Inteligentny routing, automatyczny fallback, śledzenie kosztów. [Szczegóły](https://docs.librefang.ai/configuration/providers)
 
 **16 Warstw Zabezpieczeń** — Piaskownica (sandbox) WASM, ścieżka audytu Merkle, śledzenie skażenia (taint tracking), podpisywanie Ed25519, ochrona przed SSRF, zerowanie sekretów (secret zeroization) i wiele więcej. [Szczegóły](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth)
 

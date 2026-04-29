@@ -561,7 +561,7 @@ class _ModelsResource(_Resource):
     def catalog_update(self):
         return self._c._request("POST", "/api/catalog/update")
 
-    def list_models(self):
+    def list_all_models(self):
         return self._c._request("GET", "/api/models")
 
     def list_aliases(self):
