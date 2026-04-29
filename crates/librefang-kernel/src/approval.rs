@@ -910,6 +910,42 @@ impl ApprovalManager {
             .unwrap_or(0) as usize
     }
 
+    /// Hard-delete `approval_audit` rows whose `decided_at` is older than
+    /// `older_than_days` days. Independent of the `audit_entries` Merkle
+    /// trail (which has its own retention path) — the approval log is a
+    /// flat audit table and would otherwise grow forever (#3468).
+    ///
+    /// `decided_at` is an RFC3339 string column; we wrap both sides in
+    /// `datetime(...)` so the comparison parses real timestamps instead
+    /// of relying on lexicographic ordering across `Z` / `+00:00` /
+    /// fractional-second variants.
+    ///
+    /// Returns the number of rows pruned.
+    pub fn prune_audit(&self, older_than_days: u64) -> usize {
+        if older_than_days == 0 {
+            return 0;
+        }
+        let Some(db) = &self.audit_db else {
+            return 0;
+        };
+        let Ok(conn) = db.lock() else {
+            return 0;
+        };
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::days(older_than_days as i64))
+        .to_rfc3339();
+        match conn.execute(
+            "DELETE FROM approval_audit WHERE datetime(decided_at) < datetime(?1)",
+            rusqlite::params![cutoff],
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("approval_audit prune failed: {e}");
+                0
+            }
+        }
+    }
+
     /// Update the approval policy (for hot-reload).
     pub fn update_policy(&self, policy: ApprovalPolicy) {
         *self.policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
@@ -2963,5 +2999,56 @@ mod tests {
 
         // Pending row also lives in the dedicated table (cross-restart survival).
         assert!(mgr.get_pending(request_id).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // approval_audit retention (#3468)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prune_audit_drops_old_rows_keeps_recent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let conn = Arc::new(StdMutex::new(conn));
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::clone(&conn));
+
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::days(120)).to_rfc3339();
+        let recent = (now - chrono::Duration::days(10)).to_rfc3339();
+        {
+            let g = conn.lock().unwrap();
+            let mut insert = |id: &str, decided_at: &str| {
+                g.execute(
+                    "INSERT INTO approval_audit (id, request_id, agent_id, tool_name, decision, decided_at, requested_at) \
+                     VALUES (?1, 'req', 'a', 'shell_exec', 'approved', ?2, ?2)",
+                    rusqlite::params![id, decided_at],
+                )
+                .unwrap();
+            };
+            insert("old1", &old);
+            insert("old2", &old);
+            insert("recent1", &recent);
+        }
+
+        let pruned = mgr.prune_audit(90);
+        assert_eq!(pruned, 2, "two 120-day-old rows should be deleted");
+
+        let remaining: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM approval_audit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn prune_audit_zero_disabled() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let mgr = ApprovalManager::new_with_db(
+            ApprovalPolicy::default(),
+            Arc::new(StdMutex::new(conn)),
+        );
+        assert_eq!(mgr.prune_audit(0), 0);
     }
 }

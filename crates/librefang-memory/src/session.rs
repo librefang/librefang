@@ -434,23 +434,32 @@ impl SessionStore {
     }
 
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
+    ///
+    /// The two `DELETE`s run inside a single transaction so a failure on
+    /// either side rolls back the other and leaves the agent's history
+    /// either fully intact or fully gone — never half-deleted with FTS
+    /// orphans pointing at missing rows (#3470).
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let agent_id_str = agent_id.0.to_string();
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.execute(
             "DELETE FROM sessions WHERE agent_id = ?1",
             rusqlite::params![agent_id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        if let Err(e) = conn.execute(
+        tx.execute(
             "DELETE FROM sessions_fts WHERE agent_id = ?1",
             rusqlite::params![agent_id_str],
-        ) {
-            warn!(agent_id = %agent_id_str, error = %e, "Failed to delete FTS entries for agent; orphans left in sessions_fts");
-        }
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
