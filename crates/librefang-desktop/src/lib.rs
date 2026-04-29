@@ -31,7 +31,7 @@ use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
 
 /// Reject http:// for non-loopback hosts (IPC-enabled webview MITM-RCE, #3673).
-pub fn validate_server_url(url: &str) -> Result<(), String> {
+pub(crate) fn validate_server_url(url: &str) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     let (scheme_is_http, rest) = if let Some(r) = lower.strip_prefix("http://") {
         (true, r)
