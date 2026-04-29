@@ -162,17 +162,22 @@ fn user_role_allows_request(role: UserRole, method: &axum::http::Method, path: &
 }
 
 /// Pull a caller-provided token from the standard locations the auth path
-/// understands: `Authorization: Bearer <x>` or `X-API-Key: <x>`. Bearer wins
-/// over X-API-Key — same precedence as the non-loopback flow at
-/// `auth(...)` line ~528. Returns `None` if no shape is present.
+/// understands. Precedence (matches the non-loopback flow at `auth(...)`):
+///   1. `Authorization: Bearer <x>`
+///   2. `X-API-Key: <x>`
+///   3. `Sec-WebSocket-Protocol: bearer.<x>` — WS upgrade fallback.
+///      Browsers cannot set custom headers on the WebSocket handshake, so
+///      the dashboard encodes the token as a sub-protocol entry that starts
+///      with `bearer.`. Without this branch the auth middleware (which runs
+///      before any WS handler) would 401-storm every dashboard ws (terminal,
+///      chat, agent stream). The matching ws handler echoes the protocol
+///      back via `WebSocketUpgrade::protocols(...)` so the browser accepts
+///      the handshake — see `ws::ws_bearer_protocol`.
 ///
-/// SECURITY: `?token=` query-string auth is intentionally NOT supported here.
+/// SECURITY: `?token=` query-string auth is intentionally NOT supported.
 /// Query parameters appear in server access logs, browser history, and HTTP
 /// Referer headers forwarded to third parties, making them unsuitable for
-/// carrying credentials on regular HTTP routes. WebSocket upgrades are the
-/// sole exception — browsers cannot set custom headers on WebSocket
-/// connections — and they handle `?token=` in `crate::ws::ws_auth_token`
-/// rather than going through this middleware path.
+/// carrying credentials.
 fn extract_request_token(request: &Request<Body>) -> Option<String> {
     let bearer = request
         .headers()
@@ -183,11 +188,27 @@ fn extract_request_token(request: &Request<Body>) -> Option<String> {
     if bearer.is_some() {
         return bearer;
     }
-    request
+    if let Some(key) = request
         .headers()
         .get("x-api-key")
         .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
+    {
+        return Some(key.to_string());
+    }
+    // WebSocket upgrade: sub-protocol entry of the form `bearer.<token>`.
+    // Multiple sub-protocols may be comma-separated; pick the first that
+    // starts with `bearer.`.
+    request
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(',')
+                .map(str::trim)
+                .find(|p| p.starts_with("bearer."))
+                .and_then(|p| p.strip_prefix("bearer."))
+                .map(str::to_string)
+        })
 }
 
 /// Request ID header name (standard).
