@@ -136,15 +136,16 @@ impl MessageJournal {
 
     /// Record a new message as pending.  Call this BEFORE dispatching.
     ///
-    /// The file write is executed via `spawn_blocking` so that slow disk I/O
-    /// (e.g. fsync on a busy volume) does not stall the async runtime while
-    /// the mutex is held.  The in-memory index is updated only after the
-    /// write completes, preserving the WAL invariant.
+    /// The disk write happens **while the inner mutex is held** so that a
+    /// concurrent `compact()` cannot rebuild the file from a stale `pending`
+    /// snapshot between the write and the in-memory insert (that race let
+    /// just-journaled entries get rename-truncated off disk before the
+    /// in-memory index caught up — see audit of #3967).  The write runs
+    /// inside `spawn_blocking` to keep `OpenOptions::open` + `flush` off the
+    /// async reactor; the lock is `tokio::sync::Mutex`, so we can hold it
+    /// across the `.await` without blocking other tokio tasks (only other
+    /// journal mutators queue, which is what we want).
     pub async fn record(&self, entry: JournalEntry) {
-        let path = {
-            let inner = self.inner.lock().await;
-            inner.path.clone()
-        };
         let line = match serde_json::to_string(&entry) {
             Ok(l) => l,
             Err(e) => {
@@ -152,6 +153,8 @@ impl MessageJournal {
                 return;
             }
         };
+        let mut inner = self.inner.lock().await;
+        let path = inner.path.clone();
         let write_result =
             tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
         match write_result {
@@ -165,63 +168,76 @@ impl MessageJournal {
                 return;
             }
         }
-        let mut inner = self.inner.lock().await;
         inner.pending.insert(entry.message_id.clone(), entry);
     }
 
     /// Update the status of an existing entry.
     ///
-    /// Like `record`, the disk write runs in `spawn_blocking` so that a slow
-    /// fsync cannot block the async runtime while the mutex is held.
+    /// Disk-then-memory ordering: serialize the *desired* new state, write
+    /// it under the inner lock, and only mutate the in-memory entry on
+    /// success.  The earlier "memory-first, release lock, write disk"
+    /// shape (audit of #3967) corrupted the index on transient I/O
+    /// failure: in-memory `attempts` was bumped while disk still had the
+    /// old count, and after enough retries the in-memory `attempts >= 3`
+    /// removed the entry from the retry pool entirely while the disk
+    /// record stayed at 0.
     pub async fn update_status(
         &self,
         message_id: &str,
         status: JournalStatus,
         error: Option<String>,
     ) {
-        // Snapshot the updated entry under the lock, then release before I/O.
-        let (updated, path, should_remove) = {
-            let mut inner = self.inner.lock().await;
-            let entry = match inner.pending.get_mut(message_id) {
+        let mut inner = self.inner.lock().await;
+        let path = inner.path.clone();
+
+        // Build the proposed updated entry from the current on-record entry
+        // without mutating it yet.
+        let (line, updated, should_remove) = {
+            let entry = match inner.pending.get(message_id) {
                 Some(e) => e,
                 None => return,
             };
-            entry.status = status;
-            entry.updated_at = Utc::now();
+            let mut updated = entry.clone();
+            updated.status = status;
+            updated.updated_at = Utc::now();
             if status == JournalStatus::Failed {
-                entry.attempts += 1;
-                entry.last_error = error;
+                updated.attempts += 1;
+                updated.last_error = error;
             }
-            let updated = entry.clone();
+            let line = match serde_json::to_string(&updated) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!(error = %e, id = message_id, "Failed to serialize journal update");
+                    return;
+                }
+            };
             let should_remove = status == JournalStatus::Completed
                 || (status == JournalStatus::Failed && updated.attempts >= 3);
-            (updated, inner.path.clone(), should_remove)
+            (line, updated, should_remove)
         };
 
-        // Write without holding the mutex.
-        let line = match serde_json::to_string(&updated) {
-            Ok(l) => l,
-            Err(e) => {
-                error!(error = %e, id = message_id, "Failed to serialize journal update");
-                return;
-            }
-        };
+        // Write while still holding the lock (see record() doc).  On
+        // failure, leave the in-memory entry untouched so the next retry
+        // sees the same state the disk does.
         let write_result =
             tokio::task::spawn_blocking(move || Self::write_line_to_path(&path, &line)).await;
         match write_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 error!(error = %e, id = message_id, "Failed to update journal entry");
+                return;
             }
             Err(e) => {
                 error!(error = %e, id = message_id, "spawn_blocking panicked updating journal");
+                return;
             }
         }
 
-        // Remove from in-memory index if terminal.
+        // Disk persisted; commit the in-memory state.
         if should_remove {
-            let mut inner = self.inner.lock().await;
             inner.pending.remove(message_id);
+        } else if let Some(entry) = inner.pending.get_mut(message_id) {
+            *entry = updated;
         }
     }
 
