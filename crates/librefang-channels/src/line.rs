@@ -703,4 +703,14 @@ mod tests {
         assert!(msg.is_group);
         assert_eq!(msg.sender.platform_id, "R1234567890");
     }
+
+    /// Regression for #3439: empty / non-base64 sig must never pass HMAC.
+    #[test]
+    fn test_verify_line_signature_rejects_empty_signature() {
+        let secret = b"channel-secret-bytes";
+        let body = br#"{"events":[]}"#;
+        assert!(!verify_line_signature(secret, body, ""));
+        assert!(!verify_line_signature(secret, body, "   "));
+        assert!(!verify_line_signature(secret, body, "not-base64!@#"));
+    }
 }

@@ -4769,6 +4769,107 @@ fn mcp_summary_cache_key_is_order_independent() {
     assert_eq!(super::mcp_summary_cache_key(&[]), "*");
 }
 
+#[test]
+fn available_tools_mcp_section_is_sorted_across_connect_orders() {
+    // Regression for #3765: connect / hot-reload order of MCP servers must
+    // not mutate the LLM tool definition list, otherwise provider prompt
+    // caches miss on every daemon restart.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("librefang-mcp-order-test");
+    std::fs::create_dir_all(home.join("data")).unwrap();
+    let cfg = KernelConfig {
+        home_dir: home.clone(),
+        data_dir: home.join("data"),
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(cfg).expect("kernel should boot");
+    let manifest = AgentManifest {
+        name: "mcp-order".to_string(),
+        description: "agent for mcp order regression".to_string(),
+        author: "test".to_string(),
+        module: "builtin:chat".to_string(),
+        ..Default::default()
+    };
+    let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+
+    // Order A: connect filesystem before github before weather.
+    {
+        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        tools.clear();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_filesystem_read_file".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_github_create_issue".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_weather_forecast".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let names_a: Vec<String> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    // Order B: same set, scrambled connect order.
+    {
+        let mut tools = kernel.mcp_tools_ref().lock().unwrap();
+        tools.clear();
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_weather_forecast".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_github_create_issue".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+        tools.push(librefang_types::tool::ToolDefinition {
+            name: "mcp_filesystem_read_file".to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        });
+    }
+    kernel
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let names_b: Vec<String> = kernel
+        .available_tools(agent_id)
+        .iter()
+        .filter(|t| t.name.starts_with("mcp_"))
+        .map(|t| t.name.clone())
+        .collect();
+
+    assert_eq!(
+        names_a, names_b,
+        "MCP tool list must be byte-identical across connect orders (#3765)"
+    );
+    assert_eq!(
+        names_a,
+        vec![
+            "mcp_filesystem_read_file".to_string(),
+            "mcp_github_create_issue".to_string(),
+            "mcp_weather_forecast".to_string(),
+        ],
+        "MCP tools must be sorted lexicographically by name"
+    );
+
+    kernel.shutdown();
+}
+
 // ─── resolve_dispatch_session_id ──────────────────────────────────────────
 //
 // Backstop for the session-id-in-failure-log change: ensures the kernel

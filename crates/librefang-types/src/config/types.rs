@@ -5730,9 +5730,13 @@ pub struct TeamsConfig {
     pub app_password_env: String,
     /// Env var name holding the outgoing webhook security token (base64-encoded).
     /// Used for HMAC-SHA256 verification of inbound webhook requests.
-    /// If the env var is absent or empty, verification is skipped with a warning.
+    /// Required by default; setting `signature_required = false` opts out (dev only).
     #[serde(default)]
     pub security_token_env: String,
+    /// Reject adapter startup unless a security token is configured (default `true`).
+    /// Setting to `false` is strongly discouraged — webhook becomes a public endpoint.
+    #[serde(default = "default_true")]
+    pub signature_required: bool,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
     /// Allowed tenant IDs (empty = allow all).
@@ -5754,6 +5758,7 @@ impl Default for TeamsConfig {
             app_id: String::new(),
             app_password_env: "TEAMS_APP_PASSWORD".to_string(),
             security_token_env: "TEAMS_SECURITY_TOKEN".to_string(),
+            signature_required: true,
             webhook_port: 3978,
             allowed_tenants: vec![],
             account_id: None,

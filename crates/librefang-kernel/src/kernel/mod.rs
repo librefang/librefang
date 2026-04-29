@@ -14328,7 +14328,7 @@ system_prompt = "You are a helpful assistant."
                 .read()
                 .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
-            let mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
+            let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
                 mcp_tools.iter().cloned().collect()
             } else {
                 let normalized: Vec<String> = mcp_allowlist
@@ -14351,6 +14351,9 @@ system_prompt = "You are a helpful assistant."
                     .cloned()
                     .collect()
             };
+            // Sort MCP tools by name so connect / hot-reload order does not
+            // mutate the prompt prefix and invalidate provider cache (#3765).
+            mcp_candidates.sort_by(|a, b| a.name.cmp(&b.name));
             for t in mcp_candidates {
                 // MCP tools are NOT filtered by capabilities.tools.
                 // mcp_candidates is already scoped to the agent's allowed servers
