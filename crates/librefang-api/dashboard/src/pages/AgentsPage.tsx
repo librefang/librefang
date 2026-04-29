@@ -78,6 +78,47 @@ import {
 } from "../lib/mutations/agents";
 import { StaggerList } from "../components/ui/StaggerList";
 
+/**
+ * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
+ * with the additional runtime fields the backend actually returns on
+ * `GET /api/agents/{id}` but which haven't been added to the canonical
+ * type yet. Keeping this scoped to AgentsPage avoids widening the
+ * exported interface for other consumers and removes the need for
+ * `(agent as AgentView).field` casts inside the master-detail rendering.
+ */
+type AgentTriggerSummary = {
+  event_pattern?: string;
+  name?: string;
+  description?: string;
+};
+type AgentCronSummary = {
+  schedule?: string;
+  cron?: string;
+  expression?: string;
+  next_run?: string;
+  name?: string;
+  id?: string;
+};
+type AgentView = AgentDetail & {
+  state?: string;
+  description?: string;
+  profile?: string;
+  model_name?: string;
+  model_provider?: string;
+  last_active?: string;
+  triggers?: AgentTriggerSummary[];
+  cron_jobs?: AgentCronSummary[];
+  // The backend ships capabilities.tools / .skills as string arrays on the
+  // wire, but the canonical `AgentDetail` interface narrows them to
+  // booleans. Override here so consumers of this page can `.length` them
+  // without a cast — the canonical type is fixed in the API layer in a
+  // follow-up PR.
+  capabilities?: AgentDetail["capabilities"] & {
+    skills?: string[];
+    tools?: string[];
+  };
+};
+
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
   return (
@@ -262,6 +303,10 @@ export function AgentsPage() {
     closeToolsEditor();
   }
 
+  // Currently used by deleteMutation when the active agent is removed.
+  // Inline-style void hint stops tsc complaining when the symbol gets
+  // tree-shaken in tighter no-unused-locals builds.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function deselectAgent() {
     setDetailAgent(null);
     setDetailDrawerOpen(false);
@@ -656,7 +701,9 @@ export function AgentsPage() {
         } ${stateLower === "suspended" ? "opacity-70" : ""}`}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0" />
+          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
+            <span className="sr-only">{agent.state || "idle"}</span>
+          </Badge>
           <span className="font-mono text-[13px] truncate flex-1 min-w-0 text-text-main">
             {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </span>
@@ -686,15 +733,15 @@ export function AgentsPage() {
   // and opened from the panel's overflow menu.  Five tabs mirror the
   // design: Conversation / Memory / Skills / Schedule / Logs.
   const renderDetailPanel = (agent: AgentDetail) => {
-    const detailState = ((agent as any).state || "").toLowerCase();
+    const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
     const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
-    const skillsCount = Array.isArray((agent as any).capabilities?.skills)
-      ? (agent as any).capabilities.skills.length
+    const skillsCount = Array.isArray((agent as AgentView).capabilities?.skills)
+      ? (agent as AgentView).capabilities.skills.length
       : 0;
-    const toolsCount = Array.isArray((agent as any).capabilities?.tools)
-      ? (agent as any).capabilities.tools.length
+    const toolsCount = Array.isArray((agent as AgentView).capabilities?.tools)
+      ? (agent as AgentView).capabilities.tools.length
       : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
@@ -717,18 +764,18 @@ export function AgentsPage() {
                 <h2 className="font-mono font-semibold text-base truncate text-text-main">
                   {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
                 </h2>
-                <Badge variant={getStatusVariant((agent as any).state)} dot className="shrink-0">
-                  {(agent as any).state
-                    ? t(`common.${((agent as any).state || "").toLowerCase()}`, { defaultValue: (agent as any).state })
+                <Badge variant={getStatusVariant((agent as AgentView).state)} dot className="shrink-0">
+                  {(agent as AgentView).state
+                    ? t(`common.${((agent as AgentView).state || "").toLowerCase()}`, { defaultValue: (agent as AgentView).state })
                     : t("common.idle")}
                 </Badge>
               </div>
               <p className="font-mono text-[11.5px] text-text-dim/80 truncate mt-0.5">
                 {truncateId(agent.id)}
-                {agent.model?.model || (agent as any).model_name
-                  ? ` · ${agent.model?.model || (agent as any).model_name}`
+                {agent.model?.model || (agent as AgentView).model_name
+                  ? ` · ${agent.model?.model || (agent as AgentView).model_name}`
                   : ""}
-                {agent.profile ? ` · ${agent.profile}` : ""}
+                {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
               </p>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
@@ -962,10 +1009,10 @@ export function AgentsPage() {
 
   // ---------- Skills tab — 2-col card grid per design canvas
   const renderSkillsTab = (agent: AgentDetail) => {
-    const skills: string[] = Array.isArray((agent as any).skills)
-      ? (agent as any).skills
-      : Array.isArray((agent as any).capabilities?.skills)
-        ? (agent as any).capabilities.skills
+    const skills: string[] = Array.isArray((agent as AgentView).skills)
+      ? (agent as AgentView).skills
+      : Array.isArray((agent as AgentView).capabilities?.skills)
+        ? (agent as AgentView).capabilities.skills
         : [];
     return (
       <div className="flex flex-col gap-3">
@@ -1012,7 +1059,7 @@ export function AgentsPage() {
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
     const cron = cronJobsQuery.data ?? [];
-    const triggers = Array.isArray((agent as any).triggers) ? (agent as any).triggers : [];
+    const triggers = Array.isArray((agent as AgentView).triggers) ? (agent as AgentView).triggers : [];
     // Synthetic "last 14 runs" — backend doesn't expose per-fire history
     // through a single agent-scoped endpoint yet, so we visualise an
     // agent-id-seeded waveform as a placeholder. Wire up real run
@@ -1330,7 +1377,7 @@ export function AgentsPage() {
           keep identity and primary actions pinned while the inspectable
           sections scroll in the middle. */}
       {detailAgent && detailDrawerOpen && (() => {
-        const detailState = ((detailAgent as any).state || "").toLowerCase();
+        const detailState = ((detailAgent as AgentView).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
         const isDetailCrashed = detailState === "crashed";
         const statusColor = isDetailSuspended ? "bg-warning" : isDetailCrashed ? "bg-error" : "bg-success";
@@ -1427,14 +1474,14 @@ export function AgentsPage() {
                         )}
                       </button>
                     )}
-                    {(detailAgent as any).description && (
-                      <p className="text-xs text-text-dim mt-1 leading-relaxed">{(detailAgent as any).description}</p>
+                    {(detailAgent as AgentView).description && (
+                      <p className="text-xs text-text-dim mt-1 leading-relaxed">{(detailAgent as AgentView).description}</p>
                     )}
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                       <span className="text-[11px] text-text-dim/70 font-mono">{truncateId(detailAgent.id, 16)}</span>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
                       <Badge variant={isDetailSuspended ? "warning" : isDetailCrashed ? "error" : "success"} dot>
-                        {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
+                        {(detailAgent as AgentView).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as AgentView).state }) : t("common.running")}
                       </Badge>
                     </div>
                   </div>
