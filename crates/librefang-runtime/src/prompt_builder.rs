@@ -2209,4 +2209,57 @@ mod tests {
         let input = "\u{4f60}\u{597d}";
         assert_eq!(cap_str(input, 10), input);
     }
+
+    /// Regression test for issue #3700: the system prompt must remain
+    /// byte-identical when the same `current_date` value is supplied across
+    /// turns.  The kernel deliberately formats `current_date` with day-level
+    /// precision (no `%H:%M`) so that the cached prefix on Anthropic / OpenAI
+    /// / Gemini providers is reused turn-over-turn.  If anyone ever adds a
+    /// minute-precision timestamp back into the system prompt, this test
+    /// alone won't catch that — but it does lock the contract that, *given*
+    /// a stable `current_date`, the rest of the builder is deterministic and
+    /// produces the same bytes twice in a row.
+    #[test]
+    fn build_system_prompt_is_byte_stable_for_fixed_current_date() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Wednesday, April 29, 2026 (2026-04-29 UTC)".to_string());
+        let first = build_system_prompt(&ctx);
+        let second = build_system_prompt(&ctx);
+        assert_eq!(
+            first, second,
+            "system prompt must be byte-identical across calls with the \
+             same context — any non-determinism here invalidates LLM \
+             prompt cache (see issue #3700, sibling fix #3298)"
+        );
+    }
+
+    /// Regression test for issue #3700: explicitly assert that the
+    /// `## Current Date` section we render does *not* contain a colon-separated
+    /// `HH:MM` minute-precision timestamp.  A future change that smuggles
+    /// `chrono::Local::now().format("...%H:%M...")` back into `current_date`
+    /// would silently double LLM token cost, so we lock the format here.
+    #[test]
+    fn current_date_section_omits_minute_precision_timestamp() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Wednesday, April 29, 2026 (2026-04-29 UTC)".to_string());
+        let prompt = build_system_prompt(&ctx);
+        let date_section = prompt
+            .split("## Current Date")
+            .nth(1)
+            .and_then(|rest| rest.split("\n##").next())
+            .unwrap_or("");
+        // Look for HH:MM pattern (two digits, colon, two digits).  We allow
+        // a single colon inside parens like "(2026-04-29 UTC)" but reject
+        // anything like "14:30" or "09:05".
+        let has_hh_mm = date_section
+            .as_bytes()
+            .windows(5)
+            .any(|w| w[2] == b':' && w[0].is_ascii_digit() && w[1].is_ascii_digit() && w[3].is_ascii_digit() && w[4].is_ascii_digit());
+        assert!(
+            !has_hh_mm,
+            "## Current Date section must not embed a HH:MM timestamp \
+             (issue #3700 — invalidates prompt cache every minute). \
+             Got: {date_section:?}"
+        );
+    }
 }
