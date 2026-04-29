@@ -1616,7 +1616,15 @@ pub async fn list_approvals(
     Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
-    let recent = state.kernel.approvals().list_recent(50);
+    // Pull the full in-memory recent buffer (capped at
+    // MAX_RECENT_APPROVALS = 100 by approval.rs), not a hard-coded 50.
+    // The earlier limit meant `total` reported pending + 50 even when
+    // the buffer held more, so a frontend asking for `offset=50` got
+    // an empty page despite `total > offset` — pagination contract
+    // broken (audit of #3958).  The buffer cap is the real bound;
+    // surfacing the full set here lets the skip/take below paginate
+    // over the actual window the server can serve.
+    let recent = state.kernel.approvals().list_recent(usize::MAX);
 
     let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
