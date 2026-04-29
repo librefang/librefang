@@ -1388,9 +1388,7 @@ fn promote_staging(
     let target_str = target.display().to_string();
     for item in &mut report.imported {
         if item.destination.starts_with(&staging_str) {
-            item.destination = item
-                .destination
-                .replacen(&staging_str, &target_str, 1);
+            item.destination = item.destination.replacen(&staging_str, &target_str, 1);
         }
     }
 
@@ -1420,9 +1418,7 @@ fn promote_dir(
             // #3795 — never clobber. Drop the staged copy.
             report.warnings.push(format!(
                 "Skipped promoting {} — destination already exists",
-                to.strip_prefix(real_target_root)
-                    .unwrap_or(&to)
-                    .display()
+                to.strip_prefix(real_target_root).unwrap_or(&to).display()
             ));
             let _ = std::fs::remove_file(&from);
         } else {
