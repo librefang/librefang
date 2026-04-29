@@ -222,7 +222,13 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
         return true;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // `Url::host_str()` returns IPv6 as "[::1]"; strip brackets before IpAddr::from_str rejects them.
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
         return match ip {
             IpAddr::V4(v4) => blocked_v4(v4),
             IpAddr::V6(v6) => {
