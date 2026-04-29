@@ -1721,8 +1721,33 @@ impl McpConnection {
             },
         );
         if let McpInner::Rmcp(mut client) = inner {
-            if let Err(e) = client.close().await {
-                warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
+            // Bound the rmcp close() call so a stuck stdio child or a
+            // wedged shutdown path can never block the caller (typically
+            // hot-reload or daemon shutdown) indefinitely.  rmcp's close
+            // sends a CancellationToken and waits for its transport loop
+            // + the underlying ChildWithCleanup drop; tokio's
+            // kill_on_drop(true) follows up with SIGKILL but does NOT
+            // call wait(), so the OS-level reap depends on the tokio
+            // child reaper still being alive.  A 10s timeout is generous
+            // enough that a healthy server completes shutdown but tight
+            // enough that a wedged transport doesn't stall the next
+            // hot-reload — the audit of #3926 flagged the unbounded
+            // close as a real risk.
+            const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
+                }
+                Err(_) => {
+                    warn!(
+                        server = %name,
+                        timeout_secs = CLOSE_TIMEOUT.as_secs(),
+                        "MCP stdio client close timed out — relying on kill_on_drop \
+                         to reap the subprocess (may leave a transient zombie until \
+                         the tokio child reaper runs)"
+                    );
+                }
             }
         }
         // SSE and HttpCompat hold no persistent connection; nothing to close.
@@ -1769,12 +1794,30 @@ impl Drop for McpConnection {
                 // entered.
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
-                        if let Err(e) = client.close().await {
-                            debug!(
-                                server = %name,
-                                error = ?e,
-                                "MCP stdio client close error on implicit drop (#3800)"
-                            );
+                        // Bound the implicit close just like the explicit
+                        // path above so a wedged transport doesn't stall
+                        // a runtime worker indefinitely (the spawn
+                        // itself is fire-and-forget so we can't await
+                        // the join handle, but the timeout still caps
+                        // the worker's commitment).
+                        const CLOSE_TIMEOUT: std::time::Duration =
+                            std::time::Duration::from_secs(10);
+                        match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                debug!(
+                                    server = %name,
+                                    error = ?e,
+                                    "MCP stdio client close error on implicit drop (#3800)"
+                                );
+                            }
+                            Err(_) => {
+                                debug!(
+                                    server = %name,
+                                    timeout_secs = CLOSE_TIMEOUT.as_secs(),
+                                    "MCP stdio client close timed out on implicit drop"
+                                );
+                            }
                         }
                     });
                 }
