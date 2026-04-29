@@ -1531,7 +1531,11 @@ fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
 }
 
 /// Default context window size (tokens) for token-based trimming when the
-/// model is in the catalog but its `context_window` was unset.
+/// model is in the catalog but its `context_window` was unset. Referenced by
+/// `docs/architecture/message-history-trimming.md` and
+/// `docs/src/app/configuration/core/page.mdx` so kept as the authoritative
+/// value even when no runtime path currently reads it.
+#[allow(dead_code)]
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 
 /// Conservative fallback for **unknown** models — i.e. the catalog had no

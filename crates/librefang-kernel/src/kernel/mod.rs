@@ -631,8 +631,10 @@ pub struct LibreFangKernel {
     /// behalf of a specific agent. `kill_agent` drains and aborts these so
     /// permits release immediately and a deleted agent stops accruing cost
     /// from in-flight retry loops (#3705).
-    pub(crate) agent_watchers:
-        dashmap::DashMap<AgentId, std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
+    pub(crate) agent_watchers: dashmap::DashMap<
+        AgentId,
+        std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    >,
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
