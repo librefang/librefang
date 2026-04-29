@@ -1687,6 +1687,12 @@ fn migrate_channels_from_json(
                 "teams".to_string(),
                 build_channel_table(fields, tm.dm_policy.as_deref(), None),
             );
+            report.warnings.push(
+                "Teams: signature_required defaults to true. Set TEAMS_SECURITY_TOKEN \
+                 (base64 outgoing-webhook token from the Teams portal) before \
+                 starting the daemon, or the adapter will refuse to register."
+                    .to_string(),
+            );
             report.imported.push(MigrateItem {
                 kind: ItemKind::Channel,
                 name: "teams".to_string(),

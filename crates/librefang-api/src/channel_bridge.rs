@@ -2478,6 +2478,17 @@ pub async fn start_channel_bridge_with_config(
             let security_token =
                 read_token(&tm_config.security_token_env, "Teams (security_token)")
                     .unwrap_or_default();
+            // Default-deny: unsigned webhooks let anyone forge Teams activities.
+            if tm_config.signature_required && security_token.is_empty() {
+                tracing::error!(
+                    "Teams adapter for app_id={} refused: signature_required=true \
+                     but security_token_env '{}' is unset/empty. Set the env var or \
+                     explicitly set signature_required=false (NOT recommended).",
+                    tm_config.app_id,
+                    tm_config.security_token_env
+                );
+                continue;
+            }
             let adapter = Arc::new(
                 TeamsAdapter::new(
                     tm_config.app_id.clone(),
