@@ -278,8 +278,17 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
         if args.dry_run {
             println!("  [dry-run] Would publish {}@{}", pkg_name, args.version);
         } else {
+            // --ignore-scripts blocks lifecycle hooks (prepublishOnly,
+            // prepack, postpublish) from running during publish, so a
+            // future malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
             let mut cmd = Command::new("npm");
-            cmd.args(["publish", &pkg_dir.to_string_lossy(), "--access", "public"]);
+            cmd.args([
+                "publish",
+                &pkg_dir.to_string_lossy(),
+                "--access",
+                "public",
+                "--ignore-scripts",
+            ]);
             for a in &npm_tag_args {
                 cmd.arg(a);
             }
@@ -339,8 +348,9 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
             }
             fs::write(&pkg_path, serde_json::to_string_pretty(&pkg)? + "\n")?;
 
+            // --ignore-scripts: see comment in per-target publish above.
             let mut cmd = Command::new("npm");
-            cmd.args(["publish", "--access", "public"])
+            cmd.args(["publish", "--access", "public", "--ignore-scripts"])
                 .current_dir(&wrapper_dir);
             for a in &npm_tag_args {
                 cmd.arg(a);
