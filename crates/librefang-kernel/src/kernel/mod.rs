@@ -460,6 +460,18 @@ pub struct LibreFangKernel {
         Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
+    /// Cached rendered MCP summary strings, keyed by the agent's
+    /// `mcp_servers` allowlist. Each entry stores the
+    /// `mcp_generation` it was rendered under so we cheaply detect
+    /// staleness on the next read.
+    ///
+    /// Lets the per-LLM-turn prompt build skip re-extracting tool
+    /// names under the `mcp_tools` `Mutex` and re-running the
+    /// `BTreeMap`-based render when nothing has changed since the
+    /// previous turn — the common case between rare MCP
+    /// connect/disconnect events. See #3687.
+    pub(crate) mcp_summary_cache:
+        dashmap::DashMap<String, (u64, std::sync::Arc<String>)>,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -3101,6 +3113,7 @@ impl LibreFangKernel {
                 oauth_home_dir,
             )),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
+            mcp_summary_cache: dashmap::DashMap::new(),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::with_persistence(
                 1000,
                 &a2a_db_path,
@@ -4596,21 +4609,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
-            // incurs one Arc::new() per entry instead of a full AgentEntry
-            // deep-clone. See #3685.
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list_arcs()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            // Use peer_agents_summary() so the per-LLM-turn peer-agent
+            // snapshot projects directly to the three short strings the
+            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
+            // allocation. See #3685.
+            let peer_agents: Vec<(String, String, String)> =
+                self.registry.peer_agents_summary();
 
             let ws_meta = manifest
                 .workspace
@@ -5934,21 +5938,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
-            // incurs one Arc::new() per entry instead of a full AgentEntry
-            // deep-clone. See #3685.
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list_arcs()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            // Use peer_agents_summary() so the per-LLM-turn peer-agent
+            // snapshot projects directly to the three short strings the
+            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
+            // allocation. See #3685.
+            let peer_agents: Vec<(String, String, String)> =
+                self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -7496,21 +7491,12 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use list_arcs() so the per-LLM-turn peer-agent snapshot only
-            // incurs one Arc::new() per entry instead of a full AgentEntry
-            // deep-clone. See #3685.
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list_arcs()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            // Use peer_agents_summary() so the per-LLM-turn peer-agent
+            // snapshot projects directly to the three short strings the
+            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
+            // allocation. See #3685.
+            let peer_agents: Vec<(String, String, String)> =
+                self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -13761,9 +13747,15 @@ system_prompt = "You are a helpful assistant."
             .cloned()
             .collect();
 
-        // 4. Update effective list
+        // 4. Update effective list. Bump mcp_generation so any cached
+        //    `build_mcp_summary` entries that read `effective_mcp_servers`
+        //    invalidate immediately, even before per-server connect bumps
+        //    fire below — otherwise the prompt could briefly show a stale
+        //    server set after a hot-reload. See #3687.
         if let Ok(mut effective) = self.effective_mcp_servers.write() {
             *effective = new_configs;
+            self.mcp_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // 5. Connect new servers
@@ -15294,14 +15286,38 @@ system_prompt = "You are a helpful assistant."
     /// Build a compact MCP server/tool summary for the system prompt so the
     /// agent knows what external tool servers are connected.
     ///
-    /// The sync Mutex is held for the minimum time possible: only the tool
-    /// names are extracted while the guard is live. All serialization and
-    /// rendering happens after the lock is released so we never block MCP
-    /// tool-update operations on string formatting work. See #3687.
+    /// Hot-path (~1 LLM turn for any agent with MCP servers): we cache the
+    /// rendered string per allowlist + `mcp_generation`. On a hit we skip
+    /// the `mcp_tools` `Mutex` acquisition and the `BTreeMap`-based render
+    /// entirely — both of which used to run unconditionally on every turn
+    /// even though the MCP tool registry only changes on connect /
+    /// disconnect / reload (which all bump `mcp_generation`). See #3687.
+    ///
+    /// Determinism is preserved: `render_mcp_summary` already sorts servers
+    /// (`BTreeMap`) and each server's tool list before joining, so the
+    /// cached `String` is byte-identical to a freshly rendered one for the
+    /// same `(allowlist, generation)` pair. The cache key normalises the
+    /// allowlist by sorting + joining so different insertion orders share
+    /// a single entry, matching the determinism guarantee in #3298.
     fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
-        // Extract only the names we need while holding the lock, then drop it
-        // immediately. Cloning the entire Vec<ToolDefinition> (which may hold
-        // 60KB+ of JSON schema values) under the Mutex was the original bug.
+        let mcp_gen = self
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cache_key = mcp_summary_cache_key(mcp_allowlist);
+
+        // Cache hit on the current generation: just clone the Arc<String>.
+        if let Some(entry) = self.mcp_summary_cache.get(&cache_key) {
+            let (cached_gen, cached_str) = entry.value();
+            if *cached_gen == mcp_gen {
+                return (**cached_str).clone();
+            }
+        }
+
+        // Cache miss / stale: re-render. Extract only the names we need
+        // while holding the lock, then drop it immediately. Cloning the
+        // entire `Vec<ToolDefinition>` (which may hold 60KB+ of JSON
+        // schema values) under the Mutex was the original bug fixed in
+        // an earlier pass on this issue.
         let tool_names: Vec<String> = match self.mcp_tools.lock() {
             Ok(t) => {
                 if t.is_empty() {
@@ -15319,7 +15335,10 @@ system_prompt = "You are a helpful assistant."
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
 
-        render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist)
+        let rendered = render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist);
+        let arc = std::sync::Arc::new(rendered.clone());
+        self.mcp_summary_cache.insert(cache_key, (mcp_gen, arc));
+        rendered
     }
 
     // inject_user_personalization() — logic moved to prompt_builder::build_user_section()
@@ -15408,6 +15427,22 @@ enum ReviewError {
     /// Parse / validation / security-blocked; retry would be
     /// non-idempotent (fresh LLM call, different output each time).
     Permanent(String),
+}
+
+/// Build a deterministic cache key for the per-agent MCP allowlist.
+///
+/// The render output only depends on the *set* of allowed servers, so we
+/// sort + join with a separator that cannot appear inside an MCP server
+/// name (`\x1f`, ASCII Unit Separator). Two manifests with the same set
+/// of `mcp_servers` in different listed orders share one cache entry,
+/// preserving the determinism guarantee in #3298 / #3687.
+fn mcp_summary_cache_key(mcp_allowlist: &[String]) -> String {
+    if mcp_allowlist.is_empty() {
+        return String::from("*");
+    }
+    let mut sorted = mcp_allowlist.to_vec();
+    sorted.sort();
+    sorted.join("\x1f")
 }
 
 /// Render the MCP-server tool summary that lands in the system prompt.
