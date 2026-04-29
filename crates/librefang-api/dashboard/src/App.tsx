@@ -14,6 +14,9 @@ import {
   Menu,
   Home,
   Layers,
+  Layout,
+  Image as ImageIcon,
+  History,
   MessageCircle,
   CheckCircle,
   Calendar,
@@ -22,7 +25,6 @@ import {
   User,
   Server,
   Network,
-  Bell,
   Hand,
   BarChart3,
   Database,
@@ -656,81 +658,79 @@ export function App() {
   const navBase = `relative flex items-center rounded-md border border-transparent text-[13px] text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
     isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0 h-[30px]" : "px-2.5 gap-2.5 h-[30px]"
   }`;
-  const navActive = "bg-brand/10 text-brand font-medium before:absolute before:left-[-4px] before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
+  // Tailwind v4: `before:` requires explicit `content-['']` for the pseudo
+  // element to render at all. The bar sits 1px inside the button's left edge
+  // (no negative offset) so it's visible regardless of any clipping ancestor.
+  const navActive = "bg-brand/10 text-brand font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
 
+  // Nav structure mirrors the design canvas (data.jsx::NAV_PRIMARY +
+  // NAV_SECTIONS). The first group is the unlabeled "primary" rail and
+  // the rest fall under three labeled sections: Runtime, Observability,
+  // Admin. Routes map 1:1 to the existing tanstack-router paths in
+  // src/router.tsx — items the design surfaces but the daemon doesn't
+  // expose yet (Budget, Policy as standalone pages) are deliberately
+  // omitted instead of dead-linked.
   const navGroups = useMemo(() => {
-    const advancedItems = [
-      { to: "/comms", label: t("nav.comms"), icon: Activity },
-      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
-      { to: "/network", label: t("nav.network"), icon: Share2 },
-      { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+    const observabilityItems = [
+      { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
       { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+      { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
+      { to: "/logs", label: t("nav.logs"), icon: FileText },
+      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
+      { to: "/canvas", label: t("nav.canvas", { defaultValue: "Canvas" }), icon: Layout },
+      { to: "/comms", label: t("nav.comms"), icon: Activity },
+      { to: "/media", label: t("nav.media"), icon: ImageIcon },
     ];
     return [
-    {
-      key: "core",
-      label: t("nav.core"),
-      items: [
-        { to: "/overview", label: t("nav.overview"), icon: Home },
-        { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
-        { to: "/agents", label: t("nav.agents"), icon: Users },
-        { to: "/users", label: t("nav.users", "Users"), icon: Users },
-        { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
-        { to: "/hands", label: t("nav.hands"), icon: Hand },
-      ],
-    },
-    {
-      key: "configure",
-      label: t("nav.configure"),
-      items: [
-        { to: "/providers", label: t("nav.providers"), icon: Server },
-        { to: "/models", label: t("nav.models"), icon: Cpu },
-        { to: "/media", label: t("nav.media"), icon: Sparkles },
-        { to: "/channels", label: t("nav.channels"), icon: Network },
-        { to: "/skills", label: t("nav.skills"), icon: Bell },
-        { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
-        { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
-      ],
-    },
-    {
-      key: "config",
-      label: t("nav.config"),
-      items: [
-        { to: "/config/general", label: t("config.cat_general"), icon: Settings },
-        { to: "/config/memory", label: t("config.cat_memory"), icon: Database },
-        { to: "/config/tools", label: t("config.cat_tools"), icon: Sparkles },
-        { to: "/config/channels", label: t("config.cat_channels"), icon: Network },
-        { to: "/config/security", label: t("config.cat_security"), icon: Shield },
-        { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
-        { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
-      ],
-    },
-    {
-      key: "automate",
-      label: t("nav.automate"),
-      items: [
-        { to: "/workflows", label: t("nav.workflows"), icon: Layers },
-        { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
-        { to: "/goals", label: t("nav.goals"), icon: Shield },
-      ],
-    },
-    {
-      key: "observe",
-      label: t("nav.observe"),
-      items: [
-        { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
-        { to: "/memory", label: t("nav.memory"), icon: Database },
-        { to: "/logs", label: t("nav.logs"), icon: FileText },
-        { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
-        { to: "/runtime", label: t("nav.runtime"), icon: Activity },
-      ],
-    },
-    {
-      key: "advanced",
-      label: t("nav.advanced"),
-      items: advancedItems,
-    },
-  ]; }, [t, terminalEnabled]);
+      {
+        // Empty key/label = render as unlabeled primary rail (NAV_PRIMARY in
+        // the design canvas).
+        key: "primary",
+        label: "",
+        items: [
+          { to: "/overview", label: t("nav.overview"), icon: Home },
+          { to: "/agents", label: t("nav.agents"), icon: Users },
+          { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
+          { to: "/sessions", label: t("nav.sessions", { defaultValue: "Sessions" }), icon: History },
+          { to: "/skills", label: t("nav.skills"), icon: Sparkles },
+          { to: "/workflows", label: t("nav.workflows"), icon: Layers },
+          { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
+          { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
+        ],
+      },
+      {
+        key: "runtime",
+        label: t("nav.runtime_section", { defaultValue: "Runtime" }),
+        items: [
+          { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
+          { to: "/channels", label: t("nav.channels"), icon: Network },
+          { to: "/providers", label: t("nav.providers"), icon: Server },
+          { to: "/models", label: t("nav.models"), icon: Cpu },
+          { to: "/memory", label: t("nav.memory"), icon: Database },
+          { to: "/network", label: t("nav.network"), icon: Share2 },
+          { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+          { to: "/hands", label: t("nav.hands"), icon: Hand },
+          { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
+          { to: "/goals", label: t("nav.goals"), icon: Shield },
+        ],
+      },
+      {
+        key: "observability",
+        label: t("nav.observability", { defaultValue: "Observability" }),
+        items: observabilityItems,
+      },
+      {
+        key: "admin",
+        label: t("nav.admin", { defaultValue: "Admin" }),
+        items: [
+          { to: "/runtime", label: t("nav.runtime"), icon: Activity },
+          { to: "/config", label: t("nav.config", { defaultValue: "Config" }), icon: FileText },
+          { to: "/users", label: t("nav.users", "Users"), icon: User },
+          { to: "/settings", label: t("nav.settings"), icon: Settings },
+        ],
+      },
+    ];
+  }, [t, terminalEnabled]);
 
   // Until auth is confirmed, do NOT mount the shell — `<Outlet />` and
   // `<NotificationCenter />` both fire `useDashboardSnapshot` /
@@ -766,8 +766,12 @@ export function App() {
         />
       )}
 
+      {/* Sidebar bg matches design canvas: solid white in light mode, but in
+          dark mode lets the body's radial sky-glow show through (rgba 2,6,23,
+          0.4 over slate-950 + radial). backdrop-blur smooths content scrolling
+          past the panel edge. */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(2,6,23,0.5)] dark:backdrop-blur-md lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}
@@ -818,60 +822,43 @@ export function App() {
             <kbd className="text-[10px] font-mono bg-main border border-border-subtle px-1 py-px rounded">⌘K</kbd>
           </button>
 
-          <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-6"}`}>
-            {navGroups.map((group) => (
-              <div key={group.key} className="flex flex-col gap-1">
-                {navLayout === "collapsible" ? (
-                  // 二级菜单布局 - 可折叠
-                  <>
+          <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-4"}`}>
+            {navGroups.map((group) => {
+              const showHeader = Boolean(group.label);
+              return (
+                <div key={group.key} className="flex flex-col gap-0.5">
+                  {showHeader && navLayout === "collapsible" ? (
                     <button
                       onClick={() => toggleNavGroup(group.key)}
-                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+                      className={`flex items-center justify-between px-2 mb-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-dim/70 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
                     >
                       {group.label}
                       <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
                     </button>
-                    <div className={`mt-1 flex flex-col gap-0.5 ${collapsedNavGroups[group.key] ? "lg:hidden" : ""}`}>
-                      {group.items.map((item) => (
-                        <Link
-                          key={item.to}
-                          to={item.to as any}
-                          className={navBase}
-                          activeProps={{ className: `${navBase} ${navActive}` }}
-                          onClick={() => setMobileMenuOpen(false)}
-                          title={isSidebarCollapsed ? item.label : undefined}
-                        >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  // 分组布局 - 全部显示
-                  <>
-                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+                  ) : showHeader ? (
+                    <h3 className={`px-2 mb-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-dim/70 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
                       {group.label}
                     </h3>
-                    <div className="mt-1 flex flex-col gap-0.5">
-                      {group.items.map((item) => (
-                        <Link
-                          key={item.to}
-                          to={item.to as any}
-                          className={navBase}
-                          activeProps={{ className: `${navBase} ${navActive}` }}
-                          onClick={() => setMobileMenuOpen(false)}
-                          title={isSidebarCollapsed ? item.label : undefined}
-                        >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            ))}
+                  ) : null}
+                  {/* Collapse the body when the user folded a labeled section. */}
+                  <div className={`flex flex-col gap-px ${showHeader && navLayout === "collapsible" && collapsedNavGroups[group.key] ? "lg:hidden" : ""}`}>
+                    {group.items.map((item) => (
+                      <Link
+                        key={item.to}
+                        to={item.to as any}
+                        className={navBase}
+                        activeProps={{ className: `${navBase} ${navActive}` }}
+                        onClick={() => setMobileMenuOpen(false)}
+                        title={isSidebarCollapsed ? item.label : undefined}
+                      >
+                        {item.icon && <item.icon className="h-[15px] w-[15px] transition-transform group-hover:scale-105 group-hover:text-brand shrink-0" />}
+                        <span className={`flex-1 truncate ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </nav>
 
