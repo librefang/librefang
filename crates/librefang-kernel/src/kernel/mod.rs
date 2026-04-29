@@ -9549,13 +9549,16 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Snapshot previous skill list so we can roll back the in-memory mutation
-        // if the DB persist fails (#3499 — previously `let _ =` swallowed the error
-        // and left the registry drifted from disk).
-        let prev_skills = self
+        // Snapshot previous skill list AND skills_disabled flag so we can roll
+        // back the in-memory mutation if the DB persist fails (#3499 — previously
+        // `let _ =` swallowed the error and left the registry drifted from disk).
+        // Note: capture both fields because `update_skills` always sets
+        // `skills_disabled = false`, so a rollback that only restored `skills`
+        // would silently leave the disabled flag flipped on persist failure.
+        let prev_skills_state = self
             .registry
             .get(agent_id)
-            .map(|e| e.manifest.skills.clone());
+            .map(|e| (e.manifest.skills.clone(), e.manifest.skills_disabled));
 
         self.registry
             .update_skills(agent_id, skills.clone())
@@ -9563,8 +9566,10 @@ system_prompt = "You are a helpful assistant."
 
         if let Some(entry) = self.registry.get(agent_id) {
             if let Err(e) = self.memory.save_agent(&entry) {
-                if let Some(p_skills) = prev_skills {
-                    let _ = self.registry.update_skills(agent_id, p_skills);
+                if let Some((p_skills, p_disabled)) = prev_skills_state {
+                    let _ = self
+                        .registry
+                        .restore_skills_state(agent_id, p_skills, p_disabled);
                 }
                 return Err(KernelError::LibreFang(e));
             }
@@ -9658,12 +9663,17 @@ system_prompt = "You are a helpful assistant."
             "Agent tool filters updated"
         );
 
-        // Snapshot previous tool config for rollback on DB persist failure (#3499).
+        // Snapshot previous tool config + tools_disabled flag for rollback on
+        // DB persist failure (#3499). Capture all four fields because
+        // `update_tool_config` always sets `tools_disabled = false`, so a
+        // rollback that only restored the lists would silently leave the
+        // disabled flag flipped on persist failure.
         let prev_tool_state = self.registry.get(agent_id).map(|e| {
             (
                 e.manifest.capabilities.tools.clone(),
                 e.manifest.tool_allowlist.clone(),
                 e.manifest.tool_blocklist.clone(),
+                e.manifest.tools_disabled,
             )
         });
 
@@ -9673,12 +9683,13 @@ system_prompt = "You are a helpful assistant."
 
         if let Some(entry) = self.registry.get(agent_id) {
             if let Err(e) = self.memory.save_agent(&entry) {
-                if let Some((p_caps, p_allow, p_block)) = prev_tool_state {
-                    let _ = self.registry.update_tool_config(
+                if let Some((p_caps, p_allow, p_block, p_disabled)) = prev_tool_state {
+                    let _ = self.registry.restore_tool_state(
                         agent_id,
-                        Some(p_caps),
-                        Some(p_allow),
-                        Some(p_block),
+                        p_caps,
+                        p_allow,
+                        p_block,
+                        p_disabled,
                     );
                 }
                 return Err(KernelError::LibreFang(e));
