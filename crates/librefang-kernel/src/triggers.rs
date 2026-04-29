@@ -651,7 +651,25 @@ impl TriggerEngine {
         let mut state_mutated = false;
         let now = Utc::now();
 
-        for mut entry in self.triggers.iter_mut() {
+        // Iterate in deterministic order.  DashMap's native iterator
+        // is order-by-shard-and-hash, so the same trigger set produces
+        // a different evaluation order on every event — and when the
+        // per-event budget caps the matches, the *set* of triggers
+        // that fire is also non-deterministic.  #3923's existing
+        // "ordered triggers" wording (and the CLAUDE.md determinism
+        // rule for anything that ultimately reaches an LLM prompt
+        // through TaskPosted / agent dispatch) calls for a stable
+        // order; the audit caught that the evaluator itself was the
+        // remaining gap.  Sorting the snapshot of trigger IDs before
+        // taking each shard write-lock keeps storm prevention intact
+        // (still drops excess matches at the budget) while making
+        // *which* matches drop deterministic.
+        let mut ids: Vec<TriggerId> = self.triggers.iter().map(|e| *e.key()).collect();
+        ids.sort();
+        for id in ids {
+            let Some(mut entry) = self.triggers.get_mut(&id) else {
+                continue;
+            };
             let trigger = entry.value_mut();
 
             if !trigger.enabled {
