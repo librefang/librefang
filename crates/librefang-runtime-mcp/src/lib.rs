@@ -1735,7 +1735,7 @@ impl McpConnection {
             // close as a real risk.
             const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
             match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(_reason)) => {}
                 Ok(Err(e)) => {
                     warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
                 }
@@ -1803,7 +1803,7 @@ impl Drop for McpConnection {
                         const CLOSE_TIMEOUT: std::time::Duration =
                             std::time::Duration::from_secs(10);
                         match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
-                            Ok(Ok(())) => {}
+                            Ok(Ok(_reason)) => {}
                             Ok(Err(e)) => {
                                 debug!(
                                     server = %name,

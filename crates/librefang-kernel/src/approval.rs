@@ -1046,6 +1046,7 @@ impl ApprovalManager {
     /// treat `Err(())` as a rejection — if we cannot persist the counter we
     /// cannot enforce the brute-force cap across restarts, so the safest
     /// course is to deny the request (fail-secure, fix for #3372 / #3584).
+    #[allow(clippy::result_unit_err)]
     pub fn record_totp_failure(&self, sender_id: &str) -> Result<(), ()> {
         let mut failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
         let entry = failures.entry(sender_id.to_string()).or_insert((0, None));
@@ -1210,7 +1211,9 @@ impl ApprovalManager {
     /// no audit DB is wired (test harness) so the existing tests are
     /// unaffected.
     pub fn is_oauth_nonce_used(&self, nonce: &str) -> bool {
-        let Some(db) = &self.audit_db else { return false };
+        let Some(db) = &self.audit_db else {
+            return false;
+        };
         let Ok(conn) = db.lock() else { return false };
         let hash = Self::oauth_nonce_hash(nonce);
         // OAuth flow lifetime is typically 5–15 min; matching the state

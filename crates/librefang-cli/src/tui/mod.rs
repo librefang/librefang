@@ -1826,10 +1826,15 @@ impl App {
         self.chat.mode_label = "daemon".to_string();
 
         // Fetch model label asynchronously — avoids blocking the TUI event loop.
-        if let Backend::Daemon { ref base_url, .. } = self.backend {
+        if let Backend::Daemon {
+            ref base_url,
+            ref api_key,
+        } = self.backend
+        {
             event::spawn_fetch_agent_model_label(
                 base_url.clone(),
                 id.clone(),
+                api_key.clone(),
                 self.event_tx.clone(),
             );
         }
@@ -1957,10 +1962,14 @@ impl App {
 
     fn open_model_picker(&mut self) {
         match &self.backend {
-            Backend::Daemon { base_url, .. } => {
+            Backend::Daemon { base_url, api_key } => {
                 // Fetch model list asynchronously — avoids blocking the TUI event loop.
                 // The `ChatModelsForPicker` event handler will open the picker once loaded.
-                event::spawn_fetch_models_for_picker(base_url.clone(), self.event_tx.clone());
+                event::spawn_fetch_models_for_picker(
+                    base_url.clone(),
+                    api_key.clone(),
+                    self.event_tx.clone(),
+                );
             }
             Backend::InProcess { kernel } => {
                 let models = {
@@ -2128,10 +2137,14 @@ impl App {
             }
             "/agents" => {
                 match &self.backend {
-                    Backend::Daemon { base_url, .. } => {
+                    Backend::Daemon { base_url, api_key } => {
                         // Fetch agent list asynchronously — avoids blocking the TUI event loop.
                         // The `ChatAgentListLoaded` event handler will push the reply.
-                        event::spawn_fetch_agents_for_chat(base_url.clone(), self.event_tx.clone());
+                        event::spawn_fetch_agents_for_chat(
+                            base_url.clone(),
+                            api_key.clone(),
+                            self.event_tx.clone(),
+                        );
                     }
                     Backend::InProcess { kernel } => {
                         let lines: Vec<String> = kernel

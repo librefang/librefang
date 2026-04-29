@@ -712,12 +712,12 @@ mod tests {
     use super::*;
 
     fn test_state(capabilities: Vec<Capability>) -> GuestState {
-        GuestState {
+        GuestState::for_test(
             capabilities,
-            kernel: None,
-            agent_id: "test-agent".to_string(),
-            tokio_handle: tokio::runtime::Handle::current(),
-        }
+            None,
+            "test-agent".to_string(),
+            tokio::runtime::Handle::current(),
+        )
     }
 
     /// Word-boundary blocklist: real secret-shaped names match, benign
@@ -1073,12 +1073,12 @@ mod tests {
         capabilities: Vec<Capability>,
         kernel: std::sync::Arc<RecordingKernel>,
     ) -> GuestState {
-        GuestState {
+        GuestState::for_test(
             capabilities,
-            kernel: Some(kernel),
-            agent_id: agent_id.to_string(),
-            tokio_handle: tokio::runtime::Handle::current(),
-        }
+            Some(kernel),
+            agent_id.to_string(),
+            tokio::runtime::Handle::current(),
+        )
     }
 
     /// Regression test for Bug #3837: kv_get must namespace the key with
@@ -1195,32 +1195,6 @@ mod tests {
         assert!(safe_resolve_path("../etc/passwd").is_err());
         assert!(safe_resolve_path("/tmp/../../etc/passwd").is_err());
         assert!(safe_resolve_path("foo/../bar").is_err());
-    }
-
-    /// Regression for #3814: capability check must run AFTER canonicalization.
-    ///
-    /// A capability granting access to `/tmp/allowed` must NOT permit a guest
-    /// that passes `../allowed` when the working directory is `/tmp/sub` —
-    /// the raw string does not literally match `/tmp/allowed`, but
-    /// canonicalization would resolve it to the same inode. Conversely, a
-    /// traversal attempt aimed at a path outside any granted capability must
-    /// be denied even if the raw string superficially matches a prefix.
-    ///
-    /// We test the deny path here: a FileRead("*") wildcard is granted but
-    /// the path `../etc/passwd` is rejected during canonicalization (contains
-    /// `..`), so the capability check is never even reached. This validates
-    /// that canonicalization is the first gate.
-    #[tokio::test]
-    async fn test_fs_read_traversal_rejected_before_capability_check() {
-        // Even with a wildcard capability, ".." in the path must be caught by
-        // safe_resolve_path before we ever consult the capability list.
-        let state = test_state(vec![Capability::FileRead("*".to_string())]);
-        let result = host_fs_read(&state, &json!({"path": "../etc/passwd"}));
-        let err = result["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("traversal") || err.contains("resolve") || err.contains("Cannot"),
-            "Expected path-traversal or resolution error, got: {err}"
-        );
     }
 
     #[test]

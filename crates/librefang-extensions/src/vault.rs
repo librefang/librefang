@@ -17,7 +17,10 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
+// `error!` is used only in non-test keyring code paths.
+#[cfg(not(test))]
+use tracing::error;
 use zeroize::Zeroizing;
 
 /// Env var fallback for vault key.
@@ -791,10 +794,8 @@ fn machine_fingerprint() -> Vec<u8> {
     // umask defaults.  `O_EXCL` makes the first-run race deterministic:
     // if two daemons start concurrently, only one wins the create; the
     // loser falls back to reading the winner's file.
-    let tmp_path = fingerprint_path.with_extension(format!(
-        "machine-id.tmp.{}",
-        std::process::id()
-    ));
+    let tmp_path =
+        fingerprint_path.with_extension(format!("machine-id.tmp.{}", std::process::id()));
     let persisted = (|| -> std::io::Result<()> {
         use std::io::Write as _;
         let mut opts = std::fs::OpenOptions::new();
@@ -854,6 +855,7 @@ fn machine_fingerprint() -> Vec<u8> {
 /// persisted.  Same security level as the pre-#3944 code; documented so
 /// operators know that on this path the vault is only as secret as the
 /// hostname + username.
+#[cfg(not(test))]
 fn predictable_machine_fingerprint() -> Vec<u8> {
     use sha2::Digest;
     let mut hasher = Sha256::new();

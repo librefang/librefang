@@ -108,6 +108,29 @@ pub struct GuestState {
     limiter: MemoryLimiter,
 }
 
+#[cfg(test)]
+impl GuestState {
+    /// Build a `GuestState` for unit tests in sibling modules. The host_functions
+    /// tests don't exercise WASM memory growth, so the limiter is set to
+    /// effectively unbounded.
+    pub(crate) fn for_test(
+        capabilities: Vec<Capability>,
+        kernel: Option<Arc<dyn KernelHandle>>,
+        agent_id: String,
+        tokio_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            capabilities,
+            kernel,
+            agent_id,
+            tokio_handle,
+            limiter: MemoryLimiter {
+                max_bytes: usize::MAX,
+            },
+        }
+    }
+}
+
 /// Result of executing a WASM module.
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -691,9 +714,9 @@ mod tests {
 
     #[test]
     fn test_sandbox_engine_creation() {
-        let sandbox = WasmSandbox::new().unwrap();
-        // Engine should be created successfully
-        drop(sandbox);
+        // Constructing the sandbox eagerly validates the engine config; the
+        // assertion is simply that `new()` returns Ok.
+        let _sandbox = WasmSandbox::new().unwrap();
     }
 
     /// Regression: max_memory_bytes must be enforced at runtime, not just
@@ -706,19 +729,17 @@ mod tests {
             max_bytes: 1024 * 1024,
         };
         // Within limit → allowed
-        assert_eq!(
+        assert!(
             limiter
                 .memory_growing(0, 64 * 1024, None)
                 .expect("should not error"),
-            true,
             "growth within cap must be permitted"
         );
         // Exceeds limit → denied
-        assert_eq!(
-            limiter
+        assert!(
+            !limiter
                 .memory_growing(0, 2 * 1024 * 1024, None)
                 .expect("should not error"),
-            false,
             "growth beyond cap must be denied"
         );
     }
