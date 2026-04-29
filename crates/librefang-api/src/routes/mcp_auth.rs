@@ -5,15 +5,34 @@
 //! authorization.
 
 use super::AppState;
+use crate::middleware::AuthenticatedApiUser;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
+use axum::{Extension, Json};
 use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
 use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+
+/// SHA-256 prefix of the caller's user_id (UUID).  Embedded into the vault
+/// key + flow_id so a callback initiated by user A cannot be redeemed
+/// against user B's in-flight flow even if they targeted the same server.
+fn caller_fingerprint(user: &Option<Extension<AuthenticatedApiUser>>) -> String {
+    let raw = match user {
+        Some(Extension(u)) => u.user_id.to_string(),
+        // No identity attached — fall back to a constant so single-user
+        // deployments (no RBAC configured) still produce deterministic
+        // vault keys.  The flow_id random nonce still keeps concurrent
+        // anonymous flows isolated.
+        None => "anon".to_string(),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(raw.as_bytes());
+    hex::encode(hasher.finalize())[..16].to_string()
+}
 
 fn callback_text(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
@@ -240,6 +259,7 @@ fn percent_encode_param(s: &str) -> String {
 pub async fn auth_start(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    user: Option<Extension<AuthenticatedApiUser>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Find the server config
@@ -334,10 +354,16 @@ pub async fn auth_start(
     // in the OAuth `state` parameter as `{flow_id}.{random_state}` so the
     // callback can look up the correct vault entry.
     //
+    // The flow_id carries a caller fingerprint prefix so a callback initiated
+    // by user A is keyed under a vault entry user B's flow can never reach,
+    // even if both target the same server URL — closing the multi-user
+    // clobber path the issue called out.
+    //
     // This supersedes the earlier per-server `{server_name}:{random}` binding
     // (#3911) — per-flow IDs subsume the per-server protection while also
     // allowing multiple concurrent flows against the same server.
-    let flow_id = mcp_oauth::generate_flow_id();
+    let caller_fp = caller_fingerprint(&user);
+    let flow_id = format!("{caller_fp}-{}", mcp_oauth::generate_flow_id());
     let (pkce_verifier, pkce_challenge) = mcp_oauth::generate_pkce();
     let pkce_random = mcp_oauth::generate_state();
     // Combined state sent to the OAuth server: "{flow_id}.{random_state}"
@@ -753,6 +779,44 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::{HeaderName, HeaderValue};
+    use librefang_kernel::auth::UserRole;
+    use librefang_types::agent::UserId;
+
+    #[test]
+    fn caller_fingerprint_is_stable_per_user() {
+        let user = AuthenticatedApiUser {
+            name: "alice".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("alice"),
+        };
+        let fp1 = caller_fingerprint(&Some(Extension(user.clone())));
+        let fp2 = caller_fingerprint(&Some(Extension(user)));
+        assert_eq!(fp1, fp2, "same user must produce identical fingerprint");
+    }
+
+    #[test]
+    fn caller_fingerprint_differs_across_users() {
+        let alice = AuthenticatedApiUser {
+            name: "alice".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("alice"),
+        };
+        let bob = AuthenticatedApiUser {
+            name: "bob".into(),
+            role: UserRole::Owner,
+            user_id: UserId::from_name("bob"),
+        };
+        let fp_a = caller_fingerprint(&Some(Extension(alice)));
+        let fp_b = caller_fingerprint(&Some(Extension(bob)));
+        assert_ne!(fp_a, fp_b, "distinct users must produce distinct prefixes");
+    }
+
+    #[test]
+    fn caller_fingerprint_anonymous_is_stable() {
+        let fp1 = caller_fingerprint(&None);
+        let fp2 = caller_fingerprint(&None);
+        assert_eq!(fp1, fp2);
+    }
 
     fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut h = HeaderMap::new();

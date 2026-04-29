@@ -5,13 +5,17 @@
 //! All tokens are stored in the credential vault with `Zeroizing<String>`.
 
 use crate::{ExtensionError, ExtensionResult, OAuthTemplate};
-use serde::Deserialize;
+use hmac::{Hmac, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // Canonical OAuth token type lives in `librefang-types`. Re-export so existing
 // callers can keep their `extensions::oauth::OAuthTokens` import path.
@@ -82,10 +86,109 @@ fn base64_url_encode(data: &[u8]) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, data)
 }
 
-/// Generate a random state parameter for CSRF protection.
-fn generate_state() -> String {
-    let bytes: [u8; 16] = rand::random();
-    base64_url_encode(&bytes)
+/// State token TTL — login flows must complete within 10 minutes.
+const STATE_TOKEN_TTL_SECS: u64 = 600;
+
+/// HMAC-signed state payload binding the in-flight flow to its
+/// `(provider, client_id, redirect_uri)` tuple plus a random nonce and
+/// an absolute expiry. Prevents cross-flow code injection (#3791).
+#[derive(Serialize, Deserialize)]
+struct StatePayload {
+    /// Auth URL of the OAuth template — pins state to one provider.
+    provider: String,
+    /// OAuth client ID — pins state to one app registration.
+    client_id: String,
+    /// Loopback redirect URI — pins state to the listener that issued it.
+    redirect_uri: String,
+    /// 16-byte random nonce, also kept in-process to anchor callback equality.
+    nonce: String,
+    /// Absolute UNIX-second expiry (now + STATE_TOKEN_TTL_SECS).
+    exp: u64,
+}
+
+/// Per-process random HMAC key used to sign state payloads.
+/// Re-seeded on every daemon restart, which invalidates any in-flight flows
+/// from a prior process — fail-closed for credential flows.
+fn state_signing_key() -> &'static [u8] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    KEY.get_or_init(rand::random)
+}
+
+/// Build an HMAC-signed state token bound to this specific flow.
+///
+/// Format: `base64url(payload_json).base64url(hmac)`. Both halves are
+/// URL-safe (no padding) so the token survives an unmodified pass through
+/// the OAuth provider's `state` parameter.
+fn build_signed_state(provider: &str, client_id: &str, redirect_uri: &str) -> String {
+    let nonce_bytes: [u8; 16] = rand::random();
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + STATE_TOKEN_TTL_SECS;
+    let payload = StatePayload {
+        provider: provider.to_string(),
+        client_id: client_id.to_string(),
+        redirect_uri: redirect_uri.to_string(),
+        nonce: base64_url_encode(&nonce_bytes),
+        exp,
+    };
+    let payload_json = serde_json::to_vec(&payload).unwrap_or_default();
+    let payload_b64 = base64_url_encode(&payload_json);
+    let mut mac = HmacSha256::new_from_slice(state_signing_key()).expect("HMAC accepts any key");
+    mac.update(payload_b64.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    format!("{payload_b64}.{}", base64_url_encode(&sig))
+}
+
+/// Verify a state token and return the embedded payload on success.
+///
+/// Rejects malformed tokens, bad HMAC, expired payloads, or any field
+/// mismatch against the expected `(provider, client_id, redirect_uri)`.
+fn verify_signed_state(
+    state: &str,
+    expected_provider: &str,
+    expected_client_id: &str,
+    expected_redirect_uri: &str,
+) -> Result<StatePayload, &'static str> {
+    let (payload_b64, sig_b64) = state.split_once('.').ok_or("malformed state")?;
+    let mut mac = HmacSha256::new_from_slice(state_signing_key()).expect("HMAC accepts any key");
+    mac.update(payload_b64.as_bytes());
+    let expected_sig = mac.finalize().into_bytes();
+    let provided_sig = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        sig_b64,
+    )
+    .map_err(|_| "bad sig encoding")?;
+    if expected_sig.len() != provided_sig.len()
+        || !bool::from(expected_sig.as_slice().ct_eq(&provided_sig))
+    {
+        return Err("state signature mismatch");
+    }
+    let payload_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        payload_b64,
+    )
+    .map_err(|_| "bad payload encoding")?;
+    let payload: StatePayload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| "bad payload json")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if payload.exp < now {
+        return Err("state expired");
+    }
+    if payload.provider != expected_provider {
+        return Err("state provider mismatch");
+    }
+    if payload.client_id != expected_client_id {
+        return Err("state client_id mismatch");
+    }
+    if payload.redirect_uri != expected_redirect_uri {
+        return Err("state redirect_uri mismatch");
+    }
+    Ok(payload)
 }
 
 /// Run the complete OAuth2 PKCE flow for a given template.
@@ -97,7 +200,6 @@ fn generate_state() -> String {
 /// 5. Return tokens.
 pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionResult<OAuthTokens> {
     let pkce = generate_pkce();
-    let state = generate_state();
 
     // Find an available port
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -108,6 +210,15 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
         .map_err(|e| ExtensionError::OAuth(format!("Failed to get port: {e}")))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+    // #3791: state is HMAC-signed and bound to (provider, client_id,
+    // redirect_uri, nonce, exp) so a leaked random nonce alone is not
+    // enough — a sibling local process trying to feed a stolen state to
+    // a different listener / client_id is rejected at verify time.
+    let state = build_signed_state(&oauth.auth_url, client_id, &redirect_uri);
+    let expected_provider = oauth.auth_url.clone();
+    let expected_client_id = client_id.to_string();
+    let expected_redirect_uri = redirect_uri.clone();
 
     info!("OAuth callback server listening on port {port}");
 
@@ -140,18 +251,56 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     // Wait for callback
     let (code_tx, code_rx) = oneshot::channel::<String>();
     let code_tx = Arc::new(Mutex::new(Some(code_tx)));
-    let expected_state = state.clone();
+    let expected_nonce = match verify_signed_state(
+        &state,
+        &expected_provider,
+        &expected_client_id,
+        &expected_redirect_uri,
+    ) {
+        Ok(p) => p.nonce,
+        Err(e) => {
+            return Err(ExtensionError::OAuth(format!(
+                "Failed to seal state token: {e}"
+            )));
+        }
+    };
 
     // Spawn callback handler
     let server = axum::Router::new().route(
         "/callback",
         axum::routing::get({
             let code_tx = code_tx.clone();
+            let expected_provider = expected_provider.clone();
+            let expected_client_id = expected_client_id.clone();
+            let expected_redirect_uri = expected_redirect_uri.clone();
+            let expected_nonce = expected_nonce.clone();
             move |query: axum::extract::Query<CallbackParams>| {
                 let code_tx = code_tx.clone();
-                let expected_state = expected_state.clone();
+                let expected_provider = expected_provider.clone();
+                let expected_client_id = expected_client_id.clone();
+                let expected_redirect_uri = expected_redirect_uri.clone();
+                let expected_nonce = expected_nonce.clone();
                 async move {
-                    if query.state != expected_state {
+                    // #3791: verify the HMAC-signed state binds back to this
+                    // exact flow's (provider, client_id, redirect_uri) tuple
+                    // and a non-expired payload.
+                    let payload = match verify_signed_state(
+                        &query.state,
+                        &expected_provider,
+                        &expected_client_id,
+                        &expected_redirect_uri,
+                    ) {
+                        Ok(p) => p,
+                        Err(reason) => {
+                            warn!(reason, "OAuth callback state verification failed");
+                            return axum::response::Html(
+                                "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>"
+                                    .to_string(),
+                            );
+                        }
+                    };
+                    if !bool::from(payload.nonce.as_bytes().ct_eq(expected_nonce.as_bytes())) {
+                        warn!("OAuth callback nonce mismatch");
                         return axum::response::Html(
                             "<h1>Error</h1><p>Invalid state parameter. Possible CSRF attack.</p>"
                                 .to_string(),
@@ -163,13 +312,22 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                         ));
                     }
                     if let Some(ref code) = query.code {
-                        if let Some(tx) = code_tx.lock().await.take() {
+                        // #3791: only the first valid callback wins; subsequent
+                        // hits on the same listener are rejected explicitly so
+                        // a replay against the live channel cannot succeed.
+                        let mut guard = code_tx.lock().await;
+                        if let Some(tx) = guard.take() {
                             let _ = tx.send(code.clone());
+                            axum::response::Html(
+                                "<h1>Success!</h1><p>Authorization complete. You can close this tab.</p><script>window.close()</script>"
+                                    .to_string(),
+                            )
+                        } else {
+                            axum::response::Html(
+                                "<h1>Gone</h1><p>This callback was already redeemed.</p>"
+                                    .to_string(),
+                            )
                         }
-                        axum::response::Html(
-                            "<h1>Success!</h1><p>Authorization complete. You can close this tab.</p><script>window.close()</script>"
-                                .to_string(),
-                        )
                     } else {
                         axum::response::Html(
                             "<h1>Error</h1><p>No authorization code received.</p>".to_string(),
@@ -313,10 +471,72 @@ mod tests {
     }
 
     #[test]
-    fn state_randomness() {
-        let s1 = generate_state();
-        let s2 = generate_state();
-        assert_ne!(s1, s2);
+    fn signed_state_round_trip_succeeds() {
+        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let payload = verify_signed_state(
+            &state,
+            "https://idp/auth",
+            "client-1",
+            "http://127.0.0.1:1/cb",
+        )
+        .expect("valid state must verify");
+        assert!(!payload.nonce.is_empty());
+    }
+
+    #[test]
+    fn signed_state_rejects_provider_swap() {
+        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        assert!(verify_signed_state(
+            &state,
+            "https://other/auth",
+            "client-1",
+            "http://127.0.0.1:1/cb",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signed_state_rejects_redirect_swap() {
+        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        assert!(verify_signed_state(
+            &state,
+            "https://idp/auth",
+            "client-1",
+            "http://127.0.0.1:2/cb",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signed_state_rejects_client_id_swap() {
+        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        assert!(verify_signed_state(
+            &state,
+            "https://idp/auth",
+            "client-2",
+            "http://127.0.0.1:1/cb",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signed_state_rejects_truncated_signature() {
+        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let half = &state[..state.len() - 4];
+        assert!(verify_signed_state(
+            half,
+            "https://idp/auth",
+            "client-1",
+            "http://127.0.0.1:1/cb",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signed_state_uniqueness_across_calls() {
+        let s1 = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let s2 = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        assert_ne!(s1, s2, "nonce must randomize each token");
     }
 
     #[test]

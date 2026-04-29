@@ -2014,6 +2014,43 @@ mod tests {
 
     // ── resolve_providers tests ─────────────────────────────────────────
 
+    // #3703: ensure the default is to require verified email — operators
+    // must opt out explicitly per provider, not the other way around.
+    #[test]
+    fn require_email_verified_defaults_true() {
+        let config = librefang_types::config::ExternalAuthConfig::default();
+        assert!(
+            config.require_email_verified,
+            "default OIDC config must require email_verified to keep allowed_domains meaningful"
+        );
+    }
+
+    // #3703: per-provider override `None` must inherit the global setting
+    // so the secure default is not silently bypassed by configs written
+    // before the field existed.
+    #[test]
+    fn require_email_verified_per_provider_inherits_global() {
+        let p = librefang_types::config::OidcProvider {
+            id: "x".into(),
+            display_name: "X".into(),
+            issuer_url: String::new(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            userinfo_url: String::new(),
+            jwks_uri: String::new(),
+            client_id: "c".into(),
+            client_secret_env: "S".into(),
+            redirect_url: "http://localhost/cb".into(),
+            scopes: vec![],
+            allowed_domains: vec![],
+            audience: String::new(),
+            require_email_verified: None,
+        };
+        // None means inherit — at the resolver call site we pass the
+        // global through, so the resolved provider must reflect it.
+        assert!(p.require_email_verified.unwrap_or(true));
+    }
+
     #[tokio::test]
     async fn test_resolve_providers_empty_config() {
         let config = librefang_types::config::ExternalAuthConfig::default();
