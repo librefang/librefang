@@ -762,9 +762,7 @@ pub fn run() -> InitResult {
             // Handle bracketed paste — pasting an API key during Step::ApiKey
             // must arrive as a single string, not synthesized Key events.
             if let Ok(CtEvent::Paste(text)) = &read {
-                if state.step == Step::ApiKey
-                    && state.key_test == KeyTestState::Idle
-                {
+                if state.step == Step::ApiKey && state.key_test == KeyTestState::Idle {
                     // Strip newlines/tabs/control chars; API keys never contain them
                     // and terminals occasionally append a stray \r.
                     for c in text.chars() {
