@@ -32,6 +32,7 @@
     "memory": "记忆",
     "comms": "通信",
     "runtime": "运行时",
+    "audit": "审计",
     "logs": "日志",
     "settings": "设置",
     "network": "网络",
@@ -208,6 +209,35 @@
     "setup_wizard": "使用向导",
     "last_updated": "最后更新",
     "recent_sessions": "最近会话",
+    "agents_online": "个智能体在线",
+    "loading_runtime": "正在加载运行时…",
+    "no_agents": "暂无智能体",
+    "no_token_data": "暂无 token 使用数据",
+    "idle": "空闲",
+    "error": "异常",
+    "refresh": "刷新",
+    "refreshing": "刷新中…",
+    "new_agent": "新建智能体",
+    "updated": "更新",
+    "tokens_by_agent": "各智能体 Token 用量 · 24h",
+    "kpi": {
+      "active_agents": "活跃智能体",
+      "configured": "已配置",
+      "spend": "支出",
+      "prior": "前期",
+      "peak": "tokens/s 峰值",
+      "p95_latency": "P95 延迟",
+      "default_model": "默认模型"
+    },
+    "range": {
+      "7d": "近 7 天",
+      "30d": "近 30 天",
+      "90d": "近 90 天"
+    },
+    "cost": {
+      "title": "费用",
+      "vs_prior": "对比上期"
+    },
     "alerts": {
       "title": "告警",
       "active": "条活跃",
@@ -223,6 +253,11 @@
       "degraded": "降级"
     },
     "col": {
+      "agent": "智能体",
+      "model": "模型",
+      "profile": "Profile",
+      "mode": "模式",
+      "last_active": "最近活跃",
       "task": "任务",
       "msgs": "消息数",
       "started": "开始时间",

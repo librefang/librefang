@@ -32,6 +32,7 @@
     "memory": "Memory",
     "comms": "Comms",
     "runtime": "Runtime",
+    "audit": "Audit",
     "logs": "Logs",
     "settings": "Settings",
     "network": "Network",
@@ -209,6 +210,35 @@
     "setup_wizard": "Use Wizard",
     "last_updated": "Last updated",
     "recent_sessions": "Recent sessions",
+    "agents_online": "agents online",
+    "loading_runtime": "Loading runtime…",
+    "no_agents": "No agents yet",
+    "no_token_data": "No token usage yet",
+    "idle": "idle",
+    "error": "error",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…",
+    "new_agent": "New agent",
+    "updated": "updated",
+    "tokens_by_agent": "Tokens by agent · 24h",
+    "kpi": {
+      "active_agents": "Active agents",
+      "configured": "configured",
+      "spend": "Spend",
+      "prior": "prior",
+      "peak": "tokens/s peak",
+      "p95_latency": "P95 latency",
+      "default_model": "default model"
+    },
+    "range": {
+      "7d": "7 days",
+      "30d": "30 days",
+      "90d": "90 days"
+    },
+    "cost": {
+      "title": "Cost",
+      "vs_prior": "vs prior"
+    },
     "alerts": {
       "title": "Alerts",
       "active": "active",
@@ -224,6 +254,11 @@
       "degraded": "Degraded"
     },
     "col": {
+      "agent": "Agent",
+      "model": "Model",
+      "profile": "Profile",
+      "mode": "Mode",
+      "last_active": "Last active",
       "task": "Task",
       "msgs": "Msgs",
       "started": "Started",
