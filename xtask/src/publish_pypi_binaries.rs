@@ -109,6 +109,13 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
+/// Downloads `{asset}.sha256` from the release and returns an error if the hash does not match.
+///
+/// Note: this only defends against transport corruption / mirror tampering.
+/// The `.sha256` is fetched from the same GitHub Release as the binary, so an
+/// attacker with release-write access can swap both. Real release-write defence
+/// needs OIDC artifact attestations (`actions/attest-build-provenance` +
+/// `gh attestation verify`) — out of scope for this PR.
 fn verify_asset_sha256(
     repo: &str,
     tag: &str,
