@@ -12199,9 +12199,7 @@ system_prompt = "You are a helpful assistant."
             let memory_retention = cfg.memory.soft_delete_retention_days;
             let queue_retention = cfg.queue.task_queue_retention_days;
             let approval_retention = cfg.approval.audit_retention_days;
-            let any_enabled = memory_retention > 0
-                || queue_retention > 0
-                || approval_retention > 0;
+            let any_enabled = memory_retention > 0 || queue_retention > 0 || approval_retention > 0;
             if any_enabled {
                 let kernel = Arc::clone(self);
                 tokio::spawn(async move {
@@ -12214,10 +12212,7 @@ system_prompt = "You are a helpful assistant."
                             break;
                         }
                         if memory_retention > 0 {
-                            match kernel
-                                .memory
-                                .prune_soft_deleted_memories(memory_retention)
-                            {
+                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
                                 Ok(n) if n > 0 => info!(
                                     "Memory retention: hard-deleted {n} soft-deleted memories \
                                      (older than {memory_retention} days)"

@@ -931,9 +931,8 @@ impl ApprovalManager {
         let Ok(conn) = db.lock() else {
             return 0;
         };
-        let cutoff = (chrono::Utc::now()
-            - chrono::Duration::days(older_than_days as i64))
-        .to_rfc3339();
+        let cutoff =
+            (chrono::Utc::now() - chrono::Duration::days(older_than_days as i64)).to_rfc3339();
         match conn.execute(
             "DELETE FROM approval_audit WHERE datetime(decided_at) < datetime(?1)",
             rusqlite::params![cutoff],
@@ -3017,7 +3016,7 @@ mod tests {
         let recent = (now - chrono::Duration::days(10)).to_rfc3339();
         {
             let g = conn.lock().unwrap();
-            let mut insert = |id: &str, decided_at: &str| {
+            let insert = |id: &str, decided_at: &str| {
                 g.execute(
                     "INSERT INTO approval_audit (id, request_id, agent_id, tool_name, decision, decided_at, requested_at) \
                      VALUES (?1, 'req', 'a', 'shell_exec', 'approved', ?2, ?2)",
@@ -3045,10 +3044,8 @@ mod tests {
     fn prune_audit_zero_disabled() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         librefang_memory::migration::run_migrations(&conn).unwrap();
-        let mgr = ApprovalManager::new_with_db(
-            ApprovalPolicy::default(),
-            Arc::new(StdMutex::new(conn)),
-        );
+        let mgr =
+            ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::new(StdMutex::new(conn)));
         assert_eq!(mgr.prune_audit(0), 0);
     }
 }
