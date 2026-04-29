@@ -175,9 +175,7 @@ impl MediaDriverCache {
     ///
     /// Accepts any map type that can be iterated as `(String, String)` pairs,
     /// including both `HashMap` and `BTreeMap`.
-    pub fn new_with_urls(
-        provider_urls: impl IntoIterator<Item = (String, String)>,
-    ) -> Self {
+    pub fn new_with_urls(provider_urls: impl IntoIterator<Item = (String, String)>) -> Self {
         Self {
             cache: DashMap::new(),
             provider_urls: RwLock::new(provider_urls.into_iter().collect()),
@@ -282,10 +280,7 @@ impl MediaDriverCache {
     ///
     /// Accepts any map type that can be iterated as `(String, String)` pairs,
     /// including both `HashMap` and `BTreeMap`.
-    pub fn update_provider_urls(
-        &self,
-        urls: impl IntoIterator<Item = (String, String)>,
-    ) {
+    pub fn update_provider_urls(&self, urls: impl IntoIterator<Item = (String, String)>) {
         if let Ok(mut map) = self.provider_urls.write() {
             *map = urls.into_iter().collect();
         }

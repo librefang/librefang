@@ -1459,7 +1459,8 @@ mod tests {
     /// when it added the 4xx mapping.
     #[test]
     fn map_memory_error_does_not_leak_internal_message_on_500() {
-        let (status, body) = map_memory_error("connection refused: /home/foo/.librefang/memory.db".to_string());
+        let (status, body) =
+            map_memory_error("connection refused: /home/foo/.librefang/memory.db".to_string());
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         let v: serde_json::Value = serde_json::to_value(body.0).unwrap();
         let echoed = v["error"].as_str().unwrap_or("");
@@ -1499,8 +1500,7 @@ mod tests {
         let (status, _) = map_memory_error("Capability denied: shell_exec".to_string());
         assert_eq!(status, StatusCode::FORBIDDEN);
 
-        let (status, _) =
-            map_memory_error("Resource quota exceeded: 1500 / 1000".to_string());
+        let (status, _) = map_memory_error("Resource quota exceeded: 1500 / 1000".to_string());
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
