@@ -61,6 +61,12 @@ pub(crate) const SYSTEM_CHANNEL_CRON: &str = "cron";
 /// have no user to attribute to. Issue #3243.
 pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
 
+/// Minimum tolerated value for `cron_session_max_messages` (#3459).
+/// Mirrors `agent_loop::MIN_HISTORY_MESSAGES`. Smaller values silently
+/// destroy enough history to break prompt cache reuse and tool-result
+/// referencing.  `0` is treated as "disable" before this clamp is applied.
+const MIN_CRON_HISTORY_MESSAGES: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Per-task trigger recursion depth (bug #3780)
 // ---------------------------------------------------------------------------
@@ -1847,6 +1853,39 @@ impl LibreFangKernel {
             total_removed += stale.len();
             for id in stale {
                 self.agent_msg_locks.remove(&id);
+            }
+        }
+
+        // 3a. session_msg_locks — remove idle entries.  This map grows
+        // unbounded (#3444): every (agent, session) pair gets a fresh
+        // Mutex on first use and was never reclaimed, so long-lived
+        // daemons accumulate entries proportional to total session
+        // count.  SessionId itself does not carry the owning agent
+        // (deterministic UUID-v5 derivations hash that away), so we
+        // can't filter by `live_agents`; instead we rely on Arc strong
+        // count: an entry is safely removable when the only outstanding
+        // reference is the map's own slot — `Arc::strong_count == 1` —
+        // because acquirers always clone the Arc out via `entry().
+        // or_insert().clone()` before awaiting `lock()`.  A reused
+        // session gets a fresh Mutex on next access; that's correct
+        // because the previous lock had no waiters.
+        {
+            let candidates: Vec<SessionId> = self
+                .session_msg_locks
+                .iter()
+                .filter(|e| Arc::strong_count(e.value()) == 1)
+                .map(|e| *e.key())
+                .collect();
+            for sid in candidates {
+                // Re-check under the shard lock so a writer that grabbed
+                // the Arc between iter() and remove() doesn't lose it.
+                if self
+                    .session_msg_locks
+                    .remove_if(&sid, |_, arc| Arc::strong_count(arc) == 1)
+                    .is_some()
+                {
+                    total_removed += 1;
+                }
             }
         }
 
@@ -12654,33 +12693,31 @@ system_prompt = "You are a helpful assistant."
                                 let message_owned = message.clone();
 
                                 // Spawn each AgentTurn job concurrently, bounded
-                                // by the `cron_lane` semaphore (#3738).  Acquiring
-                                // a permit blocks here (inside the tick loop) if
-                                // the lane is full; this back-pressures the
-                                // dispatcher so we never exceed `cron_lane`
-                                // in-flight tasks.
-                                let permit = match cron_sem.clone().acquire_owned().await {
-                                    Ok(p) => p,
-                                    Err(_) => {
-                                        // SemaphoreClosed means the command_queue lane was
-                                        // dropped — every subsequent acquire on the same
-                                        // semaphore will fail too. Bail out of this tick's
-                                        // due batch and let the next tick re-snapshot the
-                                        // lane (or exit on shutdown signal).
-                                        tracing::error!(
-                                            job = %job_name,
-                                            "Cron lane semaphore closed; aborting this tick's batch"
-                                        );
-                                        break;
-                                    }
-                                };
+                                // by the `cron_lane` semaphore (#3738).  We
+                                // acquire the permit INSIDE the spawn so a
+                                // saturated lane queues spawned tasks rather
+                                // than blocking the tick loop — the previous
+                                // design awaited the permit here and stalled
+                                // the entire `for job in due` dispatch behind
+                                // any single slow fire.
+                                let cron_sem_for_job = cron_sem.clone();
                                 let kernel_job = kernel.clone();
                                 // Shadow so outer `job_name` survives the move
                                 // for the post-arm per-job persist warn.
                                 let job_name = job_name.clone();
                                 tokio::spawn(async move {
-                                    // Hold the permit for the full duration of this job.
-                                    let _permit = permit;
+                                    // Acquire the lane permit before any work
+                                    // so concurrent fires are still capped.
+                                    let _permit = match cron_sem_for_job.acquire_owned().await {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            tracing::error!(
+                                                job = %job_name,
+                                                "Cron lane semaphore closed; skipping fire"
+                                            );
+                                            return;
+                                        }
+                                    };
 
                                     // Prune the persistent cron session before firing
                                     // if the user has configured a size cap.
@@ -12689,8 +12726,52 @@ system_prompt = "You are a helpful assistant."
                                         let max_tokens = cfg_snap.cron_session_max_tokens;
                                         let max_messages = cfg_snap.cron_session_max_messages;
                                         drop(cfg_snap);
+                                        // #3459: treat `cron_session_max_messages = 0`
+                                        // as "disable" rather than "trim to 0",
+                                        // and clamp dangerously-small values up
+                                        // to MIN_CRON_HISTORY_MESSAGES so a fire
+                                        // never drops the prompt cache to a
+                                        // useless 1-2 message window.  Same
+                                        // policy as `max_history_messages`
+                                        // (MIN_HISTORY_MESSAGES = 4).
+                                        let max_messages = match max_messages {
+                                            Some(0) => None,
+                                            Some(n) if n < MIN_CRON_HISTORY_MESSAGES => {
+                                                tracing::warn!(
+                                                    requested = n,
+                                                    applied = MIN_CRON_HISTORY_MESSAGES,
+                                                    "cron_session_max_messages too small; clamped"
+                                                );
+                                                Some(MIN_CRON_HISTORY_MESSAGES)
+                                            }
+                                            other => other,
+                                        };
+                                        // #3459: same policy for the token cap —
+                                        // value=0 disables the cap rather than
+                                        // forcing every fire to start with an
+                                        // empty session.
+                                        let max_tokens = match max_tokens {
+                                            Some(0) => None,
+                                            other => other,
+                                        };
                                         if max_tokens.is_some() || max_messages.is_some() {
                                             let cron_sid = SessionId::for_channel(agent_id, "cron");
+                                            // #3443: serialize prune through the
+                                            // per-session mutex so two cron fires
+                                            // for the same agent cannot both
+                                            // read-modify-write and clobber each
+                                            // other's keep-set.  The lock is
+                                            // dropped before send_message_full
+                                            // (which uses agent_msg_locks for
+                                            // persistent cron sessions).
+                                            let prune_lock = kernel_job
+                                                .session_msg_locks
+                                                .entry(cron_sid)
+                                                .or_insert_with(|| {
+                                                    Arc::new(tokio::sync::Mutex::new(()))
+                                                })
+                                                .clone();
+                                            let _prune_guard = prune_lock.lock().await;
                                             if let Ok(Some(mut session)) =
                                                 kernel_job.memory.get_session(cron_sid)
                                             {
@@ -12802,67 +12883,101 @@ system_prompt = "You are a helpful assistant."
                                 let delivery_targets = job.delivery_targets.clone();
                                 let timeout_s = timeout_secs.unwrap_or(300);
                                 let timeout = std::time::Duration::from_secs(timeout_s);
+                                let workflow_id_owned = workflow_id.clone();
 
-                                // Resolve workflow by UUID first, then by name
-                                let resolved_id =
-                                    if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id) {
-                                        Some(crate::workflow::WorkflowId(uuid))
-                                    } else {
-                                        // Search by name
-                                        let workflows = kernel.workflows.list_workflows().await;
-                                        workflows
-                                            .iter()
-                                            .find(|w| w.name == *workflow_id)
-                                            .map(|w| w.id)
+                                // Spawn the workflow fire so a long-running
+                                // workflow does not block the cron tick loop
+                                // (#3738). Concurrency is capped by the
+                                // shared cron_lane semaphore acquired inside
+                                // the spawned task.
+                                let cron_sem_for_job = cron_sem.clone();
+                                let kernel_job = kernel.clone();
+                                let job_name = job_name.clone();
+                                tokio::spawn(async move {
+                                    let _permit = match cron_sem_for_job.acquire_owned().await {
+                                        Ok(p) => p,
+                                        Err(_) => {
+                                            tracing::error!(
+                                                job = %job_name,
+                                                "Cron lane semaphore closed; skipping workflow fire"
+                                            );
+                                            return;
+                                        }
                                     };
 
-                                match resolved_id {
-                                    Some(wf_id) => {
-                                        match tokio::time::timeout(
-                                            timeout,
-                                            kernel.run_workflow(wf_id, input_text),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok((_run_id, output))) => {
-                                                tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                                kernel.cron_scheduler.record_success(job_id);
-                                                cron_deliver_response(
-                                                    &kernel, agent_id, &output, &delivery,
-                                                )
-                                                .await;
-                                                cron_fan_out_targets(
-                                                    &kernel,
-                                                    &job_name,
-                                                    &output,
-                                                    &delivery_targets,
-                                                )
-                                                .await;
+                                    // Resolve workflow by UUID first, then by name
+                                    let resolved_id =
+                                        if let Ok(uuid) = uuid::Uuid::parse_str(&workflow_id_owned) {
+                                            Some(crate::workflow::WorkflowId(uuid))
+                                        } else {
+                                            // Search by name
+                                            let workflows = kernel_job.workflows.list_workflows().await;
+                                            workflows
+                                                .iter()
+                                                .find(|w| w.name == workflow_id_owned)
+                                                .map(|w| w.id)
+                                        };
+
+                                    match resolved_id {
+                                        Some(wf_id) => {
+                                            match tokio::time::timeout(
+                                                timeout,
+                                                kernel_job.run_workflow(wf_id, input_text),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok((_run_id, output))) => {
+                                                    tracing::info!(job = %job_name, "Cron workflow completed successfully");
+                                                    kernel_job.cron_scheduler.record_success(job_id);
+                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                                    }
+                                                    cron_deliver_response(
+                                                        &kernel_job, agent_id, &output, &delivery,
+                                                    )
+                                                    .await;
+                                                    cron_fan_out_targets(
+                                                        &kernel_job,
+                                                        &job_name,
+                                                        &output,
+                                                        &delivery_targets,
+                                                    )
+                                                    .await;
+                                                }
+                                                Ok(Err(e)) => {
+                                                    let err_msg = format!("{e}");
+                                                    tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
+                                                    kernel_job
+                                                        .cron_scheduler
+                                                        .record_failure(job_id, &err_msg);
+                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
+                                                    kernel_job.cron_scheduler.record_failure(
+                                                        job_id,
+                                                        &format!(
+                                                            "workflow timed out after {timeout_s}s"
+                                                        ),
+                                                    );
+                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                        tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                                    }
+                                                }
                                             }
-                                            Ok(Err(e)) => {
-                                                let err_msg = format!("{e}");
-                                                tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow failed");
-                                                kernel
-                                                    .cron_scheduler
-                                                    .record_failure(job_id, &err_msg);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
-                                                kernel.cron_scheduler.record_failure(
-                                                    job_id,
-                                                    &format!(
-                                                        "workflow timed out after {timeout_s}s"
-                                                    ),
-                                                );
+                                        }
+                                        None => {
+                                            let err_msg = format!("workflow not found: {workflow_id_owned}");
+                                            tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
+                                            kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                             }
                                         }
                                     }
-                                    None => {
-                                        let err_msg = format!("workflow not found: {workflow_id}");
-                                        tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                        kernel.cron_scheduler.record_failure(job_id, &err_msg);
-                                    }
-                                }
+                                });
                             }
                         }
                         // Persist immediately after each job execution so that
@@ -16414,9 +16529,19 @@ impl KernelHandle for LibreFangKernel {
         );
         if let Some(weak) = self.self_handle.get() {
             if let Some(kernel) = weak.upgrade() {
-                tokio::spawn(async move {
-                    kernel.publish_event(event).await;
-                });
+                // Propagate trigger-chain depth across the spawn boundary
+                // (#3735). Without this, a memory_store invoked from inside
+                // a triggered agent would publish into a fresh top-level
+                // depth=0 scope, defeating the depth cap on chains that
+                // travel through memory updates.
+                let parent_depth =
+                    PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                tokio::spawn(PUBLISH_EVENT_DEPTH.scope(
+                    std::cell::Cell::new(parent_depth),
+                    async move {
+                        kernel.publish_event(event).await;
+                    },
+                ));
             }
         }
         Ok(())

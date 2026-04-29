@@ -14,11 +14,16 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::scheduler::{CronJob, CronJobId, CronSchedule};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 /// Maximum consecutive errors before a job is auto-disabled.
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+
+/// Per-process counter mixed into staging tmp filenames so two threads
+/// persisting concurrently never share a path. Combined with pid + nanos
+/// this also disambiguates against a second daemon on the same home_dir.
+static CRON_PERSIST_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // JobMeta — extra runtime state not stored in CronJob itself
@@ -142,9 +147,19 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self
-            .persist_path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
+        // Two daemons sharing the same home_dir, or two threads inside one
+        // process, both staging at `.json.tmp.{pid}` race the rename and
+        // produce a torn file (#3648).  Add a per-call atomic counter and
+        // monotonic nanos so each writer owns a distinct staging path.
+        let tmp_path = self.persist_path.with_extension(format!(
+            "json.tmp.{}.{}.{}",
+            std::process::id(),
+            CRON_PERSIST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
@@ -1862,6 +1877,49 @@ mod tests {
         });
         let res = sched.update_job(id, &updates);
         assert!(res.is_err());
+    }
+
+    /// Regression for #3648: two concurrent persists must never share a
+    /// staging path, otherwise the second `O_CREAT|O_TRUNC` clobbers the
+    /// first writer's tmp file mid-flight and rename produces a torn
+    /// JSON.  The pid+seq+nanos suffix ensures uniqueness within a
+    /// process and across daemons sharing a home_dir.
+    #[test]
+    fn persist_tmp_paths_are_unique_under_concurrency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 100));
+        sched.add_job(make_job(agent), false).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = sched.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..20 {
+                    s.persist().unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final file must parse cleanly — no torn JSON.
+        let path = tmp.path().join("data").join("cron_jobs.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let _: Vec<JobMeta> = serde_json::from_str(&raw).expect("torn JSON after concurrent persist");
+
+        // No leftover .tmp staging files in the parent dir.
+        let parent = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp.* staging files should remain after concurrent persist; found: {leftovers:?}"
+        );
     }
 
     #[test]
