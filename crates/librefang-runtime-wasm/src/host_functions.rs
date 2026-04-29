@@ -304,10 +304,23 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // Linux O_NOFOLLOW. macOS / *BSD use a different bit
-        // (0x0100); skip O_NOFOLLOW there and rely on the lstat
-        // pre-check above.  ELOOP -> deny shape stays Linux-only.
+        // Linux O_NOFOLLOW. The BSD family uses a different value
+        // (0x0100) and gets its own block below.
         open_opts.custom_flags(0o0_400_000);
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // BSD-family O_NOFOLLOW = 0x0100. Closes the same TOCTOU
+        // window the Linux block above closes (between lstat and open),
+        // so an attacker who can write to the parent dir can't race a
+        // regular file → symlink swap.
+        open_opts.custom_flags(0x0100);
     }
     let mut f = match open_opts.open(&write_path) {
         Ok(f) => f,
