@@ -50,9 +50,7 @@ pub fn save_preference(pref: &ConnectionPreference) {
 #[tauri::command]
 pub async fn test_connection(url: String) -> Result<serde_json::Value, String> {
     let url = url.trim_end_matches('/').to_string();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
+    crate::validate_server_url(&url)?;
 
     let health_url = format!("{url}/api/health");
     let client = reqwest::Client::builder()
@@ -85,9 +83,7 @@ pub async fn connect_remote(
     window: tauri::WebviewWindow,
 ) -> Result<(), String> {
     let url = url.trim_end_matches('/').to_string();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
+    crate::validate_server_url(&url)?;
 
     // Verify server is reachable before committing to the connection.
     let health_url = format!("{url}/api/health");
