@@ -594,10 +594,35 @@ impl SessionStore {
     /// `session_id IS NULL` and contribute nothing — list views will show
     /// `null` for those rows, not stale data.
     pub fn list_sessions(&self) -> LibreFangResult<Vec<serde_json::Value>> {
+        self.list_sessions_paginated(None, 0)
+    }
+
+    /// Total number of sessions stored.
+    pub fn count_sessions(&self) -> LibreFangResult<usize> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(total.max(0) as usize)
+    }
+
+    /// Paginated session listing. `limit = None` returns all rows from `offset` onward.
+    /// Pushes LIMIT/OFFSET into SQLite so we never deserialize message blobs we won't return (#3485).
+    pub fn list_sessions_paginated(
+        &self,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // SQLite uses -1 for "no limit"
+        let lim_sql: i64 = limit.map(|n| n as i64).unwrap_or(-1);
+        let off_sql: i64 = offset as i64;
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
@@ -612,12 +637,12 @@ impl SessionStore {
                      WHERE session_id IS NOT NULL
                      GROUP BY session_id
                  ) u ON u.session_id = s.id
-                 ORDER BY s.created_at DESC",
+                 ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![lim_sql, off_sql], |row| {
                 let session_id: String = row.get(0)?;
                 let agent_id: String = row.get(1)?;
                 let messages_blob: Vec<u8> = row.get(2)?;

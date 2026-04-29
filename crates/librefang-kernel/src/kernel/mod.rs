@@ -9301,6 +9301,16 @@ system_prompt = "You are a helpful assistant."
             model.to_string()
         };
 
+        // Snapshot the full model state for rollback on DB persist failure (#3499).
+        let prev_model_state = self.registry.get(agent_id).map(|e| {
+            (
+                e.manifest.model.model.clone(),
+                e.manifest.model.provider.clone(),
+                e.manifest.model.api_key_env.clone(),
+                e.manifest.model.base_url.clone(),
+            )
+        });
+
         if let Some(provider) = provider {
             // When the provider changes, also clear any per-agent api_key_env
             // and base_url overrides — they belonged to the previous provider
@@ -9339,9 +9349,22 @@ system_prompt = "You are a helpful assistant."
             info!(agent_id = %agent_id, model = %normalized_model, "Agent model updated (provider unchanged)");
         }
 
-        // Persist the updated entry
+        // Persist the updated entry. On DB failure, roll back the in-memory model
+        // mutation and propagate the error so the API caller sees a 500 instead of
+        // silently drifting registry vs. disk (#3499).
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            if let Err(e) = self.memory.save_agent(&entry) {
+                if let Some((p_model, p_provider, p_api_key_env, p_base_url)) = prev_model_state {
+                    let _ = self.registry.update_model_provider_config(
+                        agent_id,
+                        p_model,
+                        p_provider,
+                        p_api_key_env,
+                        p_base_url,
+                    );
+                }
+                return Err(KernelError::LibreFang(e));
+            }
         }
 
         // Write updated manifest to agent.toml so changes survive restart (#996, #1018)
@@ -9526,12 +9549,25 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Snapshot previous skill list so we can roll back the in-memory mutation
+        // if the DB persist fails (#3499 — previously `let _ =` swallowed the error
+        // and left the registry drifted from disk).
+        let prev_skills = self
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.skills.clone());
+
         self.registry
             .update_skills(agent_id, skills.clone())
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            if let Err(e) = self.memory.save_agent(&entry) {
+                if let Some(p_skills) = prev_skills {
+                    let _ = self.registry.update_skills(agent_id, p_skills);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
         }
 
         // Invalidate cached tool list — skill allowlist change affects available tools
@@ -9576,12 +9612,23 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Snapshot previous MCP server allowlist for rollback on DB persist failure (#3499).
+        let prev_servers = self
+            .registry
+            .get(agent_id)
+            .map(|e| e.manifest.mcp_servers.clone());
+
         self.registry
             .update_mcp_servers(agent_id, servers.clone())
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            if let Err(e) = self.memory.save_agent(&entry) {
+                if let Some(p_servers) = prev_servers {
+                    let _ = self.registry.update_mcp_servers(agent_id, p_servers);
+                }
+                return Err(KernelError::LibreFang(e));
+            }
         }
 
         // Invalidate cached tool list — MCP server allowlist change affects available tools
@@ -9611,12 +9658,31 @@ system_prompt = "You are a helpful assistant."
             "Agent tool filters updated"
         );
 
+        // Snapshot previous tool config for rollback on DB persist failure (#3499).
+        let prev_tool_state = self.registry.get(agent_id).map(|e| {
+            (
+                e.manifest.capabilities.tools.clone(),
+                e.manifest.tool_allowlist.clone(),
+                e.manifest.tool_blocklist.clone(),
+            )
+        });
+
         self.registry
             .update_tool_config(agent_id, capabilities_tools, allowlist, blocklist)
             .map_err(KernelError::LibreFang)?;
 
         if let Some(entry) = self.registry.get(agent_id) {
-            let _ = self.memory.save_agent(&entry);
+            if let Err(e) = self.memory.save_agent(&entry) {
+                if let Some((p_caps, p_allow, p_block)) = prev_tool_state {
+                    let _ = self.registry.update_tool_config(
+                        agent_id,
+                        Some(p_caps),
+                        Some(p_allow),
+                        Some(p_block),
+                    );
+                }
+                return Err(KernelError::LibreFang(e));
+            }
         }
 
         self.persist_manifest_to_disk(agent_id);

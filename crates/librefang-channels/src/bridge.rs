@@ -6260,6 +6260,42 @@ mod tests {
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "1\n2");
         }
+
+        // Regression test for #3742: simulates the race where the manual
+        // max-buffer flush path AND the max_timer task BOTH enqueue the same
+        // key on flush_tx. The receiver loop calls drain() once per dequeued
+        // key, so the second call must be a noop — i.e. drain() relies on
+        // `buffers.remove(key)` as the atomic single-take guard. If anything
+        // ever regresses to e.g. `buffers.get(key)` + side effects, this test
+        // catches the resulting double-send.
+        #[tokio::test]
+        async fn test_debouncer_double_drain_is_idempotent() {
+            let (debouncer, _rx) = MessageDebouncer::new(1000, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            debouncer.push(
+                "discord:userX",
+                PendingMessage {
+                    message: make_test_message("only"),
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            // First drain takes the buffer atomically.
+            let first = debouncer.drain("discord:userX", &mut buffers);
+            assert!(first.is_some());
+            // Second drain on the same key must observe an empty entry and noop.
+            let second = debouncer.drain("discord:userX", &mut buffers);
+            assert!(
+                second.is_none(),
+                "double-flush race must not duplicate-send (#3742)"
+            );
+            assert!(
+                !buffers.contains_key("discord:userX"),
+                "drain must remove the buffer entry"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------

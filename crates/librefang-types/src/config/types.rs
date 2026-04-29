@@ -3961,9 +3961,13 @@ fn default_max_agent_call_depth() -> u32 {
     5
 }
 
-/// Default maximum request body size in bytes (1 MB).
+/// Default maximum request body size in bytes (8 MiB).
+///
+/// Raised from 1 MiB so that dashboard uploads of ~1 MiB files (which incur
+/// multipart-form overhead) no longer get rejected with 413. Per-route caps
+/// (A2A 1 MiB, webhook 1 MiB) still bound external attack surface (#3493).
 fn default_max_request_body_bytes() -> usize {
-    1_024 * 1_024
+    8 * 1_024 * 1_024
 }
 
 /// Audit log configuration.

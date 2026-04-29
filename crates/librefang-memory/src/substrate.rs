@@ -273,6 +273,20 @@ impl MemorySubstrate {
         self.sessions.list_sessions()
     }
 
+    /// Paginated session listing — pushes LIMIT/OFFSET into SQLite (#3485).
+    pub fn list_sessions_paginated(
+        &self,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<serde_json::Value>> {
+        self.sessions.list_sessions_paginated(limit, offset)
+    }
+
+    /// Total number of sessions stored.
+    pub fn count_sessions(&self) -> LibreFangResult<usize> {
+        self.sessions.count_sessions()
+    }
+
     /// Delete a session by ID.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         self.sessions.delete_session(session_id)

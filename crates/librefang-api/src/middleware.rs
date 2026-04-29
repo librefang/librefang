@@ -108,6 +108,10 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             | "/api/approvals/totp/setup"
             | "/api/approvals/totp/confirm"
             | "/api/approvals/totp/revoke"
+            // A2A discover registers a remote agent into the pending registry,
+            // expanding the trust surface; restrict to Owner so non-Owner API keys
+            // cannot fill the registry or stage impersonation attempts (#3483).
+            | "/api/a2a/discover"
     ) {
         return true;
     }

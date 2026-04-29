@@ -1243,7 +1243,7 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
-    const DEFAULT_LIMIT: usize = 100;
+    const DEFAULT_LIMIT: usize = 50;
     const MAX_LIMIT: usize = 500;
 
     fn effective_limit(&self) -> usize {
@@ -1263,7 +1263,7 @@ impl PaginationParams {
     path = "/api/sessions",
     tag = "sessions",
     params(
-        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
@@ -1274,19 +1274,18 @@ pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    match state.kernel.memory_substrate().list_sessions() {
-        Ok(all_sessions) => {
-            let total = all_sessions.len();
-            let offset = pagination.effective_offset();
-            let limit = pagination.effective_limit();
-            let items: Vec<_> = all_sessions.into_iter().skip(offset).take(limit).collect();
-            Json(serde_json::json!({
-                "sessions": items,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-            }))
-        }
+    let offset = pagination.effective_offset();
+    let limit = pagination.effective_limit();
+    let substrate = state.kernel.memory_substrate();
+    // Push pagination into SQLite so we don't deserialize every session blob (#3485).
+    let total = substrate.count_sessions().unwrap_or(0);
+    match substrate.list_sessions_paginated(Some(limit), offset) {
+        Ok(items) => Json(serde_json::json!({
+            "sessions": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        })),
         Err(_) => Json(serde_json::json!({
             "sessions": [],
             "total": 0,
@@ -1606,7 +1605,7 @@ fn approval_to_json(
     path = "/api/approvals",
     tag = "approvals",
     params(
-        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses((status = 200, description = "Paginated list of pending and recent approvals", body = serde_json::Value))
