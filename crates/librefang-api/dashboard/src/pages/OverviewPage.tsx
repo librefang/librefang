@@ -321,7 +321,7 @@ export function OverviewPage() {
 
   if (isError) {
     return (
-      <div className="px-4 sm:px-6 py-6 max-w-[1380px] mx-auto">
+      <div className="max-w-[1380px] mx-auto">
         <Card padding="lg" className="surface-lit">
           <ErrorState onRetry={refresh} />
         </Card>
@@ -330,7 +330,7 @@ export function OverviewPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4 px-4 sm:px-6 py-5 max-w-[1380px] mx-auto pb-12">
+    <div className="flex flex-col gap-4 max-w-[1380px] mx-auto">
       {/* Hero strip */}
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
