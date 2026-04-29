@@ -181,14 +181,16 @@ impl MemorySubstrate {
     ///
     /// Pre-fix (#3501) sessions and structured rows were deleted in
     /// independent locks/transactions: a failure between the two would
-    /// orphan whichever side had not run yet. Now all DELETEs share one
-    /// `unchecked_transaction` — partial cascade rolls back to the
-    /// pre-call state.
+    /// orphan whichever side had not run yet. Now all DELETEs — including
+    /// `sessions_fts` — share one `unchecked_transaction` so a partial
+    /// cascade rolls back to the pre-call state.
     ///
-    /// `sessions_fts` is intentionally outside the rollback path: an FTS
-    /// failure logs a warning rather than aborting the cascade, because
-    /// the user-visible `agents` row removal is the primary contract and
-    /// FTS orphans are recoverable by a rebuild.
+    /// `sessions_fts` cannot be left outside the rollback path: it stores
+    /// session content (`snippet(...)` returns it on any FTS hit) and
+    /// `search_sessions` reads from it without joining the `sessions`
+    /// table. A `sessions` row removed without its FTS twin would leave
+    /// the deleted agent's content searchable, which is a privacy
+    /// regression rather than a recoverable hygiene issue.
     pub fn remove_agent(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self
             .conn
@@ -215,6 +217,7 @@ impl MemorySubstrate {
             "DELETE FROM usage_events WHERE agent_id = ?1",
             "DELETE FROM memories WHERE agent_id = ?1",
             "DELETE FROM sessions WHERE agent_id = ?1",
+            "DELETE FROM sessions_fts WHERE agent_id = ?1",
             "DELETE FROM canonical_sessions WHERE agent_id = ?1",
             "DELETE FROM kv_store WHERE agent_id = ?1",
             "DELETE FROM task_queue WHERE agent_id = ?1",
@@ -228,19 +231,6 @@ impl MemorySubstrate {
         }
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-        // FTS index cleanup outside the tx: it's a derived index and a
-        // failure shouldn't undo the user-visible agent removal.
-        if let Err(e) = conn.execute(
-            "DELETE FROM sessions_fts WHERE agent_id = ?1",
-            rusqlite::params![id],
-        ) {
-            tracing::warn!(
-                %agent_id,
-                error = %e,
-                "Failed to clear sessions_fts entries; FTS may need rebuild",
-            );
-        }
         Ok(())
     }
 
@@ -1880,5 +1870,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(memory_count, 0, "memories must cascade-delete");
+    }
+
+    /// `remove_agent` must also wipe the `sessions_fts` index inside the
+    /// cascade transaction. `search_sessions` reads FTS rows directly
+    /// (no JOIN to `sessions`), so an orphan FTS row would let the
+    /// removed agent's session content remain full-text searchable —
+    /// a privacy regression, not a hygiene issue.
+    #[tokio::test]
+    async fn test_remove_agent_clears_sessions_fts() {
+        use librefang_types::message::Message;
+
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let agent_id = AgentId::new();
+
+        // Seed a session whose content lands in the FTS index.
+        let mut session = substrate.create_session(agent_id).unwrap();
+        let needle = "removalprivacynonceabc123";
+        session.messages.push(Message::user(needle));
+        substrate.save_session(&session).unwrap();
+
+        // Sanity: FTS sees it.
+        let pre = substrate.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(!pre.is_empty(), "FTS must index the seeded content");
+
+        substrate.remove_agent(agent_id).unwrap();
+
+        // After remove_agent, the FTS row must be gone. If it survived
+        // outside the tx, search_sessions would still surface a snippet
+        // of the deleted agent's content.
+        let post = substrate.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(
+            post.is_empty(),
+            "sessions_fts must be cleared inside remove_agent's tx"
+        );
+
+        // Also assert at the row level — search_sessions could in principle
+        // filter by JOIN in the future; the underlying table must be empty.
+        let conn = substrate.conn.lock().unwrap();
+        let fts_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE agent_id = ?1",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0, "sessions_fts must cascade-delete");
     }
 }

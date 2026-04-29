@@ -533,10 +533,13 @@ impl SessionStore {
 
     /// Delete all sessions belonging to an agent and their FTS5 index entries.
     ///
-    /// The two `DELETE`s run inside a single transaction so a failure on
-    /// either side rolls back the other and leaves the agent's history
-    /// either fully intact or fully gone — never half-deleted with FTS
-    /// orphans pointing at missing rows (#3470, #3501).
+    /// Both `sessions` and `sessions_fts` are removed inside the same
+    /// transaction (#3470, #3501). `save_session` writes both rows
+    /// atomically, and `search_sessions` reads from `sessions_fts`
+    /// without joining `sessions` — so an orphan FTS row would leave
+    /// the deleted agent's content searchable via `snippet(...)`. That
+    /// makes write-side asymmetry a privacy regression, not just a
+    /// recoverable hygiene issue.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let mut conn = self
             .conn
@@ -1415,6 +1418,42 @@ mod tests {
         store.delete_agent_sessions(agent_id).unwrap();
         assert!(store.get_session(s1.id).unwrap().is_none());
         assert!(store.get_session(s2.id).unwrap().is_none());
+    }
+
+    /// `delete_agent_sessions` must wipe `sessions_fts` in the same
+    /// transaction as `sessions`. `search_sessions` reads from the FTS
+    /// table without joining `sessions`, so any orphan FTS row remains
+    /// searchable (and snippets leak content) after the owning agent
+    /// is gone — a privacy regression, not a recoverable hygiene issue.
+    #[test]
+    fn test_delete_agent_sessions_clears_fts() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Seed a session whose content goes through the FTS index.
+        let mut session = store.create_session(agent_id).unwrap();
+        let needle = "thequickbrownfoxnonceabc123";
+        session.messages.push(Message::user(needle));
+        store.save_session(&session).unwrap();
+
+        // FTS sees it.
+        let pre = store.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(
+            !pre.is_empty(),
+            "FTS index must be populated by save_session"
+        );
+
+        store.delete_agent_sessions(agent_id).unwrap();
+
+        // After cascade delete, the FTS index must NOT still return the
+        // content. Pre-fix the FTS DELETE was best-effort outside the tx,
+        // so a partial failure (or any out-of-tx race) could leave the
+        // searchable orphan visible here.
+        let post = store.search_sessions(needle, Some(&agent_id)).unwrap();
+        assert!(
+            post.is_empty(),
+            "search_sessions must not return orphan FTS rows after delete_agent_sessions"
+        );
     }
 
     #[test]
