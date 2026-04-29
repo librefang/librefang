@@ -387,14 +387,12 @@ function AuthBadge({
     try {
       const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
+        // Nullify opener BEFORE navigation: the popup is still on
+        // about:blank (same origin) so the assignment can't throw, and
+        // once the navigation kicks the window into the IdP origin,
+        // .opener is already null. No race window.
+        authWindow.opener = null;
         authWindow.location.href = result.auth_url;
-        try {
-          authWindow.opener = null;
-        } catch {
-          // Cross-origin set may throw once the IdP loads; either way
-          // the popup is on an attacker-irrelevant origin from the
-          // dashboard's perspective.
-        }
       } else {
         window.location.href = result.auth_url;
       }
