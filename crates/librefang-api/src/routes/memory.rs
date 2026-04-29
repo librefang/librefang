@@ -149,9 +149,7 @@ fn default_user_id() -> String {
 /// semantically correct codes for `InvalidInput` (400), `AgentNotFound` /
 /// `SessionNotFound` (404), `CapabilityDenied` (403), and `QuotaExceeded` (429)
 /// so callers can distinguish between client errors and server errors.
-fn internal_error(
-    e: impl std::fmt::Display,
-) -> (StatusCode, Json<serde_json::Value>) {
+fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
     map_memory_error(e.to_string())
 }
 
@@ -159,25 +157,32 @@ fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
     // Classify by the error message prefix emitted by LibreFangError Display impls.
     // This avoids a dependency on the concrete type at every call-site while still
     // providing correct HTTP semantics.
-    let status = if msg.starts_with("Invalid input:") {
-        StatusCode::BAD_REQUEST
-    } else if msg.starts_with("Agent not found:")
-        || msg.starts_with("Session not found:")
-    {
-        StatusCode::NOT_FOUND
+    //
+    // Body policy: client-facing errors (4xx) echo the full message because
+    // the content is already shaped from caller-supplied input or
+    // documented quota state.  Server-side errors (5xx) deliberately
+    // return a generic body — the underlying message can carry a
+    // database path, an internal trace ID, or other deployment detail
+    // we don't want to leak across an API boundary.  The original
+    // `internal_error` returned only "Internal server error"; #3661
+    // unintentionally regressed that by echoing every error message.
+    let (status, body_msg) = if msg.starts_with("Invalid input:") {
+        (StatusCode::BAD_REQUEST, msg)
+    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
+        (StatusCode::NOT_FOUND, msg)
     } else if msg.starts_with("Capability denied:") {
-        StatusCode::FORBIDDEN
+        (StatusCode::FORBIDDEN, msg)
     } else if msg.starts_with("Resource quota exceeded:") {
-        StatusCode::TOO_MANY_REQUESTS
+        (StatusCode::TOO_MANY_REQUESTS, msg)
     } else {
         tracing::error!("Memory operation failed: {msg}");
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
     };
 
-    (
-        status,
-        Json(serde_json::json!({ "error": msg })),
-    )
+    (status, Json(serde_json::json!({ "error": body_msg })))
 }
 
 /// Build a [`MemoryNamespaceGuard`] for the current request from the
@@ -1444,6 +1449,59 @@ mod tests {
             vec!["proactive".to_string()],
             "anonymous fallback must only allow reading the `proactive` namespace"
         );
+    }
+
+    /// 5xx responses must NOT echo the underlying error message back to
+    /// the client.  Internal failures can carry deployment detail (DB
+    /// path, internal trace ID, low-level error chain) that should not
+    /// cross the API boundary.  The original `internal_error` returned
+    /// "Internal server error"; #3661 unintentionally regressed that
+    /// when it added the 4xx mapping.
+    #[test]
+    fn map_memory_error_does_not_leak_internal_message_on_500() {
+        let (status, body) = map_memory_error("connection refused: /home/foo/.librefang/memory.db".to_string());
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let v: serde_json::Value = serde_json::to_value(body.0).unwrap();
+        let echoed = v["error"].as_str().unwrap_or("");
+        assert_eq!(
+            echoed, "Internal server error",
+            "5xx body must be generic; leaked internal detail: {echoed}"
+        );
+        assert!(
+            !echoed.contains(".librefang"),
+            "5xx body must not contain filesystem paths"
+        );
+    }
+
+    /// 4xx responses keep echoing the message — the content is shaped
+    /// from caller input (Invalid input, agent IDs in 404, quota state
+    /// in 429), so callers benefit from the detail without information
+    /// disclosure risk.
+    #[test]
+    fn map_memory_error_echoes_message_for_4xx() {
+        let (status, body) = map_memory_error("Invalid input: payload too large".to_string());
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::to_value(body.0).unwrap();
+        assert_eq!(
+            v["error"].as_str().unwrap_or(""),
+            "Invalid input: payload too large"
+        );
+
+        let (status, body) =
+            map_memory_error("Agent not found: 11111111-2222-3333-4444-555555555555".to_string());
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::to_value(body.0).unwrap();
+        assert!(v["error"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("Agent not found:"));
+
+        let (status, _) = map_memory_error("Capability denied: shell_exec".to_string());
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) =
+            map_memory_error("Resource quota exceeded: 1500 / 1000".to_string());
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

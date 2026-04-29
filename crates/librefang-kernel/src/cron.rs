@@ -142,10 +142,9 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self.persist_path.with_extension(format!(
-            "json.tmp.{}",
-            std::process::id()
-        ));
+        let tmp_path = self
+            .persist_path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {

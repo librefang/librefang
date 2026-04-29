@@ -418,7 +418,10 @@ impl StandaloneChat {
                 }
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel.model_catalog_ref().read().unwrap_or_else(|p| p.into_inner());
+                let catalog = kernel
+                    .model_catalog_ref()
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner());
                 catalog
                     .available_models()
                     .into_iter()

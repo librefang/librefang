@@ -978,9 +978,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: retry_after
-                        .as_millis()
-                        .min(u64::MAX as u128) as u64,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1388,9 +1386,7 @@ impl LlmDriver for OpenAIDriver {
                     continue;
                 }
                 return Err(LlmError::RateLimited {
-                    retry_after_ms: retry_after
-                        .as_millis()
-                        .min(u64::MAX as u128) as u64,
+                    retry_after_ms: retry_after.as_millis().min(u64::MAX as u128) as u64,
                     message: None,
                 });
             }
@@ -1536,7 +1532,9 @@ impl LlmDriver for OpenAIDriver {
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 if receiver_dropped {
-                    tracing::debug!("streaming receiver dropped; cancelling OpenAI-compatible LLM stream");
+                    tracing::debug!(
+                        "streaming receiver dropped; cancelling OpenAI-compatible LLM stream"
+                    );
                     break;
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
@@ -1606,7 +1604,11 @@ impl LlmDriver for OpenAIDriver {
                                 for action in think_filter.process(text) {
                                     match action {
                                         FilterAction::EmitText(t) => {
-                                            if tx.send(StreamEvent::TextDelta { text: t }).await.is_err() {
+                                            if tx
+                                                .send(StreamEvent::TextDelta { text: t })
+                                                .await
+                                                .is_err()
+                                            {
                                                 receiver_dropped = true;
                                             }
                                         }
@@ -1691,16 +1693,15 @@ impl LlmDriver for OpenAIDriver {
                                     // Arguments delta
                                     if let Some(args) = func["arguments"].as_str() {
                                         tool_accum[idx].2.push_str(args);
-                                        if !args.is_empty() {
-                                            if tx
+                                        if !args.is_empty()
+                                            && tx
                                                 .send(StreamEvent::ToolInputDelta {
                                                     text: args.to_string(),
                                                 })
                                                 .await
                                                 .is_err()
-                                            {
-                                                receiver_dropped = true;
-                                            }
+                                        {
+                                            receiver_dropped = true;
                                         }
                                     }
                                 }
@@ -1729,7 +1730,11 @@ impl LlmDriver for OpenAIDriver {
                             }
                         }
                         FilterAction::EmitThinking(t) => {
-                            if tx.send(StreamEvent::ThinkingDelta { text: t }).await.is_err() {
+                            if tx
+                                .send(StreamEvent::ThinkingDelta { text: t })
+                                .await
+                                .is_err()
+                            {
                                 break;
                             }
                         }

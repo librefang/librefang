@@ -2898,9 +2898,7 @@ async fn tool_agent_send(
     // turn, causing an unrecoverable deadlock (issue #3613).
     if let Some(caller) = caller_agent_id {
         if caller == agent_id {
-            return Err(
-                "agent_send: an agent cannot send a message to itself".to_string(),
-            );
+            return Err("agent_send: an agent cannot send a message to itself".to_string());
         }
     }
 

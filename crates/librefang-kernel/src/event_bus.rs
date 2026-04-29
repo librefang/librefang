@@ -112,8 +112,8 @@ impl EventBus {
                     }
                 }
                 if agent_drops > 0 {
-                    let total = self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed)
-                        + agent_drops;
+                    let total =
+                        self.dropped_count.fetch_add(agent_drops, Ordering::Relaxed) + agent_drops;
                     if let Ok(mut last) = self.last_drop_warn.lock() {
                         if last.elapsed() >= std::time::Duration::from_secs(10) {
                             warn!(

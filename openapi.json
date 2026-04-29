@@ -140,6 +140,7 @@
           "a2a"
         ],
         "summary": "GET /api/a2a/agents — List discovered external A2A agents.",
+        "description": "Returns both `trusted` agents (approved and able to receive tasks) and\n`pending` agents (discovered but not yet approved by the operator).",
         "operationId": "a2a_list_external_agents",
         "responses": {
           "200": {
@@ -2168,15 +2169,34 @@
         "summary": "GET /api/approvals — List pending and recent approval requests.",
         "description": "Transforms field names to match the dashboard template expectations:\n`action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.",
         "operationId": "list_approvals",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items (default 100, max 500)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Items to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "List pending and recent approvals",
+            "description": "Paginated list of pending and recent approvals",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                }
+                "schema": {}
               }
             }
           }
@@ -3003,6 +3023,7 @@
           "budget"
         ],
         "summary": "GET /api/budget/agents — Per-agent cost ranking (top spenders).",
+        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.",
         "operationId": "agent_budget_ranking",
         "responses": {
           "200": {
@@ -6850,15 +6871,34 @@
         ],
         "summary": "GET /api/sessions — List all sessions with metadata.",
         "operationId": "list_sessions",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items (default 100, max 500)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Items to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "List sessions",
+            "description": "Paginated list of sessions",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                }
+                "schema": {}
               }
             }
           }
@@ -8088,7 +8128,7 @@
           "openai"
         ],
         "summary": "GET /v1/models — List available agents as OpenAI model objects.",
-        "operationId": "list_models",
+        "operationId": "list_openai_models",
         "responses": {
           "200": {
             "description": "OpenAI-compatible model list",

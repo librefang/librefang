@@ -2737,8 +2737,10 @@ pub struct KernelConfig {
     #[serde(default)]
     pub pairing: PairingConfig,
     /// Auth profiles for key rotation (provider name → profiles).
+    /// Uses `BTreeMap` for deterministic serialisation order (avoids prompt-cache
+    /// invalidation when the same providers are configured across restarts; see #3757).
     #[serde(default)]
-    pub auth_profiles: HashMap<String, Vec<AuthProfile>>,
+    pub auth_profiles: BTreeMap<String, Vec<AuthProfile>>,
     /// Extended thinking configuration.
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
@@ -2747,13 +2749,15 @@ pub struct KernelConfig {
     pub budget: BudgetConfig,
     /// Provider base URL overrides (provider ID → custom base URL).
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_urls: HashMap<String, String>,
+    pub provider_urls: BTreeMap<String, String>,
     /// Per-provider proxy URL overrides (provider ID → proxy URL).
     /// Allows routing specific providers through a proxy while others connect directly.
     /// e.g. `openai = "http://proxy.corp:8080"`, `ollama = ""` (direct)
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_proxy_urls: HashMap<String, String>,
+    pub provider_proxy_urls: BTreeMap<String, String>,
     /// Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).
     ///
     /// Overrides the HTTP client's default read timeout for LLM API requests to the
@@ -2762,19 +2766,22 @@ pub struct KernelConfig {
     ///
     /// Only applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.).
     /// CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_request_timeout_secs: HashMap<String, u64>,
+    pub provider_request_timeout_secs: BTreeMap<String, u64>,
     /// Provider region selection (provider ID → region name).
     /// Selects a regional endpoint from the provider's `[provider.regions]` map.
     /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_regions: HashMap<String, String>,
+    pub provider_regions: BTreeMap<String, String>,
     /// Provider API key env var overrides (provider ID → env var name).
     /// For custom/unknown providers, maps the provider name to the environment
     /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
+    /// Uses `BTreeMap` for deterministic serialisation order (see #3757).
     #[serde(default)]
-    pub provider_api_keys: HashMap<String, String>,
+    pub provider_api_keys: BTreeMap<String, String>,
     /// Interval in seconds between reachability probes of local providers
     /// (Ollama, vLLM, LM Studio, lemonade).
     ///
@@ -3927,11 +3934,6 @@ fn default_max_upload_size_bytes() -> usize {
     10 * 1024 * 1024
 }
 
-/// Default workflow stale timeout: 60 minutes.
-fn default_workflow_stale_timeout_minutes() -> u64 {
-    60
-}
-
 /// Default maximum concurrent background LLM calls.
 fn default_max_concurrent_bg_llm() -> usize {
     5
@@ -4749,14 +4751,14 @@ impl Default for KernelConfig {
             tts: TtsConfig::default(),
             docker: DockerSandboxConfig::default(),
             pairing: PairingConfig::default(),
-            auth_profiles: HashMap::new(),
+            auth_profiles: BTreeMap::new(),
             thinking: None,
             budget: BudgetConfig::default(),
-            provider_urls: HashMap::new(),
-            provider_proxy_urls: HashMap::new(),
-            provider_request_timeout_secs: HashMap::new(),
-            provider_regions: HashMap::new(),
-            provider_api_keys: HashMap::new(),
+            provider_urls: BTreeMap::new(),
+            provider_proxy_urls: BTreeMap::new(),
+            provider_request_timeout_secs: BTreeMap::new(),
+            provider_regions: BTreeMap::new(),
+            provider_api_keys: BTreeMap::new(),
             local_probe_interval_secs: default_local_probe_interval_secs(),
             vertex_ai: VertexAiConfig::default(),
             azure_openai: AzureOpenAiConfig::default(),
@@ -5161,7 +5163,7 @@ pub struct NetworkConfig {
     pub max_messages_per_peer_per_minute: u32,
     /// SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.
     ///
-    /// When set, the node tracks how many tokens each peer's 
+    /// When set, the node tracks how many tokens each peer's
     /// requests have consumed in the current hour window. If a peer exceeds
     /// this budget the request is rejected with a 429 error.
     ///
@@ -5201,8 +5203,14 @@ impl std::fmt::Debug for NetworkConfig {
                     "<redacted>"
                 },
             )
-            .field("max_messages_per_peer_per_minute", &self.max_messages_per_peer_per_minute)
-            .field("max_llm_tokens_per_peer_per_hour", &self.max_llm_tokens_per_peer_per_hour)
+            .field(
+                "max_messages_per_peer_per_minute",
+                &self.max_messages_per_peer_per_minute,
+            )
+            .field(
+                "max_llm_tokens_per_peer_per_hour",
+                &self.max_llm_tokens_per_peer_per_hour,
+            )
             .finish()
     }
 }

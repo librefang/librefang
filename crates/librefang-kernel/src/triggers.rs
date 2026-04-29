@@ -184,6 +184,11 @@ pub struct TriggerEngine {
     /// Path to the persistence file (`<home>/trigger_jobs.json`).
     /// `None` means no persistence (used in tests).
     persist_path: Option<PathBuf>,
+    /// Serializes `persist()` writes so concurrent callers (event
+    /// dispatch, API routes, restart handlers) within a single process
+    /// don't `O_TRUNC` the same `.tmp.{pid}` path and produce a torn
+    /// file before rename.  Mirrors `CronScheduler::persist_lock`.
+    persist_lock: std::sync::Mutex<()>,
 }
 
 impl TriggerEngine {
@@ -196,6 +201,7 @@ impl TriggerEngine {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: None,
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -211,6 +217,7 @@ impl TriggerEngine {
             max_triggers_per_event: config.max_per_event.max(1),
             default_cooldown_secs: config.cooldown_secs,
             persist_path: Some(home_dir.join("trigger_jobs.json")),
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -292,6 +299,7 @@ impl TriggerEngine {
     ///
     /// Does nothing when no persistence path is configured.
     pub fn persist(&self) -> LibreFangResult<()> {
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(()),
@@ -664,9 +672,7 @@ impl TriggerEngine {
                 Duration::from_secs(trigger.cooldown_secs.unwrap_or(self.default_cooldown_secs));
             if !cooldown.is_zero() {
                 if let Some(last) = self.last_fired.get(&trigger.id) {
-                    let elapsed = (now - *last)
-                        .to_std()
-                        .unwrap_or(Duration::ZERO);
+                    let elapsed = (now - *last).to_std().unwrap_or(Duration::ZERO);
                     if elapsed < cooldown {
                         debug!(
                             trigger_id = %trigger.id,
@@ -1876,8 +1882,7 @@ mod tests {
         let (matches, _) = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            matches[0].session_mode_override,
-            None,
+            matches[0].session_mode_override, None,
             "session_mode_override must be None when the trigger has no override; \
              the dispatcher should then fall back to the agent manifest default"
         );
@@ -1891,9 +1896,9 @@ mod tests {
         use librefang_types::agent::SessionMode;
 
         // Helper that mimics the single line in the kernel dispatch loop.
-        let resolve = |trigger_override: Option<SessionMode>, manifest: SessionMode| -> SessionMode {
-            trigger_override.unwrap_or(manifest)
-        };
+        let resolve = |trigger_override: Option<SessionMode>,
+                       manifest: SessionMode|
+         -> SessionMode { trigger_override.unwrap_or(manifest) };
 
         // Case 1: trigger override = New → New regardless of manifest
         assert_eq!(
@@ -1943,7 +1948,10 @@ mod tests {
         );
 
         // Sanity: override is present before the patch.
-        assert_eq!(engine.get_trigger(tid).unwrap().session_mode, Some(SessionMode::New));
+        assert_eq!(
+            engine.get_trigger(tid).unwrap().session_mode,
+            Some(SessionMode::New)
+        );
 
         // Clear the override.
         engine.update(
@@ -1958,8 +1966,9 @@ mod tests {
             engine.get_trigger(tid).unwrap().session_mode,
             None,
             "patching session_mode = Some(None) must clear the per-trigger override"
+        );
+    }
 
-    // ── PR #3913 cooldown tests ──
     // -- cooldown persistence across restarts (#3779) -------------------------
 
     /// Verify that `last_fired_at` survives a persist → load round-trip so
@@ -1977,6 +1986,7 @@ mod tests {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: Some(persist_path.clone()),
+            persist_lock: std::sync::Mutex::new(()),
         };
         let agent_id = AgentId::new();
         // Register with a 60-second cooldown so it won't expire during the test.
@@ -2014,6 +2024,7 @@ mod tests {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: Some(persist_path),
+            persist_lock: std::sync::Mutex::new(()),
         };
         let loaded = engine2.load().unwrap();
         assert_eq!(loaded, 1, "Should have loaded exactly one trigger");

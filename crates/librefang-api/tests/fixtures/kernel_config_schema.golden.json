@@ -5148,6 +5148,22 @@
           },
           "type": "array"
         },
+        "max_llm_tokens_per_peer_per_hour": {
+          "description": "SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.\n\nWhen set, the node tracks how many tokens each peer's requests have consumed in the current hour window. If a peer exceeds this budget the request is rejected with a 429 error.\n\nmeans no per-peer token cap (default). Set to a value like to bound the LLM spend a single federated peer can force.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_messages_per_peer_per_minute": {
+          "default": 60,
+          "description": "SECURITY (#3876): Maximum number of  requests a single OFP peer may send per minute before being rate-limited.\n\nEach peer connection is tracked independently. Excess messages are rejected with a 429 error response; a  is emitted with the peer ID and current rate so operators can investigate abuse.\n\nSet to  to disable per-peer message rate limiting (not recommended for production federations). Default: 60.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "max_peers": {
           "default": 50,
           "description": "Maximum number of connected peers.",
@@ -8218,7 +8234,7 @@
             },
             "allow_local": {
               "default": false,
-              "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.\nDefaults to `false`; set to `true` only when signal-cli runs on localhost.",
+              "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses. Defaults to `false`; set to `true` only when signal-cli runs on localhost.",
               "type": "boolean"
             },
             "allowed_users": {
@@ -8231,7 +8247,7 @@
             },
             "api_key": {
               "default": null,
-              "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request.\nIf absent, requests are sent without an Authorization header.",
+              "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request. If absent, requests are sent without an Authorization header.",
               "type": [
                 "string",
                 "null"
@@ -10471,6 +10487,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "auth_rate_limit_per_ip": {
+          "default": 10,
+          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10. Set to 0 to disable the per-IP auth rate limiter.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "max_ws_per_ip": {
           "default": 5,
           "description": "Maximum concurrent WebSocket connections per IP. Default: 5.",
@@ -10848,7 +10871,7 @@
       "type": "object"
     },
     "SanitizeConfig": {
-      "description": "Configuration for channel input sanitization / prompt-injection detection.\n\n```toml [sanitize] mode = \"warn\"           # off | warn | block max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] ```",
+      "description": "Configuration for channel input sanitization / prompt-injection detection.\n\nThe sanitizer is **enabled by default** (mode = \"block\"). To opt out set `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:\n\n```toml [sanitize] mode = \"block\"          # off | warn | block  (default: block) max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] # disable_input_sanitizer = true  # emergency opt-out ```",
       "properties": {
         "custom_block_patterns": {
           "default": [],
@@ -10857,6 +10880,11 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "disable_input_sanitizer": {
+          "default": false,
+          "description": "Emergency opt-out: set to `true` to disable all input sanitization. Not recommended for production — prefer `mode = \"warn\"` for monitoring without blocking, or `mode = \"off\"` for a softer disable.",
+          "type": "boolean"
         },
         "max_message_length": {
           "default": 32768,
@@ -10871,7 +10899,7 @@
               "$ref": "#/definitions/SanitizeMode"
             }
           ],
-          "default": "off",
+          "default": "block",
           "description": "Sanitization mode."
         }
       },
@@ -10881,7 +10909,7 @@
       "description": "Input sanitization mode for channel messages.",
       "oneOf": [
         {
-          "description": "No checking — all messages pass through (default).",
+          "description": "No checking — all messages pass through. Set `mode = \"off\"` in `[sanitize]` to opt out of prompt-injection detection.",
           "enum": [
             "off"
           ],
@@ -10895,7 +10923,7 @@
           "type": "string"
         },
         {
-          "description": "Reject the message and send an error to the user.",
+          "description": "Reject the message and send an error to the user (default).",
           "enum": [
             "block"
           ],
@@ -11182,7 +11210,7 @@
         },
         "allow_local": {
           "default": false,
-          "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses.\nDefaults to `false`; set to `true` only when signal-cli runs on localhost.",
+          "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses. Defaults to `false`; set to `true` only when signal-cli runs on localhost.",
           "type": "boolean"
         },
         "allowed_users": {
@@ -11195,7 +11223,7 @@
         },
         "api_key": {
           "default": null,
-          "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request.\nIf absent, requests are sent without an Authorization header.",
+          "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request. If absent, requests are sent without an Authorization header.",
           "type": [
             "string",
             "null"
@@ -14324,6 +14352,7 @@
         "issuer_url": "",
         "providers": [],
         "redirect_url": "http://127.0.0.1:4545/api/auth/callback",
+        "require_email_verified": true,
         "scopes": [
           "openid",
           "profile",
@@ -14560,6 +14589,7 @@
         "listen_addresses": [
           "/ip4/0.0.0.0/tcp/0"
         ],
+        "max_messages_per_peer_per_minute": 60,
         "max_peers": 50,
         "mdns_enabled": true,
         "shared_secret": ""
@@ -14790,6 +14820,7 @@
       ],
       "default": {
         "api_requests_per_minute": 500,
+        "auth_rate_limit_per_ip": 10,
         "max_ws_per_ip": 5,
         "retry_after_secs": 60,
         "ws_debounce_chars": 200,
@@ -14839,8 +14870,9 @@
       ],
       "default": {
         "custom_block_patterns": [],
+        "disable_input_sanitizer": false,
         "max_message_length": 32768,
-        "mode": "off"
+        "mode": "block"
       },
       "description": "Input sanitization / prompt-injection detection for channel messages."
     },
@@ -15184,6 +15216,13 @@
       ],
       "default": null,
       "description": "Webhook trigger configuration (external event injection)."
+    },
+    "workflow_stale_timeout_minutes": {
+      "default": 60,
+      "description": "How long (in minutes) a workflow run may remain in the `Running` or `Pending` state before it is considered stale after a daemon restart.\n\nOn boot the engine scans all persisted runs and marks any that are older than this threshold as `Failed` with the error `\"Interrupted by daemon restart\"`.  Set to `0` to disable recovery. Default: `60` minutes.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
     },
     "workspaces_dir": {
       "default": null,

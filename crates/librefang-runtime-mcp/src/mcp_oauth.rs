@@ -195,6 +195,7 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
     /// that route packets to an IPv4 endpoint on the wire:
     ///   * IPv4-mapped: `::ffff:x.x.x.x` (RFC 4291 §2.5.5.2)
     ///   * NAT64:       `64:ff9b::x.x.x.x` (RFC 6052)
+    ///
     /// Without these, `http://[::ffff:7f00:0001]/` bypasses the V4
     /// loopback check entirely — the daemon happily connects to
     /// 127.0.0.1 over an IPv6 socket.
@@ -262,7 +263,6 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
@@ -447,11 +447,13 @@ pub fn parse_authorization_server_metadata(
 
     // SSRF guard — validate every discovered endpoint URL.
     for (label, url_str) in [
-        ("authorization_endpoint", raw.authorization_endpoint.as_str()),
+        (
+            "authorization_endpoint",
+            raw.authorization_endpoint.as_str(),
+        ),
         ("token_endpoint", raw.token_endpoint.as_str()),
     ] {
-        let parsed =
-            Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
+        let parsed = Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| format!("{label} has no host"))?;

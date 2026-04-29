@@ -361,7 +361,16 @@ impl A2aTaskStore {
         }
     }
 
-    /// Load all tasks from the DB into the in-memory map.
+    /// Load the most recent `max_tasks` rows from the DB into the in-memory
+    /// map.
+    ///
+    /// Bound matters: a long-running daemon accumulates rows up to the
+    /// 7-day retention window, which can be far more than `max_tasks`.
+    /// Loading every row would (a) blow `max_tasks` on boot and force an
+    /// immediate cascade of capacity evictions and (b) hold the full
+    /// row set in memory during decode.  Older rows still live in the
+    /// DB and stay reachable through `get()`'s SQLite fallback when a
+    /// poller asks for them by ID.
     fn db_load_into_memory(&mut self) {
         let db_arc = match &self.db {
             Some(d) => d,
@@ -369,7 +378,10 @@ impl A2aTaskStore {
         };
         let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2",
+            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id
+             FROM a2a_tasks_v2
+             ORDER BY updated_at DESC
+             LIMIT ?1",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -378,7 +390,7 @@ impl A2aTaskStore {
             }
         };
 
-        let rows: Vec<_> = match stmt.query_map([], |row| {
+        let rows: Vec<_> = match stmt.query_map(rusqlite::params![self.max_tasks as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,         // id
                 row.get::<_, String>(1)?,         // status (JSON)
@@ -828,9 +840,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A discovery failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
         if !response.status().is_success() {
             return Err(format!("A2A discovery returned {}", response.status()));
@@ -874,9 +884,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A send_task failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
         let body: serde_json::Value = response
@@ -914,9 +922,7 @@ impl A2aClient {
             .map_err(|e| format!("A2A get_task failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(
-                "A2A request redirect not followed (SSRF prevention)".to_string(),
-            );
+            return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
         let body: serde_json::Value = response
@@ -1395,5 +1401,52 @@ mod tests {
             .expect("evicted task must still be retrievable from the DB");
         assert_eq!(got.id, "evicted-1");
         assert_eq!(got.session_id.as_deref(), Some("s1"));
+    }
+
+    /// `with_persistence` must not load more than `max_tasks` rows on boot,
+    /// even when the DB has accumulated many more (long-running daemon
+    /// inside the 7-day retention window).  The `LIMIT` clause picks the
+    /// most recently updated rows; older rows stay reachable via the
+    /// `get()` SQLite fallback path.
+    #[test]
+    fn test_persistence_load_respects_max_tasks_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+
+        // First daemon lifetime: insert 10 tasks under a generous cap.
+        {
+            let store = A2aTaskStore::with_persistence(20, &db_path);
+            for i in 0..10 {
+                store.insert(A2aTask {
+                    id: format!("t-{i:02}"),
+                    session_id: None,
+                    status: A2aTaskStatus::Completed.into(),
+                    messages: vec![],
+                    artifacts: vec![],
+                    agent_id: None,
+                    caller_a2a_agent_id: None,
+                });
+            }
+        }
+
+        // Second lifetime: tighter cap.  The DB still has 10 rows, but the
+        // in-memory map must hold at most 3 to honour the new cap.
+        let restarted = A2aTaskStore::with_persistence(3, &db_path);
+        let in_memory_len = {
+            let tasks = restarted.tasks.lock().unwrap();
+            tasks.len()
+        };
+        assert_eq!(
+            in_memory_len, 3,
+            "boot load must respect max_tasks=3, got {in_memory_len}"
+        );
+
+        // Older rows still reachable through the DB fallback path.
+        for i in 0..10 {
+            assert!(
+                restarted.get(&format!("t-{i:02}")).is_some(),
+                "task t-{i:02} must remain queryable after restart (DB fallback)"
+            );
+        }
     }
 }
