@@ -804,7 +804,7 @@ mod tests {
                     .memory
                     .decay_rate)
                 .abs()
-                < f32::EPSILON
+                < f64::EPSILON
         );
     }
 
