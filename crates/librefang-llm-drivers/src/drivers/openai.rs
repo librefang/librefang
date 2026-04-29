@@ -225,7 +225,14 @@ impl OpenAIDriver {
         use base64::Engine;
         use sha2::{Digest, Sha256};
 
-        for msg in &mut request.messages {
+        // `request.messages` is `Arc<Vec<Message>>` (#3766). Get an exclusive
+        // `&mut Vec<Message>` via `Arc::make_mut` — when the refcount is 1
+        // (the common case: fresh `CompletionRequest` for this call) this is
+        // O(1); on a shared Arc it clones once, which is unavoidable since
+        // we must mutate. Without this, `for msg in &mut request.messages`
+        // doesn't compile because `Arc<Vec<_>>` only derefs to `&Vec<_>`.
+        let messages = std::sync::Arc::make_mut(&mut request.messages);
+        for msg in messages.iter_mut() {
             let blocks = match &mut msg.content {
                 MessageContent::Blocks(b) => b,
                 _ => continue,
