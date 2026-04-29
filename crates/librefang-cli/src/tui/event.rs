@@ -2956,7 +2956,7 @@ pub fn spawn_fetch_agent_model_label(
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(None);
         if let Ok(resp) = client
             .get(format!("{base_url}/api/agents/{agent_id}"))
             .send()
@@ -2976,7 +2976,7 @@ pub fn spawn_fetch_agent_model_label(
 /// without blocking the render/input thread.
 pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(None);
         if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
                 let models: Vec<super::screens::chat::ModelEntry> = body["models"]
@@ -3004,7 +3004,7 @@ pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent
 /// without blocking the render/input thread.
 pub fn spawn_fetch_agents_for_chat(base_url: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(None);
         if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
                 let arr = if let Some(arr) = body.as_array() {
