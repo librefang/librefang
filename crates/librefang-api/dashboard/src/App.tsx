@@ -420,6 +420,7 @@ type SidebarUserBlockProps = {
   collapsed: boolean;
   authMode: AuthMode;
   hostname: string;
+  username: string;
   onOpenChangePassword: () => void;
   onLogout: () => void | Promise<void>;
   onToggleTheme: () => void;
@@ -433,6 +434,7 @@ function SidebarUserBlock({
   collapsed,
   authMode,
   hostname,
+  username,
   onOpenChangePassword,
   onLogout,
   onToggleTheme,
@@ -442,12 +444,6 @@ function SidebarUserBlock({
   t,
 }: SidebarUserBlockProps) {
   const [open, setOpen] = useState(false);
-  const [username, setUsername] = useState<string>("");
-  useEffect(() => {
-    let cancelled = false;
-    getDashboardUsername().then((u) => { if (!cancelled) setUsername(u); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
   const initials = (username || "U").slice(0, 2).toUpperCase();
 
   return (
@@ -478,9 +474,9 @@ function SidebarUserBlock({
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-[90]" onClick={() => setOpen(false)} />
           <div
-            className={`absolute z-50 ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"} rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5`}
+            className={`absolute z-[100] ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"} rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5`}
           >
             <button
               onClick={() => { setOpen(false); onToggleTheme(); }}
@@ -563,6 +559,7 @@ export function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
+  const [username, setUsername] = useState("");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -631,6 +628,11 @@ export function App() {
       // The WebSocket connection itself will enforce actual policy.
       setTerminalEnabled(true);
     });
+
+    getDashboardUsername().then((u) => {
+      if (cancelled) return;
+      setUsername(u);
+    }).catch(() => { /* unauth or no-auth mode — fine, avatar shows the icon. */ });
 
     return () => {
       cancelled = true;
@@ -881,6 +883,7 @@ export function App() {
           collapsed={isSidebarCollapsed}
           authMode={authMode}
           hostname={hostname}
+          username={username}
           onOpenChangePassword={() => setShowChangePassword(true)}
           onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
           onToggleTheme={toggleTheme}
@@ -926,25 +929,41 @@ export function App() {
           </div>
           <div className="flex items-center gap-1">
             <NotificationCenter />
-            {/* Mobile-only: keep an avatar button so the user menu is reachable
-                without opening the drawer. Desktop users use the sidebar
-                user-row dropdown. */}
-            <div className="relative lg:hidden">
+            {/* Avatar button — top-right pattern from the design canvas
+                (`shell.jsx::TopBar`, "user-menu" variant). Visible on every
+                breakpoint so the menu is always one click away from the
+                topbar; the sidebar's user-row dropdown is the secondary
+                "user-menu-sidebar" variant. */}
+            <div className="relative">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-white text-[10px] font-semibold transition-transform duration-200 active:scale-95"
+                className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors duration-200 active:scale-95 ${
+                  userMenuOpen
+                    ? "ring-2 ring-brand/40 ring-offset-1 ring-offset-surface"
+                    : "ring-1 ring-border-subtle hover:ring-brand/30"
+                }`}
                 style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}
                 aria-haspopup="menu"
               >
-                <UserCircle className="h-4 w-4" />
+                {username ? (
+                  <span className="text-white text-[10px] font-semibold">
+                    {username.slice(0, 2).toUpperCase()}
+                  </span>
+                ) : (
+                  <UserCircle className="h-4 w-4 text-white" />
+                )}
               </button>
               {userMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1.5 z-50 w-52 rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5">
+                  <div className="fixed inset-0 z-[90]" onClick={() => setUserMenuOpen(false)} />
+                  {/* Use position:fixed so the menu is not clipped by the
+                      ancestor `overflow-hidden` flex column. Anchor to the
+                      topbar bottom (h-12 = 48px) + a 6px gap, flush to the
+                      right padding (px-3 / px-4 mobile / desktop). */}
+                  <div className="fixed top-[54px] right-3 sm:right-4 z-[100] w-52 rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5">
                     <button
                       onClick={() => { setUserMenuOpen(false); toggleTheme(); }}
                       className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
