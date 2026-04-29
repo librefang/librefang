@@ -241,9 +241,15 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
-    /// Return the aliases configured for an agent (from agent.toml `aliases` field).
-    /// Used to build trigger patterns and enrich the reply-intent classifier.
-    async fn get_agent_aliases(&self, _agent_id: AgentId) -> Vec<String> {
+    /// Return the agent's `group_trigger_patterns` (already-escaped regex
+    /// patterns), drawn from `manifest.channel_overrides.group_trigger_patterns`.
+    ///
+    /// The previous name `get_agent_aliases` was misleading: callers reading
+    /// "aliases" expected plain names like `"Rodelo"` and would re-escape
+    /// the result — but the `KernelBridgeAdapter` impl returns regex patterns
+    /// like `(?i)\bRodelo\b`, so re-escaping would corrupt them. Renaming
+    /// surfaces the actual return contract.
+    async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
         Vec::new()
     }
 
@@ -1475,19 +1481,6 @@ fn text_content(message: &ChannelMessage) -> Option<&str> {
     }
 }
 
-/// Convert agent aliases (plain names) into case-insensitive word-boundary
-/// regex patterns suitable for `group_trigger_patterns`.
-///
-/// Each alias `"foo"` becomes `(?i)\bfoo\b`. Special regex characters in
-/// the alias are escaped so user-supplied names are safe.
-pub fn aliases_to_trigger_patterns(aliases: &[String]) -> Vec<String> {
-    aliases
-        .iter()
-        .filter(|a| !a.is_empty())
-        .map(|a| format!(r"(?i)\b{}\b", regex::escape(a)))
-        .collect()
-}
-
 fn matches_group_trigger_pattern(
     ct_str: &str,
     message: &ChannelMessage,
@@ -1897,6 +1890,60 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .get(SENDER_USER_ID_KEY)
         .and_then(|v| v.as_str())
         .unwrap_or(&message.sender.platform_id)
+}
+
+/// Record this message's sender into the persistent group roster.
+///
+/// #4079 added `RosterStore` and the `roster_upsert` trait method but never
+/// wired it up — `RosterStore` stayed empty for every install. Without a
+/// channel adapter providing a full participant list (which only the
+/// WhatsApp gateway does, via `sock.groupMetadata`), the next-best signal
+/// we have is "this user just spoke", so we accumulate the roster from
+/// the senders we observe over time. DM senders are skipped — there's no
+/// useful "group" to record them under.
+///
+/// We require `metadata[SENDER_USER_ID_KEY]` to be explicitly set so we
+/// don't accidentally store the group's own platform_id (which is what
+/// `message.sender.platform_id` is for group messages — see
+/// `parse_telegram_message`). Adapters that don't yet plumb the sender's
+/// real user id silently no-op here.
+async fn upsert_sender_into_roster(handle: &dyn ChannelBridgeHandle, message: &ChannelMessage) {
+    if !message.is_group {
+        return;
+    }
+    let Some(user_id) = message
+        .metadata
+        .get(SENDER_USER_ID_KEY)
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    if user_id.is_empty() || message.sender.platform_id.is_empty() {
+        return;
+    }
+    let username = message
+        .metadata
+        .get("sender_username")
+        .and_then(|v| v.as_str());
+    let channel_str = channel_type_str(&message.channel);
+    if let Err(e) = handle
+        .roster_upsert(
+            channel_str,
+            &message.sender.platform_id,
+            user_id,
+            &message.sender.display_name,
+            username,
+        )
+        .await
+    {
+        warn!(
+            channel = channel_str,
+            chat_id = %message.sender.platform_id,
+            user_id = %user_id,
+            error = %e,
+            "roster_upsert failed; group member will not be remembered for this turn"
+        );
+    }
 }
 
 /// Wrap an outbound message with the responding agent's name according to
@@ -3355,6 +3402,10 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
+    // Accumulate group senders into RosterStore (no-op for DMs / adapters
+    // that don't plumb sender_user_id). See #4079 follow-up.
+    upsert_sender_into_roster(handle, message).await;
+
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
 
@@ -4393,6 +4444,10 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
+    // Accumulate group senders into RosterStore (no-op for DMs / adapters
+    // that don't plumb sender_user_id). See #4079 follow-up.
+    upsert_sender_into_roster(handle, message).await;
+
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);
 
@@ -5273,36 +5328,6 @@ mod tests {
                 "telegram", &overrides, &message
             ));
         });
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_basic() {
-        let aliases = vec!["Rodelo".to_string(), "bot".to_string()];
-        let patterns = aliases_to_trigger_patterns(&aliases);
-        assert_eq!(patterns.len(), 2);
-        assert!(patterns[0].contains("Rodelo"));
-        assert!(patterns[1].contains("bot"));
-        // Each should be a valid regex
-        for p in &patterns {
-            assert!(regex::Regex::new(p).is_ok(), "Invalid regex: {p}");
-        }
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_escapes_special() {
-        let aliases = vec!["c++".to_string(), "a.b".to_string()];
-        let patterns = aliases_to_trigger_patterns(&aliases);
-        // Special chars should be escaped so they match literally
-        for p in &patterns {
-            assert!(regex::Regex::new(p).is_ok(), "Invalid regex: {p}");
-        }
-    }
-
-    #[test]
-    fn test_aliases_to_trigger_patterns_empty_filtered() {
-        let aliases = vec!["".to_string(), "valid".to_string()];
-        let patterns = aliases_to_trigger_patterns(&aliases);
-        assert_eq!(patterns.len(), 1);
     }
 
     #[test]
