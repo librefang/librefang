@@ -2247,6 +2247,15 @@ pub struct QueueConfig {
     /// Per-lane concurrency limits.
     #[serde(default)]
     pub concurrency: QueueConcurrencyConfig,
+    /// How many days to keep `completed` / `failed` / `cancelled` rows in
+    /// `task_queue` before the periodic retention sweep hard-deletes them.
+    /// Default: 7. Set to 0 to disable pruning (queue grows forever — #3466).
+    #[serde(default = "default_task_queue_retention_days")]
+    pub task_queue_retention_days: u64,
+}
+
+fn default_task_queue_retention_days() -> u64 {
+    7
 }
 
 impl Default for QueueConfig {
@@ -2256,6 +2265,7 @@ impl Default for QueueConfig {
             max_depth_global: 0,
             task_ttl_secs: 3600,
             concurrency: QueueConcurrencyConfig::default(),
+            task_queue_retention_days: default_task_queue_retention_days(),
         }
     }
 }
@@ -5061,6 +5071,16 @@ pub struct MemoryConfig {
     /// Base URL for the HTTP vector store (used when `vector_backend = "http"`).
     #[serde(default)]
     pub vector_store_url: Option<String>,
+    /// How many days to keep soft-deleted memories (`deleted = 1`) before
+    /// the periodic retention sweep hard-deletes them and reclaims their
+    /// embedding BLOB. Default: 30. Set to 0 to disable hard-delete (rows
+    /// stay forever, leaking embedding storage — see #3467).
+    #[serde(default = "default_soft_delete_retention_days")]
+    pub soft_delete_retention_days: u64,
+}
+
+fn default_soft_delete_retention_days() -> u64 {
+    30
 }
 
 /// Configuration for splitting long documents into overlapping chunks.
@@ -5105,6 +5125,7 @@ impl Default for MemoryConfig {
             chunking: ChunkConfig::default(),
             vector_backend: None,
             vector_store_url: None,
+            soft_delete_retention_days: default_soft_delete_retention_days(),
         }
     }
 }
