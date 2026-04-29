@@ -461,7 +461,8 @@ pub struct LibreFangKernel {
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
     /// Rendered MCP summary cache keyed by allowlist + mcp_generation; skips Mutex + re-render on hit.
-    pub(crate) mcp_summary_cache: dashmap::DashMap<String, (u64, std::sync::Arc<String>)>,
+    /// Stale entries from old generations are never evicted; bounded by distinct allowlists in practice.
+    pub(crate) mcp_summary_cache: dashmap::DashMap<String, (u64, String)>,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -15261,11 +15262,11 @@ system_prompt = "You are a helpful assistant."
             .load(std::sync::atomic::Ordering::Relaxed);
         let cache_key = mcp_summary_cache_key(mcp_allowlist);
 
-        // Cache hit on the current generation: just clone the Arc<String>.
+        // Cache hit on the current generation: clone the cached String.
         if let Some(entry) = self.mcp_summary_cache.get(&cache_key) {
             let (cached_gen, cached_str) = entry.value();
             if *cached_gen == mcp_gen {
-                return (**cached_str).clone();
+                return cached_str.clone();
             }
         }
 
@@ -15288,8 +15289,8 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
 
         let rendered = render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist);
-        let arc = std::sync::Arc::new(rendered.clone());
-        self.mcp_summary_cache.insert(cache_key, (mcp_gen, arc));
+        self.mcp_summary_cache
+            .insert(cache_key, (mcp_gen, rendered.clone()));
         rendered
     }
 
