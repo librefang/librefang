@@ -2479,15 +2479,37 @@ pub async fn start_channel_bridge_with_config(
                 read_token(&tm_config.security_token_env, "Teams (security_token)")
                     .unwrap_or_default();
             // Default-deny: unsigned webhooks let anyone forge Teams activities.
-            if tm_config.signature_required && security_token.is_empty() {
-                tracing::error!(
-                    "Teams adapter for app_id={} refused: signature_required=true \
-                     but security_token_env '{}' is unset/empty. Set the env var or \
-                     explicitly set signature_required=false (NOT recommended).",
-                    tm_config.app_id,
-                    tm_config.security_token_env
-                );
-                continue;
+            // Also reject when the token is present but cannot be base64-decoded
+            // or decodes to empty bytes — TeamsAdapter::new would otherwise
+            // silently fall back to security_token_key=None and skip
+            // signature verification at the webhook handler.
+            if tm_config.signature_required {
+                use base64::Engine;
+                let decoded = if security_token.is_empty() {
+                    Err("missing".to_string())
+                } else {
+                    base64::engine::general_purpose::STANDARD
+                        .decode(security_token.as_bytes())
+                        .map_err(|e| format!("invalid base64: {e}"))
+                        .and_then(|b| {
+                            if b.is_empty() {
+                                Err("decodes to empty key".to_string())
+                            } else {
+                                Ok(b)
+                            }
+                        })
+                };
+                if let Err(reason) = decoded {
+                    tracing::error!(
+                        "Teams adapter for app_id={} refused: signature_required=true \
+                         but security_token_env '{}' is {reason}. Set the env var to a \
+                         valid base64-encoded outgoing-webhook token, or explicitly \
+                         set signature_required=false (NOT recommended).",
+                        tm_config.app_id,
+                        tm_config.security_token_env
+                    );
+                    continue;
+                }
             }
             let adapter = Arc::new(
                 TeamsAdapter::new(
