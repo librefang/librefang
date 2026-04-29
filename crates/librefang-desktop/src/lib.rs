@@ -49,6 +49,13 @@ pub(crate) fn validate_server_url(url: &str) -> Result<(), String> {
 
     // strip path/query, then peel optional :port (IPv6 literal needs []).
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Reject userinfo: `http://[::1]@evil.com/` would otherwise pass the
+    // loopback check while wry/reqwest connect to evil.com.
+    if authority.contains('@') {
+        return Err(format!(
+            "Refusing URL with userinfo (would bypass loopback check): {url}"
+        ));
+    }
     let host = if let Some(stripped) = authority.strip_prefix('[') {
         match stripped.split_once(']') {
             Some((h, _)) => h,
@@ -567,5 +574,16 @@ mod tests {
     fn malformed_url_rejected() {
         assert!(validate_server_url("http://").is_err());
         assert!(validate_server_url("http://[::1").is_err());
+    }
+
+    #[test]
+    fn userinfo_loopback_bypass_rejected() {
+        // wry/reqwest connect to the @-suffix host, not the userinfo;
+        // the IPv6/IPv4 prefix must NOT vouch for the real target.
+        assert!(validate_server_url("http://[::1]@evil.com/").is_err());
+        assert!(validate_server_url("http://[::1]:80@evil.com/").is_err());
+        assert!(validate_server_url("http://localhost@evil.com/").is_err());
+        assert!(validate_server_url("http://127.0.0.1@evil.com/").is_err());
+        assert!(validate_server_url("http://user:pass@evil.com/").is_err());
     }
 }
