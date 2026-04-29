@@ -4915,9 +4915,13 @@ mod tests {
         assert_eq!(dc_count, 1, "Duplicate DISCORD_BOT_TOKEN in secrets.env");
     }
 
-    /// Forced re-run (marker deleted) must back up user-edited files to `.bak.<timestamp>` siblings rather than overwriting them.
+    /// Forced re-run (marker deleted) must NEVER clobber existing user-edited
+    /// files. The atomic staging-promotion path (this PR) preserves the user
+    /// edit as-is — no backup needed because nothing is overwritten.
+    /// This is the #3795 semantics; the earlier #4091 "backup + overwrite"
+    /// behaviour was reversed by the staging-dir promotion.
     #[test]
-    fn test_rerun_backs_up_user_edits() {
+    fn test_rerun_preserves_user_edits() {
         let source = TempDir::new().unwrap();
         let target = TempDir::new().unwrap();
 
@@ -4930,8 +4934,7 @@ mod tests {
             dry_run: false,
         };
 
-        // Initial migration writes config.toml and removes the marker so we
-        // can simulate a forced re-run.
+        // Initial migration writes config.toml and the migration marker.
         migrate(&options).unwrap();
 
         let config_path = target.path().join("config.toml");
@@ -4947,14 +4950,16 @@ mod tests {
 
         migrate(&options).unwrap();
 
-        // Re-imported config exists with fresh content (no user marker).
+        // User edit is preserved verbatim — promote_staging refuses to
+        // clobber existing files.
         let new_content = std::fs::read_to_string(&config_path).unwrap();
         assert!(
-            !new_content.contains(user_marker),
-            "fresh config should not contain user edit"
+            new_content.contains(user_marker),
+            "user edit must be preserved (never-clobber semantics, #3795)"
         );
 
-        // The user's edited copy must be preserved as a `.bak.*` sibling.
+        // No `.bak.*` sibling should be created — never-clobber means we
+        // never need to back up because we never overwrite.
         let backups: Vec<_> = std::fs::read_dir(target.path())
             .unwrap()
             .filter_map(Result::ok)
@@ -4964,11 +4969,10 @@ mod tests {
                     .starts_with("config.toml.bak.")
             })
             .collect();
-        assert_eq!(backups.len(), 1, "exactly one config backup expected");
-        let backup_content = std::fs::read_to_string(backups[0].path()).unwrap();
         assert!(
-            backup_content.contains(user_marker),
-            "backup must preserve the user's edits"
+            backups.is_empty(),
+            "no backup expected (never-clobber semantics), got {} backup(s)",
+            backups.len()
         );
     }
 
