@@ -141,6 +141,15 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                     continue;
                 }
 
+                // Skip files quarantined by a previous failed empty-file move.
+                if path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.contains(".quarantined."))
+                {
+                    continue;
+                }
+
                 // Skip files that are too large
                 let metadata = match tokio::fs::metadata(&path).await {
                     Ok(m) => m,
@@ -172,26 +181,23 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
 
                 if content.trim().is_empty() {
                     // Move empty files to processed without sending.
-                    // If the move fails (permissions, race), delete the file so
-                    // we don't spin forever rescanning the same empty file.
+                    // #3751 — never silently delete the user's file.  If the
+                    // move fails (read-only processed dir, disk full, EACCES),
+                    // try to rename it in place with a `.quarantined` suffix
+                    // so subsequent polls skip it without spinning.  If even
+                    // that rename fails, park the path in `in_flight` so we
+                    // skip it for the rest of this process lifetime.
                     if let Err(e) = move_to_processed(&path, &processed_dir).await {
                         warn!(
                             path = %path.display(),
                             error = %e,
-                            "Inbox: failed to move empty file to processed dir, removing to avoid spin loop"
+                            "Inbox: failed to move empty file to processed dir, attempting quarantine rename"
                         );
-                        if let Err(e2) = tokio::fs::remove_file(&path).await {
-                            // Move and delete both failed (read-only inbox,
-                            // EACCES, etc.).  Park the path in `in_flight`
-                            // so subsequent ticks skip it instead of
-                            // re-reading + re-warning every interval.  The
-                            // `retain(|p| p.exists())` sweep below still
-                            // unblocks the path the moment it disappears
-                            // by external means.
+                        if let Err(e2) = quarantine_in_place(&path).await {
                             warn!(
                                 path = %path.display(),
                                 error = %e2,
-                                "Inbox: also failed to remove empty file; suppressing rescan via in_flight"
+                                "Inbox: quarantine rename also failed; suppressing rescan via in_flight"
                             );
                             in_flight.insert(path.clone());
                         }
@@ -323,6 +329,33 @@ async fn move_to_processed(src: &Path, processed_dir: &Path) -> std::io::Result<
         from = %src.display(),
         to = %dest.display(),
         "Inbox: moved file to processed"
+    );
+    Ok(())
+}
+
+/// Rename a file in place by appending `.quarantined.<timestamp>` so the inbox
+/// poller stops rescanning it without destroying the user's data.
+///
+/// Used as a fallback when `move_to_processed` fails — a same-directory rename
+/// usually succeeds even when the `processed/` subdir is broken.
+async fn quarantine_in_place(src: &Path) -> std::io::Result<()> {
+    let file_name = src
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "inbox_file".to_string());
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let mut dest = src.with_file_name(format!("{file_name}.quarantined.{ts}"));
+    // Collision is unlikely but possible if poll_interval < 1s; nanosecond
+    // suffix gives us a deterministic non-colliding fallback.
+    if dest.exists() {
+        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        dest = src.with_file_name(format!("{file_name}.quarantined.{ts}.{nanos}"));
+    }
+    tokio::fs::rename(src, &dest).await?;
+    warn!(
+        from = %src.display(),
+        to = %dest.display(),
+        "Inbox: quarantined file in place to break spin loop"
     );
     Ok(())
 }
@@ -486,6 +519,30 @@ mod tests {
             .join(".librefang")
             .join("inbox");
         assert_eq!(resolve_inbox_dir(&config, &home), expected);
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_in_place_renames_file() {
+        // #3751 — quarantine fallback must rename rather than delete.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("empty.txt");
+        std::fs::write(&src, "").unwrap();
+
+        quarantine_in_place(&src).await.unwrap();
+
+        // Original path is gone.
+        assert!(!src.exists(), "src must have been renamed away");
+
+        // A sibling with `.quarantined.` in the name now exists.
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            entries.iter().any(|n| n.contains(".quarantined.")),
+            "expected a .quarantined.* sibling, got {entries:?}"
+        );
     }
 
     #[test]

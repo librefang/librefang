@@ -143,14 +143,16 @@ impl SkillRegistry {
             return Ok(0);
         }
 
-        // Clean up any leftover temporary install directories from previous
-        // interrupted downloads (e.g. daemon crash mid-extraction).
+        // Clean up any leftover staging directories from previous interrupted
+        // downloads (e.g. daemon crash mid-extraction).  Both the legacy
+        // `.installing-` prefix (pre-#3719) and the current `.staging-` prefix
+        // are handled so a downgrade-then-upgrade doesn't leak old temp dirs.
         if let Ok(entries) = std::fs::read_dir(&self.skills_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with(".installing-") {
+                        if name.starts_with(".staging-") || name.starts_with(".installing-") {
                             if let Err(e) = std::fs::remove_dir_all(&path) {
                                 warn!(
                                     "Failed to clean up stale install dir {}: {e}",

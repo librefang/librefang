@@ -1205,4 +1205,56 @@ mod tests {
             .unwrap();
         assert_eq!(bound, "approval:abc");
     }
+
+    #[test]
+    fn test_migrate_v10_partial_apply_does_not_panic() {
+        // #3452 — simulate a DB that crashed mid-v10 with the agent_id columns
+        // already added but user_version still at 9.  Re-running migrations
+        // must succeed (idempotent ALTER) rather than panic with
+        // "duplicate column name: agent_id".
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Apply v1..v9 to reach the pre-v10 state.
+        macro_rules! step {
+            ($v:expr, $f:expr) => {{
+                let tx = conn.unchecked_transaction().unwrap();
+                $f(&tx).unwrap();
+                set_schema_version(&tx, $v).unwrap();
+                tx.commit().unwrap();
+            }};
+        }
+        step!(1, migrate_v1);
+        step!(2, migrate_v2);
+        step!(3, migrate_v3);
+        step!(4, migrate_v4);
+        step!(5, migrate_v5);
+        step!(6, migrate_v6);
+        step!(7, migrate_v7);
+        step!(8, migrate_v8);
+        step!(9, migrate_v9);
+
+        // Manually pre-apply the v10 ALTERs as if the previous run crashed
+        // after the schema change but before the version bump.
+        conn.execute(
+            "ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "ALTER TABLE relations ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .unwrap();
+        // user_version is still 9 — the partial-apply scenario.
+        assert_eq!(get_schema_version(&conn), 9);
+
+        // Resuming migrations from this state must succeed without
+        // "duplicate column name: agent_id".
+        run_migrations(&conn).expect("v10 retry on partial-apply DB must not error");
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+
+        // Columns are still present and writable.
+        assert!(column_exists(&conn, "entities", "agent_id"));
+        assert!(column_exists(&conn, "relations", "agent_id"));
+    }
 }

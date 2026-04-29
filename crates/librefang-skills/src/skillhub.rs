@@ -274,20 +274,51 @@ impl SkillhubClient {
             .install_from_bytes(slug, target_dir, &bytes)
             .await?;
 
-        // Step 4: Patch source provenance to Skillhub
+        // Step 4: Patch source provenance to Skillhub.
+        //
+        // #3675 — propagate every step's error (read / parse / serialize /
+        // write) instead of swallowing with `if let Ok`.  A failure here means
+        // the manifest's `source` field is wrong, which silently breaks later
+        // upgrade and sync logic that switches behavior on `SkillSource`.  On
+        // failure we tear down the freshly-extracted skill directory so the
+        // installer doesn't leave a manifest with the wrong provenance behind.
         let skill_dir = target_dir.join(slug);
         let manifest_path = skill_dir.join("skill.toml");
         if manifest_path.exists() {
-            if let Ok(toml_str) = std::fs::read_to_string(&manifest_path) {
-                if let Ok(mut manifest) = toml::from_str::<crate::SkillManifest>(&toml_str) {
-                    manifest.source = Some(crate::SkillSource::Skillhub {
-                        slug: slug.to_string(),
-                        version: result.version.clone(),
-                    });
-                    if let Ok(updated) = toml::to_string_pretty(&manifest) {
-                        let _ = std::fs::write(&manifest_path, updated);
-                    }
-                }
+            let patch_result = (|| -> Result<(), SkillError> {
+                let toml_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
+                    SkillError::InvalidManifest(format!(
+                        "Skillhub: read skill.toml for provenance patch: {e}"
+                    ))
+                })?;
+                let mut manifest: crate::SkillManifest =
+                    toml::from_str(&toml_str).map_err(|e| {
+                        SkillError::InvalidManifest(format!(
+                            "Skillhub: parse skill.toml for provenance patch: {e}"
+                        ))
+                    })?;
+                manifest.source = Some(crate::SkillSource::Skillhub {
+                    slug: slug.to_string(),
+                    version: result.version.clone(),
+                });
+                let updated = toml::to_string_pretty(&manifest).map_err(|e| {
+                    SkillError::InvalidManifest(format!(
+                        "Skillhub: serialize skill.toml for provenance patch: {e}"
+                    ))
+                })?;
+                std::fs::write(&manifest_path, updated).map_err(|e| {
+                    SkillError::InvalidManifest(format!(
+                        "Skillhub: write skill.toml for provenance patch: {e}"
+                    ))
+                })?;
+                Ok(())
+            })();
+
+            if let Err(e) = patch_result {
+                // Clean up the half-installed skill: it has the wrong source
+                // provenance recorded and would mislead upgrade/sync logic.
+                let _ = std::fs::remove_dir_all(&skill_dir);
+                return Err(e);
             }
         }
 

@@ -615,12 +615,24 @@ impl ClawHubClient {
             }
         }
 
-        // Install into a temporary directory first, then atomically rename to
-        // the final skill directory.  This prevents partial installs from being
-        // loaded on the next daemon start if extraction is interrupted.
+        // Install into a sibling staging directory first, then atomically
+        // rename to the final skill directory.  This prevents partial installs
+        // from being loaded on the next daemon start if extraction is
+        // interrupted.  #3719 — match the PR-R #3798 staging pattern: include
+        // nanosecond timestamp + pid so concurrent installs of the same slug
+        // never collide on the staging path.
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
-        let tmp_dir = target_dir.join(format!(".installing-{}-{}", slug, std::process::id()));
-        // Clean up any leftover temp dir from a previous crashed install.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_dir = target_dir.join(format!(
+            ".staging-{}-{}-{}",
+            slug,
+            std::process::id(),
+            nanos
+        ));
+        // Defensive: clean up if a path collision somehow occurred.
         if tmp_dir.exists() {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }
