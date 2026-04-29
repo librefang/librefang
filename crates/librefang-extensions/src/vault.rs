@@ -120,10 +120,7 @@ const NONCE_LEN: usize = 12;
 /// Magic bytes for vault file format versioning.
 const VAULT_MAGIC: &[u8; 4] = b"OFV1";
 
-/// Current vault schema version. Bumped when the AAD layout or on-disk
-/// format changes. Version 0 = legacy (no AAD or path-only AAD); version 1
-/// = `(schema_version_le_bytes || path_bytes)` AAD which prevents both
-/// file-swap and downgrade attacks (#3788).
+/// AAD schema version; 0 = legacy path-only AAD, 1 = schema_version_le_bytes || path_bytes.
 const VAULT_SCHEMA_VERSION: u32 = 1;
 
 /// On-disk vault format (encrypted).
@@ -137,9 +134,7 @@ struct VaultFile {
     nonce: String,
     /// Encrypted data (base64).
     ciphertext: String,
-    /// AAD schema version. Missing on legacy files (deserializes to 0,
-    /// which selects the path-only AAD decrypt path for backward compat).
-    /// Files written by this binary are always `VAULT_SCHEMA_VERSION`.
+    /// AAD schema version; defaults to 0 on legacy files (path-only AAD compat).
     #[serde(default)]
     schema_version: u32,
 }
@@ -356,11 +351,7 @@ impl CredentialVault {
         Err(ExtensionError::VaultLocked)
     }
 
-    /// Build the AAD bytes used to bind a ciphertext to both this vault's
-    /// canonical path AND the current schema version. Layout:
-    ///   `schema_version (u32 little-endian) || path_bytes`
-    /// A different path or a downgraded `schema_version` field will cause
-    /// AES-GCM authentication to fail on decrypt (#3788).
+    /// Returns `schema_version_le_bytes || path_bytes` as AES-GCM AAD.
     fn aad_bytes(path: &std::path::Path, schema_version: u32) -> Vec<u8> {
         let path_str = path.to_string_lossy();
         let path_bytes = path_str.as_bytes();
@@ -370,14 +361,7 @@ impl CredentialVault {
         buf
     }
 
-    /// Save encrypted vault to disk.
-    ///
-    /// Binds the AES-GCM Additional Associated Data (AAD) to both the vault
-    /// file's canonical path AND the current schema version so that a
-    /// ciphertext blob cannot be silently transplanted to a different path,
-    /// a different install's vault file, or downgraded to an older AAD
-    /// layout (#3788) — decryption will fail with an authentication error
-    /// if either differs.
+    /// Save encrypted vault to disk; AAD binds ciphertext to path + schema version.
     fn save(&self, master_key: &[u8; 32]) -> ExtensionResult<()> {
         // Serialize entries to JSON
         let plain_entries: HashMap<String, String> = self
@@ -402,12 +386,6 @@ impl CredentialVault {
         // Derive encryption key from master key + salt using Argon2
         let derived_key = derive_key(master_key, &salt)?;
 
-        // Encrypt with AES-256-GCM, binding the ciphertext to this vault's
-        // canonical path AND the current schema version via AAD. An
-        // adversary who copies the raw vault file to a different path,
-        // splices it from another install, or rewrites `schema_version`
-        // will receive an authentication error on decrypt rather than
-        // silently obtaining a valid plaintext (#3788).
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -445,11 +423,7 @@ impl CredentialVault {
         output.extend_from_slice(VAULT_MAGIC);
         output.extend_from_slice(content.as_bytes());
 
-        // Atomic write: write to a sibling .tmp file (same filesystem guarantees
-        // rename is atomic), fsync to flush to disk, then rename over the target.
-        // A crash mid-write leaves only the .tmp file; the vault is never corrupt.
-        // The tmp file is created with mode 0600 on Unix so the secret
-        // ciphertext is never world-readable, even briefly (#3724).
+        // Atomic write to .tmp (mode 0600 on Unix) then rename over target.
         let temp_path = self.path.with_extension("tmp");
         {
             let mut opts = OpenOptions::new();
@@ -464,9 +438,7 @@ impl CredentialVault {
             f.sync_all()?;
         }
         std::fs::rename(&temp_path, &self.path)?;
-        // Belt-and-braces: if the file already existed before the rename
-        // with looser permissions, the rename inherits the tmp file's mode
-        // on POSIX. On non-Unix this is a no-op.
+        // Enforce 0600 if a pre-existing file had looser perms.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -529,12 +501,7 @@ impl CredentialVault {
         // Derive key
         let derived_key = derive_key(master_key, &salt)?;
 
-        // Decrypt, supplying AAD that matches the schema version recorded
-        // in the file. Files written by this binary use schema_version=1
-        // (path + version bound); legacy files have schema_version=0
-        // (default), which selects the path-only AAD compat path so users
-        // upgrading from a pre-#3788 vault can still unlock without a
-        // forced re-init. The next save() will rewrite at v1 automatically.
+        // schema_version=0 on disk means path-only AAD (legacy compat); save() rewrites at v1.
         let cipher = Aes256Gcm::new_from_slice(derived_key.as_ref())
             .map_err(|e| ExtensionError::Vault(format!("Cipher init failed: {e}")))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -679,10 +646,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
         let content =
             serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
 
-        // Atomic write with mode 0600 on Unix so the wrapped master key is
-        // never world-readable, even briefly between `write` and a
-        // separate `set_permissions` call (#3724). On non-Unix the create
-        // is plain; ACLs apply at the OS level.
+        // Atomic write with mode 0600 on Unix; non-Unix relies on OS ACLs.
         let tmp_path =
             keyring_path.with_extension(format!("keyring.tmp.{}", std::process::id()));
         let result = (|| -> std::io::Result<()> {
@@ -707,9 +671,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
             return Err(format!("write: {e}"));
         }
 
-        // Belt-and-braces tighten on Unix in case the destination
-        // pre-existed with looser perms (rename inherits source mode on
-        // POSIX, but enforce explicitly).
+        // Enforce 0600 if destination pre-existed with looser perms.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -109,11 +109,7 @@ fn load_env_file(path: &Path) {
     }
 }
 
-/// Parse a single `KEY=VALUE` line. Handles optional quotes and undoes
-/// the `\\` / `\n` / `\r` / `\"` escape sequences emitted by
-/// [`escape_env_value`] so values written by the dashboard round-trip
-/// byte-identically (#3790). Single-quoted values are taken literally,
-/// matching shell semantics.
+/// Parses a `KEY=VALUE` line; undoes double-quote escape sequences, single-quoted values are literal.
 fn parse_env_line(line: &str) -> Option<(String, String)> {
     let eq_pos = line.find('=')?;
     let key = line[..eq_pos].trim().to_string();
@@ -142,24 +138,17 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {
     Some((key, value))
 }
 
-/// Escape a `.env` value so that newlines, carriage returns, backslashes
-/// and double quotes survive a write→read round-trip without splitting
-/// the value across lines or being misread as escape sequences (#3790).
-///
-/// Backslash MUST be replaced first, otherwise the `\n` inserted by the
-/// newline replacement gets a leading `\\` and decodes back as a literal
-/// `\n` instead of a newline.
+/// Escapes `\`, `\n`, `\r`, `"` for writing inside double-quoted `.env` values.
 fn escape_env_value(value: &str) -> String {
     value
+        // Backslash must come first; otherwise the \n replacement produces \\n which decodes back as a newline.
         .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('"', "\\\"")
 }
 
-/// Inverse of [`escape_env_value`]. Walks the input once so we never
-/// double-decode an embedded `\\` (e.g. the input `\\n` must decode to
-/// the literal two-character `\n`, not a real newline).
+/// Inverse of [`escape_env_value`]; single-pass to avoid double-decoding `\\n`.
 fn unescape_env_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -266,11 +255,6 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
     content.push_str("# Do not edit while the daemon is running.\n\n");
 
     for (key, value) in entries {
-        // A value needs quoting if it contains ANY character that would
-        // confuse a dotenv reader, including newline / CR (which would
-        // otherwise split the value into bogus extra `KEY=...` lines —
-        // #3790). Always escape inside the quotes so backslash, double
-        // quote, newline and CR round-trip via [`parse_env_line`].
         let needs_quoting = value.contains(' ')
             || value.contains('#')
             || value.contains('"')
