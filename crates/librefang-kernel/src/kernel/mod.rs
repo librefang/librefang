@@ -565,18 +565,8 @@ pub struct LibreFangKernel {
     /// fresh `instance_id` doesn't accumulate stale mutexes across
     /// activate/deactivate cycles.
     hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
-    /// Per-(agent, session) mid-turn message injection senders (#956, #3734).
-    ///
-    /// When an agent loop is running, it holds the receiver; callers use the
-    /// sender to inject messages between tool calls. Keying by
-    /// `(AgentId, SessionId)` instead of just `AgentId` is required for
-    /// concurrent sessions on the same agent (multi-tab UI, multi-channel
-    /// agents) — under the previous `AgentId` keying, a second turn's
-    /// `setup_injection_channel` silently overwrote the first turn's sender,
-    /// so `/api/agents/{id}/inject` could only ever reach the most recently
-    /// started session and earlier sessions' approval-resolution signals
-    /// were silently dropped. See `inject_message` for how callers without a
-    /// session id fan out to all live sessions for the agent.
+    /// Per-(agent, session) mid-turn injection senders; keyed by session so concurrent
+    /// sessions on the same agent each get their own channel.
     pub(crate) injection_senders: dashmap::DashMap<
         (AgentId, SessionId),
         tokio::sync::mpsc::Sender<AgentLoopSignal>,
@@ -1774,7 +1764,7 @@ impl LibreFangKernel {
         &self.whatsapp_gateway_pid
     }
 
-    /// Per-(agent, session) message injection senders (#3734).
+    /// Per-(agent, session) message injection senders.
     #[inline]
     pub fn injection_senders_ref(
         &self,
@@ -1875,9 +1865,7 @@ impl LibreFangKernel {
             }
         }
 
-        // 4. injection_senders / injection_receivers — remove for dead agents
-        // (#3734: keys are now `(AgentId, SessionId)`, so we filter on the
-        // tuple's agent component).
+        // 4. injection_senders / injection_receivers — remove for dead agents.
         {
             let stale: Vec<(AgentId, SessionId)> = self
                 .injection_senders
@@ -6152,11 +6140,8 @@ system_prompt = "You are a helpful assistant."
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
-        // Issue #3737: acquire the same session/agent lock as the non-streaming
-        // path so concurrent streaming + non-streaming turns on the same session
-        // are serialized (last-write-wins data loss on session history otherwise).
-        // We clone the Arc here (sync fn) and move it into the task; the lock
-        // itself is awaited inside the spawn where we can .await.
+        // Acquire the same session/agent lock as the non-streaming path so concurrent
+        // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
         let session_lock = if session_id_override.is_some() {
             self.session_msg_locks
                 .entry(effective_session_id)
@@ -6178,26 +6163,16 @@ system_prompt = "You are a helpful assistant."
             },
         );
 
-        // #3737 — `session` was loaded above before the spawn, OUTSIDE the
-        // serialization lock. If a concurrent turn (streaming or non-
-        // streaming) lands on the same `(agent, session)` between that read
-        // and the spawn acquiring the lock, the snapshot we captured is
-        // already stale and any messages the loop appends will overwrite
-        // the other turn's writes (last-write-wins). The spawn now reloads
-        // the session AFTER acquiring `session_lock` so the read+modify+
-        // write window is fully serialized — matching the non-streaming
-        // path which loads the session inside `_guard`.
+        // Reload session after acquiring the lock so we never act on a stale
+        // snapshot captured before a concurrent turn's writes landed.
         let handle = tokio::spawn(async move {
             // Acquire the session/agent serialization lock for the duration of
             // this streaming turn.  This matches the non-streaming path and
             // prevents concurrent streaming + non-streaming writes from
-            // producing last-write-wins data loss on session history (#3737).
+            // producing last-write-wins data loss on session history.
             let _session_guard = session_lock.lock().await;
 
-            // #3737 — Reload the session under the lock so we never feed the
-            // loop a snapshot that another concurrent turn has already
-            // mutated. If the session is missing (race with deletion or a
-            // brand-new session), keep the empty placeholder built above.
+            // Reload session under the lock; keep the placeholder on miss.
             match memory.get_session(effective_session_id) {
                 Ok(Some(reloaded)) => {
                     session = reloaded;
@@ -6285,19 +6260,9 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
-            // Set up mid-turn injection channel (#956). Fork turns skip —
-            // inserting into `injection_senders[(agent_id, session_id)]`
-            // would overwrite the parent turn's channel (forks share the
-            // parent's session id for prompt-cache alignment), and external
-            // code trying to inject into the parent during the fork window
-            // would land on the fork's (about-to-be-dropped) sender
-            // instead. Forks are by design short synchronous derivative
-            // calls that don't need mid-turn injection themselves.
-            //
-            // #3734: keyed by `(agent_id, session_id)` so concurrent
-            // sessions on the same agent (multi-tab UI / multi-channel
-            // bridges) each get their own injection sender instead of the
-            // last writer winning under a single-AgentId key.
+            // Set up mid-turn injection channel. Fork turns skip — inserting
+            // would overwrite the parent turn's channel (forks share the parent's
+            // session id for prompt-cache alignment).
             let injection_rx = if loop_opts.is_fork {
                 None
             } else {
@@ -7909,9 +7874,7 @@ system_prompt = "You are a helpful assistant."
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
-        // Set up mid-turn injection channel (#956, #3734 — keyed by
-        // `(agent_id, effective_session_id)` so concurrent sessions for the
-        // same agent each get their own sender).
+        // Set up mid-turn injection channel.
         let injection_rx = self.setup_injection_channel(agent_id, effective_session_id);
 
         // Session-scoped interrupt for tool-level cancellation.  Cloned into
@@ -8003,8 +7966,7 @@ system_prompt = "You are a helpful assistant."
         )
         .await;
 
-        // Tear down injection channel after loop finishes (#3734 — same
-        // (agent_id, session_id) key as setup above).
+        // Tear down injection channel after loop finishes.
         self.teardown_injection_channel(agent_id, effective_session_id);
 
         // Clean up the interrupt handle regardless of outcome — the map must
@@ -8235,18 +8197,9 @@ system_prompt = "You are a helpful assistant."
             .await
     }
 
-    /// #3734 — Session-aware variant of [`Self::inject_message`].
+    /// Session-aware variant of [`Self::inject_message`]; `None` fans out to all live sessions.
     ///
-    /// When `session_id` is `Some`, deliver the message to that exact
-    /// `(agent, session)` injection channel. When `None`, fan out to every
-    /// live session for the agent — useful for callers (HTTP `/inject`
-    /// without a session id, approval-resolution dispatch, …) that don't
-    /// know which concrete session a deferred operation belongs to and need
-    /// to wake whichever loop happens to be running.
-    ///
-    /// Returns `Ok(true)` if at least one channel accepted the message,
-    /// `Ok(false)` if no live loop was reachable, or `Err` when the agent
-    /// itself does not exist.
+    /// Returns `Ok(true)` if at least one channel accepted, `Ok(false)` if no loop was running.
     pub async fn inject_message_for_session(
         &self,
         agent_id: AgentId,
@@ -8315,13 +8268,7 @@ system_prompt = "You are a helpful assistant."
         Ok(delivered)
     }
 
-    /// Set up the injection channel for an agent's specific session before
-    /// running its loop. Returns the receiver wrapped in a Mutex for the
-    /// agent loop to consume.
-    ///
-    /// #3734: keyed by `(AgentId, SessionId)` so concurrent sessions for the
-    /// same agent each get their own channel — previously, the second turn
-    /// silently overwrote the first's sender via the single-`AgentId` key.
+    /// Creates the injection channel for `(agent_id, session_id)` and returns the receiver.
     fn setup_injection_channel(
         &self,
         agent_id: AgentId,
@@ -8335,8 +8282,7 @@ system_prompt = "You are a helpful assistant."
         rx
     }
 
-    /// Tear down the injection channel for an agent's specific session
-    /// after its loop finishes (#3734).
+    /// Tears down the `(agent_id, session_id)` injection channel after the loop finishes.
     fn teardown_injection_channel(&self, agent_id: AgentId, session_id: SessionId) {
         self.injection_senders.remove(&(agent_id, session_id));
         self.injection_receivers.remove(&(agent_id, session_id));
@@ -18561,13 +18507,8 @@ impl LibreFangKernel {
     /// Notify the running agent loop about an approval resolution via an explicit
     /// mid-turn signal.
     ///
-    /// #3734 — `injection_senders` is keyed by `(AgentId, SessionId)`. The
-    /// `DeferredToolExecution` does not currently carry a `SessionId`, so we
-    /// fan the signal out to every live session for the agent. In practice
-    /// only one session has the matching `tool_use_id` outstanding, so the
-    /// other sessions will ignore the message; this is strictly more correct
-    /// than the pre-#3734 behaviour where a single-AgentId key meant only
-    /// the most recently spawned session ever received the signal at all.
+    /// `DeferredToolExecution` carries no session id, so the signal fans out to every
+    /// live session; only the one holding the matching `tool_use_id` will act on it.
     fn notify_agent_of_resolution(
         &self,
         agent_id: &AgentId,

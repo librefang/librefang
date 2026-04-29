@@ -67,19 +67,10 @@ fn atomic_write(path: &std::path::Path, content: impl AsRef<[u8]>) -> std::io::R
     Ok(())
 }
 
-/// #3795 — Marker filename written into the target home directory after a
-/// successful OpenClaw migration. Subsequent invocations of `migrate()` see
-/// this file and refuse to run, so we never overwrite (or even back up) user
-/// edits made after the initial import.
+/// Marker written after a successful migration; present = re-runs are no-ops.
 const MIGRATION_MARKER_FILENAME: &str = ".openclaw_migrated";
 
-/// #3795 — Backup `path` to a timestamped sibling (`<path>.bak.<unix_ts>`)
-/// before overwriting. Returns the backup path so callers can record it in
-/// the migration report. If the source file does not exist, this is a no-op
-/// and returns `Ok(None)`.
-///
-/// The timestamp is the current UTC time formatted as `YYYYMMDDHHMMSS` so
-/// repeated rescues never collide and the order is obvious from the filename.
+/// Renames `path` to a `.bak.<timestamp>` sibling; returns the new path or `None` if absent.
 fn backup_existing(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -100,11 +91,7 @@ fn backup_existing(path: &std::path::Path) -> std::io::Result<Option<PathBuf>> {
     Ok(Some(backup_path))
 }
 
-/// #3795 — Helper used by every migration write point: if `dest` already
-/// exists, rename it to a `.bak.<timestamp>` sibling and emit a warning +
-/// report entry, then proceed to atomically write `content`. This is the
-/// single chokepoint that protects user-edited config/agent/memory files
-/// from being silently clobbered on re-runs.
+/// Backs up any existing `dest` to a `.bak.*` sibling then atomically writes `content`.
 fn write_with_backup(
     dest: &std::path::Path,
     content: &str,
@@ -1282,11 +1269,8 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
         ..Default::default()
     };
 
-    // #3795 — If a previous successful migration already wrote a marker file
-    // in the target home directory, refuse to re-run. The marker is the
-    // strongest signal that any subsequent edits to config.toml /
-    // agent.toml / imported_memory.md belong to the user, not to OpenClaw,
-    // and should not be touched by the migrator at all (not even backed up).
+    // Refuse to re-run if the marker file is present; user edits since the
+    // first import must not be overwritten.
     let marker_path = target.join(MIGRATION_MARKER_FILENAME);
     if marker_path.exists() && !options.dry_run {
         warn!(
@@ -1318,9 +1302,8 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
         let report_path = target.join("migration_report.md");
         let _ = std::fs::write(&report_path, &report_md);
 
-        // #3795 — Drop a marker file so re-runs are no-ops. Best-effort: if
-        // we can't write the marker (e.g. read-only home), the worst case is
-        // a future re-run that backs up files again — no data is lost.
+        // Drop a marker so re-runs are no-ops. Best-effort: if the write fails,
+        // a future re-run will back up files again — no data lost.
         let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
         let marker_body = format!(
             "OpenClaw migration completed at {stamp}.\nDelete this file to force a re-import; existing files will be moved to .bak.<timestamp> siblings rather than overwritten.\n"
@@ -1443,10 +1426,7 @@ fn migrate_config_from_json(
 
     if !dry_run {
         std::fs::create_dir_all(target)?;
-        // #3795 — Existing config.toml is preserved by renaming it to a
-        // timestamped `.bak.*` sibling before writing the freshly imported
-        // version. The migrate() entry point also writes a marker file so
-        // subsequent re-runs short-circuit before reaching this point.
+        // Back up any existing config.toml before overwriting.
         write_with_backup(&dest, &config_content, report)?;
     }
 
@@ -1978,12 +1958,7 @@ fn migrate_agents_from_json(
 
                 if !dry_run {
                     std::fs::create_dir_all(&dest_dir)?;
-                    // #3795 — Existing agent.toml is moved to a timestamped
-                    // `.bak.*` sibling before writing. Combined with the
-                    // marker file, re-runs after the initial import are
-                    // short-circuited at migrate() entry, so this branch
-                    // only fires on the first import or when the marker has
-                    // been deliberately removed.
+                    // Back up any existing agent.toml before overwriting.
                     write_with_backup(&dest_file, &toml_str, report)?;
                 }
 
@@ -2324,9 +2299,7 @@ fn migrate_memory_files(
 
                 if !dry_run {
                     std::fs::create_dir_all(&dest_dir)?;
-                    // #3795 — Back up any existing imported_memory.md before
-                    // overwriting; the marker file in target/ stops re-runs
-                    // from reaching this branch on subsequent invocations.
+                    // Back up any existing imported_memory.md before overwriting.
                     write_with_backup(&dest_file, &content, report)?;
                 }
 
@@ -2375,8 +2348,7 @@ fn migrate_memory_files(
 
                 if !dry_run {
                     std::fs::create_dir_all(&dest_dir)?;
-                    // #3795 — Back up any existing imported_memory.md before
-                    // overwriting; marker file short-circuits re-runs.
+                    // Back up any existing imported_memory.md before overwriting.
                     write_with_backup(&dest_file, &content, report)?;
                 }
 
@@ -2749,9 +2721,7 @@ fn migrate_legacy_config(
 
     if !dry_run {
         std::fs::create_dir_all(target)?;
-        // #3795 — Back up any existing config.toml before overwriting; the
-        // marker file written at migrate() exit prevents re-runs from
-        // reaching this branch on subsequent invocations.
+        // Back up any existing config.toml before overwriting.
         write_with_backup(&dest, &config_content, report)?;
     }
 
@@ -3065,8 +3035,7 @@ fn migrate_legacy_agents(
 
                 if !dry_run {
                     std::fs::create_dir_all(&dest_dir)?;
-                    // #3795 — Back up any existing agent.toml before
-                    // overwriting; marker file short-circuits re-runs.
+                    // Back up any existing agent.toml before overwriting.
                     write_with_backup(&dest_file, &toml_str, report)?;
                 }
 
@@ -3259,8 +3228,7 @@ fn migrate_legacy_memory(
 
         if !dry_run {
             std::fs::create_dir_all(&dest_dir)?;
-            // #3795 — Back up any existing imported_memory.md before
-            // overwriting; marker file short-circuits re-runs.
+            // Back up any existing imported_memory.md before overwriting.
             write_with_backup(&dest_file, &content, report)?;
         }
 
@@ -4804,7 +4772,7 @@ mod tests {
         // Run migration twice
         migrate(&options).unwrap();
 
-        // #3795 — Marker file should be present after a successful run.
+        // Marker file must be present after a successful run.
         let marker = target.path().join(MIGRATION_MARKER_FILENAME);
         assert!(marker.exists(), "marker file not written");
 
@@ -4831,9 +4799,8 @@ mod tests {
         assert_eq!(dc_count, 1, "Duplicate DISCORD_BOT_TOKEN in secrets.env");
     }
 
-    /// #3795 regression — when the marker file is removed and a re-run is
-    /// forced, any user-edited config.toml / agent.toml must be backed up
-    /// to a `.bak.<timestamp>` sibling rather than silently overwritten.
+    /// When the marker is removed and a re-run is forced, user-edited files
+    /// must be backed up to `.bak.<timestamp>` siblings rather than overwritten.
     #[test]
     fn test_rerun_backs_up_user_edits() {
         let source = TempDir::new().unwrap();
@@ -4872,8 +4839,7 @@ mod tests {
             "fresh config should not contain user edit"
         );
 
-        // The user's edited copy is preserved as a `.bak.*` sibling so no
-        // data is lost — this is what #3795 demands.
+        // The user's edited copy must be preserved as a `.bak.*` sibling.
         let backups: Vec<_> = std::fs::read_dir(target.path())
             .unwrap()
             .filter_map(Result::ok)

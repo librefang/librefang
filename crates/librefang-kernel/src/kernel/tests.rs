@@ -5379,14 +5379,6 @@ fn cron_create_handles_missing_peer_id() {
     assert_eq!(peer_id, None);
 }
 
-// ---------------------------------------------------------------------------
-// #3734 — injection_senders is keyed by `(AgentId, SessionId)` so concurrent
-// sessions on the same agent each get their own sender. Pre-#3734 the second
-// `setup_injection_channel` silently overwrote the first one's entry under
-// the single `AgentId` key, so an HTTP `/inject` could only ever reach the
-// most recently spawned session.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     let kernel = boot_kernel_for_display_tests();
@@ -5398,8 +5390,7 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     let _rx_a = kernel.setup_injection_channel(agent_id, session_a);
     let _rx_b = kernel.setup_injection_channel(agent_id, session_b);
 
-    // Both senders must be live concurrently — pre-#3734 the second insert
-    // overwrote the first under the `AgentId` key.
+    // Both senders must be live concurrently (second insert used to overwrite the first).
     assert!(
         kernel
             .injection_senders
@@ -5428,7 +5419,7 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
         "session B must NOT have received a session-A inject"
     );
 
-    // Untargeted inject (#3734 fallback) broadcasts to both sessions.
+    // Untargeted inject (None session_id) broadcasts to both sessions.
     kernel
         .inject_message_for_session(agent_id, None, "broadcast")
         .await
@@ -5453,9 +5444,7 @@ async fn injection_teardown_only_removes_target_session() {
     let _rx_a = kernel.setup_injection_channel(agent_id, session_a);
     let _rx_b = kernel.setup_injection_channel(agent_id, session_b);
 
-    // Tearing down session A must NOT clear session B's sender — pre-#3734
-    // a single `remove(&agent_id)` would orphan whichever session was still
-    // running.
+    // Tearing down session A must NOT clear session B's sender.
     kernel.teardown_injection_channel(agent_id, session_a);
     assert!(!kernel
         .injection_senders

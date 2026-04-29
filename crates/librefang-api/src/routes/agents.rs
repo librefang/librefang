@@ -5570,9 +5570,7 @@ pub async fn inject_message(
             .into_response();
     }
 
-    // #3734: parse the optional session_id so callers can target a specific
-    // running loop on agents with concurrent sessions. None falls back to a
-    // broadcast across every live session for the agent.
+    // None falls back to a broadcast across every live session for the agent.
     let session_id = match req.session_id.as_deref() {
         Some(s) if !s.is_empty() => match s.parse::<uuid::Uuid>() {
             Ok(u) => Some(librefang_types::agent::SessionId(u)),
