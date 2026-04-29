@@ -20,6 +20,18 @@ pub struct PublishPypiBinariesArgs {
     /// Dry run — show what would be published
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Build wheels only; do not run `twine upload`.
+    /// When set, wheels are written to `--dist-dir` (or a temp dir if unset)
+    /// and the workflow is expected to upload them via OIDC trusted
+    /// publishing (`pypa/gh-action-pypi-publish`).
+    #[arg(long)]
+    pub build_only: bool,
+
+    /// Output directory for built wheels (used with `--build-only`).
+    /// If unset, a temp directory is used.
+    #[arg(long)]
+    pub dist_dir: Option<PathBuf>,
 }
 
 struct PyTarget {
@@ -97,6 +109,50 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
+/// Download and verify the .sha256 sidecar for an asset.
+///
+/// Mirrors `publish_npm_binaries::verify_asset_sha256`. Fails fast if the
+/// sidecar is missing or the hash mismatches — we refuse to repackage a
+/// binary into a wheel without confirming what the GitHub Release
+/// actually served us.
+fn verify_asset_sha256(
+    repo: &str,
+    tag: &str,
+    asset_name: &str,
+    asset_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sha_url = format!(
+        "https://github.com/{}/releases/download/{}/{}.sha256",
+        repo, tag, asset_name
+    );
+    let tmp_sha = asset_path.with_extension("sha256");
+    download_asset(&sha_url, &tmp_sha)?;
+
+    let sha_content = fs::read_to_string(&tmp_sha)?;
+    let expected = sha_content
+        .split_whitespace()
+        .next()
+        .ok_or("empty .sha256 file")?
+        .to_ascii_lowercase();
+
+    let data = fs::read(asset_path)?;
+    let actual = sha256_hex(&data);
+    fs::remove_file(&tmp_sha).ok();
+
+    if actual != expected {
+        return Err(
+            format!("SHA256 mismatch for {asset_name}: expected {expected}, got {actual}").into(),
+        );
+    }
+    println!("  ✓ SHA256 verified: {expected}");
+    Ok(())
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(data))
+}
+
 /// Convert version for PEP 440: -beta1 → b1, -rc1 → rc1
 fn pypi_version(version: &str) -> String {
     version.replace("-beta", "b").replace("-rc", "rc")
@@ -131,6 +187,10 @@ fn build_wheel(
     if !dry_run {
         let asset_path = wheel_dir.join(&asset);
         download_asset(&url, &asset_path)?;
+
+        // Verify SHA256 against the .sha256 sidecar uploaded alongside the
+        // release asset. Refuse to repackage on mismatch.
+        verify_asset_sha256(repo, tag, &asset, &asset_path)?;
 
         let scripts_dir = wheel_dir.join(&data_dir);
         if target.ext == "tar.gz" {
@@ -277,13 +337,19 @@ fn sha256_base64url(data: &[u8]) -> String {
 pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Error>> {
     let pypi_ver = pypi_version(&args.version);
     let work = std::env::temp_dir().join(format!("xtask-pypi-{}", std::process::id()));
-    let dist = work.join("dist");
+    let dist = match &args.dist_dir {
+        Some(p) => p.clone(),
+        None => work.join("dist"),
+    };
     fs::create_dir_all(&dist)?;
 
     println!(
         "Publishing PyPI wheels for v{} (PEP 440: {})",
         args.version, pypi_ver
     );
+    if args.build_only {
+        println!("  --build-only set: wheels → {}", dist.display());
+    }
 
     for target in TARGETS {
         println!("\n=== {} ({}) ===", target.rust_target, target.platform_tag);
@@ -298,8 +364,11 @@ pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Erro
         )?;
     }
 
-    if !args.dry_run {
-        println!("\n=== Uploading to PyPI ===");
+    if !args.dry_run && !args.build_only {
+        // Legacy path: twine + long-lived API token. Prefer `--build-only`
+        // and let the workflow upload via OIDC trusted publishing
+        // (`pypa/gh-action-pypi-publish`) — see `cli_pypi` in release.yml.
+        println!("\n=== Uploading to PyPI (twine, legacy) ===");
         let _ = Command::new("pip")
             .args(["install", "--quiet", "twine"])
             .status();
@@ -315,9 +384,17 @@ pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Erro
         if !status.success() {
             return Err("twine upload failed".into());
         }
+    } else if args.build_only {
+        println!(
+            "\n=== Build complete; {} wheels in {} ===",
+            TARGETS.len(),
+            dist.display()
+        );
     }
 
     println!("\nDone.");
+    // Always clean up the temp working dir. When --dist-dir is explicit,
+    // wheels live outside `work` so they survive this cleanup.
     fs::remove_dir_all(&work).ok();
     Ok(())
 }
