@@ -5413,7 +5413,7 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
 
     let queued_a = _rx_a.lock().await.try_recv();
     let queued_b = _rx_b.lock().await.try_recv();
-    assert!(matches!(queued_a, Ok(_)), "session A must have received");
+    assert!(queued_a.is_ok(), "session A must have received");
     assert!(
         matches!(queued_b, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
         "session B must NOT have received a session-A inject"
@@ -5425,8 +5425,8 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
         .await
         .expect("inject broadcast");
 
-    assert!(matches!(_rx_a.lock().await.try_recv(), Ok(_)));
-    assert!(matches!(_rx_b.lock().await.try_recv(), Ok(_)));
+    assert!(_rx_a.lock().await.try_recv().is_ok());
+    assert!(_rx_b.lock().await.try_recv().is_ok());
 
     kernel.teardown_injection_channel(agent_id, session_a);
     kernel.teardown_injection_channel(agent_id, session_b);
