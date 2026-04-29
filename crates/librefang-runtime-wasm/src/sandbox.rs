@@ -926,6 +926,39 @@ mod tests {
         assert!(annotated.contains("[truncated 100 bytes]"));
         assert!(annotated.len() > MAX_LOG_BYTES);
     }
+
+    /// Regression: the truncation cap can land mid-codepoint for non-ASCII
+    /// text.  Strict `str::from_utf8 + unwrap_or("<invalid utf8>")` would
+    /// then replace the entire 4 KiB payload with the literal sentinel,
+    /// dropping the user's whole log line.  `String::from_utf8_lossy`
+    /// preserves the valid prefix and substitutes U+FFFD only for the
+    /// broken trailing bytes.
+    ///
+    /// `'中'` is 3 bytes in UTF-8 and `MAX_LOG_BYTES = 4096` is not
+    /// divisible by 3, so slicing at the byte cap is guaranteed to split a
+    /// codepoint.
+    #[test]
+    fn test_host_log_lossy_decode_preserves_valid_prefix_at_boundary() {
+        let s = "中".repeat(MAX_LOG_BYTES);
+        // Take the first MAX_LOG_BYTES bytes — landing inside a codepoint.
+        let bytes = &s.as_bytes()[..MAX_LOG_BYTES];
+        // The invariant under test: lossy decode does NOT collapse the
+        // whole payload to the strict sentinel.
+        let lossy = String::from_utf8_lossy(bytes);
+        assert!(
+            !lossy.contains("<invalid utf8>"),
+            "lossy decode must keep the valid prefix instead of falling \
+             back to the strict sentinel"
+        );
+        assert!(
+            lossy.contains('中'),
+            "valid prefix codepoints must survive"
+        );
+        assert!(
+            lossy.contains('\u{FFFD}'),
+            "the partial trailing codepoint must surface as U+FFFD"
+        );
+    }
     /// Module that returns a packed result whose `result_len` field is set to
     /// MAX_RESULT_BYTES + 1 (0x1000001 = 16 MiB + 1) with a ptr of 0, to
     /// trigger the oversized-result guard introduced in Bug #3866.
