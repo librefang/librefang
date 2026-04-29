@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 28;
+const SCHEMA_VERSION: u32 = 29;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -67,6 +67,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(26, migrate_v26);
     run_step!(27, migrate_v27);
     run_step!(28, migrate_v28);
+    run_step!(29, migrate_v29);
 
     Ok(())
 }
@@ -853,6 +854,49 @@ fn migrate_v28(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (28, datetime('now'), 'Add group_roster table for cross-channel group membership tracking')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 29: Retention timestamps for soft-deleted memories and finished tasks.
+///
+/// Adds two unix-epoch timestamp columns so the periodic prune sweeps in
+/// `kernel/background_agents` can identify rows ready for hard delete:
+/// - `memories.deleted_at` is stamped when a row is soft-deleted (`deleted = 1`).
+///   Without this, the embedding BLOB hangs around forever (#3467).
+/// - `task_queue.finished_at` is stamped when a row reaches `completed`/`failed`.
+///   Without this, the queue grows unbounded (#3466).
+///
+/// Both columns are nullable: pre-migration soft-deletes / completions get
+/// NULL and are treated as "not yet eligible for hard delete" by the sweep,
+/// which compares `< (now - retention_days)`.
+fn migrate_v29(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "memories", "deleted_at") {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN deleted_at INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_deleted_at \
+         ON memories(deleted, deleted_at)",
+        [],
+    )?;
+    if !column_exists(conn, "task_queue", "finished_at") {
+        conn.execute(
+            "ALTER TABLE task_queue ADD COLUMN finished_at INTEGER DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_task_queue_finished_at \
+         ON task_queue(status, finished_at)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (29, datetime('now'), 'Add deleted_at/finished_at retention timestamps')",
         [],
     )?;
     Ok(())

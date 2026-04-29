@@ -11,6 +11,14 @@ sdk/rust/Cargo.lock
 # Default `rustc foo.rs` output when run without `-o` — never a tracked artifact.
 /rust_out
 
+# Mobile generated artifacts
+crates/librefang-desktop/gen/apple/Externals/
+crates/librefang-desktop/gen/apple/build/
+crates/librefang-desktop/gen/android/.gradle/
+crates/librefang-desktop/gen/android/build/
+crates/librefang-desktop/gen/android/app/build/
+crates/librefang-desktop/gen/android/local.properties
+
 # Cloudflare Wrangler
 .wrangler/
 .serena
