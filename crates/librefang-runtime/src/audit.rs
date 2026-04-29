@@ -692,45 +692,52 @@ impl AuditLog {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
 
-            // Find the indices of persisted entries up to the overflow
-            // count, scanning from the front (oldest).
-            let mut to_drop: Vec<usize> = Vec::with_capacity(overflow);
-            for (idx, e) in entries.iter().enumerate() {
-                if to_drop.len() >= overflow {
+            // Drop a contiguous prefix of clean entries.  We MUST stop
+            // at the first dirty entry: dropping non-contiguous indices
+            // would leave a dirty entry in front of newer clean ones,
+            // breaking the in-buffer hash chain (each entry's
+            // `prev_hash` points at the entry that *was* in front of it,
+            // so removing a clean entry from the middle invalidates the
+            // next entry's `prev_hash` linkage and `verify_integrity`
+            // returns Err on the next call).  Trade-off: if the front
+            // entry is dirty the buffer grows past the cap until disk
+            // recovers and the recovery path drains it, which is exactly
+            // the fail-safe shape we want — better an unbounded buffer
+            // (with operator-visible error logs every push) than a
+            // silently corrupted chain.
+            let mut drop_count = 0;
+            for e in entries.iter() {
+                if drop_count >= overflow {
                     break;
                 }
-                if !dirty.contains(&e.seq) {
-                    to_drop.push(idx);
+                if dirty.contains(&e.seq) {
+                    break;
                 }
+                drop_count += 1;
             }
             drop(dirty);
 
-            if to_drop.is_empty() {
-                // Every in-memory entry is non-persisted.  Don't drop
-                // anything — let the buffer grow.  The error log on
-                // each failed INSERT above is the operator's signal to
-                // intervene before this becomes an OOM.
+            if drop_count == 0 {
+                // Front entry is non-persisted.  Don't drop anything —
+                // let the buffer grow.  The error log on each failed
+                // INSERT above is the operator's signal to intervene
+                // before this becomes an OOM.
                 tracing::warn!(
                     cap = MAX_AUDIT_ENTRIES,
                     in_memory = entries.len(),
-                    "Audit cap reached but every in-memory entry is unpersisted; \
+                    "Audit cap reached but oldest in-memory entry is unpersisted; \
                      refusing to trim to avoid forensic loss"
                 );
             } else {
-                // Anchor at the hash of the most recently dropped entry
-                // so verify_integrity() stays sound across the trim.
-                let last_idx = *to_drop.last().expect("checked non-empty");
-                let new_anchor = entries[last_idx].hash.clone();
+                // Anchor at the hash of the last dropped entry so
+                // verify_integrity() stays sound across the trim.
+                let new_anchor = entries[drop_count - 1].hash.clone();
                 {
                     let mut anchor =
                         self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
                     *anchor = Some(new_anchor);
                 }
-                // Drop indices in descending order so we don't shift the
-                // remaining ones.
-                for idx in to_drop.into_iter().rev() {
-                    entries.remove(idx);
-                }
+                entries.drain(..drop_count);
             }
         }
 
@@ -2169,5 +2176,65 @@ mod tests {
         // No leftover .tmp file.
         let tmp = anchor_path.with_extension("anchor.tmp");
         assert!(!tmp.exists(), "tempfile should have been renamed away");
+    }
+
+    /// The cap-trim must NOT drop non-contiguous indices.  Each entry's
+    /// `prev_hash` points at the entry that was directly in front of it
+    /// at write time, so removing a clean entry from the middle of the
+    /// buffer breaks the next entry's `prev_hash` linkage and
+    /// `verify_integrity` returns Err.
+    ///
+    /// Earlier draft of #4050 collected `to_drop = [idx of every clean
+    /// entry up to overflow]`, which on `[E1(dirty), E2(clean), E3(clean)]`
+    /// with overflow=1 dropped E2 and left `[E1, E3]` — E3.prev_hash
+    /// equalled E2.hash but the new anchor was set to E2.hash, so
+    /// verify_integrity walked anchor → E1.prev_hash and reported a
+    /// chain break.  This test pins the corrected behavior: when the
+    /// front entry is dirty, the trim must skip entirely and let the
+    /// buffer grow.
+    #[test]
+    fn test_cap_trim_skips_when_front_entry_is_dirty() {
+        let log = AuditLog::new();
+
+        // Push one entry that will be flagged dirty.
+        log.record("a", AuditAction::ToolInvoke, "front-dirty", "ok");
+        log.non_persisted_seqs
+            .lock()
+            .unwrap()
+            .insert(1);
+
+        // Push enough clean entries to push the buffer past MAX_AUDIT_ENTRIES.
+        // Without the dirty-front guard, the cap-trim would remove an
+        // entry from inside the buffer and break the chain.
+        for i in 0..MAX_AUDIT_ENTRIES {
+            log.record("a", AuditAction::ToolInvoke, format!("clean-{i}"), "ok");
+        }
+
+        // Buffer is allowed to grow past the cap because the front
+        // entry is dirty (we cannot drop it without losing forensic
+        // data, and we cannot drop later entries without breaking the
+        // chain).
+        assert_eq!(
+            log.len(),
+            MAX_AUDIT_ENTRIES + 1,
+            "buffer must grow past cap when front entry is dirty rather than corrupting the chain"
+        );
+
+        // Chain must verify cleanly.
+        assert!(
+            log.verify_integrity().is_ok(),
+            "verify_integrity must succeed when trim refuses to break the chain"
+        );
+
+        // After the dirty entry recovers (gets backfilled to disk),
+        // the next push should be able to trim.
+        log.non_persisted_seqs.lock().unwrap().remove(&1);
+        log.record("a", AuditAction::ToolInvoke, "trigger-trim", "ok");
+        assert_eq!(
+            log.len(),
+            MAX_AUDIT_ENTRIES,
+            "trim must resume once the dirty front entry recovers"
+        );
+        assert!(log.verify_integrity().is_ok());
     }
 }
