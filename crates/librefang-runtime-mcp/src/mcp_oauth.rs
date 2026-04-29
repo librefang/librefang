@@ -1151,7 +1151,10 @@ mod tests {
             "token_endpoint": "https://auth.example.com/token"
         }"#;
         let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
-        assert!(result.is_err(), "userinfo authorization_endpoint must be rejected");
+        assert!(
+            result.is_err(),
+            "userinfo authorization_endpoint must be rejected"
+        );
     }
 
     #[test]

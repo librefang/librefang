@@ -168,9 +168,7 @@ impl KernelOAuthProvider {
         if let Err(reason) =
             librefang_runtime::mcp_oauth::is_ssrf_blocked_url(registration_endpoint)
         {
-            return Err(format!(
-                "SSRF: registration_endpoint rejected: {reason}"
-            ));
+            return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
         }
         let client = reqwest::Client::new();
 
