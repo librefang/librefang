@@ -34,6 +34,8 @@ import {
   Puzzle,
   Cpu,
   Lock,
+  Check,
+  HelpCircle,
   Share2,
   Gauge,
   LogOut,
@@ -414,6 +416,186 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Shared user menu panel — body of the user dropdown wherever it appears
+// (sidebar foot or topbar avatar). Mirrors the design canvas's
+// `shell.jsx::UserMenuPanel`:
+//
+//   ┌────────────────────────────────┐
+//   │  [avatar] name                 │
+//   │           role · mode (mono)   │
+//   ├────────────────────────────────┤
+//   │  THEME                         │
+//   │  [ Light | Dark ]              │
+//   │  LANGUAGE                      │
+//   │  English      en-US ✓          │
+//   │  简体中文     zh-CN            │
+//   ├────────────────────────────────┤
+//   │  Settings              ⌘,      │
+//   │  Docs & shortcuts      ⌘?      │
+//   │  Change credentials            │
+//   │  Sign out                      │
+//   └────────────────────────────────┘
+type UserMenuPanelProps = {
+  username: string;
+  authMode: AuthMode;
+  hostname: string;
+  theme: "dark" | "light";
+  language: string;
+  onToggleTheme: () => void;
+  onSwitchLanguage: (lang: "en" | "zh") => void;
+  onOpenChangePassword: () => void;
+  onOpenShortcuts: () => void;
+  onLogout: () => void | Promise<void>;
+  onClose: () => void;
+  t: ReturnType<typeof useTranslation>["t"];
+};
+
+function UserMenuPanel({
+  username,
+  authMode,
+  hostname,
+  theme,
+  language,
+  onToggleTheme,
+  onSwitchLanguage,
+  onOpenChangePassword,
+  onOpenShortcuts,
+  onLogout,
+  onClose,
+  t,
+}: UserMenuPanelProps) {
+  const initials = (username || "U").slice(0, 2).toUpperCase();
+  const roleLine = [authMode !== "none" ? authMode : null, hostname]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="rounded-xl border border-border-subtle bg-surface shadow-2xl backdrop-blur-md p-1.5 w-[260px]">
+      {/* Header row — avatar + name + meta */}
+      <div className="flex items-center gap-2.5 px-2.5 pt-2 pb-2.5">
+        <div
+          className="h-8 w-8 rounded-full grid place-items-center text-white text-[12px] font-semibold shrink-0"
+          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+        >
+          {initials}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-semibold text-text-main truncate">
+            {username || t("common.user", { defaultValue: "User" })}
+          </div>
+          {roleLine && (
+            <div className="font-mono text-[10px] text-text-dim/80 truncate">{roleLine}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="h-px bg-border-subtle mx-1 my-0.5" />
+
+      {/* Theme — segmented control. The store only models light/dark today,
+          so we ship a 2-way toggle (canvas had Light/Dark/Auto). */}
+      <div className="px-2.5 pt-1.5 pb-1">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Sun className="h-2.5 w-2.5 text-text-dim/70" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-dim/70">
+            {t("common.theme", { defaultValue: "Theme" })}
+          </span>
+        </div>
+        <div className="flex p-0.5 rounded-md border border-border-subtle bg-main/40">
+          {([
+            { id: "light", label: t("common.light", { defaultValue: "Light" }), Icon: Sun },
+            { id: "dark",  label: t("common.dark",  { defaultValue: "Dark" }),  Icon: Moon },
+          ] as const).map((opt) => {
+            const active = opt.id === theme;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => { if (!active) onToggleTheme(); }}
+                className={`flex-1 inline-flex items-center justify-center gap-1 px-1.5 py-1 text-[11px] font-mono rounded transition-colors ${
+                  active ? "bg-brand/15 text-brand" : "text-text-dim hover:text-text-main"
+                }`}
+              >
+                <opt.Icon className="h-2.5 w-2.5" />
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Language list */}
+      <div className="px-2.5 pt-2 pb-1">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Globe className="h-2.5 w-2.5 text-text-dim/70" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-dim/70">
+            {t("common.language", { defaultValue: "Language" })}
+          </span>
+        </div>
+        <div className="flex flex-col gap-px">
+          {([
+            { id: "en", label: "English",   sub: "en-US" },
+            { id: "zh", label: "简体中文",  sub: "zh-CN" },
+          ] as const).map((opt) => {
+            const active = opt.id === language;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => onSwitchLanguage(opt.id)}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-[12.5px] text-left transition-colors ${
+                  active ? "bg-brand/8 text-text-main" : "text-text-main hover:bg-surface-hover"
+                }`}
+              >
+                <span className="flex-1">{opt.label}</span>
+                <span className="font-mono text-[10px] text-text-dim/70">{opt.sub}</span>
+                {active && <Check className="h-3 w-3 text-brand" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="h-px bg-border-subtle mx-1 my-1" />
+
+      {/* Action rows */}
+      <Link
+        to="/settings"
+        onClick={onClose}
+        className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <Settings className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1">{t("nav.settings")}</span>
+        <span className="font-mono text-[10px] text-text-dim/70">⌘,</span>
+      </Link>
+      <button
+        onClick={() => { onClose(); onOpenShortcuts(); }}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <HelpCircle className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1 text-left">{t("nav.shortcuts", { defaultValue: "Docs & shortcuts" })}</span>
+        <span className="font-mono text-[10px] text-text-dim/70">⌘?</span>
+      </button>
+      <button
+        onClick={() => { onClose(); onOpenChangePassword(); }}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <Lock className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1 text-left">{t("settings.change_password")}</span>
+      </button>
+      {authMode !== "none" && (
+        <>
+          <div className="h-px bg-border-subtle mx-1 my-1" />
+          <button
+            onClick={async () => { onClose(); await onLogout(); }}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-rose-400 hover:bg-rose-500/10 transition-colors"
+          >
+            <LogOut className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1 text-left">{t("nav.logout")}</span>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Sidebar user-row + dropdown menu. Mirrors the design canvas
 // `shell.jsx::Sidebar` footer (avatar + name + chevron) and reuses the
 // existing AppShell auth/theme/language wiring. The dropdown is anchored
@@ -424,9 +606,10 @@ type SidebarUserBlockProps = {
   hostname: string;
   username: string;
   onOpenChangePassword: () => void;
+  onOpenShortcuts: () => void;
   onLogout: () => void | Promise<void>;
   onToggleTheme: () => void;
-  onSwitchLanguage: () => void;
+  onSwitchLanguage: (lang: "en" | "zh") => void;
   theme: "dark" | "light";
   language: string;
   t: ReturnType<typeof useTranslation>["t"];
@@ -438,6 +621,7 @@ function SidebarUserBlock({
   hostname,
   username,
   onOpenChangePassword,
+  onOpenShortcuts,
   onLogout,
   onToggleTheme,
   onSwitchLanguage,
@@ -447,6 +631,9 @@ function SidebarUserBlock({
 }: SidebarUserBlockProps) {
   const [open, setOpen] = useState(false);
   const initials = (username || "U").slice(0, 2).toUpperCase();
+  const subline = [authMode !== "none" ? authMode : null, hostname]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="relative border-t border-border-subtle">
@@ -465,10 +652,12 @@ function SidebarUserBlock({
         {!collapsed && (
           <>
             <div className="flex-1 min-w-0">
-              <div className="text-xs font-medium text-text-main truncate">{username || t("common.user", { defaultValue: "User" })}</div>
-              <div className="font-mono text-[10px] text-text-dim truncate">
-                {hostname || (language === "en" ? "en-US" : "zh-CN")}
+              <div className="text-xs font-medium text-text-main truncate">
+                {username || t("common.user", { defaultValue: "User" })}
               </div>
+              {subline && (
+                <div className="font-mono text-[10px] text-text-dim truncate">{subline}</div>
+              )}
             </div>
             <ChevronRight className={`h-3 w-3 text-text-dim transition-transform ${open ? "rotate-90" : ""}`} />
           </>
@@ -477,53 +666,21 @@ function SidebarUserBlock({
       {open && (
         <>
           <div className="fixed inset-0 z-[90]" onClick={() => setOpen(false)} />
-          <div
-            className={`absolute z-[100] ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"} rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5`}
-          >
-            <button
-              onClick={() => { setOpen(false); onToggleTheme(); }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            >
-              {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-              <span className="flex-1 text-left">{t("common.toggle_theme")}</span>
-              <span className="font-mono text-[10px] text-text-dim/70">{theme === "dark" ? "dark" : "light"}</span>
-            </button>
-            <button
-              onClick={() => { setOpen(false); onSwitchLanguage(); }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            >
-              <Globe className="h-3.5 w-3.5" />
-              <span className="flex-1 text-left">{t("common.change_language")}</span>
-              <span className="font-mono text-[10px] text-text-dim/70">{language === "en" ? "EN" : "中文"}</span>
-            </button>
-            <div className="my-1 h-px bg-border-subtle" />
-            <Link
-              to="/settings"
-              onClick={() => setOpen(false)}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            >
-              <Settings className="h-3.5 w-3.5" />
-              <span>{t("nav.settings")}</span>
-            </Link>
-            <button
-              onClick={() => { setOpen(false); onOpenChangePassword(); }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            >
-              <Lock className="h-3.5 w-3.5" />
-              <span>{t("settings.change_password")}</span>
-            </button>
-            {authMode !== "none" && (
-              <>
-                <div className="my-1 h-px bg-border-subtle" />
-                <button
-                  onClick={async () => { setOpen(false); await onLogout(); }}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span>{t("nav.logout")}</span>
-                </button>
-              </>
-            )}
+          <div className={`absolute z-[100] ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"}`}>
+            <UserMenuPanel
+              username={username}
+              authMode={authMode}
+              hostname={hostname}
+              theme={theme}
+              language={language}
+              onToggleTheme={onToggleTheme}
+              onSwitchLanguage={onSwitchLanguage}
+              onOpenChangePassword={onOpenChangePassword}
+              onOpenShortcuts={onOpenShortcuts}
+              onLogout={onLogout}
+              onClose={() => setOpen(false)}
+              t={t}
+            />
           </div>
         </>
       )}
@@ -768,10 +925,14 @@ export function App() {
 
       {/* Sidebar bg matches design canvas: solid white in light mode, but in
           dark mode lets the body's radial sky-glow show through (rgba 2,6,23,
-          0.4 over slate-950 + radial). backdrop-blur smooths content scrolling
-          past the panel edge. */}
+          0.5 over slate-950 + radial).
+          IMPORTANT: do NOT add `backdrop-blur-*` here. CSS spec: any
+          `backdrop-filter` value other than `none` makes the element a
+          containing block for fixed-positioned descendants. That would trap
+          the user-menu's `fixed inset-0` close-on-outside-click backdrop
+          inside the sidebar's bounds. */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(2,6,23,0.5)] dark:backdrop-blur-md lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(2,6,23,0.55)] lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}
@@ -872,9 +1033,10 @@ export function App() {
           hostname={hostname}
           username={username}
           onOpenChangePassword={() => setShowChangePassword(true)}
+          onOpenShortcuts={() => setShowShortcuts(true)}
           onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
           onToggleTheme={toggleTheme}
-          onSwitchLanguage={() => setLanguage(language === "en" ? "zh" : "en")}
+          onSwitchLanguage={(lang) => setLanguage(lang)}
           theme={theme}
           language={language}
           t={t}
@@ -885,8 +1047,15 @@ export function App() {
         {/* Compact topbar (h-12, ~48px). Theme/language/avatar moved into the
             sidebar's user-row dropdown to match the design. Notifications
             stays inline as a single iconed button. Mobile keeps a hamburger
-            and the brand block since the sidebar is hidden. */}
-        <header className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 backdrop-blur-md px-3 sm:px-4">
+            and the brand block since the sidebar is hidden.
+
+            IMPORTANT: do NOT add `backdrop-blur-*` here. CSS spec: any
+            `backdrop-filter` value other than `none` makes the element a
+            containing block for fixed-positioned descendants AND establishes
+            a new stacking context. That traps our dropdown menus inside the
+            header, where they get covered by KPI cards / chart bars rendered
+            in the page below. Solid `bg-surface` is fine. */}
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-4">
           <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -948,48 +1117,22 @@ export function App() {
                   <div className="fixed inset-0 z-[90]" onClick={() => setUserMenuOpen(false)} />
                   {/* Use position:fixed so the menu is not clipped by the
                       ancestor `overflow-hidden` flex column. Anchor to the
-                      topbar bottom (h-12 = 48px) + a 6px gap, flush to the
-                      right padding (px-3 / px-4 mobile / desktop). */}
-                  <div className="fixed top-[54px] right-3 sm:right-4 z-[100] w-52 rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5">
-                    <button
-                      onClick={() => { setUserMenuOpen(false); toggleTheme(); }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-                      <span className="flex-1 text-left">{t("common.toggle_theme")}</span>
-                    </button>
-                    <button
-                      onClick={() => { setUserMenuOpen(false); setLanguage(language === "en" ? "zh" : "en"); }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      <Globe className="h-3.5 w-3.5" />
-                      <span className="flex-1 text-left">{t("common.change_language")}</span>
-                    </button>
-                    <div className="my-1 h-px bg-border-subtle" />
-                    <Link
-                      to="/settings"
-                      onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      <Settings className="h-3.5 w-3.5" />
-                      {t("nav.settings")}
-                    </Link>
-                    <button
-                      onClick={() => { setUserMenuOpen(false); setShowChangePassword(true); }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      <Lock className="h-3.5 w-3.5" />
-                      {t("settings.change_password")}
-                    </button>
-                    {authMode !== "none" && (
-                      <button
-                        onClick={async () => { await dashboardLogout(); window.location.reload(); }}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
-                      >
-                        <LogOut className="h-3.5 w-3.5" />
-                        {t("nav.logout")}
-                      </button>
-                    )}
+                      topbar bottom (h-12 = 48px) + a 6px gap. */}
+                  <div className="fixed top-[54px] right-3 sm:right-4 z-[100]">
+                    <UserMenuPanel
+                      username={username}
+                      authMode={authMode}
+                      hostname={hostname}
+                      theme={theme}
+                      language={language}
+                      onToggleTheme={toggleTheme}
+                      onSwitchLanguage={(lang) => setLanguage(lang)}
+                      onOpenChangePassword={() => setShowChangePassword(true)}
+                      onOpenShortcuts={() => setShowShortcuts(true)}
+                      onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+                      onClose={() => setUserMenuOpen(false)}
+                      t={t}
+                    />
                   </div>
                 </>
               )}
