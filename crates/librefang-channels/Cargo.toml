@@ -7,50 +7,53 @@ description = "Channel Bridge Layer — pluggable messaging integrations for Lib
 
 [features]
 default = [
+    # Commonly used channels — lightweight, no heavy/unmaintained deps
     "channel-telegram",
     "channel-discord",
     "channel-slack",
-    "channel-matrix",
-    "channel-email",
     "channel-webhook",
-    "channel-whatsapp",
     "channel-signal",
+    "channel-whatsapp",
     "channel-teams",
-    "channel-mattermost",
-    "channel-irc",
-    "channel-google-chat",
+    "channel-feishu",
+    "channel-dingtalk",
+    "channel-wecom",
     "channel-twitch",
     "channel-rocketchat",
     "channel-zulip",
-    "channel-xmpp",
-    "channel-bluesky",
-    "channel-feishu",
-    "channel-line",
-    "channel-mastodon",
-    "channel-messenger",
-    "channel-reddit",
     "channel-revolt",
-    "channel-viber",
-    "channel-voice",
-    "channel-flock",
-    "channel-guilded",
-    "channel-keybase",
-    "channel-nextcloud",
-    "channel-nostr",
     "channel-pumble",
     "channel-threema",
     "channel-twist",
     "channel-webex",
-    "channel-dingtalk",
-    "channel-discourse",
-    "channel-gitter",
-    "channel-gotify",
-    "channel-linkedin",
-    "channel-mumble",
     "channel-ntfy",
+    "channel-nextcloud",
+    "channel-nostr",
     "channel-qq",
     "channel-wechat",
-    "channel-wecom",
+    "channel-voice",
+    "channel-reddit",
+    "channel-xmpp",
+    # Heavy/unmaintained deps — opt-in only:
+    # "channel-email"        — imap 2.x + nom 5 + base64 0.13 (unmaintained; see #3861)
+    # "channel-google-chat"  — rsa crate, RUSTSEC-2023-0071 Marvin timing attack (see #3666)
+    # "channel-matrix"       — heavy dep tree
+    # "channel-mattermost"   — rarely used
+    # "channel-irc"          — rarely used
+    # "channel-bluesky"      — rarely used
+    # "channel-line"         — rarely used
+    # "channel-mastodon"     — rarely used
+    # "channel-messenger"    — rarely used
+    # "channel-flock"        — rarely used
+    # "channel-guilded"      — rarely used
+    # "channel-keybase"      — rarely used
+    # "channel-discourse"    — rarely used
+    # "channel-gitter"       — rarely used
+    # "channel-gotify"       — rarely used
+    # "channel-linkedin"     — rarely used
+    # "channel-mumble"       — rarely used
+    # "channel-viber"        — rarely used
+    # "channel-mqtt"         — rarely used
 ]
 
 all-channels = [

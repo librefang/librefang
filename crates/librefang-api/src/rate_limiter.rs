@@ -296,12 +296,8 @@ impl AuthLoginLimiter {
 /// `max_attempts` within the 15-minute window receive HTTP 429 with a
 /// `Retry-After` header.
 ///
-/// IP resolution order (first match wins):
-/// 1. `X-Forwarded-For` first hop (when the header is present — best-effort,
-///    not trusted-proxy-validated; same conservative stance as the GCRA layer).
-/// 2. `X-Real-IP` header.
-/// 3. TCP peer address from `ConnectInfo`.
-/// 4. `0.0.0.0` fallback (non-loopback, enters the limiter).
+/// IP resolution: TCP peer address (`ConnectInfo`) only; forwarded
+/// headers are deliberately not trusted (see `resolve_client_ip`).
 pub async fn auth_rate_limit_layer(
     axum::extract::State((limiter, max_attempts)): axum::extract::State<(
         Arc<AuthLoginLimiter>,
@@ -312,7 +308,11 @@ pub async fn auth_rate_limit_layer(
 ) -> Response<Body> {
     let path = request.uri().path();
 
-    // Only apply to auth endpoints that accept credentials.
+    // Endpoints that accept credentials, recovery codes, or TOTP codes —
+    // any of these is a brute-force surface and must be rate-limited
+    // alongside the password endpoints.  TOTP/recovery-code endpoints
+    // were missing in #3950, leaving 6-digit-code brute force unbounded
+    // for any session that already cleared the password gate.
     let is_auth_path = path == "/api/auth/dashboard-login"
         || path == "/api/v1/auth/dashboard-login"
         || path.starts_with("/api/auth/login")
@@ -320,7 +320,11 @@ pub async fn auth_rate_limit_layer(
         || path == "/api/auth/introspect"
         || path == "/api/v1/auth/introspect"
         || path == "/api/auth/refresh"
-        || path == "/api/v1/auth/refresh";
+        || path == "/api/v1/auth/refresh"
+        || (path.starts_with("/api/approvals/") && path.ends_with("/approve"))
+        || (path.starts_with("/api/v1/approvals/") && path.ends_with("/approve"))
+        || path == "/api/approvals/totp/confirm"
+        || path == "/api/v1/approvals/totp/confirm";
 
     if !is_auth_path {
         return next.run(request).await;
@@ -328,8 +332,13 @@ pub async fn auth_rate_limit_layer(
 
     let ip = resolve_client_ip(&request);
 
-    // Loopback is always exempt.
-    if ip.is_loopback() {
+    // Loopback is exempt only when there is no upstream proxy.  A loopback
+    // peer carrying any forwarding header indicates a reverse proxy on the
+    // same host fronting public clients; those requests must still meter
+    // (they share one bucket because the forwarded value is not trusted).
+    // Without this guard, a same-host reverse-proxy deployment loses every
+    // auth-attempt limit.
+    if ip.is_loopback() && !has_forwarding_header(request.headers()) {
         return next.run(request).await;
     }
 
@@ -356,35 +365,23 @@ pub async fn auth_rate_limit_layer(
     next.run(request).await
 }
 
-/// Resolve the best available client IP from a request.
+/// Resolve the client IP from the TCP `ConnectInfo` only.
 ///
-/// Checks `X-Forwarded-For` (first hop), then `X-Real-IP`, then `ConnectInfo`.
-/// Falls back to `0.0.0.0` (non-loopback) so missing extensions never
-/// silently disable the limiter.
+/// **Header trust removed.**  Trusting `X-Forwarded-For` / `X-Real-IP`
+/// without a verified upstream proxy lets any internet attacker rotate
+/// the apparent source per request and bypass the limiter entirely —
+/// the counter never advances past 1 for any unique (forged) IP.  The
+/// rest of this crate already follows the same conservative stance for
+/// the GCRA limiter and only consults `peer_addr` for rate-limiting
+/// keys; the auth limiter was the outlier.
+///
+/// Reverse-proxy deployments will see all auth attempts collapsed onto
+/// the proxy's IP, which is the correct fail-closed behaviour: a
+/// compromised proxy is a different threat model than a missing one.
+/// A future config flag (`auth_rate_limit_trust_forwarded`) can opt
+/// back in to header parsing once a `trusted_proxies` allowlist
+/// exists; until then, anything else is exploitable.
 fn resolve_client_ip(request: &Request<Body>) -> IpAddr {
-    // X-Forwarded-For: <client>, <proxy1>, <proxy2>
-    // The leftmost address is the original client.
-    if let Some(ip) = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
-
-    // X-Real-IP (nginx, caddy)
-    if let Some(ip) = request
-        .headers()
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    {
-        return ip;
-    }
-
-    // TCP peer address
     request
         .extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
@@ -884,6 +881,148 @@ mod tests {
                 resp.status(),
                 StatusCode::OK,
                 "non-auth request #{i} must not be rate-limited"
+            );
+        }
+    }
+
+    /// Spoofing `X-Forwarded-For` per request must NOT bypass the limit.
+    /// The limiter keys on `peer_addr` only; rotating the header value
+    /// each request keeps `peer_addr` constant, so the bucket fills.
+    /// This is exactly the bypass pattern flagged in the post-merge
+    /// audit of #3950 — without this regression test it can return.
+    #[tokio::test]
+    async fn auth_rate_limit_xff_spoof_does_not_bypass() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 2;
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (limiter, max_attempts),
+                auth_rate_limit_layer,
+            ));
+
+        let attacker_peer: IpAddr = "203.0.113.99".parse().unwrap();
+        let mut saw_429 = false;
+        for i in 0..10 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .body(Body::empty())
+                .unwrap();
+            // Rotate X-Forwarded-For to a fresh fake IP each request —
+            // the spoof an internet attacker would actually use.
+            req.headers_mut()
+                .insert("x-forwarded-for", format!("1.2.3.{i}").parse().unwrap());
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    attacker_peer,
+                    55003,
+                ))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "rotating X-Forwarded-For per request must not bypass the per-IP limit"
+        );
+    }
+
+    /// A loopback peer carrying any forwarding header is a same-host
+    /// reverse-proxy fronting public clients — must NOT be exempt.
+    #[tokio::test]
+    async fn auth_rate_limit_loopback_with_xff_not_exempt() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let limiter = Arc::new(AuthLoginLimiter::new());
+        let max_attempts: u32 = 1;
+        let app = Router::new()
+            .route("/api/auth/dashboard-login", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                (limiter, max_attempts),
+                auth_rate_limit_layer,
+            ));
+
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let mut saw_429 = false;
+        for _ in 0..10 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/auth/dashboard-login")
+                .body(Body::empty())
+                .unwrap();
+            req.headers_mut()
+                .insert("x-forwarded-for", "203.0.113.42".parse().unwrap());
+            req.extensions_mut()
+                .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                    loopback, 55004,
+                ))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "loopback peer with a forwarding header must still be rate-limited"
+        );
+    }
+
+    /// TOTP confirm and approval endpoints accept 6-digit / recovery
+    /// codes; they must be in the rate-limited path set so an attacker
+    /// who already cleared the password gate cannot brute-force codes.
+    #[tokio::test]
+    async fn auth_rate_limit_covers_totp_and_approval_endpoints() {
+        use axum::routing::post;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let public_ip: IpAddr = "203.0.113.55".parse().unwrap();
+
+        for path in &[
+            "/api/approvals/some-id/approve",
+            "/api/v1/approvals/some-id/approve",
+            "/api/approvals/totp/confirm",
+            "/api/v1/approvals/totp/confirm",
+        ] {
+            let limiter = Arc::new(AuthLoginLimiter::new());
+            let max_attempts: u32 = 1;
+            let app = Router::new()
+                .route(path, post(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    (limiter, max_attempts),
+                    auth_rate_limit_layer,
+                ));
+
+            let mut saw_429 = false;
+            for _ in 0..5 {
+                let mut req = Request::builder()
+                    .method("POST")
+                    .uri(*path)
+                    .body(Body::empty())
+                    .unwrap();
+                req.extensions_mut()
+                    .insert(axum::extract::ConnectInfo(SocketAddr::from((
+                        public_ip, 55005,
+                    ))));
+                let resp = app.clone().oneshot(req).await.unwrap();
+                if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                    saw_429 = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_429,
+                "endpoint {path} must be rate-limited but was not"
             );
         }
     }

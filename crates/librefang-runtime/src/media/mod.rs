@@ -172,10 +172,15 @@ impl MediaDriverCache {
     /// caller passes `base_url: None` to [`get_or_create`], the cache
     /// checks `provider_urls` before falling back to the driver's hardcoded
     /// default.
-    pub fn new_with_urls(provider_urls: HashMap<String, String>) -> Self {
+    ///
+    /// Accepts any map type that can be iterated as `(String, String)` pairs,
+    /// including both `HashMap` and `BTreeMap`.
+    pub fn new_with_urls(
+        provider_urls: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
         Self {
             cache: DashMap::new(),
-            provider_urls: RwLock::new(provider_urls),
+            provider_urls: RwLock::new(provider_urls.into_iter().collect()),
             media_providers: RwLock::new(vec![
                 "openai".into(),
                 "gemini".into(),
@@ -274,9 +279,15 @@ impl MediaDriverCache {
 
     /// Update the provider URL overrides and clear the driver cache so that
     /// drivers are recreated with the new URLs on next access.
-    pub fn update_provider_urls(&self, urls: HashMap<String, String>) {
+    ///
+    /// Accepts any map type that can be iterated as `(String, String)` pairs,
+    /// including both `HashMap` and `BTreeMap`.
+    pub fn update_provider_urls(
+        &self,
+        urls: impl IntoIterator<Item = (String, String)>,
+    ) {
         if let Ok(mut map) = self.provider_urls.write() {
-            *map = urls;
+            *map = urls.into_iter().collect();
         }
         self.cache.clear();
     }
