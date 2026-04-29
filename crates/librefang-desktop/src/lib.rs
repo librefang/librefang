@@ -21,6 +21,7 @@ mod updater;
 use librefang_extensions::dotenv;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
@@ -28,6 +29,53 @@ use tauri::Manager;
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
+
+/// Reject http:// for non-loopback hosts (IPC-enabled webview MITM-RCE, #3673).
+pub fn validate_server_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let (scheme_is_http, rest) = if let Some(r) = lower.strip_prefix("http://") {
+        (true, r)
+    } else if let Some(r) = lower.strip_prefix("https://") {
+        (false, r)
+    } else {
+        return Err(format!(
+            "Server URL must start with http:// or https://, got: {url}"
+        ));
+    };
+
+    if !scheme_is_http {
+        return Ok(());
+    }
+
+    // strip path/query, then peel optional :port (IPv6 literal needs []).
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        match stripped.split_once(']') {
+            Some((h, _)) => h,
+            None => return Err(format!("Malformed IPv6 host in URL: {url}")),
+        }
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    };
+
+    if host.is_empty() {
+        return Err(format!("Missing host in URL: {url}"));
+    }
+
+    if host == "localhost" {
+        return Ok(());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "Refusing to load plaintext http:// from non-loopback host {host}: \
+         use https:// to prevent MITM-injected IPC abuse (issue #3673). URL: {url}"
+    ))
+}
 
 /// Managed state: the port the embedded server listens on.
 /// Wrapped in `RwLock<Option<_>>` — `None` when running in remote mode or before local boot.
@@ -183,8 +231,8 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let (initial_url, server_handle, is_remote) = match &mode {
         StartupMode::Remote(url) => {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                eprintln!("Server URL must use http:// or https://, got: {url}");
+            if let Err(e) = validate_server_url(url) {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
             info!("Remote mode: connecting to {url}");
@@ -206,8 +254,8 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     let (initial_url, is_remote) = match &mode {
         StartupMode::Remote(url) => {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                eprintln!("Server URL must use http:// or https://, got: {url}");
+            if let Err(e) = validate_server_url(url) {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
             info!("Remote mode: connecting to {url}");
@@ -464,4 +512,57 @@ pub fn run(server_url: Option<String>, force_local: bool) {
     info!("Tauri app closed, shutting down...");
     // The ServerHandle's Drop impl will signal shutdown automatically when
     // Tauri's managed state is dropped.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_server_url;
+
+    #[test]
+    fn https_remote_host_accepted() {
+        assert!(validate_server_url("https://example.com").is_ok());
+        assert!(validate_server_url("https://example.com:8443/path").is_ok());
+        assert!(validate_server_url("https://192.0.2.10").is_ok());
+    }
+
+    #[test]
+    fn http_loopback_accepted() {
+        assert!(validate_server_url("http://127.0.0.1:4545").is_ok());
+        assert!(validate_server_url("http://localhost").is_ok());
+        assert!(validate_server_url("http://localhost:4545/dashboard").is_ok());
+        assert!(validate_server_url("http://[::1]:4545").is_ok());
+        assert!(validate_server_url("http://127.0.0.1").is_ok());
+        // Anywhere in 127.0.0.0/8 is loopback per IpAddr::is_loopback.
+        assert!(validate_server_url("http://127.5.6.7:4545").is_ok());
+    }
+
+    #[test]
+    fn http_remote_host_rejected() {
+        assert!(validate_server_url("http://example.com").is_err());
+        assert!(validate_server_url("http://192.168.1.10:4545").is_err());
+        assert!(validate_server_url("http://10.0.0.1:4545/dashboard").is_err());
+        assert!(validate_server_url("http://[2001:db8::1]:4545").is_err());
+    }
+
+    #[test]
+    fn case_insensitive_scheme() {
+        assert!(validate_server_url("HTTP://example.com").is_err());
+        assert!(validate_server_url("Http://127.0.0.1:4545").is_ok());
+        assert!(validate_server_url("HTTPS://example.com").is_ok());
+    }
+
+    #[test]
+    fn unknown_scheme_rejected() {
+        assert!(validate_server_url("ftp://example.com").is_err());
+        assert!(validate_server_url("javascript:alert(1)").is_err());
+        assert!(validate_server_url("file:///etc/passwd").is_err());
+        assert!(validate_server_url("").is_err());
+        assert!(validate_server_url("example.com").is_err());
+    }
+
+    #[test]
+    fn malformed_url_rejected() {
+        assert!(validate_server_url("http://").is_err());
+        assert!(validate_server_url("http://[::1").is_err());
+    }
 }
