@@ -626,6 +626,13 @@ pub struct LibreFangKernel {
     /// cooldowns catch up. Semaphore starts at
     /// [`Self::MAX_INFLIGHT_SKILL_REVIEWS`] permits.
     skill_review_concurrency: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Per-agent fire-and-forget background tasks (skill reviews, owner
+    /// notifications, …) that hold semaphore permits or spend tokens on
+    /// behalf of a specific agent. `kill_agent` drains and aborts these so
+    /// permits release immediately and a deleted agent stops accruing cost
+    /// from in-flight retry loops (#3705).
+    pub(crate) agent_watchers:
+        dashmap::DashMap<AgentId, std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>>,
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
@@ -3159,6 +3166,7 @@ impl LibreFangKernel {
             skill_review_concurrency: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 Self::MAX_INFLIGHT_SKILL_REVIEWS,
             )),
+            agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
@@ -3566,6 +3574,25 @@ impl LibreFangKernel {
                                 break;
                             }
                         }
+                    }
+                    // Reconciliation (#3665): if the persisted state is
+                    // `Running` but no in-memory process actually exists
+                    // (the registry was wiped by `shutdown()` or a crash),
+                    // a previous shutdown failed to persist `Suspended`.
+                    // Emit a warning so unclean shutdowns are visible in
+                    // logs rather than silently re-spawning into a state
+                    // that looks identical to a clean boot.
+                    if matches!(
+                        restored_entry.state,
+                        AgentState::Running | AgentState::Crashed
+                    ) {
+                        warn!(
+                            agent = %name,
+                            id = %agent_id,
+                            prev_state = ?restored_entry.state,
+                            "Agent restored from non-clean state — last shutdown likely \
+                             crashed before persisting Suspended. Reconciling state on boot."
+                        );
                     }
                     if is_enabled {
                         restored_entry.state = AgentState::Running;
@@ -5187,7 +5214,7 @@ system_prompt = "You are a helpful assistant."
                     let review_agent_id = agent_id;
                     let audit_log_success = audit_log.clone();
                     let agent_id_for_success = agent_id_str.clone();
-                    tokio::spawn(async move {
+                    let review_handle = tokio::spawn(async move {
                         // Move the permit into the task so it's released
                         // on task exit. Binding it to `_permit` keeps
                         // clippy happy (dropped at end of scope).
@@ -5266,6 +5293,9 @@ system_prompt = "You are a helpful assistant."
                             );
                         }
                     });
+                    // Track the review task so kill_agent can abort it and
+                    // release its semaphore permit promptly (#3705).
+                    self.register_agent_watcher(agent_id, review_handle);
                 }
 
                 Ok(result)
@@ -6800,6 +6830,9 @@ system_prompt = "You are a helpful assistant."
             Some(w) => w.clone(),
             None => return,
         };
+        // Note: this is kernel-scoped (not agent-scoped) — sending owner
+        // notifications via channel adapters touches `kernel.send_channel_message`
+        // which has its own lifecycle. No per-agent tracking needed here.
         tokio::spawn(async move {
             let kernel = match weak.upgrade() {
                 Some(k) => k,
@@ -9753,6 +9786,36 @@ system_prompt = "You are a helpful assistant."
         ))
     }
 
+    /// Track a per-agent fire-and-forget background task so `kill_agent`
+    /// can abort it and free its semaphore permit. Drops finished entries
+    /// opportunistically to keep the vec bounded (#3705).
+    pub(crate) fn register_agent_watcher(
+        &self,
+        agent_id: AgentId,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        let slot = self
+            .agent_watchers
+            .entry(agent_id)
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone();
+        if let Ok(mut guard) = slot.lock() {
+            guard.retain(|h| !h.is_finished());
+            guard.push(handle);
+        }
+    }
+
+    /// Abort and drop every tracked watcher task for `agent_id`.
+    fn abort_agent_watchers(&self, agent_id: AgentId) {
+        if let Some((_, slot)) = self.agent_watchers.remove(&agent_id) {
+            if let Ok(mut guard) = slot.lock() {
+                for h in guard.drain(..) {
+                    h.abort();
+                }
+            }
+        }
+    }
+
     /// Kill an agent.
     pub fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         let entry = self
@@ -9760,6 +9823,10 @@ system_prompt = "You are a helpful assistant."
             .remove(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.background.stop_agent(agent_id);
+        // Abort any per-agent fire-and-forget tasks (skill reviews, …) so
+        // they release semaphore permits and stop spending tokens on
+        // behalf of a now-deleted agent (#3705).
+        self.abort_agent_watchers(agent_id);
         self.scheduler.unregister(agent_id);
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
@@ -13219,17 +13286,38 @@ system_prompt = "You are a helpful assistant."
 
         self.supervisor.shutdown();
 
-        // Update agent states to Suspended in persistent storage (not delete)
+        // Update agent states to Suspended in persistent storage (not delete).
+        // Track failures so we can emit a single critical summary if any
+        // agent could not be persisted — without this, a partial-shutdown
+        // would leave on-disk state at the old `Running` value with only a
+        // per-agent error in the log, easy to miss (#3665).
+        let mut total = 0usize;
+        let mut state_failures = 0usize;
+        let mut save_failures = 0usize;
         for entry in self.registry.list() {
+            total += 1;
             if let Err(e) = self.registry.set_state(entry.id, AgentState::Suspended) {
+                state_failures += 1;
                 tracing::error!(agent_id = %entry.id, "failed to set agent state to Suspended on shutdown: {e}");
             }
             // Re-save with Suspended state for clean resume on next boot
             if let Some(updated) = self.registry.get(entry.id) {
                 if let Err(e) = self.memory.save_agent(&updated) {
+                    save_failures += 1;
                     tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
                 }
             }
+        }
+
+        if state_failures > 0 || save_failures > 0 {
+            tracing::error!(
+                total_agents = total,
+                state_failures,
+                save_failures,
+                "Kernel shutdown completed with persistence errors — some agents \
+                 may resume in stale state on next boot. Inspect data/agents.* \
+                 before restarting."
+            );
         }
 
         info!(
