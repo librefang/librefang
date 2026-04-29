@@ -4786,9 +4786,8 @@ prompt_template = "do {{x}}"
         let wf_id = engine.register(test_workflow()).await;
         let run_id = engine.create_run(wf_id, "x".to_string()).await.unwrap();
         let token = engine.pause_run(run_id, "atomic-take").await.unwrap();
-        let sender = |_id: AgentId, msg: String| async move {
-            Ok((format!("R:{msg}"), 1_u64, 1_u64))
-        };
+        let sender =
+            |_id: AgentId, msg: String| async move { Ok((format!("R:{msg}"), 1_u64, 1_u64)) };
         engine
             .execute_run(run_id, mock_resolver, sender)
             .await
@@ -4821,20 +4820,15 @@ prompt_template = "do {{x}}"
 
         let mut run_ids = Vec::with_capacity(32);
         for _ in 0..32 {
-            run_ids.push(
-                engine
-                    .create_run(wf_id, "data".to_string())
-                    .await
-                    .unwrap(),
-            );
+            run_ids.push(engine.create_run(wf_id, "data".to_string()).await.unwrap());
         }
 
         let mut handles = Vec::with_capacity(run_ids.len());
         for rid in run_ids.iter().copied() {
             let e = engine.clone();
-            handles.push(tokio::spawn(async move {
-                e.pause_run(rid, "concurrent").await
-            }));
+            handles.push(tokio::spawn(
+                async move { e.pause_run(rid, "concurrent").await },
+            ));
         }
         for h in handles {
             h.await.unwrap().expect("pause_run must succeed");
