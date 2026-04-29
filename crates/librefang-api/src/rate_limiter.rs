@@ -996,12 +996,12 @@ mod tests {
         ] {
             let limiter = Arc::new(AuthLoginLimiter::new());
             let max_attempts: u32 = 1;
-            let app = Router::new()
-                .route(path, post(|| async { "ok" }))
-                .layer(axum::middleware::from_fn_with_state(
+            let app = Router::new().route(path, post(|| async { "ok" })).layer(
+                axum::middleware::from_fn_with_state(
                     (limiter, max_attempts),
                     auth_rate_limit_layer,
-                ));
+                ),
+            );
 
             let mut saw_429 = false;
             for _ in 0..5 {
@@ -1020,10 +1020,7 @@ mod tests {
                     break;
                 }
             }
-            assert!(
-                saw_429,
-                "endpoint {path} must be rate-limited but was not"
-            );
+            assert!(saw_429, "endpoint {path} must be rate-limited but was not");
         }
     }
 }

@@ -181,6 +181,36 @@ fn clamp_max_history(requested: usize, agent: &str) -> usize {
     }
 }
 
+/// Run session repair on `session.messages` before persisting on failure paths.
+///
+/// When the agent loop exits via circuit breaker, max iterations, or timeout,
+/// the session history may contain orphaned `ToolUse` blocks with no matching
+/// `ToolResult`.  Providers that enforce strict pairing (Moonshot, OpenAI)
+/// then return 400 on next load, making the session permanently broken.
+///
+/// This helper replaces `session.messages` with the repaired copy so the
+/// persisted history is always well-formed.
+fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &str) {
+    let (repaired, stats) =
+        crate::session_repair::validate_and_repair_with_stats(&session.messages);
+    if stats != crate::session_repair::RepairStats::default() {
+        tracing::warn!(
+            agent_id,
+            reason,
+            orphaned_results_removed = stats.orphaned_results_removed,
+            empty_messages_removed = stats.empty_messages_removed,
+            messages_merged = stats.messages_merged,
+            results_reordered = stats.results_reordered,
+            synthetic_results_inserted = stats.synthetic_results_inserted,
+            duplicates_removed = stats.duplicates_removed,
+            misplaced_results_rescued = stats.misplaced_results_rescued,
+            positional_synthetic_inserted = stats.positional_synthetic_inserted,
+            "Session repair applied before save"
+        );
+    }
+    session.messages = repaired;
+}
+
 /// Maximum consecutive iterations where every executed tool failed before
 /// the loop exits with `RepeatedToolFailures`. Catches expensive wheel-spinning
 /// when the LLM cannot fix a tool call (bad auth, permanent 404, etc.).
@@ -798,6 +828,7 @@ async fn execute_single_tool_call(
             } else {
                 warn!(tool = %tool_call.name, "Circuit breaker triggered");
             }
+            repair_session_before_save(ctx.session, ctx.agent_id_str, "circuit_breaker");
             if !ctx.opts.is_fork {
                 if let Err(e) = ctx.memory.save_session_async(ctx.session).await {
                     warn!("Failed to save session on circuit break: {e}");
@@ -3859,6 +3890,7 @@ pub async fn run_agent_loop(
     // Save session before failing so conversation history is preserved.
     // Fork turns skip — they're ephemeral and must not pollute canonical
     // session history even when the loop bailed out.
+    repair_session_before_save(session, agent_id_str.as_str(), "max_iterations");
     if !opts.is_fork {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");
@@ -4740,6 +4772,7 @@ pub async fn run_agent_loop_streaming(
                          Any partial output was already sent to the user.]"
                     );
                     session.messages.push(Message::assistant(note));
+                    repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
                     if !opts.is_fork {
                         if let Err(save_err) = memory.save_session_async(session).await {
                             warn!(
@@ -5285,6 +5318,7 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
+    repair_session_before_save(session, agent_id_str.as_str(), "streaming_max_iterations");
     if !opts.is_fork {
         if let Err(e) = memory.save_session_async(session).await {
             warn!("Failed to save session on max iterations: {e}");

@@ -792,12 +792,37 @@ fn save_sessions(
     let path = sessions_path(home_dir);
     match serde_json::to_string(sessions) {
         Ok(content) => {
-            if let Err(e) = std::fs::write(&path, content) {
+            // Atomic save with mode(0o600) at create-time to close the
+            // TOCTOU window left by #3939: std::fs::write opened the
+            // file at default perms (0644 minus umask) and only
+            // tightened to 0600 by a separate `restrict_permissions`
+            // syscall.  A parallel reader on the same host could grab
+            // the bearer tokens during the gap.  open(mode 0600 +
+            // truncate) + write_all + flush + sync_all + rename keeps
+            // the file at owner-only mode for its entire lifetime.
+            let tmp_path = path.with_extension(format!(
+                "json.tmp.{}",
+                std::process::id()
+            ));
+            let result = (|| -> std::io::Result<()> {
+                use std::io::Write as _;
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                let mut f = opts.open(&tmp_path)?;
+                f.write_all(content.as_bytes())?;
+                f.flush()?;
+                f.sync_all()?;
+                drop(f);
+                std::fs::rename(&tmp_path, &path)
+            })();
+            if let Err(e) = result {
+                let _ = std::fs::remove_file(&tmp_path);
                 tracing::warn!("Failed to persist sessions: {e}");
-            } else {
-                // Restrict to owner-read/write only so bearer tokens are not
-                // world-readable on multi-user systems.
-                restrict_permissions(&path);
             }
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),

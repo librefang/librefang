@@ -1119,9 +1119,30 @@ impl McpConnection {
                 let mut lines_read: u32 = 0;
                 const MAX_LINE_BYTES: usize = 256;
                 const MAX_LINES: u32 = 100;
-                while lines_read < MAX_LINES {
+                loop {
                     match reader.next_line().await {
                         Ok(Some(line)) => {
+                            // Past the log cap we KEEP READING but stop
+                            // logging.  CRITICAL: we must continue to
+                            // drain the pipe — if the loop exits on
+                            // line 101, the kernel stderr pipe buffer
+                            // (64 KiB on Linux) fills and the child's
+                            // next `write(stderr)` blocks forever,
+                            // hanging the MCP server.  #3926 introduced
+                            // a `break` here that reintroduced exactly
+                            // the pipe-stall failure mode the PR title
+                            // claimed to fix.
+                            if lines_read >= MAX_LINES {
+                                if lines_read == MAX_LINES {
+                                    debug!(
+                                        server = %server_name_for_log,
+                                        "MCP stdio stderr drain reached {MAX_LINES}-line log cap; \
+                                         continuing to discard further output to keep the pipe drained"
+                                    );
+                                }
+                                lines_read = lines_read.saturating_add(1);
+                                continue;
+                            }
                             let truncated = if line.len() > MAX_LINE_BYTES {
                                 // Find the last valid UTF-8 character boundary at
                                 // or before MAX_LINE_BYTES so we don't panic on
@@ -1142,15 +1163,9 @@ impl McpConnection {
                             );
                             lines_read += 1;
                         }
-                        Ok(None) => break, // EOF
-                        Err(_) => break,   // pipe closed or read error
+                        Ok(None) => break, // EOF — child closed stderr.
+                        Err(_) => break,   // read error — pipe is unusable.
                     }
-                }
-                if lines_read >= MAX_LINES {
-                    debug!(
-                        server = %server_name_for_log,
-                        "MCP stdio stderr drain reached {MAX_LINES}-line cap; suppressing further output"
-                    );
                 }
             });
         }

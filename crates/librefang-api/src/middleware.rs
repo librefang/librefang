@@ -2114,12 +2114,7 @@ mod tests {
         ] {
             let resp = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(*path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(

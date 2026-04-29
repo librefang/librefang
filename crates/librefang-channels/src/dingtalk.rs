@@ -943,11 +943,13 @@ mod tests {
     fn test_dingtalk_verify_signature_rejects_wrong_timestamp() {
         let secret = "test-secret";
         let ts: i64 = 1700000000000;
-        let good_sig = DingTalkAdapter::compute_signature(secret, ts);
+        let body: &[u8] = b"{\"msgtype\":\"text\"}";
+        let good_sig = DingTalkAdapter::compute_signature(secret, ts, body);
         // Different timestamp → signature mismatch
         assert!(!DingTalkAdapter::verify_signature(
             secret,
             ts + 1,
+            body,
             &good_sig
         ));
     }

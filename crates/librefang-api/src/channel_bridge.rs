@@ -1486,7 +1486,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             }
                         }
                         Some(code) => {
-                            // TOTP code
+                            // TOTP code — replay check first (#3952): if a
+                            // captured/screen-shared code was already used
+                            // within the 60s acceptance window, refuse it
+                            // even if the time-window math still validates.
+                            // The HTTP approval path checks this in
+                            // approve_request; the channel-bridge path was
+                            // missed in #3952 and remained vulnerable to
+                            // replay over Telegram / Slack / WhatsApp etc.
+                            if self.kernel.approvals().is_totp_code_used(code) {
+                                return "TOTP code already used. Wait for a new code.".into();
+                            }
                             let secret = match self.kernel.vault_get("totp_secret") {
                                 Some(s) => s,
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
@@ -1497,7 +1507,14 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 code,
                                 &totp_issuer,
                             ) {
-                                Ok(true) => true,
+                                Ok(true) => {
+                                    // Record consumption only after a true
+                                    // verify so a wrong code can still be
+                                    // tried again with the same digits at
+                                    // the next time-step.
+                                    self.kernel.approvals().record_totp_code_used(code);
+                                    true
+                                }
                                 Ok(false) => {
                                     // Fail-secure parity with the HTTP path:
                                     // a wedged audit DB must not silently

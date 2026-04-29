@@ -764,16 +764,25 @@ async fn handle_code_exchange(
         }
     };
 
-    // Try to validate the ID token if present.
+    // Validate the ID token if the provider supplies one.  Three rules,
+    // all hard rejects:
+    //   1. Provider sent an id_token AND we have a jwks_uri to verify it
+    //      against → JWT validation MUST succeed.  A malformed / forged /
+    //      expired id_token is a strong signal of replay or token swap;
+    //      falling through to userinfo (which carries no nonce) lets
+    //      the attack succeed.  This was the path #3944 left open.
+    //   2. id_token validates → nonce claim MUST be present and equal
+    //      to the nonce we signed into `state`.
+    //   3. id_token validates with mismatched nonce → reject.
+    //
+    // The "no id_token at all" path (some OAuth2 providers genuinely
+    // don't emit one for non-OIDC flows) still falls through to
+    // userinfo by design; that path was always nonce-less.
     let claims = if let Some(ref id_token) = token_resp.id_token {
         if !id_token.is_empty() && !provider.jwks_uri.is_empty() {
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
                 Ok(c) => {
                     // Verify nonce claim against the nonce we sent in the auth request.
-                    // Two failure cases must both be rejected:
-                    //   1. Nonce claim present but doesn't match (replay / token swap).
-                    //   2. Nonce claim absent even though we sent a nonce (provider
-                    //      non-compliance that could be used to bypass nonce binding).
                     match c.nonce {
                         Some(ref token_nonce) if token_nonce != &state_payload.nonce => {
                             warn!("Nonce mismatch in ID token");
@@ -802,11 +811,36 @@ async fn handle_code_exchange(
                     Some(c)
                 }
                 Err(e) => {
-                    debug!(error = %e, "ID token validation failed, falling back to userinfo");
-                    None
+                    // The provider sent an id_token AND we had keys to
+                    // verify it — verification must succeed or the
+                    // request is rejected.  Returning the error message
+                    // as-is is fine: it's our own validation diagnostic
+                    // (kid mismatch, expired, sig fail), not provider
+                    // body.
+                    warn!(error = %e, "ID token validation failed — rejecting OAuth callback");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "ID token signature or expiry validation failed"
+                        })),
+                    )
+                        .into_response();
                 }
             }
         } else {
+            // Provider sent a non-empty id_token but no jwks_uri configured
+            // for this provider, OR the id_token field came back empty.
+            // The empty-token case is benign (no token to verify); the
+            // missing-jwks-uri case means this provider was added to the
+            // config without OIDC keys, which only makes sense for pure
+            // OAuth2 — accept and rely on userinfo.
+            if !id_token.is_empty() {
+                warn!(
+                    "Provider supplied id_token but jwks_uri is unset; \
+                     skipping JWT validation and falling back to userinfo. \
+                     Configure jwks_uri to enforce OIDC nonce binding."
+                );
+            }
             None
         }
     } else {

@@ -195,6 +195,7 @@ mod tests {
             mode: SanitizeMode::Warn,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 
@@ -203,6 +204,7 @@ mod tests {
             mode: SanitizeMode::Block,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 
@@ -211,6 +213,7 @@ mod tests {
             mode: SanitizeMode::Off,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 
