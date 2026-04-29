@@ -278,9 +278,7 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
         if args.dry_run {
             println!("  [dry-run] Would publish {}@{}", pkg_name, args.version);
         } else {
-            // --ignore-scripts blocks lifecycle hooks (prepublishOnly,
-            // prepack, postpublish) from running during publish, so a
-            // future malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
+            // --ignore-scripts blocks lifecycle hooks so a malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
             let mut cmd = Command::new("npm");
             cmd.args([
                 "publish",

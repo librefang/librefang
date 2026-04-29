@@ -46,10 +46,7 @@ fn publish_js(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Erro
 
     println!("Publishing JavaScript SDK...");
 
-    // --ignore-scripts: block lifecycle hooks (prepublishOnly, prepack,
-    // postpublish) during publish so a future malicious dep cannot
-    // exfiltrate NODE_AUTH_TOKEN. Matches publish_npm_binaries.rs and
-    // the inline `npm publish` calls in release.yml.
+    // --ignore-scripts blocks lifecycle hooks so a malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
     let mut args = vec!["publish", "--access", "public", "--ignore-scripts"];
     if dry_run {
         args.push("--dry-run");
