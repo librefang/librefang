@@ -2072,6 +2072,98 @@ mod tests {
         );
     }
 
+    // ---- Bug #3680: GET /api/logs/stream must require auth even when
+    // ---- require_auth_for_reads = false -------------------------------
+    //
+    // Before #3939 the SSE endpoint was unconditionally appended to
+    // `dashboard_read_public` (`|| path == "/api/logs/stream"`) so any
+    // operator who explicitly set `require_auth_for_reads = false` (the
+    // documented escape hatch for an external auth proxy) lost auth on
+    // the log stream. The stream emits real-time tracing fields that can
+    // contain prompts, OAuth callback codes, MCP stderr, and bearer
+    // prefixes — a continuous credential leak. The fix removed the
+    // path from every public allowlist; this test locks that contract
+    // so a future refactor cannot silently re-introduce it.
+
+    /// GET /api/logs/stream must return 401 when `require_auth_for_reads`
+    /// is OFF — the SSE log stream is sensitive enough that the
+    /// "loosen reads" escape hatch must NOT apply to it.
+    #[tokio::test]
+    async fn logs_stream_requires_auth_even_when_reads_are_loosened() {
+        // Reproduce the deployment posture that exposed the bug:
+        // an api_key is configured, but the operator has opted out of
+        // auth-gating dashboard reads (e.g. fronting with an external
+        // auth proxy). /api/logs/stream MUST still require auth.
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/logs/stream", get(|| async { "sse stream" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        // Simulate a remote (non-loopback) caller so the loopback
+        // short-circuit cannot mask the bug.
+        let addr: std::net::SocketAddr = "203.0.113.5:53000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/api/logs/stream")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /api/logs/stream must require auth — SSE leaks tracing \
+             fields with prompts, OAuth codes, and bearer prefixes"
+        );
+    }
+
+    /// Sanity check: /api/logs/stream with a valid bearer DOES go through.
+    /// Without this counter-test the regression test above could pass by
+    /// accident (e.g. if the route were globally blocked).
+    #[tokio::test]
+    async fn logs_stream_allows_authenticated_caller() {
+        let auth_state = AuthState {
+            api_key_lock: Arc::new(tokio::sync::RwLock::new("secret".to_string())),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            dashboard_auth_enabled: false,
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            require_auth_for_reads: false,
+            allow_no_auth: false,
+            audit_log: None,
+        };
+
+        let app = Router::new()
+            .route("/api/logs/stream", get(|| async { "sse stream" }))
+            .layer(axum::middleware::from_fn_with_state(auth_state, auth));
+
+        let addr: std::net::SocketAddr = "203.0.113.5:53000".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/api/logs/stream")
+            .header("authorization", "Bearer secret")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid bearer token must allow access to /api/logs/stream"
+        );
+    }
+
     /// Regression: #3367 — GET /api/approvals/session/{id} used to be
     /// publicly readable via the `/api/approvals/` prefix in
     /// `dashboard_read_prefix`. That endpoint returns pending approval
