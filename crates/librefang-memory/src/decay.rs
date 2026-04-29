@@ -393,7 +393,7 @@ mod tests {
 
         let now_unix = Utc::now().timestamp();
         let old_unix = now_unix - 60 * 86_400; // 60 days ago
-        let recent_unix = now_unix - 1 * 86_400; // 1 day ago
+        let recent_unix = now_unix - 86_400; // 1 day ago
 
         // One old soft-deleted row, one recent soft-deleted row, one alive row.
         conn.execute(

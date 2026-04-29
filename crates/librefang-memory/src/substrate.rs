@@ -1624,7 +1624,7 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let now_unix = chrono::Utc::now().timestamp();
         let old_unix = now_unix - 30 * 86_400; // 30 days ago
-        let recent_unix = now_unix - 1 * 86_400; // 1 day ago
+        let recent_unix = now_unix - 86_400; // 1 day ago
 
         // Insert directly to control finished_at precisely.
         {
