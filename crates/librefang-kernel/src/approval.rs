@@ -180,6 +180,9 @@ impl ApprovalManager {
     }
 
     /// Persist a new pending approval to the database so it survives restarts.
+    ///
+    /// Also writes a `pending` audit row so submission is observable even when
+    /// the daemon dies before resolution (#3611).
     fn db_insert_pending(&self, req: &ApprovalRequest) {
         let Some(db) = &self.audit_db else { return };
         let Ok(conn) = db.lock() else { return };
@@ -198,6 +201,45 @@ impl ApprovalManager {
             ],
         ) {
             warn!(request_id = %req.id, error = %e, "Failed to persist pending approval to database");
+        }
+        // Audit row at submission so a crash mid-flight still shows the request.
+        let entry = ApprovalAuditEntry {
+            id: Uuid::new_v4().to_string(),
+            request_id: req.id.to_string(),
+            agent_id: req.agent_id.clone(),
+            tool_name: req.tool_name.clone(),
+            description: req.description.clone(),
+            action_summary: req.action_summary.clone(),
+            risk_level: serde_json::to_string(&req.risk_level)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string(),
+            decision: "pending".to_string(),
+            decided_by: None,
+            decided_at: req.requested_at.to_rfc3339(),
+            requested_at: req.requested_at.to_rfc3339(),
+            feedback: None,
+            second_factor_used: false,
+        };
+        if let Err(e) = conn.execute(
+            "INSERT OR IGNORE INTO approval_audit (id, request_id, agent_id, tool_name, description, action_summary, risk_level, decision, decided_by, decided_at, requested_at, feedback, second_factor_used) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                entry.id,
+                entry.request_id,
+                entry.agent_id,
+                entry.tool_name,
+                entry.description,
+                entry.action_summary,
+                entry.risk_level,
+                entry.decision,
+                entry.decided_by,
+                entry.decided_at,
+                entry.requested_at,
+                entry.feedback,
+                entry.second_factor_used,
+            ],
+        ) {
+            warn!(request_id = %req.id, error = %e, "Failed to write pending audit entry");
         }
     }
 
@@ -866,6 +908,41 @@ impl ApprovalManager {
 
         conn.query_row(&sql, param_refs.as_slice(), |row| row.get::<_, i64>(0))
             .unwrap_or(0) as usize
+    }
+
+    /// Hard-delete `approval_audit` rows whose `decided_at` is older than
+    /// `older_than_days` days. Independent of the `audit_entries` Merkle
+    /// trail (which has its own retention path) — the approval log is a
+    /// flat audit table and would otherwise grow forever (#3468).
+    ///
+    /// `decided_at` is an RFC3339 string column; we wrap both sides in
+    /// `datetime(...)` so the comparison parses real timestamps instead
+    /// of relying on lexicographic ordering across `Z` / `+00:00` /
+    /// fractional-second variants.
+    ///
+    /// Returns the number of rows pruned.
+    pub fn prune_audit(&self, older_than_days: u64) -> usize {
+        if older_than_days == 0 {
+            return 0;
+        }
+        let Some(db) = &self.audit_db else {
+            return 0;
+        };
+        let Ok(conn) = db.lock() else {
+            return 0;
+        };
+        let cutoff =
+            (chrono::Utc::now() - chrono::Duration::days(older_than_days as i64)).to_rfc3339();
+        match conn.execute(
+            "DELETE FROM approval_audit WHERE datetime(decided_at) < datetime(?1)",
+            rusqlite::params![cutoff],
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("approval_audit prune failed: {e}");
+                0
+            }
+        }
     }
 
     /// Update the approval policy (for hot-reload).
@@ -2886,5 +2963,89 @@ mod tests {
         // Cleanup.
         let _ = mgr.resolve(id1, ApprovalDecision::Denied, None, false, None);
         let _ = mgr.resolve(id3, ApprovalDecision::Denied, None, false, None);
+    }
+
+    #[tokio::test]
+    async fn submission_writes_pending_audit_row_and_persists_pending_table() {
+        // #3611: a daemon crash mid-flight must not erase the audit trail.
+        // Submission writes a `pending` row immediately so the request is
+        // observable even if resolve / expire never runs.
+        let mgr = Arc::new(make_manager_with_db());
+        let deferred = DeferredToolExecution {
+            agent_id: "agent-3611".to_string(),
+            tool_use_id: "tool-3611".to_string(),
+            tool_name: "shell_exec".to_string(),
+            input: serde_json::json!({"cmd": "echo hi"}),
+            allowed_tools: None,
+            allowed_env_vars: None,
+            exec_policy: None,
+            sender_id: None,
+            channel: None,
+            workspace_root: None,
+            force_human: false,
+        };
+        let req = make_session_request("agent-3611", "sess-3611");
+        let request_id = mgr.submit_request(req, deferred).unwrap();
+
+        // Audit row exists with `pending` decision before any resolve.
+        let audit = mgr.query_audit(50, 0, Some("agent-3611"), None);
+        assert!(
+            audit
+                .iter()
+                .any(|e| e.request_id == request_id.to_string() && e.decision == "pending"),
+            "submission must write a pending audit row, got: {audit:?}"
+        );
+
+        // Pending row also lives in the dedicated table (cross-restart survival).
+        assert!(mgr.get_pending(request_id).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // approval_audit retention (#3468)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prune_audit_drops_old_rows_keeps_recent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let conn = Arc::new(StdMutex::new(conn));
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::clone(&conn));
+
+        let now = chrono::Utc::now();
+        let old = (now - chrono::Duration::days(120)).to_rfc3339();
+        let recent = (now - chrono::Duration::days(10)).to_rfc3339();
+        {
+            let g = conn.lock().unwrap();
+            let insert = |id: &str, decided_at: &str| {
+                g.execute(
+                    "INSERT INTO approval_audit (id, request_id, agent_id, tool_name, decision, decided_at, requested_at) \
+                     VALUES (?1, 'req', 'a', 'shell_exec', 'approved', ?2, ?2)",
+                    rusqlite::params![id, decided_at],
+                )
+                .unwrap();
+            };
+            insert("old1", &old);
+            insert("old2", &old);
+            insert("recent1", &recent);
+        }
+
+        let pruned = mgr.prune_audit(90);
+        assert_eq!(pruned, 2, "two 120-day-old rows should be deleted");
+
+        let remaining: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM approval_audit", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn prune_audit_zero_disabled() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let mgr =
+            ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::new(StdMutex::new(conn)));
+        assert_eq!(mgr.prune_audit(0), 0);
     }
 }
