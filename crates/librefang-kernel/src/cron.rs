@@ -597,12 +597,27 @@ impl CronScheduler {
 
     /// Record a skipped execution for a job (e.g. agent was Suspended).
     ///
-    /// Sets `last_status` to `"skipped"` without touching error counters or
-    /// removing one-shot jobs — the job remains scheduled for its next run.
+    /// Sets `last_status` to `"skipped"` without touching error counters.
+    ///
+    /// For recurring jobs the job remains scheduled at its next_run.
+    /// For one_shot jobs (At schedule, manual one-shot) the only
+    /// scheduled fire has now passed, so the job is removed from the
+    /// scheduler — otherwise compute_next_run_after pre-advances
+    /// next_run to far-future and the job lingers in jobs.json
+    /// forever, surfacing in /api/cron as inert garbage.  Audit of
+    /// #3923 caught this; remove on skip the same way record_success
+    /// does for one_shot.
     pub fn record_skipped(&self, id: CronJobId) {
-        if let Some(mut meta) = self.jobs.get_mut(&id) {
+        let should_remove = if let Some(mut meta) = self.jobs.get_mut(&id) {
             meta.last_status = Some("skipped: agent suspended".to_string());
             debug!(job_id = %id, "Cron job skipped (agent suspended)");
+            meta.one_shot
+        } else {
+            false
+        };
+        if should_remove {
+            self.jobs.remove(&id);
+            debug!(job_id = %id, "Removed one-shot cron job after skip");
         }
     }
 

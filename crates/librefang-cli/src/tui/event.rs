@@ -2953,10 +2953,11 @@ pub fn spawn_comms_task(
 pub fn spawn_fetch_agent_model_label(
     base_url: String,
     agent_id: String,
+    api_key: Option<String>,
     tx: mpsc::Sender<AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(api_key.as_deref());
         if let Ok(resp) = client
             .get(format!("{base_url}/api/agents/{agent_id}"))
             .send()
@@ -2974,9 +2975,13 @@ pub fn spawn_fetch_agent_model_label(
 /// Fetch the model list from the daemon for the chat model picker.
 /// Sends `ChatModelsForPicker` so the event loop can open the picker
 /// without blocking the render/input thread.
-pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent>) {
+pub fn spawn_fetch_models_for_picker(
+    base_url: String,
+    api_key: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(api_key.as_deref());
         if let Ok(resp) = client.get(format!("{base_url}/api/models")).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
                 let models: Vec<super::screens::chat::ModelEntry> = body["models"]
@@ -3002,9 +3007,13 @@ pub fn spawn_fetch_models_for_picker(base_url: String, tx: mpsc::Sender<AppEvent
 /// Fetch the agent list from the daemon for the /agents chat command.
 /// Sends `ChatAgentListLoaded` so the event loop can push the reply
 /// without blocking the render/input thread.
-pub fn spawn_fetch_agents_for_chat(base_url: String, tx: mpsc::Sender<AppEvent>) {
+pub fn spawn_fetch_agents_for_chat(
+    base_url: String,
+    api_key: Option<String>,
+    tx: mpsc::Sender<AppEvent>,
+) {
     std::thread::spawn(move || {
-        let client = daemon_client();
+        let client = make_daemon_client(api_key.as_deref());
         if let Ok(resp) = client.get(format!("{base_url}/api/agents")).send() {
             if let Ok(body) = resp.json::<serde_json::Value>() {
                 let arr = if let Some(arr) = body.as_array() {

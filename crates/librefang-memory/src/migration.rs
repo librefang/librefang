@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 26;
+const SCHEMA_VERSION: u32 = 27;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -65,6 +65,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(25, migrate_v25);
 
     run_step!(26, migrate_v26);
+    run_step!(27, migrate_v27);
 
     Ok(())
 }
@@ -797,6 +798,33 @@ fn migrate_v26(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (26, datetime('now'), 'Add pending_approvals table for cross-restart persistence (issue #3611)')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 27: Add `oauth_used_nonces` table for OIDC nonce single-use enforcement.
+///
+/// OIDC `state` carries a server-signed nonce that the IdP echoes back in the
+/// id_token's `nonce` claim.  #3944 added the equality check but never
+/// consumed the nonce, so a callback URL captured from browser history /
+/// Referer / proxy logs could be replayed against the daemon repeatedly.
+/// Hashes of recently-redeemed nonces live here for the duration of the
+/// OAuth flow window (default ~15 minutes); prune sweeps anything older
+/// than 1 hour to bound the table.
+fn migrate_v27(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS oauth_used_nonces (
+            nonce_hash  TEXT    NOT NULL,  -- SHA-256 hex of the raw state nonce
+            used_at     INTEGER NOT NULL,  -- Unix timestamp (seconds)
+            PRIMARY KEY (nonce_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_oauth_used_nonces_used_at
+            ON oauth_used_nonces(used_at);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (27, datetime('now'), 'Add oauth_used_nonces table for OIDC nonce single-use enforcement')",
         [],
     )?;
     Ok(())

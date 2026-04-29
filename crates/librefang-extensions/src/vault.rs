@@ -18,6 +18,9 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
+// `error!` is used only in non-test keyring code paths.
+#[cfg(not(test))]
+use tracing::error;
 use zeroize::Zeroizing;
 
 /// Env var fallback for vault key.
@@ -742,72 +745,128 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
 /// degraded security as before, but only as a last resort.
 #[cfg(not(test))]
 fn machine_fingerprint() -> Vec<u8> {
-    use sha2::Digest;
-
     let fingerprint_path = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("librefang")
         .join(".machine-id");
 
     // Try to read an existing random machine-id.
-    if let Ok(bytes) = std::fs::read(&fingerprint_path) {
-        if bytes.len() == 32 {
-            return bytes;
+    match std::fs::read(&fingerprint_path) {
+        Ok(bytes) if bytes.len() == 32 => return bytes,
+        Ok(bytes) => {
+            // Length mismatch — most likely a partial-write crash from an
+            // earlier non-atomic save, an external corruption, or a manual
+            // truncate.  DO NOT regenerate: the random id used to wrap the
+            // existing vault entries is gone either way, but overwriting
+            // the file makes any chance of recovery (restore from backup)
+            // also impossible.  Fall back to the predictable derivation;
+            // operators get a hard error decrypting the existing vault and
+            // can restore the file from backup.
+            error!(
+                "machine-id file at {:?} has unexpected length ({} bytes, expected 32). \
+                 NOT regenerating to preserve any chance of restoring from backup. \
+                 The vault wrapping key cannot be reconstructed; restore the file or \
+                 set LIBREFANG_VAULT_KEY to recover.",
+                fingerprint_path,
+                bytes.len()
+            );
+            return predictable_machine_fingerprint();
         }
-        // Length mismatch — stale or corrupt file; regenerate below.
-        warn!(
-            "Unexpected machine-id file length ({} bytes) at {:?} — regenerating",
-            bytes.len(),
-            fingerprint_path
-        );
+        Err(_) => {
+            // File does not exist (or unreadable) — fall through to create.
+        }
     }
 
     // Generate a fresh random 32-byte value.
     let mut random_id = [0u8; 32];
     OsRng.fill_bytes(&mut random_id);
 
-    // Persist with restrictive permissions so other local users cannot read it.
     if let Some(parent) = fingerprint_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::write(&fingerprint_path, &random_id) {
+
+    // Atomic create:
+    //   1. open <path>.tmp with O_EXCL | mode 0600 (Unix)
+    //   2. write_all + flush + sync_all
+    //   3. rename(tmp, final) — atomic on POSIX
+    // Locking the perms at `open` time closes the TOCTOU window where a
+    // separate `set_permissions` call would briefly expose the secret at
+    // umask defaults.  `O_EXCL` makes the first-run race deterministic:
+    // if two daemons start concurrently, only one wins the create; the
+    // loser falls back to reading the winner's file.
+    let tmp_path =
+        fingerprint_path.with_extension(format!("machine-id.tmp.{}", std::process::id()));
+    let persisted = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(&random_id)?;
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        // rename is atomic; if another daemon got there first the source
+        // tmp still exists from this caller's PID, so cleanup on failure
+        // below removes it.
+        std::fs::rename(&tmp_path, &fingerprint_path)
+    })();
+
+    match persisted {
         Ok(()) => {
-            // Restrict to owner-read/write only on Unix.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(
-                    &fingerprint_path,
-                    std::fs::Permissions::from_mode(0o600),
-                );
-            }
             warn!(
                 "OS keyring unavailable — generated random machine-id for keyring fallback at {:?}. \
                  This file must not be deleted; losing it makes the vault unrecoverable.",
                 fingerprint_path
             );
+            random_id.to_vec()
         }
         Err(e) => {
-            // Cannot persist — fall back to the predictable derivation with a
-            // strong warning. This is the same security level as the old code.
+            // Clean up any abandoned tmp.
+            let _ = std::fs::remove_file(&tmp_path);
+            // Either the destination already exists (lost the create_new
+            // race against another daemon), or persist genuinely failed.
+            // Re-read once: if the contents are 32 bytes, use them — this
+            // is the lost-race path.
+            if let Ok(bytes) = std::fs::read(&fingerprint_path) {
+                if bytes.len() == 32 {
+                    debug!(
+                        "Lost machine-id create_new race; using the file written by the winning process at {:?}",
+                        fingerprint_path
+                    );
+                    return bytes;
+                }
+            }
             warn!(
                 "Could not persist machine-id for keyring fallback ({e}): \
                  falling back to predictable username+hostname derivation. \
                  Set LIBREFANG_VAULT_KEY for a secure alternative."
             );
-            let mut hasher = Sha256::new();
-            if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
-                hasher.update(user.as_bytes());
-            }
-            if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
-                hasher.update(host.as_bytes());
-            }
-            hasher.update(b"librefang-vault-v1");
-            return hasher.finalize().to_vec();
+            predictable_machine_fingerprint()
         }
     }
+}
 
-    random_id.to_vec()
+/// Predictable fallback derivation used when no random machine-id can be
+/// persisted.  Same security level as the pre-#3944 code; documented so
+/// operators know that on this path the vault is only as secret as the
+/// hostname + username.
+#[cfg(not(test))]
+fn predictable_machine_fingerprint() -> Vec<u8> {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
+        hasher.update(user.as_bytes());
+    }
+    if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+        hasher.update(host.as_bytes());
+    }
+    hasher.update(b"librefang-vault-v1");
+    hasher.finalize().to_vec()
 }
 
 /// Derive a 256-bit wrapping key from a machine fingerprint + salt using Argon2id.

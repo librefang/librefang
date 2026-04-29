@@ -4116,7 +4116,7 @@ async fn test_push_notification_health_check_failed_falls_back_to_alert_channels
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive", None)
         .await;
 
     let recorded = sent.lock().unwrap().clone();
@@ -4165,7 +4165,7 @@ async fn test_push_notification_health_check_failed_agent_rule_overrides_alert_c
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("worker-7", "health_check_failed", "agent unresponsive")
+        .push_notification("worker-7", "health_check_failed", "agent unresponsive", None)
         .await;
 
     let recorded = sent.lock().unwrap().clone();
@@ -4199,7 +4199,7 @@ async fn test_push_notification_health_check_failed_no_targets_when_unconfigured
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive")
+        .push_notification("agent-xyz", "health_check_failed", "agent unresponsive", None)
         .await;
 
     assert!(
@@ -4245,12 +4245,115 @@ async fn test_push_notification_unknown_event_type_yields_no_targets() {
     kernel.channel_adapters.insert("test".to_string(), adapter);
 
     kernel
-        .push_notification("agent-xyz", "totally_made_up_event", "should not deliver")
+        .push_notification("agent-xyz", "totally_made_up_event", "should not deliver", None)
         .await;
 
     assert!(
         sent.lock().unwrap().is_empty(),
         "unknown event_type must not deliver to any global channel"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_appends_session_suffix_when_provided() {
+    // Operator alerts for session-scoped events (task_completed,
+    // task_failed, tool_failure) must include `[session=<uuid>]` so
+    // operators can correlate the alert with the failing session's
+    // history. Companion to #3260, which added session_id to the
+    // `Agent loop failed` warn log.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    let session_id = SessionId::new();
+    kernel
+        .push_notification(
+            "agent-xyz",
+            "tool_failure",
+            "Agent \"x\" exited after 3 consecutive tool failures",
+            Some(&session_id),
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 1, "exactly one alert delivered");
+    let expected = format!(
+        "ops:Agent \"x\" exited after 3 consecutive tool failures [session={session_id}]"
+    );
+    assert_eq!(
+        recorded[0], expected,
+        "session-scoped alert must include [session=<uuid>] suffix"
+    );
+
+    kernel.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_push_notification_omits_session_suffix_for_agent_level_alerts() {
+    // health_check_failed is agent-level, not session-scoped — the
+    // call site passes None and the delivered message must NOT carry a
+    // `[session=…]` suffix that would mislead operators into thinking
+    // a specific session was at fault.
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    config.notification = NotificationConfig {
+        approval_channels: Vec::new(),
+        alert_channels: vec![NotificationTarget {
+            channel_type: "test".to_string(),
+            recipient: "ops".to_string(),
+            thread_id: None,
+        }],
+        agent_rules: Vec::new(),
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let adapter = Arc::new(RecordingChannelAdapter::new("test"));
+    let sent = adapter.sent.clone();
+    kernel.channel_adapters.insert("test".to_string(), adapter);
+
+    kernel
+        .push_notification(
+            "agent-xyz",
+            "health_check_failed",
+            "Agent \"x\" is unresponsive",
+            None,
+        )
+        .await;
+
+    let recorded = sent.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec!["ops:Agent \"x\" is unresponsive".to_string()],
+        "agent-level alert must not carry a session suffix"
     );
 
     kernel.shutdown();

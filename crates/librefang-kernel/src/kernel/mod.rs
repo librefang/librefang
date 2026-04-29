@@ -5043,8 +5043,13 @@ system_prompt = "You are a helpful assistant."
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
                             name, result.total_usage.input_tokens, result.total_usage.output_tokens,
                         );
-                        self.push_notification(&agent_id.to_string(), "task_completed", &msg)
-                            .await;
+                        self.push_notification(
+                            &agent_id.to_string(),
+                            "task_completed",
+                            &msg,
+                            resolved_session_id.as_ref(),
+                        )
+                        .await;
                     }
                 }
 
@@ -5329,8 +5334,13 @@ system_prompt = "You are a helpful assistant."
                         ),
                     ),
                 };
-                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
-                    .await;
+                self.push_notification(
+                    &agent_id.to_string(),
+                    event_type,
+                    &fail_msg,
+                    resolved_session_id.as_ref(),
+                )
+                .await;
 
                 Err(e)
             }
@@ -6583,10 +6593,20 @@ system_prompt = "You are a helpful assistant."
         // (auto_memorize, dream) which has its own join handle and doesn't
         // need external cancellation via the registry.
         if !is_fork {
-            // #3739: abort any previous task before replacing it so we don't
-            // orphan an in-flight LLM call by dropping its abort handle.
-            if let Some((_, old_task)) =
-                self.running_tasks.remove(&(agent_id, effective_session_id))
+            // #3739: atomically swap in the new task and abort the previous
+            // one if any.  `DashMap::insert` returns the displaced value
+            // under the same shard write-lock, so two concurrent
+            // `send_message_full` calls for the same (agent, session)
+            // can never both observe an empty slot and lose one of the
+            // abort handles.  The earlier `remove(...) → insert(...)`
+            // sequence had exactly that race window.
+            let new_task = RunningTask {
+                abort: handle.abort_handle(),
+                started_at: chrono::Utc::now(),
+            };
+            if let Some(old_task) = self
+                .running_tasks
+                .insert((agent_id, effective_session_id), new_task)
             {
                 tracing::debug!(
                     agent_id = %agent_id,
@@ -6595,13 +6615,6 @@ system_prompt = "You are a helpful assistant."
                 );
                 old_task.abort.abort();
             }
-            self.running_tasks.insert(
-                (agent_id, effective_session_id),
-                RunningTask {
-                    abort: handle.abort_handle(),
-                    started_at: chrono::Utc::now(),
-                },
-            );
         }
 
         Ok((rx, handle))
@@ -11396,8 +11409,22 @@ system_prompt = "You are a helpful assistant."
             }
 
             if !dispatches.is_empty() {
-                // #3740: spawn_logged so panics in dispatch surface in logs.
-                spawn_logged("trigger_dispatch", async move {
+                // CRITICAL: tokio task-locals do NOT propagate across
+                // tokio::spawn.  Without re-establishing the
+                // PUBLISH_EVENT_DEPTH scope inside the spawned task,
+                // every send_message_full -> publish_event chain
+                // started from a triggered dispatch would observe an
+                // unscoped depth, fall into the "top-level scope"
+                // branch, and reset depth=0 — the exact path that
+                // breaks circular trigger detection across the spawn
+                // boundary (audit of #3929 / #3780).  Capture the
+                // parent depth here on the caller's task and rebuild
+                // the scope inside the spawn so trigger chains
+                // accumulate correctly.
+                let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                let task = PUBLISH_EVENT_DEPTH.scope(
+                    std::cell::Cell::new(parent_depth),
+                    async move {
                     // Execute trigger dispatches sequentially to preserve
                     // the order in which the trigger engine evaluated them.
                     // Each dispatch still acquires its semaphore permits
@@ -11449,7 +11476,9 @@ system_prompt = "You are a helpful assistant."
                             warn!(agent = %aid, "Trigger dispatch failed: {e}");
                         }
                     }
-                });
+                    },
+                );
+                spawn_logged("trigger_dispatch", task);
             }
         }
 
@@ -13021,11 +13050,15 @@ system_prompt = "You are a helpful assistant."
                                 "Agent \"{}\" is unresponsive (inactive for {}s)",
                                 status.name, status.inactive_secs,
                             );
+                            // health_check_failed is agent-level, not
+                            // session-scoped — pass None so the alert
+                            // doesn't get a misleading [session=…] suffix.
                             kernel
                                 .push_notification(
                                     &status.agent_id.to_string(),
                                     "health_check_failed",
                                     &msg,
+                                    None,
                                 )
                                 .await;
                         }
@@ -16078,7 +16111,20 @@ impl LibreFangKernel {
 
     /// Push a notification to all configured targets, resolving routing rules.
     /// Resolution: per-agent rules (matching event) > global channels for that event type.
-    async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
+    ///
+    /// When `session_id` is `Some`, ` [session=<uuid>]` is appended to the
+    /// delivered message so operators can correlate the alert with the
+    /// failing session's history (matches the `session_id` field in the
+    /// `Agent loop failed — recorded in supervisor` warn log).
+    /// Pass `None` for agent-level alerts that aren't session-scoped
+    /// (e.g. `health_check_failed`).
+    async fn push_notification(
+        &self,
+        agent_id: &str,
+        event_type: &str,
+        message: &str,
+        session_id: Option<&SessionId>,
+    ) {
         use librefang_types::capability::glob_matches;
         let cfg = self.config.load_full();
 
@@ -16107,8 +16153,13 @@ impl LibreFangKernel {
             }
         };
 
+        let delivered: std::borrow::Cow<'_, str> = match session_id {
+            Some(sid) => std::borrow::Cow::Owned(format!("{message} [session={sid}]")),
+            None => std::borrow::Cow::Borrowed(message),
+        };
+
         for target in &targets {
-            self.push_to_target(target, message).await;
+            self.push_to_target(target, &delivered).await;
         }
     }
 

@@ -632,8 +632,20 @@ impl App {
             }
 
             // ── Async chat helpers (previously blocked the event-loop thread) ──
-            AppEvent::ChatModelLabelLoaded { agent_id: _, label } => {
-                self.chat.model_label = label;
+            AppEvent::ChatModelLabelLoaded { agent_id, label } => {
+                // The variant carries the agent id specifically so a late
+                // response from a previously-entered chat target can't
+                // clobber the current header.  Drop labels that don't
+                // match the current daemon target.
+                let still_current = self
+                    .chat_target
+                    .as_ref()
+                    .and_then(|t| t.agent_id_daemon.as_deref())
+                    .map(|cur| cur == agent_id.as_str())
+                    .unwrap_or(false);
+                if still_current {
+                    self.chat.model_label = label;
+                }
             }
             AppEvent::ChatModelsForPicker(models) => {
                 if models.is_empty() {
@@ -1814,10 +1826,15 @@ impl App {
         self.chat.mode_label = "daemon".to_string();
 
         // Fetch model label asynchronously — avoids blocking the TUI event loop.
-        if let Backend::Daemon { ref base_url, .. } = self.backend {
+        if let Backend::Daemon {
+            ref base_url,
+            ref api_key,
+        } = self.backend
+        {
             event::spawn_fetch_agent_model_label(
                 base_url.clone(),
                 id.clone(),
+                api_key.clone(),
                 self.event_tx.clone(),
             );
         }
@@ -1945,10 +1962,14 @@ impl App {
 
     fn open_model_picker(&mut self) {
         match &self.backend {
-            Backend::Daemon { base_url, .. } => {
+            Backend::Daemon { base_url, api_key } => {
                 // Fetch model list asynchronously — avoids blocking the TUI event loop.
                 // The `ChatModelsForPicker` event handler will open the picker once loaded.
-                event::spawn_fetch_models_for_picker(base_url.clone(), self.event_tx.clone());
+                event::spawn_fetch_models_for_picker(
+                    base_url.clone(),
+                    api_key.clone(),
+                    self.event_tx.clone(),
+                );
             }
             Backend::InProcess { kernel } => {
                 let models = {
@@ -2116,10 +2137,14 @@ impl App {
             }
             "/agents" => {
                 match &self.backend {
-                    Backend::Daemon { base_url, .. } => {
+                    Backend::Daemon { base_url, api_key } => {
                         // Fetch agent list asynchronously — avoids blocking the TUI event loop.
                         // The `ChatAgentListLoaded` event handler will push the reply.
-                        event::spawn_fetch_agents_for_chat(base_url.clone(), self.event_tx.clone());
+                        event::spawn_fetch_agents_for_chat(
+                            base_url.clone(),
+                            api_key.clone(),
+                            self.event_tx.clone(),
+                        );
                     }
                     Backend::InProcess { kernel } => {
                         let lines: Vec<String> = kernel

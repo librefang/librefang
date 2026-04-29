@@ -219,13 +219,42 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
         }
     }
 
-    std::fs::write(path, &content).map_err(|e| format!("Failed to write .env file: {e}"))?;
+    // Atomic save: open <path>.tmp.<pid> with mode 0600 (Unix) at open
+    // time, write_all + flush + sync_all + rename(tmp, final).  Closes
+    // three #3944 holes left by the bare std::fs::write:
+    //   * Crash mid-write no longer leaves a truncated/empty .env
+    //     (the loader silently accepts that, so the API key the user
+    //     just configured vanishes on next boot).
+    //   * Default-perms TOCTOU window is gone: the file is created
+    //     0600 instead of 0644-then-tightened, so a parallel local
+    //     reader can't grab the key during the open syscall.
+    //   * Two concurrent saves no longer share the same staging path
+    //     because the tmp filename is uniquified by PID.
+    let tmp_path = path.with_extension(format!(
+        "env.tmp.{}",
+        std::process::id()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, path)
+    })();
 
-    // Set 0600 permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = result {
+        // Clean up an abandoned tmp on either write or rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("Failed to write .env file: {e}"));
     }
 
     Ok(())

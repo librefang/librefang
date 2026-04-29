@@ -249,6 +249,7 @@ impl StandaloneChat {
                     base_url.clone(),
                     self.agent_id_daemon.as_ref().unwrap().clone(),
                     message,
+                    crate::read_api_key(),
                     self.event_tx.clone(),
                 );
             }
@@ -626,6 +627,7 @@ impl StandaloneChat {
                 event::spawn_daemon_agent(
                     base_url.to_string(),
                     t.content.clone(),
+                    crate::read_api_key(),
                     self.event_tx.clone(),
                 );
                 self.chat.status_msg = Some(format!("Spawning '{}' agent\u{2026}", t.name));

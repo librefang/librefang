@@ -594,7 +594,10 @@ pub async fn auth(
             | "/api/budget/agents"
             | "/api/network/status"
             | "/api/a2a/agents"
-            | "/api/approvals"
+            // /api/approvals removed — list_approvals returns the same
+            // action_summary (pending shell command) the prefix carve
+            // protects against.  See the matching change to
+            // dashboard_read_prefix below.
             | "/api/channels"
             | "/api/hands"
             | "/api/hands/active"
@@ -606,16 +609,17 @@ pub async fn auth(
             | "/api/workflows"
             | "/api/auto-dream/status"
     );
-    // SECURITY #3367: /api/approvals/session/{id} exposes pending shell
-    // commands and must require authentication.  The broader
-    // /api/approvals/* prefix is kept public for the dashboard polling
-    // paths that do not contain sensitive payload detail (e.g. the
-    // individual approval GET by id), but the /session/ sub-tree is
-    // explicitly excluded here and falls through to the normal auth gate.
-    let approvals_prefix_public =
-        path.starts_with("/api/approvals/") && !path.starts_with("/api/approvals/session/");
+    // SECURITY #3367 + post-merge audit of #3941: every read path under
+    // /api/approvals/* exposes the same `action_summary` field (the
+    // pending shell command and arguments) — it is reachable through
+    // GET /approvals (list), GET /approvals/{id}, GET /approvals/audit,
+    // and the previously-carved /approvals/session/* tree.  #3941 only
+    // gated /api/approvals/session/, leaving the same payload
+    // unauthenticated through the sister endpoints.  Drop the prefix
+    // from the public allowlist entirely so the auth gate covers every
+    // approvals route; the dashboard already attaches credentials on
+    // every request via its api helper, so this is not a UX regression.
     let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
-        || approvals_prefix_public
         || path.starts_with("/api/hands/")
         || path.starts_with("/api/cron/");
     // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
@@ -2074,10 +2078,12 @@ mod tests {
     /// details including shell commands, so it must require authentication
     /// even when `require_auth_for_reads` is off.
     ///
-    /// The broader `/api/approvals/{id}` path (individual approval GET) is
-    /// still in the public bucket; only the `/session/` sub-tree is locked.
+    /// Updated post-#3941 audit: every approvals read endpoint exposes
+    /// the same `action_summary` (pending shell command), so the entire
+    /// `/api/approvals/*` surface must be auth-gated, not just the
+    /// `/session/` sub-tree.
     #[tokio::test]
-    async fn approvals_session_get_requires_auth() {
+    async fn approvals_reads_require_auth() {
         // Auth state: api_key configured, require_auth_for_reads OFF — this
         // is the scenario where the bug was exploitable.
         let auth_state = AuthState {
@@ -2091,45 +2097,31 @@ mod tests {
         };
 
         let app = Router::new()
+            .route("/api/approvals", get(|| async { "list" }))
             .route(
                 "/api/approvals/session/{id}",
                 get(|| async { "pending approvals" }),
             )
+            .route("/api/approvals/audit", get(|| async { "audit log" }))
             .route("/api/approvals/{id}", get(|| async { "approval detail" }))
             .layer(axum::middleware::from_fn_with_state(auth_state, auth));
 
-        // GET /api/approvals/session/{id} — must require auth.
-        let session_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/approvals/session/sess-abc-123")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            session_resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "/api/approvals/session/{{id}} must be auth-gated"
-        );
-
-        // GET /api/approvals/{id} — must still be accessible without auth
-        // (dashboard polling).
-        let detail_resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/approvals/some-approval-id")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            detail_resp.status(),
-            StatusCode::OK,
-            "/api/approvals/{{id}} should remain publicly readable"
-        );
+        for path in &[
+            "/api/approvals",
+            "/api/approvals/session/sess-abc-123",
+            "/api/approvals/audit",
+            "/api/approvals/some-approval-id",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(*path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path} must be auth-gated (returns action_summary)"
+            );
+        }
     }
 }

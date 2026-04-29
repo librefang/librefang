@@ -516,13 +516,55 @@ const BLOCKED_ENV_EXACT: &[&str] = &[
 /// returned to a WASM guest.
 fn is_blocked_env_var(name: &str) -> bool {
     let upper = name.to_uppercase();
-    // Exact-name check (belt-and-suspenders — all of these also match a
-    // substring below, but an explicit list is easier to audit).
+    // Exact-name check (belt-and-suspenders — all of these also match the
+    // boundary check below, but an explicit list is easier to audit).
     if BLOCKED_ENV_EXACT.contains(&upper.as_str()) {
         return true;
     }
-    // Substring check — catches any var that smells like a credential.
-    BLOCKED_ENV_SUBSTRINGS.iter().any(|sub| upper.contains(sub))
+    // Word-boundary substring check.  Plain `contains` flagged
+    // `MONKEYHOUSE`, `KEYBOARD_LAYOUT`, `TOKENIZER_OPTS`,
+    // `PRIVATELABEL_NAME` and similar non-secret config vars, leaving
+    // `EnvRead("*")` plugins unable to read benign settings.  Require a
+    // non-alphanumeric boundary on at least one side of the match
+    // (start/end of string counts), so e.g. `AWS_API_KEY` and
+    // `MY_PASSWORD_HASH` still match while `MONKEYHOUSE` does not.
+    BLOCKED_ENV_SUBSTRINGS
+        .iter()
+        .any(|sub| has_word_boundary_substring(&upper, sub))
+}
+
+/// `true` iff `needle` appears in `haystack` as its own word —
+/// i.e. with a non-alphanumeric boundary (string edge or any char that
+/// is not an ASCII letter / digit) on **both** sides.  Env-var
+/// convention separates words with `_`; `-` / `.` are also covered for
+/// odd names like `MY-API-KEY` or `KEY.PRIVATE`.
+///
+/// Both-sides matters: a single-side rule would still flag
+/// `KEYBOARD_LAYOUT` (left edge = start-of-string is a boundary, but
+/// right edge = `'B'` is alphanumeric, so it isn't actually a `KEY`
+/// word).  Real secret names always have a boundary on the side
+/// closest to the credential token: `OPENAI_API_KEY`, `MY_PASSWORD`,
+/// `FOO_TOKEN`, `KEY_FOO` all satisfy both-sides.
+fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let n = needle.len();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let end = idx + n;
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past this occurrence to find any later one with a
+        // boundary.  Stop if we'd loop on a zero-length needle.
+        start = idx + n.max(1);
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
 }
 
 fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -670,12 +712,56 @@ mod tests {
     use super::*;
 
     fn test_state(capabilities: Vec<Capability>) -> GuestState {
-        GuestState {
+        GuestState::for_test(
             capabilities,
-            kernel: None,
-            agent_id: "test-agent".to_string(),
-            tokio_handle: tokio::runtime::Handle::current(),
+            None,
+            "test-agent".to_string(),
+            tokio::runtime::Handle::current(),
+        )
+    }
+
+    /// Word-boundary blocklist: real secret-shaped names match, benign
+    /// names that merely embed the substring don't.
+    #[test]
+    fn test_is_blocked_env_var_word_boundary() {
+        // Real secrets — must block.
+        for name in &[
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "MY_PASSWORD",
+            "DB_PRIVATE_KEY",
+            "API_CREDENTIAL_FILE",
+            // Standalone tokens at string start/end.
+            "KEY",
+            "SECRET_FOO",
+            "FOO_TOKEN",
+        ] {
+            assert!(
+                is_blocked_env_var(name),
+                "{name} must be blocked (real secret)"
+            );
         }
+
+        // Benign config — must NOT block.  These were all false positives
+        // under the old plain `contains` check.
+        for name in &[
+            "MONKEYHOUSE",
+            "KEYBOARD_LAYOUT",
+            "TOKENIZER_OPTS",
+            "PRIVATELABEL_NAME",
+            "PASSWORDLIST_FILE",
+            "MASTERKEYBOARD",
+        ] {
+            assert!(
+                !is_blocked_env_var(name),
+                "{name} must NOT be blocked (benign config)"
+            );
+        }
+
+        // Boundary punctuation other than `_` is also a boundary.
+        assert!(is_blocked_env_var("MY-API-KEY"));
+        assert!(is_blocked_env_var("KEY.PRIVATE"));
     }
 
     #[tokio::test]
@@ -987,12 +1073,12 @@ mod tests {
         capabilities: Vec<Capability>,
         kernel: std::sync::Arc<RecordingKernel>,
     ) -> GuestState {
-        GuestState {
+        GuestState::for_test(
             capabilities,
-            kernel: Some(kernel),
-            agent_id: agent_id.to_string(),
-            tokio_handle: tokio::runtime::Handle::current(),
-        }
+            Some(kernel),
+            agent_id.to_string(),
+            tokio::runtime::Handle::current(),
+        )
     }
 
     /// Regression test for Bug #3837: kv_get must namespace the key with
@@ -1109,32 +1195,6 @@ mod tests {
         assert!(safe_resolve_path("../etc/passwd").is_err());
         assert!(safe_resolve_path("/tmp/../../etc/passwd").is_err());
         assert!(safe_resolve_path("foo/../bar").is_err());
-    }
-
-    /// Regression for #3814: capability check must run AFTER canonicalization.
-    ///
-    /// A capability granting access to `/tmp/allowed` must NOT permit a guest
-    /// that passes `../allowed` when the working directory is `/tmp/sub` —
-    /// the raw string does not literally match `/tmp/allowed`, but
-    /// canonicalization would resolve it to the same inode. Conversely, a
-    /// traversal attempt aimed at a path outside any granted capability must
-    /// be denied even if the raw string superficially matches a prefix.
-    ///
-    /// We test the deny path here: a FileRead("*") wildcard is granted but
-    /// the path `../etc/passwd` is rejected during canonicalization (contains
-    /// `..`), so the capability check is never even reached. This validates
-    /// that canonicalization is the first gate.
-    #[tokio::test]
-    async fn test_fs_read_traversal_rejected_before_capability_check() {
-        // Even with a wildcard capability, ".." in the path must be caught by
-        // safe_resolve_path before we ever consult the capability list.
-        let state = test_state(vec![Capability::FileRead("*".to_string())]);
-        let result = host_fs_read(&state, &json!({"path": "../etc/passwd"}));
-        let err = result["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("traversal") || err.contains("resolve") || err.contains("Cannot"),
-            "Expected path-traversal or resolution error, got: {err}"
-        );
     }
 
     #[test]

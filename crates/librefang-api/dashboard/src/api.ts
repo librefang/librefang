@@ -1743,7 +1743,10 @@ export async function createWorkflow(payload: {
   }>;
   layout?: unknown;
 }): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>("/api/workflows", payload);
+  return post<ApiActionResponse>("/api/workflows", payload).then((r) => ({
+    ...r,
+    id: r.id ?? (r as { workflow_id?: string }).workflow_id,
+  }));
 }
 
 export async function getWorkflow(workflowId: string): Promise<WorkflowItem> {

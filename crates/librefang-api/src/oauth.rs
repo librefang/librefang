@@ -664,6 +664,10 @@ pub async fn auth_callback(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &code, &state_payload).await
 }
 
@@ -696,7 +700,42 @@ pub async fn auth_callback_post(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &body.code, &state_payload).await
+}
+
+/// Atomically reject + consume an OAuth state nonce.
+///
+/// #3944 verified that the nonce in the id_token matched the one we
+/// signed into `state`, but never marked the nonce as redeemed.  A
+/// callback URL captured from browser history, Referer, or proxy logs
+/// could be replayed against the daemon repeatedly until the IdP
+/// rejected the authorization code.  This helper enforces single-use
+/// at the daemon by checking + recording the nonce as consumed before
+/// the code exchange runs.  Subsequent requests with the same `state`
+/// are rejected with HTTP 400.
+///
+/// The nonce is consumed eagerly (before code exchange).  Failed
+/// downstream verification (token-endpoint reject, JWT signature fail)
+/// still leaves the nonce marked used — the legitimate user must
+/// restart the auth flow if anything goes wrong, which is exactly the
+/// fail-closed shape we want for credential flows.
+fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Response> {
+    if state.kernel.approvals().is_oauth_nonce_used(nonce) {
+        warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "OAuth callback already redeemed; please restart the sign-in flow"
+            })),
+        )
+            .into_response());
+    }
+    state.kernel.approvals().record_oauth_nonce_used(nonce);
+    Ok(())
 }
 
 /// Shared code exchange logic for both GET and POST callback handlers.
@@ -764,16 +803,25 @@ async fn handle_code_exchange(
         }
     };
 
-    // Try to validate the ID token if present.
+    // Validate the ID token if the provider supplies one.  Three rules,
+    // all hard rejects:
+    //   1. Provider sent an id_token AND we have a jwks_uri to verify it
+    //      against → JWT validation MUST succeed.  A malformed / forged /
+    //      expired id_token is a strong signal of replay or token swap;
+    //      falling through to userinfo (which carries no nonce) lets
+    //      the attack succeed.  This was the path #3944 left open.
+    //   2. id_token validates → nonce claim MUST be present and equal
+    //      to the nonce we signed into `state`.
+    //   3. id_token validates with mismatched nonce → reject.
+    //
+    // The "no id_token at all" path (some OAuth2 providers genuinely
+    // don't emit one for non-OIDC flows) still falls through to
+    // userinfo by design; that path was always nonce-less.
     let claims = if let Some(ref id_token) = token_resp.id_token {
         if !id_token.is_empty() && !provider.jwks_uri.is_empty() {
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
                 Ok(c) => {
                     // Verify nonce claim against the nonce we sent in the auth request.
-                    // Two failure cases must both be rejected:
-                    //   1. Nonce claim present but doesn't match (replay / token swap).
-                    //   2. Nonce claim absent even though we sent a nonce (provider
-                    //      non-compliance that could be used to bypass nonce binding).
                     match c.nonce {
                         Some(ref token_nonce) if token_nonce != &state_payload.nonce => {
                             warn!("Nonce mismatch in ID token");
@@ -802,11 +850,36 @@ async fn handle_code_exchange(
                     Some(c)
                 }
                 Err(e) => {
-                    debug!(error = %e, "ID token validation failed, falling back to userinfo");
-                    None
+                    // The provider sent an id_token AND we had keys to
+                    // verify it — verification must succeed or the
+                    // request is rejected.  Returning the error message
+                    // as-is is fine: it's our own validation diagnostic
+                    // (kid mismatch, expired, sig fail), not provider
+                    // body.
+                    warn!(error = %e, "ID token validation failed — rejecting OAuth callback");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "ID token signature or expiry validation failed"
+                        })),
+                    )
+                        .into_response();
                 }
             }
         } else {
+            // Provider sent a non-empty id_token but no jwks_uri configured
+            // for this provider, OR the id_token field came back empty.
+            // The empty-token case is benign (no token to verify); the
+            // missing-jwks-uri case means this provider was added to the
+            // config without OIDC keys, which only makes sense for pure
+            // OAuth2 — accept and rely on userinfo.
+            if !id_token.is_empty() {
+                warn!(
+                    "Provider supplied id_token but jwks_uri is unset; \
+                     skipping JWT validation and falling back to userinfo. \
+                     Configure jwks_uri to enforce OIDC nonce binding."
+                );
+            }
             None
         }
     } else {

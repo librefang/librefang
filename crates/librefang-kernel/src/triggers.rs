@@ -184,6 +184,11 @@ pub struct TriggerEngine {
     /// Path to the persistence file (`<home>/trigger_jobs.json`).
     /// `None` means no persistence (used in tests).
     persist_path: Option<PathBuf>,
+    /// Serializes `persist()` writes so concurrent callers (event
+    /// dispatch, API routes, restart handlers) within a single process
+    /// don't `O_TRUNC` the same `.tmp.{pid}` path and produce a torn
+    /// file before rename.  Mirrors `CronScheduler::persist_lock`.
+    persist_lock: std::sync::Mutex<()>,
 }
 
 impl TriggerEngine {
@@ -196,6 +201,7 @@ impl TriggerEngine {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: None,
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -211,6 +217,7 @@ impl TriggerEngine {
             max_triggers_per_event: config.max_per_event.max(1),
             default_cooldown_secs: config.cooldown_secs,
             persist_path: Some(home_dir.join("trigger_jobs.json")),
+            persist_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -292,6 +299,7 @@ impl TriggerEngine {
     ///
     /// Does nothing when no persistence path is configured.
     pub fn persist(&self) -> LibreFangResult<()> {
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = match &self.persist_path {
             Some(p) => p,
             None => return Ok(()),
@@ -1978,6 +1986,7 @@ mod tests {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: Some(persist_path.clone()),
+            persist_lock: std::sync::Mutex::new(()),
         };
         let agent_id = AgentId::new();
         // Register with a 60-second cooldown so it won't expire during the test.
@@ -2015,6 +2024,7 @@ mod tests {
             max_triggers_per_event: DEFAULT_MAX_TRIGGERS_PER_EVENT,
             default_cooldown_secs: DEFAULT_COOLDOWN_SECS,
             persist_path: Some(persist_path),
+            persist_lock: std::sync::Mutex::new(()),
         };
         let loaded = engine2.load().unwrap();
         assert_eq!(loaded, 1, "Should have loaded exactly one trigger");

@@ -2744,14 +2744,31 @@ pub async fn totp_revoke(
             }
         }
     } else {
+        // TOTP replay check first (#3952).  Most damaging path of all:
+        // a single replayed code disables 2FA entirely.  approve_request
+        // and totp_confirm both check this; totp_revoke was missed.
+        if state.kernel.approvals().is_totp_code_used(&body.code) {
+            // Don't count toward the lockout — the code itself isn't
+            // wrong, it's already-spent.  Return the same 400 shape so
+            // the caller can't distinguish "already used" from "wrong".
+            return ApiErrorResponse::bad_request(
+                "TOTP code already used. Wait for a new code.",
+            )
+            .into_json_tuple();
+        }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
-                librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                     &secret,
                     &body.code,
                     &totp_issuer,
                 )
-                .unwrap_or(false)
+                .unwrap_or(false);
+                if ok {
+                    // Mark consumption only after a true verify.
+                    state.kernel.approvals().record_totp_code_used(&body.code);
+                }
+                ok
             }
             None => false,
         }
