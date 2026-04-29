@@ -7,7 +7,7 @@ use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelOverrides, ModelTier,
     ProviderInfo,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::warn;
 
 /// The model catalog — registry of all known models and providers.
@@ -661,7 +661,7 @@ impl ModelCatalog {
     /// Unknown providers are automatically added as custom OpenAI-compatible entries.
     /// Providers with explicit URL overrides are marked as configured since
     /// the user intentionally set them up (e.g. local proxies, custom endpoints).
-    pub fn apply_url_overrides(&mut self, overrides: &HashMap<String, String>) {
+    pub fn apply_url_overrides(&mut self, overrides: &BTreeMap<String, String>) {
         for (provider, url) in overrides {
             if self.set_provider_url(provider, url) {
                 // Mark as configured so models from this provider show as available
@@ -686,7 +686,7 @@ impl ModelCatalog {
     }
 
     /// Apply a batch of per-provider proxy URL overrides from config.
-    pub fn apply_proxy_url_overrides(&mut self, overrides: &HashMap<String, String>) {
+    pub fn apply_proxy_url_overrides(&mut self, overrides: &BTreeMap<String, String>) {
         for (provider, proxy_url) in overrides {
             self.set_provider_proxy_url(provider, proxy_url);
         }
@@ -701,9 +701,9 @@ impl ModelCatalog {
     /// Entries where the provider or region is not found are skipped with a warning.
     pub fn resolve_region_urls(
         &self,
-        region_selections: &HashMap<String, String>,
-    ) -> HashMap<String, String> {
-        let mut resolved = HashMap::new();
+        region_selections: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut resolved = BTreeMap::new();
         for (provider_id, region_name) in region_selections {
             if let Some(provider) = self.get_provider(provider_id) {
                 if let Some(region_cfg) = provider.regions.get(region_name) {
@@ -737,9 +737,9 @@ impl ModelCatalog {
     /// [`KernelConfig::resolve_api_key_env`] picks up region-specific env vars.
     pub fn resolve_region_api_keys(
         &self,
-        region_selections: &HashMap<String, String>,
-    ) -> HashMap<String, String> {
-        let mut resolved = HashMap::new();
+        region_selections: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        let mut resolved = BTreeMap::new();
         for (provider_id, region_name) in region_selections {
             if let Some(provider) = self.get_provider(provider_id) {
                 if let Some(region_cfg) = provider.regions.get(region_name) {
@@ -1971,7 +1971,7 @@ id = "acme"
     #[test]
     fn test_apply_url_overrides() {
         let mut catalog = test_catalog();
-        let mut overrides = HashMap::new();
+        let mut overrides = BTreeMap::new();
         overrides.insert("ollama".to_string(), "http://10.0.0.5:11434/v1".to_string());
         overrides.insert("vllm".to_string(), "http://10.0.0.6:8000/v1".to_string());
         overrides.insert("nonexistent".to_string(), "http://nowhere".to_string());
@@ -2055,7 +2055,7 @@ supports_streaming = false
         let catalog = region_test_catalog();
 
         // Known provider + known region -> URL resolved
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("test-provider".to_string(), "us".to_string());
         let urls = catalog.resolve_region_urls(&sel);
         assert_eq!(
@@ -2084,7 +2084,7 @@ supports_streaming = false
         let catalog = region_test_catalog();
 
         // Region with api_key_env -> returned
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("test-provider".to_string(), "cn".to_string());
         let keys = catalog.resolve_region_api_keys(&sel);
         assert_eq!(
@@ -2108,7 +2108,7 @@ supports_streaming = false
     #[test]
     fn test_resolve_region_unknown_provider() {
         let catalog = region_test_catalog();
-        let mut sel = HashMap::new();
+        let mut sel = BTreeMap::new();
         sel.insert("nonexistent".to_string(), "us".to_string());
         let urls = catalog.resolve_region_urls(&sel);
         assert!(urls.is_empty());
