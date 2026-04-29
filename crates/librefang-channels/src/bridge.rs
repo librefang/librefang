@@ -9,7 +9,7 @@ use crate::router::AgentRouter;
 use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, truncate_utf8, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage,
-    ChannelUser, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
+    ChannelUser, GroupMember, InteractiveButton, LifecycleReaction, ParticipantRef, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -239,6 +239,23 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Returns `None` if the agent has no per-agent overrides configured.
     async fn agent_channel_overrides(&self, _agent_id: AgentId) -> Option<ChannelOverrides> {
         None
+    }
+
+    /// Already-escaped regex patterns from `channel_overrides.group_trigger_patterns`; callers must not re-escape.
+    async fn get_agent_group_trigger_patterns(&self, _agent_id: AgentId) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Persist a group roster member to the kernel's persistent storage.
+    async fn roster_upsert(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
     /// Lightweight LLM classification: should the bot reply to this group message?
@@ -816,20 +833,34 @@ fn flush_debounced(
 
             // --- Input sanitization (prompt injection detection) ---
             if !sanitizer.is_off() {
-                let text_to_check: Option<&str> = match &merged_msg.content {
-                    ChannelContent::Text(t) => Some(t.as_str()),
-                    ChannelContent::Image { caption, .. } => caption.as_deref(),
-                    ChannelContent::Voice { caption, .. } => caption.as_deref(),
-                    ChannelContent::Video { caption, .. } => caption.as_deref(),
+                // Command-type messages are checked by reconstructing their text
+                // so that slash-command args cannot carry prompt-injection payloads.
+                let text_to_check: Option<String> = match &merged_msg.content {
+                    ChannelContent::Text(t) => Some(t.clone()),
+                    ChannelContent::Command { name, args } => {
+                        if args.is_empty() {
+                            Some(format!("/{name}"))
+                        } else {
+                            Some(format!("/{name} {}", args.join(" ")))
+                        }
+                    }
+                    ChannelContent::Image { caption, .. } => caption.clone(),
+                    ChannelContent::Voice { caption, .. } => caption.clone(),
+                    ChannelContent::Video { caption, .. } => caption.clone(),
                     _ => None,
                 };
-                if let Some(text) = text_to_check {
+                let message_type = match &merged_msg.content {
+                    ChannelContent::Command { .. } => "Command",
+                    _ => "User",
+                };
+                if let Some(ref text) = text_to_check {
                     match sanitizer.check(text) {
                         SanitizeResult::Clean => {}
                         SanitizeResult::Warned(reason) => {
                             warn!(
                                 channel = ct_str,
                                 user = %merged_msg.sender.display_name,
+                                message_type = message_type,
                                 reason = reason.as_str(),
                                 "Suspicious channel input (warn mode, allowing through)"
                             );
@@ -837,9 +868,11 @@ fn flush_debounced(
                         SanitizeResult::Blocked(reason) => {
                             warn!(
                                 channel = ct_str,
-                                user = %merged_msg.sender.display_name,
+                                source = %merged_msg.sender.display_name,
+                                message_type = message_type,
                                 reason = reason.as_str(),
-                                "Blocked channel input (prompt injection detected)"
+                                "Input sanitizer blocked potential prompt injection in {message_type} message from {}"
+                                , merged_msg.sender.display_name,
                             );
                             let _ = adapter
                                 .send(
@@ -1730,6 +1763,17 @@ fn should_process_group_message(
     }
 }
 
+/// Extract structured `GroupMember` entries from the inbound message metadata.
+/// Channels that supply `group_members` (a JSON array of `{user_id, display_name, username?}`)
+/// populate this; the bridge persists them to the roster store for later queries.
+fn extract_group_members(message: &ChannelMessage) -> Vec<GroupMember> {
+    message
+        .metadata
+        .get("group_members")
+        .and_then(|v| serde_json::from_value::<Vec<GroupMember>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// Read `group_participants` from the inbound message metadata payload
 /// (populated gateway-side by `sock.groupMetadata`). Returns empty when the
 /// channel doesn't supply a roster — the addressee guard then becomes a no-op
@@ -1811,6 +1855,18 @@ fn build_sender_context(
         // sock.groupMetadata). Empty for non-WhatsApp channels — addressee
         // guard then becomes a no-op (BC-01).
         group_participants: extract_group_participants(message),
+        // Bot identity metadata for group context enrichment.
+        bot_username: message
+            .metadata
+            .get("bot_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        sender_username: message
+            .metadata
+            .get("sender_username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        group_members: extract_group_members(message),
         // Channel bridges land in per-channel sessions (the default); only
         // the dashboard WS opts into canonical storage.
         use_canonical_session: false,
@@ -1827,6 +1883,49 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
         .get(SENDER_USER_ID_KEY)
         .and_then(|v| v.as_str())
         .unwrap_or(&message.sender.platform_id)
+}
+
+/// Persists the observed group sender; skips DMs and messages without SENDER_USER_ID_KEY to avoid storing the group's own platform_id.
+async fn upsert_sender_into_roster(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    message: &ChannelMessage,
+) {
+    if !message.is_group {
+        return;
+    }
+    let Some(user_id) = message
+        .metadata
+        .get(SENDER_USER_ID_KEY)
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    if user_id.is_empty() || message.sender.platform_id.is_empty() {
+        return;
+    }
+    let username = message
+        .metadata
+        .get("sender_username")
+        .and_then(|v| v.as_str());
+    let channel_str = channel_type_str(&message.channel);
+    if let Err(e) = handle
+        .roster_upsert(
+            channel_str,
+            &message.sender.platform_id,
+            user_id,
+            &message.sender.display_name,
+            username,
+        )
+        .await
+    {
+        warn!(
+            channel = channel_str,
+            chat_id = %message.sender.platform_id,
+            user_id = %user_id,
+            error = %e,
+            "roster_upsert failed; group member will not be remembered for this turn"
+        );
+    }
 }
 
 /// Wrap an outbound message with the responding agent's name according to
@@ -2252,20 +2351,34 @@ async fn dispatch_message(
 
     // --- Input sanitization (prompt injection detection) ---
     if !sanitizer.is_off() {
-        let text_to_check: Option<&str> = match &message.content {
-            ChannelContent::Text(t) => Some(t.as_str()),
-            ChannelContent::Image { caption, .. } => caption.as_deref(),
-            ChannelContent::Voice { caption, .. } => caption.as_deref(),
-            ChannelContent::Video { caption, .. } => caption.as_deref(),
+        // Command-type messages are checked by reconstructing their text
+        // so that slash-command args cannot carry prompt-injection payloads.
+        let text_to_check: Option<String> = match &message.content {
+            ChannelContent::Text(t) => Some(t.clone()),
+            ChannelContent::Command { name, args } => {
+                if args.is_empty() {
+                    Some(format!("/{name}"))
+                } else {
+                    Some(format!("/{name} {}", args.join(" ")))
+                }
+            }
+            ChannelContent::Image { caption, .. } => caption.clone(),
+            ChannelContent::Voice { caption, .. } => caption.clone(),
+            ChannelContent::Video { caption, .. } => caption.clone(),
             _ => None,
         };
-        if let Some(text) = text_to_check {
+        let message_type = match &message.content {
+            ChannelContent::Command { .. } => "Command",
+            _ => "User",
+        };
+        if let Some(ref text) = text_to_check {
             match sanitizer.check(text) {
                 SanitizeResult::Clean => {}
                 SanitizeResult::Warned(reason) => {
                     warn!(
                         channel = ct_str,
                         user = %message.sender.display_name,
+                        message_type = message_type,
                         reason = reason.as_str(),
                         "Suspicious channel input (warn mode, allowing through)"
                     );
@@ -2273,9 +2386,11 @@ async fn dispatch_message(
                 SanitizeResult::Blocked(reason) => {
                     warn!(
                         channel = ct_str,
-                        user = %message.sender.display_name,
+                        source = %message.sender.display_name,
+                        message_type = message_type,
                         reason = reason.as_str(),
-                        "Blocked channel input (prompt injection detected)"
+                        "Input sanitizer blocked potential prompt injection in {message_type} message from {}"
+                        , message.sender.display_name,
                     );
                     let _ = adapter
                         .send(
@@ -3268,6 +3383,8 @@ async fn dispatch_message(
     let msg_id = &message.platform_message_id;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+
+    upsert_sender_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides.as_ref());
@@ -4306,6 +4423,8 @@ async fn dispatch_with_blocks(
     let msg_id = &message.platform_message_id;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+
+    upsert_sender_into_roster(handle, message).await;
 
     // Build sender context to propagate identity to the agent
     let sender_ctx = build_sender_context(message, overrides);

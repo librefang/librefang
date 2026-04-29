@@ -244,7 +244,7 @@ impl SsrfResolution {
 ///
 /// Returns the resolved addresses on success so that callers can pin DNS
 /// and avoid TOCTOU / DNS-rebinding attacks.
-pub(crate) fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution, String> {
+pub fn check_ssrf(url: &str, allowed_hosts: &[String]) -> Result<SsrfResolution, String> {
     // Only allow http:// and https:// schemes
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Only http:// and https:// URLs are allowed".to_string());

@@ -46,7 +46,8 @@ fn publish_js(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Erro
 
     println!("Publishing JavaScript SDK...");
 
-    let mut args = vec!["publish", "--access", "public"];
+    // --ignore-scripts blocks lifecycle hooks so a malicious dep cannot exfiltrate NODE_AUTH_TOKEN.
+    let mut args = vec!["publish", "--access", "public", "--ignore-scripts"];
     if dry_run {
         args.push("--dry-run");
     }

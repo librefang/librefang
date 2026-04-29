@@ -143,6 +143,28 @@ impl SkillRegistry {
             return Ok(0);
         }
 
+        // Clean up any leftover temporary install directories from previous
+        // interrupted downloads (e.g. daemon crash mid-extraction).
+        if let Ok(entries) = std::fs::read_dir(&self.skills_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.starts_with(".installing-") {
+                            if let Err(e) = std::fs::remove_dir_all(&path) {
+                                warn!(
+                                    "Failed to clean up stale install dir {}: {e}",
+                                    path.display()
+                                );
+                            } else {
+                                warn!("Removed stale install directory: {}", path.display());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut count = 0;
         let entries = std::fs::read_dir(&self.skills_dir)?;
 

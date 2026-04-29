@@ -1,0 +1,217 @@
+# 移动端发布 SOP
+
+将 LibreFang 移动端构建发布到 **TestFlight** (iOS) 与 **Play 内部测试**
+(Android) 的端到端运行手册。与桌面端的[生产部署](/zh/operations/production)
+配套——本文仅涵盖移动端特有的步骤。
+
+本 SOP 假设
+[移动端 CI](https://github.com/librefang/librefang/blob/main/.github/workflows/release.yml)
+中的 `mobile_android` 与 `mobile_ios` 任务已就绪（PR #3970 关闭）且
+[`.github/SECRETS.md`](https://github.com/librefang/librefang/blob/main/.github/SECRETS.md)
+中的上传所需 secret 已配置完成。
+
+<Note>
+  面向真人的分发（TestFlight 邀请、Play 测试者 opt-in、App Store 提审）
+  绝大多数是合规与外部审核工作。即便工程工作量约 3 天，也要为整个
+  流程预留两周日历时间。
+</Note>
+
+---
+
+## 目录
+
+- [前置条件——每个商店一次性](#prerequisites--one-time-per-store)
+- [版本号映射方案](#version-mapping-scheme)
+- [发版操作](#cutting-a-release)
+- [TestFlight 通道](#testflight-track)
+- [Play 内部测试通道](#play-internal-testing-track)
+- [推送到生产](#promoting-to-production)
+- [上传失败的恢复](#recovering-from-failed-uploads)
+
+---
+
+## 前置条件——每个商店一次性
+
+请在 issue 系统中跟踪以下事项；完成后不再重复。
+
+### Apple
+
+1. **Apple Developer Program** 注册（$99 / 年）。如 LibreFang 有法人实体
+   则选组织版，否则选个人版。组织团队内部人员变动不需要重新注册。
+2. **App Store Connect 应用记录**：bundle id `ai.librefang.app`，主类目
+   *Productivity*。尽早占位——bundle id 抢注无法回滚。
+3. **发布证书 + Provisioning Profile**（Ad Hoc + App Store）。将证书
+   导出为 `.p12`，填入 `.github/SECRETS.md` 中四个 `APPLE_*` 签名
+   secret。
+4. **App Store Connect API Key**，权限 *App Manager*。填入三个
+   `APPLE_API_KEY_*` 上传 secret。
+5. **隐私政策**部署到 `librefang.ai/privacy-mobile`。草稿模板位于
+   [`.github/templates/PRIVACY_MOBILE_TEMPLATE.md`](https://github.com/librefang/librefang/blob/main/.github/templates/PRIVACY_MOBILE_TEMPLATE.md)
+   ——经法务复核后，发布到
+   `docs/src/app/privacy-mobile/`。
+6. App Store Connect 中的 **App Privacy 问卷**。声明：
+   - "API key" → 用户输入的联系信息
+   - "Agent 对话日志" → 用户内容
+   - 全部标记为 **Data Not Linked to User**（LibreFang 不将数据
+     绑定到 Apple ID）。
+7. **加密出口合规**：iOS 构建流程已自动将
+   `ITSAppUsesNonExemptEncryption = false` 写入 Info.plist，并向
+   TestFlight action 传入 `uses-non-exempt-encryption: "false"`——除非
+   未来代码引入非标准加密，否则无需手动填表。
+
+### Google
+
+1. **Play Console 账号**（$25 一次性）。在添加任何制品前，先在开发者
+   账号上启用两步验证。
+2. **应用记录**：包名 `ai.librefang.app`，默认语言英文。两端 bundle id
+   按惯例保持一致；技术上不必相同，但保持一致可以简化运维面。
+3. **上传密钥**（启用 Play App Signing 时与应用签名密钥分开——推荐）。
+   上传密钥丢失可在 Play Console 重置；Google 持有的应用签名密钥若
+   丢失，则**永远无法**再发版。务必离线备份。
+4. **服务账号 JSON**，在该应用上具备 *Release Manager* 角色。填入
+   `GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`。
+5. **隐私政策**（与 iOS 同 URL）。
+6. **数据安全表单**：内容与 Apple 问卷一致。
+7. **内容分级**：Productivity / Tools，无敏感内容。
+
+---
+
+## 版本号映射方案
+
+两个商店都拒绝 build 号回退的提交。CI 流程按以下规则确定性地派生：
+
+| 位置 | 字段 | 公式 | 示例 |
+|---|---|---|---|
+| 双端 | display version | 根 `Cargo.toml` 中 `[workspace.package].version`，去除 `-betaN` / `-rcN` 后缀 | `2026.4.28-beta7` → `2026.4.28` |
+| iOS | `CFBundleShortVersionString` | display version | `2026.4.28` |
+| iOS | `CFBundleVersion` | UTC `YYYYMMDDNN`，NN = `run_number % 100` | `2026042901` |
+| Android | `versionName` | display version | `2026.4.28` |
+| Android | `versionCode` | 同样的 `YYYYMMDDNN` 整数 | `2026042901` |
+
+实际硬上限是 Play 的 `versionCode` 上限 **2,100,000,000**（int32 有更多
+余量但 Play 卡得更紧）。YYYYMMDDNN 方案在 **2100-01-01** 前都低于该
+上限。在此之前需切换到更小值域的公式（例如
+`(year - 2024) * 1_000_000 + month * 10_000 + day * 100 + nn`），并
+同步更新 `release.yml` 中的两个任务。
+
+> **为什么用 YYYYMMDDNN？** 两个商店都要求所有历史上传的 build 号严格
+> 单调递增。基于日期的方案让"这个 build 是哪天切的？"无需查 git 即可
+> 回答——这在 App Review 回滚窗口仅有数小时时尤为重要。
+
+---
+
+## 发版操作
+
+前置条件就绪后的端到端流程：
+
+1. 提升根 `Cargo.toml` 中的 `[workspace.package].version`。Conventional
+   commit 规范：`chore(release): vYYYY.M.D-betaN`。
+2. 给该提交打 `vYYYY.M.D-betaN` 标签并推送。移动端任务仅在匹配
+   `refs/tags/v*` 的标签上运行。
+3. 在 Actions 页观察 `mobile_android` 与 `mobile_ios` 任务。两者
+   `continue-on-error: true`——单次抖动不会破坏桌面矩阵；这意味着
+   你必须真的去看 summary，而不是只确认工作流末尾的绿勾。
+4. 成功后，`.aab` / `.apk` / `.ipa` 会附加到 GitHub Release，*同时*
+   无人值守上传步骤会分别推到 Play 内部测试 / TestFlight。
+5. 记录 build 号（`Mobile / Android` / `Mobile / iOS` 步骤摘要会打印
+   `versionName=… versionCode=…` 与
+   `CFBundleShortVersionString=… CFBundleVersion=…`）。商店面板上需要
+   这些值。
+
+如果上传 secret 尚未配置，这些任务会优雅降级：GitHub Release 上传仍会
+进行，商店推送步骤打印 `::notice::` 后以 0 退出。
+
+---
+
+## TestFlight 通道
+
+`mobile_ios` 完成上传步骤后：
+
+1. App Store Connect → My Apps → LibreFang → **TestFlight** 标签页。
+   build 会进入 *Processing*（干净 build 5–30 分钟，符号上传慢的话
+   更久）。
+2. 处理期间填写 *Test Information* 字段（测试凭据见下；要测试什么；
+   描述）。这些信息在所有 TestFlight build 间共享——只需填写一次，
+   只在内容变更时编辑。
+3. 将 build 加入 **librefang-internal** 组（最多 100 邮箱，无需审核）。
+   内部测试者会在数分钟内收到邀请邮件。
+4. 首个 **External Testing** build 需提交 *Beta App Review*。审核
+   时长约 24 小时；常见拒绝原因：
+   - 审核员无法连接到 daemon。在 App Review notes 里给出测试 daemon
+     URL 与 API key。审核窗口结束后请轮换该测试 daemon 上的 API key。
+   - "Sign-in wall"：连接向导首启即要求填入 daemon URL，Apple 可能
+     视为登录墙。缓解方式是在 review notes 写一段清晰说明：daemon
+     连接*就是*产品本身。
+5. 每个 build 在上传后 **90 天**过期。设个日历提醒，每月推一个新的
+   内部 build，避免 beta 通道熄火。
+
+---
+
+## Play 内部测试通道
+
+`mobile_android` 完成上传步骤后：
+
+1. Play Console → LibreFang → **Testing → Internal testing**。`.aab`
+   会在约 5 分钟内出现在当前 release 中。
+2. **Pre-launch report**：Play 会在真机集群上运行该 build 并通过邮件
+   报告崩溃。在升级到 Closed / Open testing 前**务必**阅读这些报告——
+   它经常能暴露模拟器看不到的设备特定布局问题。
+3. 测试者通过邮件列表管理——把内部团队邮箱粘贴到 *Testers* 标签页。
+   opt-in URL 可分享。
+4. 升级到 **Closed Testing**：Play Console → Closed testing → Promote
+   release → 选同一个 `.aab`。无需重新上传。
+5. **Open Testing** = 公开 beta。在产品稳定前不要开。Open testing 与
+   生产共用同一审核界面。
+
+---
+
+## 推送到生产
+
+这一步是有意为之的人工卡点——两个商店都有审核延迟，beta 阶段抓到的
+回归代价低，自动晋级后才发现的回归代价高。
+
+### iOS
+
+1. App Store Connect → App Store 标签页 → *iOS App* → 创建目标
+   `CFBundleShortVersionString` 的新版本。挑选要送审的 TestFlight build。
+2. **App Review** 时长：首次 1–3 天，后续更新更快（通常不到 24 小时）。
+   常见后续询问：审核员要凭据，或要求提供视频演示。
+3. 在版本页选择 *Manual release*，避免 App Review 通过后立即推给用户。
+
+### Android
+
+1. Play Console → Production → Create new release → 复用现有 AAB
+   （**不要**重新构建——同一制品必须贯穿所有通道）。
+2. 灰度发布：5% → 20% → 50% → 100%，在 48–72 小时内完成。每一档都看
+   Vitals 与 ANR 率。当 ANR 率 > 0.47% 或崩溃率 > 1.09%（Play 的
+   "bad behaviour" 阈值）时停止并回滚。
+3. 首个生产 release：完整审核，约 3 天。后续更新：通常不到 12 小时。
+
+---
+
+## 上传失败的恢复
+
+| 现象 | 可能原因 | 修复 |
+|---|---|---|
+| `mobile_android` 的 "Upload to Play Internal Testing" 步骤报 `403` | 服务账号缺少 *Release Manager* 角色，或该应用还未在内部测试通道首次发布 | 给 SA 授予该角色；若是首次上传，先通过 Play Console 手工上传一次以引导该通道 |
+| `mobile_ios` 的 "Upload to TestFlight" 步骤报 `Authentication credentials are missing or invalid` | API key 已撤销，或 `APPLE_API_KEY_P8` 粘贴时丢了换行 | 重新生成 key；确保 secret 值完整保留 BEGIN/END PEM 标记 |
+| Apple build 卡在 *Processing* 超过 24 小时 | Apple 端处理延迟（少见），偶有二进制问题 | 等 24 小时，仍卡住则通过 Apple Developer support 提 TSI ticket |
+| Play release 显示 "Internal app sharing only" 而非进入内部测试 | CI 上传到了*内部应用共享*通道（未指定 track） | 检查 `r0adkll/upload-google-play` action 调用的 `track: internal` 参数是否正确 |
+| `versionCode X has already been used` | 同一 UTC 日内 release 重跑次数超过 100 次（`NN` 槽位回绕） | 在工作流中手动调高下次运行的 `NN` 槽位，或等到下一个 UTC 日 |
+
+---
+
+## 周期性检查清单
+
+SOP 依赖的年度或周期性任务——请设置日历提醒：
+
+- **Apple 发布证书**：每年轮换（参见
+  [`.github/SECRETS.md`](https://github.com/librefang/librefang/blob/main/.github/SECRETS.md)
+  中的"Rotation runbook (yearly Apple cert refresh)"）。
+- **App Store Connect API key**：每年轮换；遇人员变动应提前轮换。
+- **TestFlight build 续期**：每月——在 90 天过期前推一个新的内部
+  build，确保 beta 通道不熄火。
+- **Apple Developer Program**：$99 / 年自动续费。默认开启自动续费；
+  请确认绑定的信用卡未过期。
+- **隐私政策**：每年通读一次。商店允许突击审计——声明的与实际的
+  数据采集行为产生漂移，是触发应用下架最常见的原因。

@@ -296,6 +296,10 @@ pub struct ResolvedProvider {
     pub allowed_domains: Vec<String>,
     #[serde(skip)]
     pub audience: String,
+    /// Whether to require `email_verified: true` in the ID token / userinfo
+    /// response before allowing login.  Defaults to `true` (#3703).
+    #[serde(skip)]
+    pub require_email_verified: bool,
 }
 
 // ── Token exchange response ─────────────────────────────────────────────
@@ -660,6 +664,10 @@ pub async fn auth_callback(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &code, &state_payload).await
 }
 
@@ -692,7 +700,52 @@ pub async fn auth_callback_post(
         }
     };
 
+    if let Err(resp) = consume_oauth_nonce(&state, &state_payload.nonce) {
+        return resp;
+    }
+
     handle_code_exchange(ext_auth, &body.code, &state_payload).await
+}
+
+/// Atomically reject + consume an OAuth state nonce.
+///
+/// #3944 verified that the nonce in the id_token matched the one we
+/// signed into `state`, but never marked the nonce as redeemed.  A
+/// callback URL captured from browser history, Referer, or proxy logs
+/// could be replayed against the daemon repeatedly until the IdP
+/// rejected the authorization code.  This helper enforces single-use
+/// at the daemon by checking + recording the nonce as consumed before
+/// the code exchange runs.  Subsequent requests with the same `state`
+/// are rejected with HTTP 400.
+///
+/// The nonce is consumed eagerly (before code exchange).  Failed
+/// downstream verification (token-endpoint reject, JWT signature fail)
+/// still leaves the nonce marked used — the legitimate user must
+/// restart the auth flow if anything goes wrong, which is exactly the
+/// fail-closed shape we want for credential flows.
+//
+// `axum::http::Response<Body>` is ~128 bytes, which trips clippy's
+// `result_large_err` lint.  The whole point of this helper is to
+// short-circuit the callback handler with a fully-formed Response
+// when the nonce was already redeemed — boxing the Err just to
+// satisfy the lint would force every caller to `.map_err(|b| *b)`
+// at the call site for no real benefit (the helper isn't on a hot
+// path; one allocation per OAuth callback is fine, and the Err
+// path is the rare-branch).  Suppress the lint here.
+#[allow(clippy::result_large_err)]
+fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Response> {
+    if state.kernel.approvals().is_oauth_nonce_used(nonce) {
+        warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "OAuth callback already redeemed; please restart the sign-in flow"
+            })),
+        )
+            .into_response());
+    }
+    state.kernel.approvals().record_oauth_nonce_used(nonce);
+    Ok(())
 }
 
 /// Shared code exchange logic for both GET and POST callback handlers.
@@ -760,14 +813,27 @@ async fn handle_code_exchange(
         }
     };
 
-    // Try to validate the ID token if present.
+    // Validate the ID token if the provider supplies one.  Three rules,
+    // all hard rejects:
+    //   1. Provider sent an id_token AND we have a jwks_uri to verify it
+    //      against → JWT validation MUST succeed.  A malformed / forged /
+    //      expired id_token is a strong signal of replay or token swap;
+    //      falling through to userinfo (which carries no nonce) lets
+    //      the attack succeed.  This was the path #3944 left open.
+    //   2. id_token validates → nonce claim MUST be present and equal
+    //      to the nonce we signed into `state`.
+    //   3. id_token validates with mismatched nonce → reject.
+    //
+    // The "no id_token at all" path (some OAuth2 providers genuinely
+    // don't emit one for non-OIDC flows) still falls through to
+    // userinfo by design; that path was always nonce-less.
     let claims = if let Some(ref id_token) = token_resp.id_token {
         if !id_token.is_empty() && !provider.jwks_uri.is_empty() {
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
                 Ok(c) => {
-                    // Verify nonce matches the one from our state token.
-                    if let Some(ref token_nonce) = c.nonce {
-                        if token_nonce != &state_payload.nonce {
+                    // Verify nonce claim against the nonce we sent in the auth request.
+                    match c.nonce {
+                        Some(ref token_nonce) if token_nonce != &state_payload.nonce => {
                             warn!("Nonce mismatch in ID token");
                             return (
                                 StatusCode::BAD_REQUEST,
@@ -775,15 +841,55 @@ async fn handle_code_exchange(
                             )
                                 .into_response();
                         }
+                        None => {
+                            // We always send a nonce; a well-behaved provider must echo it.
+                            warn!(
+                                "ID token is missing the nonce claim — \
+                                 rejecting to prevent nonce-bypass attack"
+                            );
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": "ID token missing required nonce claim"
+                                })),
+                            )
+                                .into_response();
+                        }
+                        Some(_) => {} // nonce present and matches — OK
                     }
                     Some(c)
                 }
                 Err(e) => {
-                    debug!(error = %e, "ID token validation failed, falling back to userinfo");
-                    None
+                    // The provider sent an id_token AND we had keys to
+                    // verify it — verification must succeed or the
+                    // request is rejected.  Returning the error message
+                    // as-is is fine: it's our own validation diagnostic
+                    // (kid mismatch, expired, sig fail), not provider
+                    // body.
+                    warn!(error = %e, "ID token validation failed — rejecting OAuth callback");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "ID token signature or expiry validation failed"
+                        })),
+                    )
+                        .into_response();
                 }
             }
         } else {
+            // Provider sent a non-empty id_token but no jwks_uri configured
+            // for this provider, OR the id_token field came back empty.
+            // The empty-token case is benign (no token to verify); the
+            // missing-jwks-uri case means this provider was added to the
+            // config without OIDC keys, which only makes sense for pure
+            // OAuth2 — accept and rely on userinfo.
+            if !id_token.is_empty() {
+                warn!(
+                    "Provider supplied id_token but jwks_uri is unset; \
+                     skipping JWT validation and falling back to userinfo. \
+                     Configure jwks_uri to enforce OIDC nonce binding."
+                );
+            }
             None
         }
     } else {
@@ -837,6 +943,44 @@ async fn handle_code_exchange(
             }
         }
     };
+
+    // SECURITY (#3703): Require email_verified = true before allowing login.
+    // Without this check, a provider that supports unverified email addresses
+    // can be exploited to claim an address in `allowed_domains` without actually
+    // owning that address.
+    if provider.require_email_verified {
+        match claims.email_verified {
+            Some(true) => {} // verified — allow login to proceed
+            Some(false) => {
+                warn!(
+                    sub = %claims.sub,
+                    provider = %provider.id,
+                    "OIDC login rejected: email_verified = false"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Email address not verified by identity provider"
+                    })),
+                )
+                    .into_response();
+            }
+            None => {
+                warn!(
+                    sub = %claims.sub,
+                    provider = %provider.id,
+                    "OIDC login rejected: email_verified claim absent"
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Email address not verified by identity provider"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     // Check allowed domains.
     if !provider.allowed_domains.is_empty() {
@@ -1337,7 +1481,7 @@ pub(crate) async fn resolve_providers(
 
     // Multi-provider mode.
     for provider in &config.providers {
-        match resolve_single_provider(provider).await {
+        match resolve_single_provider(provider, config.require_email_verified).await {
             Ok(p) => resolved.push(p),
             Err(e) => warn!(
                 provider_id = %provider.id,
@@ -1368,6 +1512,7 @@ pub(crate) async fn resolve_providers(
                     } else {
                         config.audience.clone()
                     },
+                    require_email_verified: config.require_email_verified,
                 });
             }
             Err(e) => warn!(error = %e, "Failed to resolve legacy OIDC provider"),
@@ -1379,6 +1524,7 @@ pub(crate) async fn resolve_providers(
 
 async fn resolve_single_provider(
     provider: &librefang_types::config::OidcProvider,
+    global_require_email_verified: bool,
 ) -> Result<ResolvedProvider, String> {
     let display_name = if provider.display_name.is_empty() {
         provider.id.clone()
@@ -1391,6 +1537,11 @@ async fn resolve_single_provider(
     } else {
         provider.audience.clone()
     };
+
+    // Per-provider override takes precedence over the global setting.
+    let require_email_verified = provider
+        .require_email_verified
+        .unwrap_or(global_require_email_verified);
 
     // If explicit URLs are provided, use them directly (e.g., GitHub).
     if !provider.auth_url.is_empty() && !provider.token_url.is_empty() {
@@ -1407,6 +1558,7 @@ async fn resolve_single_provider(
             client_secret_env: provider.client_secret_env.clone(),
             allowed_domains: provider.allowed_domains.clone(),
             audience,
+            require_email_verified,
         });
     }
 
@@ -1448,6 +1600,7 @@ async fn resolve_single_provider(
         client_secret_env: provider.client_secret_env.clone(),
         allowed_domains: provider.allowed_domains.clone(),
         audience,
+        require_email_verified,
     })
 }
 
@@ -1886,6 +2039,7 @@ mod tests {
                 scopes: vec!["read:user".to_string()],
                 allowed_domains: vec![],
                 audience: String::new(),
+                require_email_verified: None,
             }],
             ..Default::default()
         };
@@ -1917,6 +2071,7 @@ mod tests {
                 scopes: vec!["openid".to_string()],
                 allowed_domains: vec![],
                 audience: String::new(),
+                require_email_verified: None,
             }],
             ..Default::default()
         };
@@ -1958,6 +2113,7 @@ mod tests {
                     scopes: vec!["openid".to_string()],
                     allowed_domains: vec![],
                     audience: String::new(),
+                    require_email_verified: None,
                 },
                 librefang_types::config::OidcProvider {
                     id: "bad".to_string(),
@@ -1973,6 +2129,7 @@ mod tests {
                     scopes: vec!["openid".to_string()],
                     allowed_domains: vec![],
                     audience: String::new(),
+                    require_email_verified: None,
                 },
             ],
             ..Default::default()

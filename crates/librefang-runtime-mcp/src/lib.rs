@@ -796,31 +796,59 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Read an HTTP response body up to [`MAX_RESPONSE_BYTES`].
 ///
-/// Rejects based on `Content-Length` header first (fast path), then reads
-/// the full body and errors if it exceeds the cap.
-async fn read_response_bytes_capped(response: reqwest::Response) -> Result<Vec<u8>, String> {
+/// Rejects based on `Content-Length` header first (fast path), then
+/// **streams** the body chunk-by-chunk and aborts mid-read once the
+/// running total would breach the cap.
+///
+/// The previous shape (`response.bytes().await` followed by a length
+/// check) happily allocated up to ~16 MiB before rejecting — a server
+/// omitting `Content-Length` (chunked transfer) forces that allocation
+/// per request and creates memory pressure under concurrent abuse.
+/// The audit of #3926 flagged this; fix is a streaming reader with a
+/// running byte counter.
+async fn read_response_bytes_capped(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     // Fast-path: reject via Content-Length before reading a single byte.
     if let Some(content_length) = response.content_length() {
-        if content_length as usize > MAX_RESPONSE_BYTES {
+        if content_length > MAX_RESPONSE_BYTES as u64 {
             return Err(format!(
                 "MCP response Content-Length ({content_length}) exceeds \
                  the {MAX_RESPONSE_BYTES}-byte cap — response rejected"
             ));
         }
     }
-    // Read the full body and enforce the cap.
-    let b = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read response body: {e}"))?;
-    if b.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "MCP response body ({} bytes) exceeds the {MAX_RESPONSE_BYTES}-byte cap \
-             — response rejected",
-            b.len()
-        ));
+
+    // Streaming-path: consume chunks via reqwest's `chunk()` async API
+    // and bail out the moment the running total would breach the cap.
+    // No 16 MiB buffering for chunked-transfer servers that omit
+    // Content-Length.
+    let mut buf: Vec<u8> = Vec::new();
+    if let Some(hint) = response.content_length() {
+        // Pre-allocate when Content-Length is honest; clamp to avoid a
+        // malicious large hint forcing the allocation we're trying to
+        // avoid.
+        let cap_hint = hint.min(MAX_RESPONSE_BYTES as u64) as usize;
+        buf.reserve(cap_hint);
     }
-    Ok(b.to_vec())
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                    return Err(format!(
+                        "MCP response body exceeds the {MAX_RESPONSE_BYTES}-byte cap \
+                         (streamed {} + next chunk {}) — response aborted",
+                        buf.len(),
+                        chunk.len()
+                    ));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break, // end of body
+            Err(e) => {
+                return Err(format!("Failed to read response body: {e}"));
+            }
+        }
+    }
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,9 +1147,30 @@ impl McpConnection {
                 let mut lines_read: u32 = 0;
                 const MAX_LINE_BYTES: usize = 256;
                 const MAX_LINES: u32 = 100;
-                while lines_read < MAX_LINES {
+                loop {
                     match reader.next_line().await {
                         Ok(Some(line)) => {
+                            // Past the log cap we KEEP READING but stop
+                            // logging.  CRITICAL: we must continue to
+                            // drain the pipe — if the loop exits on
+                            // line 101, the kernel stderr pipe buffer
+                            // (64 KiB on Linux) fills and the child's
+                            // next `write(stderr)` blocks forever,
+                            // hanging the MCP server.  #3926 introduced
+                            // a `break` here that reintroduced exactly
+                            // the pipe-stall failure mode the PR title
+                            // claimed to fix.
+                            if lines_read >= MAX_LINES {
+                                if lines_read == MAX_LINES {
+                                    debug!(
+                                        server = %server_name_for_log,
+                                        "MCP stdio stderr drain reached {MAX_LINES}-line log cap; \
+                                         continuing to discard further output to keep the pipe drained"
+                                    );
+                                }
+                                lines_read = lines_read.saturating_add(1);
+                                continue;
+                            }
                             let truncated = if line.len() > MAX_LINE_BYTES {
                                 // Find the last valid UTF-8 character boundary at
                                 // or before MAX_LINE_BYTES so we don't panic on
@@ -1142,15 +1191,9 @@ impl McpConnection {
                             );
                             lines_read += 1;
                         }
-                        Ok(None) => break, // EOF
-                        Err(_) => break,   // pipe closed or read error
+                        Ok(None) => break, // EOF — child closed stderr.
+                        Err(_) => break,   // read error — pipe is unusable.
                     }
-                }
-                if lines_read >= MAX_LINES {
-                    debug!(
-                        server = %server_name_for_log,
-                        "MCP stdio stderr drain reached {MAX_LINES}-line cap; suppressing further output"
-                    );
                 }
             });
         }
@@ -1706,8 +1749,33 @@ impl McpConnection {
             },
         );
         if let McpInner::Rmcp(mut client) = inner {
-            if let Err(e) = client.close().await {
-                warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
+            // Bound the rmcp close() call so a stuck stdio child or a
+            // wedged shutdown path can never block the caller (typically
+            // hot-reload or daemon shutdown) indefinitely.  rmcp's close
+            // sends a CancellationToken and waits for its transport loop
+            // + the underlying ChildWithCleanup drop; tokio's
+            // kill_on_drop(true) follows up with SIGKILL but does NOT
+            // call wait(), so the OS-level reap depends on the tokio
+            // child reaper still being alive.  A 10s timeout is generous
+            // enough that a healthy server completes shutdown but tight
+            // enough that a wedged transport doesn't stall the next
+            // hot-reload — the audit of #3926 flagged the unbounded
+            // close as a real risk.
+            const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+            match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
+                Ok(Ok(_reason)) => {}
+                Ok(Err(e)) => {
+                    warn!(server = %name, error = ?e, "MCP stdio client close error on disconnect");
+                }
+                Err(_) => {
+                    warn!(
+                        server = %name,
+                        timeout_secs = CLOSE_TIMEOUT.as_secs(),
+                        "MCP stdio client close timed out — relying on kill_on_drop \
+                         to reap the subprocess (may leave a transient zombie until \
+                         the tokio child reaper runs)"
+                    );
+                }
             }
         }
         // SSE and HttpCompat hold no persistent connection; nothing to close.
@@ -1754,12 +1822,30 @@ impl Drop for McpConnection {
                 // entered.
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
-                        if let Err(e) = client.close().await {
-                            debug!(
-                                server = %name,
-                                error = ?e,
-                                "MCP stdio client close error on implicit drop (#3800)"
-                            );
+                        // Bound the implicit close just like the explicit
+                        // path above so a wedged transport doesn't stall
+                        // a runtime worker indefinitely (the spawn
+                        // itself is fire-and-forget so we can't await
+                        // the join handle, but the timeout still caps
+                        // the worker's commitment).
+                        const CLOSE_TIMEOUT: std::time::Duration =
+                            std::time::Duration::from_secs(10);
+                        match tokio::time::timeout(CLOSE_TIMEOUT, client.close()).await {
+                            Ok(Ok(_reason)) => {}
+                            Ok(Err(e)) => {
+                                debug!(
+                                    server = %name,
+                                    error = ?e,
+                                    "MCP stdio client close error on implicit drop (#3800)"
+                                );
+                            }
+                            Err(_) => {
+                                debug!(
+                                    server = %name,
+                                    timeout_secs = CLOSE_TIMEOUT.as_secs(),
+                                    "MCP stdio client close timed out on implicit drop"
+                                );
+                            }
                         }
                     });
                 }

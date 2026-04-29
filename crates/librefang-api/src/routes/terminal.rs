@@ -25,7 +25,7 @@ use crate::terminal::PtySession;
 use crate::terminal_tmux::{validate_window_name, TmuxController, DEFAULT_TMUX_SESSION_NAME};
 use crate::ws::{
     detect_connection_locality, send_json, try_acquire_ws_slot, validate_ws_origin, ws_auth_token,
-    ws_query_param, WsConnectionGuard,
+    ws_bearer_protocol, ws_query_param, WsConnectionGuard,
 };
 
 pub const MAX_WS_MSG_SIZE: usize = 64 * 1024;
@@ -739,11 +739,18 @@ pub async fn terminal_ws(
         }
     };
 
-    ws.on_upgrade(move |socket| {
-        let guard = _terminal_guard;
-        handle_terminal_ws(socket, state, ip, guard, initial_cols, initial_rows, uri)
-    })
-    .into_response()
+    // #3963: Echo `bearer.<token>` sub-protocol back so browsers accept the
+    // handshake. Without this, dashboard WS connections fail in browsers.
+    let upgrade = match ws_bearer_protocol(&headers) {
+        Some(proto) => ws.protocols([proto]),
+        None => ws,
+    };
+    upgrade
+        .on_upgrade(move |socket| {
+            let guard = _terminal_guard;
+            handle_terminal_ws(socket, state, ip, guard, initial_cols, initial_rows, uri)
+        })
+        .into_response()
 }
 
 fn initial_terminal_dimension(uri: &axum::http::Uri, key: &str, max: u16) -> Option<u16> {

@@ -115,7 +115,10 @@ impl EmailAdapter {
     /// Check if a sender is in the allowlist (empty = allow all). Used in tests.
     #[allow(dead_code)]
     fn is_allowed_sender(&self, sender: &str) -> bool {
-        self.allowed_senders.is_empty() || self.allowed_senders.iter().any(|s| sender.contains(s))
+        if self.allowed_senders.is_empty() {
+            return true;
+        }
+        sender_matches_allowlist(sender, &self.allowed_senders)
     }
 
     /// Extract agent name from subject line brackets, e.g., "[coder] Fix the bug" -> Some("coder")
@@ -178,6 +181,33 @@ fn extract_email_addr(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+/// Exact-address or `@domain` allowlist match (no substring — fixes #3463).
+fn sender_matches_allowlist(sender: &str, allowed: &[String]) -> bool {
+    let addr = extract_email_addr(sender);
+    let addr = addr.trim();
+    let Some(at_idx) = addr.rfind('@') else {
+        return false;
+    };
+    let domain = &addr[at_idx + 1..];
+    if domain.is_empty() {
+        return false;
+    }
+    for entry in allowed {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if let Some(allowed_domain) = entry.strip_prefix('@') {
+            if !allowed_domain.is_empty() && domain.eq_ignore_ascii_case(allowed_domain) {
+                return true;
+            }
+        } else if addr.eq_ignore_ascii_case(entry) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Get a specific header value from a parsed email.
@@ -383,9 +413,9 @@ impl ChannelAdapter for EmailAdapter {
                 };
 
                 for (from_addr, subject, message_id, body) in emails {
-                    // Check allowed senders
+                    // Exact-match allowlist (substring match would let evil-trusted.com bypass).
                     if !allowed_senders.is_empty()
-                        && !allowed_senders.iter().any(|s| from_addr.contains(s))
+                        && !sender_matches_allowlist(&from_addr, &allowed_senders)
                     {
                         debug!(from = %from_addr, "Email from non-allowed sender, skipping");
                         continue;
@@ -577,6 +607,58 @@ mod tests {
             vec![],
         );
         assert!(open.is_allowed_sender("anyone@anywhere.com"));
+    }
+
+    #[test]
+    fn test_allowed_senders_domain_exact_match() {
+        let allowed = vec!["@example.com".to_string()];
+        // Exact domain match passes
+        assert!(sender_matches_allowlist("alice@example.com", &allowed));
+        assert!(sender_matches_allowlist("ALICE@EXAMPLE.COM", &allowed));
+        assert!(sender_matches_allowlist(
+            "Alice <alice@example.com>",
+            &allowed
+        ));
+        // Sibling-domain spoofing is rejected (the original substring bug).
+        assert!(!sender_matches_allowlist(
+            "attacker@example.com.evil.com",
+            &allowed
+        ));
+        assert!(!sender_matches_allowlist(
+            "attacker@notexample.com",
+            &allowed
+        ));
+        assert!(!sender_matches_allowlist("attacker@evil.com", &allowed));
+        assert!(!sender_matches_allowlist("malformed", &allowed));
+        assert!(!sender_matches_allowlist("trailing@", &allowed));
+    }
+
+    #[test]
+    fn test_allowed_senders_full_address_exact_match() {
+        let allowed = vec!["alice@example.com".to_string()];
+        assert!(sender_matches_allowlist("alice@example.com", &allowed));
+        assert!(sender_matches_allowlist("ALICE@example.com", &allowed));
+        assert!(!sender_matches_allowlist(
+            "alice@example.com.evil.com",
+            &allowed
+        ));
+        assert!(!sender_matches_allowlist("bob@example.com", &allowed));
+        assert!(!sender_matches_allowlist(
+            "alice+spoof@example.com",
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn test_allowed_senders_mixed_entries() {
+        let allowed = vec!["@example.com".to_string(), "bob@partner.com".to_string()];
+        assert!(sender_matches_allowlist("anyone@example.com", &allowed));
+        assert!(sender_matches_allowlist("bob@partner.com", &allowed));
+        assert!(!sender_matches_allowlist("alice@partner.com", &allowed));
+        assert!(!sender_matches_allowlist(
+            "bob@partner.com.evil.com",
+            &allowed
+        ));
     }
 
     #[test]

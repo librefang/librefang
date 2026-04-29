@@ -118,6 +118,10 @@ async fn start_test_server_with_provider(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(),
+        ),
+        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
     });
 
     let app = Router::new()
@@ -1467,8 +1471,10 @@ async fn test_agent_list_limit_clamped_to_max() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    // limit in response should be clamped to 100
-    assert_eq!(body["limit"].as_u64().unwrap(), 100);
+    // limit in response should be clamped to MAX_AGENT_LIST_LIMIT = 500
+    // (the cap was bumped from 100 to 500 by a subsequent change to
+    // routes/agents.rs:939; updating the assertion to track the code).
+    assert_eq!(body["limit"].as_u64().unwrap(), 500);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1635,6 +1641,10 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(),
+        ),
+        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
     });
 
     let api_key_state = middleware::AuthState {
@@ -2808,6 +2818,10 @@ async fn start_test_server_with_rbac_users(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(),
+        ),
+        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
     });
 
     let api_key_state = middleware::AuthState {
@@ -3111,6 +3125,10 @@ async fn start_test_server_with_full_user_configs(
         provider_test_cache: dashmap::DashMap::new(),
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: std::sync::Arc::new(
+            librefang_api::rate_limiter::AuthLoginLimiter::new(),
+        ),
+        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
     });
 
     let api_key_state = middleware::AuthState {

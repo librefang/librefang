@@ -794,12 +794,34 @@ fn save_sessions(
     let path = sessions_path(home_dir);
     match serde_json::to_string(sessions) {
         Ok(content) => {
-            if let Err(e) = std::fs::write(&path, content) {
+            // Atomic save with mode(0o600) at create-time to close the
+            // TOCTOU window left by #3939: std::fs::write opened the
+            // file at default perms (0644 minus umask) and only
+            // tightened to 0600 by a separate `restrict_permissions`
+            // syscall.  A parallel reader on the same host could grab
+            // the bearer tokens during the gap.  open(mode 0600 +
+            // truncate) + write_all + flush + sync_all + rename keeps
+            // the file at owner-only mode for its entire lifetime.
+            let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+            let result = (|| -> std::io::Result<()> {
+                use std::io::Write as _;
+                let mut opts = std::fs::OpenOptions::new();
+                opts.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.mode(0o600);
+                }
+                let mut f = opts.open(&tmp_path)?;
+                f.write_all(content.as_bytes())?;
+                f.flush()?;
+                f.sync_all()?;
+                drop(f);
+                std::fs::rename(&tmp_path, &path)
+            })();
+            if let Err(e) = result {
+                let _ = std::fs::remove_file(&tmp_path);
                 tracing::warn!("Failed to persist sessions: {e}");
-            } else {
-                // Restrict to owner-read/write only so bearer tokens are not
-                // world-readable on multi-user systems.
-                restrict_permissions(&path);
             }
         }
         Err(e) => tracing::warn!("Failed to serialize sessions: {e}"),
@@ -862,6 +884,13 @@ pub async fn build_router(
         keys
     }));
 
+    let auth_login_limiter = Arc::new(rate_limiter::AuthLoginLimiter::new());
+
+    // Build the GCRA rate limiter before AppState so both the middleware layer
+    // and the background GC task can share the same Arc (see #3668).
+    let rl_cfg_early = kernel.config_ref().rate_limit.clone();
+    let gcra_limiter_arc = rate_limiter::create_rate_limiter(rl_cfg_early.api_requests_per_minute);
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -885,6 +914,8 @@ pub async fn build_router(
         webhook_router,
         config_write_lock: tokio::sync::Mutex::new(()),
         pending_a2a_agents: dashmap::DashMap::new(),
+        auth_login_limiter: auth_login_limiter.clone(),
+        gcra_limiter: gcra_limiter_arc.clone(),
         #[cfg(feature = "telemetry")]
         prometheus_handle: prom_handle,
     });
@@ -1011,10 +1042,14 @@ pub async fn build_router(
         audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
+    // Reuse the limiter Arc already stored in AppState (created above before
+    // the AppState constructor so the background GC task can share it for
+    // periodic retain_recent() eviction — see #3668).
     let gcra_limiter = rate_limiter::GcraState {
-        limiter: rate_limiter::create_rate_limiter(rl_cfg.api_requests_per_minute),
+        limiter: state.gcra_limiter.clone(),
         retry_after_secs: rl_cfg.retry_after_secs,
     };
+    let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
 
     // Build the versioned API routes. All /api/* endpoints are defined once
     // in api_v1_routes() and mounted at both /api and /api/v1 for backward
@@ -1107,6 +1142,10 @@ pub async fn build_router(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            (auth_login_limiter, auth_rl_max_attempts),
+            rate_limiter::auth_rate_limit_layer,
+        ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
@@ -1146,7 +1185,7 @@ pub async fn build_router(
     // (which was applied above to `app`). Tower layers wrap the router they
     // are attached to; a layer added to `app` after `.nest()` would not
     // cover the nested router. 1 MiB is generous for any webhook payload
-    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks.
+    // (Slack, Teams, Feishu, Line) while capping memory-exhaustion attacks (#3813).
     const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024; // 1 MiB
     let channel_webhook_state = state.webhook_router.clone();
     let channel_routes = Router::new()
@@ -1184,6 +1223,14 @@ pub async fn run_daemon(
     daemon_info_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = listen_addr.parse()?;
+
+    // Acquire an exclusive file lock on `daemon.lock` so two daemons can never
+    // open the same SQLite database simultaneously. This is a true cross-process
+    // mutex that works even when the old daemon was bound to a different port
+    // (making `is_daemon_responding` return false). The lock is released when
+    // `_daemon_lock` is dropped at the end of this function.
+    let lock_path = kernel.home_dir().join("daemon.lock");
+    let _daemon_lock = acquire_daemon_lock(&lock_path)?;
 
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
@@ -1269,7 +1316,10 @@ pub async fn run_daemon(
         }
     }
 
-    // Track background task handles for graceful shutdown
+    // Track background task handles for graceful shutdown.
+    // `bg_shutdown_tx` is broadcast to all looping bg_tasks so they can exit
+    // cleanly before we resort to abort().
+    let (bg_shutdown_tx, _bg_shutdown_rx) = tokio::sync::watch::channel::<bool>(false);
     let mut bg_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     let (app, state) = build_router(kernel.clone(), addr).await;
@@ -1298,12 +1348,18 @@ pub async fn run_daemon(
         let k = kernel.clone();
         let st = state.clone();
         let config_path = kernel.home_dir().join("config.toml");
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
                 .ok();
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                tokio::select! {
+                    // Graceful shutdown signal: exit the loop so the task
+                    // finishes cleanly instead of being aborted mid-operation.
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+                }
                 let current = std::fs::metadata(&config_path)
                     .and_then(|m| m.modified())
                     .ok();
@@ -1397,6 +1453,7 @@ pub async fn run_daemon(
     // Background: sync model catalog from community repo on startup, then every 24 hours
     {
         let kernel = state.kernel.clone();
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
@@ -1433,7 +1490,11 @@ pub async fn run_daemon(
                         );
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+                // Wait 24 hours or until shutdown signal, whichever comes first.
+                tokio::select! {
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)) => {}
+                }
             }
         }));
     }
@@ -1441,11 +1502,15 @@ pub async fn run_daemon(
     // Background: periodic GC for API-layer caches (every 5 minutes)
     {
         let st = state.clone();
+        let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // Skip first immediate tick
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = shutdown_rx.wait_for(|v| *v) => break,
+                    _ = interval.tick() => {}
+                }
 
                 // Evict expired clawhub/skillhub cache entries (120s TTL)
                 let cache_ttl = std::time::Duration::from_secs(120);
@@ -1469,14 +1534,34 @@ pub async fn run_daemon(
                     before - sessions.len()
                 };
 
+                // Prune stale auth-rate-limit entries (windows older than 30 minutes).
+                let before_auth_rl = st.auth_login_limiter.map.len();
+                st.auth_login_limiter.prune_stale();
+                let auth_rl_removed = before_auth_rl - st.auth_login_limiter.map.len();
+
+                // Evict stale GCRA rate-limiter entries. The DashMap grows
+                // unbounded as new client IPs arrive — every unique IP adds a
+                // permanent entry. `retain_recent()` drops entries that are
+                // older than one full quota period so the map stays small
+                // between bursts. See #3668.
+                let gcra_before = st.gcra_limiter.len();
+                st.gcra_limiter.retain_recent();
+                let gcra_removed = gcra_before.saturating_sub(st.gcra_limiter.len());
+
                 let claw_removed = before_claw - st.clawhub_cache.len();
                 let skill_removed = before_skill - st.skillhub_cache.len();
-                let total = claw_removed + skill_removed + expired_sessions;
+                let total = claw_removed
+                    + skill_removed
+                    + expired_sessions
+                    + auth_rl_removed
+                    + gcra_removed;
                 if total > 0 {
                     tracing::info!(
                         clawhub = claw_removed,
                         skillhub = skill_removed,
                         sessions = expired_sessions,
+                        auth_rate_limit_entries = auth_rl_removed,
+                        gcra_ips = gcra_removed,
                         "API cache GC sweep completed"
                     );
                 }
@@ -1511,12 +1596,25 @@ pub async fn run_daemon(
     .with_graceful_shutdown(shutdown_signal(api_shutdown))
     .await?;
 
-    // Abort tracked background tasks (config reload watcher, catalog sync)
-    for handle in &bg_tasks {
-        handle.abort();
-    }
+    // Signal background tasks to exit their loops gracefully, then wait up to
+    // 5 seconds for each to finish. Abort any that haven't exited by then so
+    // we don't stall shutdown indefinitely.
+    let _ = bg_shutdown_tx.send(true);
+    let grace = std::time::Duration::from_secs(5);
     for handle in bg_tasks {
-        let _ = handle.await; // JoinError from abort() is expected; ignore it
+        let abort = handle.abort_handle();
+        match tokio::time::timeout(grace, handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                // Task did not finish within the grace period — abort as a
+                // last resort so a mid-operation task does not stall shutdown.
+                tracing::warn!(
+                    "Background task did not finish within {}s of shutdown signal; aborting",
+                    grace.as_secs()
+                );
+                abort.abort();
+            }
+        }
     }
     info!("Background tasks stopped");
 
@@ -1860,6 +1958,55 @@ async fn shutdown_signal(api_shutdown: Arc<tokio::sync::Notify>) {
             }
         }
     }
+}
+
+/// Acquire an exclusive file lock on `path`, creating the file if needed.
+///
+/// Returns a `std::fs::File` whose OS file lock is held for as long as the
+/// handle is alive. Dropping the handle releases the lock automatically (the
+/// kernel releases all `flock` locks when the last fd for the file is closed).
+///
+/// On Unix this uses `flock(2)` with `LOCK_EX | LOCK_NB` — a true
+/// cross-process mutex. If another daemon already holds the lock the call
+/// returns `EWOULDBLOCK` immediately (non-blocking). On other platforms the
+/// file is opened as a best-effort marker only.
+fn acquire_daemon_lock(path: &Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    use std::fs::OpenOptions;
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("Cannot open daemon lock file {}: {e}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: flock(2) is safe to call on any open fd; the fd remains valid
+        // for the entire lifetime of `file`.
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            let errno = std::io::Error::last_os_error();
+            return Err(format!(
+                "Another LibreFang daemon is already running (could not acquire exclusive lock \
+                 on {}): {}. Stop the existing daemon before starting a new one.",
+                path.display(),
+                errno
+            )
+            .into());
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms (Windows, WASM, etc.) the lock file is created
+        // as a best-effort marker. A proper LockFileEx implementation can be
+        // added when needed.
+        let _ = &file;
+    }
+
+    Ok(file)
 }
 
 /// Check if a process with the given PID is still alive.

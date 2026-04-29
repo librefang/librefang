@@ -536,6 +536,9 @@ pub struct LibreFangKernel {
         Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
+    /// Rendered MCP summary cache keyed by allowlist + mcp_generation; skips Mutex + re-render on hit.
+    /// Stale entries from old generations are never evicted; bounded by distinct allowlists in practice.
+    pub(crate) mcp_summary_cache: dashmap::DashMap<String, (u64, String)>,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -641,14 +644,14 @@ pub struct LibreFangKernel {
     /// fresh `instance_id` doesn't accumulate stale mutexes across
     /// activate/deactivate cycles.
     hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
-    /// Per-agent mid-turn message injection senders (#956).
-    /// When an agent loop is running, it holds the receiver; callers use the sender
-    /// to inject messages between tool calls.
+    /// Per-(agent, session) mid-turn injection senders; keyed by session so concurrent
+    /// sessions on the same agent each get their own channel.
     pub(crate) injection_senders:
-        dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>>,
-    /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
+        dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>>,
+    /// Per-(agent, session) injection receivers, created alongside senders
+    /// and consumed by the agent loop.
     injection_receivers: dashmap::DashMap<
-        AgentId,
+        (AgentId, SessionId),
         Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>>,
     >,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
@@ -734,6 +737,13 @@ pub struct LibreFangKernel {
     /// don't take effect on the active filter (the hot-reload action is a
     /// no-op with a warning).
     pub(crate) log_reloader: OnceLock<crate::log_reload::LogLevelReloaderArc>,
+    /// Serialises all recovery-code redemption attempts so the
+    /// read-verify-write sequence is atomic within the process.
+    /// Fixes the TOCTOU race described in issue #3560: without this lock a
+    /// concurrent second request that reads the same code list before the
+    /// first request has written the updated list can redeem the same code
+    /// twice.
+    vault_recovery_codes_mutex: std::sync::Mutex<()>,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -859,6 +869,32 @@ impl DeliveryTracker {
 
 mod workspace_setup;
 use workspace_setup::*;
+
+/// Spawn a fire-and-forget tokio task that logs panics instead of silently
+/// swallowing them (#3740).
+///
+/// `tokio::spawn` drops panics when the returned `JoinHandle` is not awaited.
+/// This wrapper catches any panic from the inner future and logs it at `error`
+/// level so it surfaces in traces and structured logs.
+fn spawn_logged(
+    tag: &'static str,
+    fut: impl std::future::Future<Output = ()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    use futures::FutureExt as _;
+    tokio::spawn(async move {
+        if let Err(e) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "(non-string panic payload)".to_string()
+            };
+            tracing::error!(tag, "spawned task panicked: {msg}");
+        }
+    })
+}
+
 // ── Public Facade Getters ────────────────────────────────────────────
 // These provide a stable API surface for external crates (librefang-api,
 // librefang-desktop) to access kernel internals. When all external call
@@ -1485,6 +1521,46 @@ impl LibreFangKernel {
             .map_err(|e| format!("Vault write failed: {e}"))
     }
 
+    /// Atomically redeem a TOTP recovery code.
+    ///
+    /// Acquires `vault_recovery_codes_mutex`, reads the stored code list,
+    /// verifies `code`, removes it from the list, and writes back the
+    /// updated list — all under the lock.  This prevents the TOCTOU race
+    /// in issue #3560 where two concurrent requests could both succeed with
+    /// the same code before either had written the updated (shortened) list.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — code matched and was consumed (vault updated).
+    /// - `Ok(false)` — code did not match (vault unchanged).
+    /// - `Err(e)`    — vault read/write error, or vault_set failed (#3633).
+    pub fn vault_redeem_recovery_code(&self, code: &str) -> Result<bool, String> {
+        // Hold the mutex for the entire read-verify-write sequence.
+        let _guard = self
+            .vault_recovery_codes_mutex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let stored = match self.vault_get("totp_recovery_codes") {
+            Some(s) => s,
+            None => return Err("No recovery codes configured".to_string()),
+        };
+
+        match crate::approval::ApprovalManager::verify_recovery_code(&stored, code) {
+            Ok((true, updated)) => {
+                // #3633: if the vault write fails, treat the attempt as failed
+                // rather than granting access with a still-valid code.
+                self.vault_set("totp_recovery_codes", &updated)
+                    .map_err(|e| {
+                        warn!("vault_set failed when consuming recovery code: {e}");
+                        "Internal error persisting recovery code consumption".to_string()
+                    })?;
+                Ok(true)
+            }
+            Ok((false, _)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Workflow engine.
     #[inline]
     pub fn workflow_engine(&self) -> &WorkflowEngine {
@@ -1781,11 +1857,11 @@ impl LibreFangKernel {
         &self.whatsapp_gateway_pid
     }
 
-    /// Per-agent message injection senders.
+    /// Per-(agent, session) message injection senders.
     #[inline]
     pub fn injection_senders_ref(
         &self,
-    ) -> &dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>> {
+    ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
         &self.injection_senders
     }
 
@@ -1882,18 +1958,18 @@ impl LibreFangKernel {
             }
         }
 
-        // 4. injection_senders / injection_receivers — remove for dead agents
+        // 4. injection_senders / injection_receivers — remove for dead agents.
         {
-            let stale: Vec<AgentId> = self
+            let stale: Vec<(AgentId, SessionId)> = self
                 .injection_senders
                 .iter()
-                .filter(|e| !live_agents.contains(e.key()))
+                .filter(|e| !live_agents.contains(&e.key().0))
                 .map(|e| *e.key())
                 .collect();
             total_removed += stale.len();
-            for id in &stale {
-                self.injection_senders.remove(id);
-                self.injection_receivers.remove(id);
+            for key in &stale {
+                self.injection_senders.remove(key);
+                self.injection_receivers.remove(key);
             }
         }
 
@@ -3202,7 +3278,7 @@ impl LibreFangKernel {
                     // operators can correlate with daemon restart time in logs.
                     // This only logs warnings — it does not catch-up-fire.
                     let warn_since = chrono::Utc::now() - chrono::Duration::minutes(5);
-                    cron_scheduler.warn_missed_fires(warn_since);
+                    cron_scheduler.log_missed_fires_since(warn_since);
                 }
             }
             Err(e) => {
@@ -3429,6 +3505,7 @@ impl LibreFangKernel {
                 oauth_home_dir,
             )),
             mcp_tools: std::sync::Mutex::new(Vec::new()),
+            mcp_summary_cache: dashmap::DashMap::new(),
             a2a_task_store: librefang_runtime::a2a::A2aTaskStore::with_persistence(
                 1000,
                 &a2a_db_path,
@@ -3499,6 +3576,7 @@ impl LibreFangKernel {
             },
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
+            vault_recovery_codes_mutex: std::sync::Mutex::new(()),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -4930,18 +5008,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             let ws_meta = manifest
                 .workspace
@@ -5268,9 +5335,10 @@ system_prompt = "You are a helpful assistant."
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
-            // Release the reservation immediately — no tokens will be consumed
+            // No LLM call is made; release reservation without inflating
+            // llm_calls or the burst window.
             self.scheduler
-                .settle_reservation(agent_id, token_reservation, &Default::default());
+                .release_reservation(agent_id, token_reservation);
             return Ok(AgentLoopResult::default());
         }
 
@@ -5373,8 +5441,13 @@ system_prompt = "You are a helpful assistant."
                             "Agent \"{}\" completed task (in={}, out={} tokens)",
                             name, result.total_usage.input_tokens, result.total_usage.output_tokens,
                         );
-                        self.push_notification(&agent_id.to_string(), "task_completed", &msg)
-                            .await;
+                        self.push_notification(
+                            &agent_id.to_string(),
+                            "task_completed",
+                            &msg,
+                            resolved_session_id.as_ref(),
+                        )
+                        .await;
                     }
                 }
 
@@ -5606,11 +5679,10 @@ system_prompt = "You are a helpful assistant."
                 Ok(result)
             }
             Err(e) => {
-                // Release the pre-charged token reservation — no tokens were
-                // consumed because the agent loop failed before or during the
-                // LLM call.
+                // Release the pre-charged token reservation — the agent loop
+                // failed before completing, no usage to settle.
                 self.scheduler
-                    .settle_reservation(agent_id, token_reservation, &Default::default());
+                    .release_reservation(agent_id, token_reservation);
 
                 // SECURITY: Record failed message in audit trail
                 self.audit_log.record(
@@ -5660,8 +5732,13 @@ system_prompt = "You are a helpful assistant."
                         ),
                     ),
                 };
-                self.push_notification(&agent_id.to_string(), event_type, &fail_msg)
-                    .await;
+                self.push_notification(
+                    &agent_id.to_string(),
+                    event_type,
+                    &fail_msg,
+                    resolved_session_id.as_ref(),
+                )
+                .await;
 
                 Err(e)
             }
@@ -6056,12 +6133,12 @@ system_prompt = "You are a helpful assistant."
                         Ok(result)
                     }
                     Err(e) => {
-                        // Release reservation — no tokens consumed
-                        kernel_clone.scheduler.settle_reservation(
-                            agent_id,
-                            token_reservation,
-                            &Default::default(),
-                        );
+                        // Non-LLM agent (wasm/python) failed — never made an
+                        // LLM call, release reservation without inflating
+                        // llm_calls.
+                        kernel_clone
+                            .scheduler
+                            .release_reservation(agent_id, token_reservation);
                         kernel_clone.supervisor.record_panic();
                         warn!(agent_id = %agent_id, error = %e, "Non-LLM agent failed");
                         Err(e)
@@ -6156,29 +6233,14 @@ system_prompt = "You are a helpful assistant."
             );
         }
 
-        // Check if auto-compaction is needed: message-count OR token-count trigger
-        let needs_compact = {
-            use librefang_runtime::compactor::{
-                estimate_token_count, needs_compaction as check_compact,
-                needs_compaction_by_tokens, CompactionConfig,
-            };
-            let config = CompactionConfig::from_toml(&cfg.compaction);
-            let by_messages = check_compact(&session, &config);
-            let estimated = estimate_token_count(
-                &session.messages,
-                Some(&entry.manifest.model.system_prompt),
-                None,
-            );
-            let by_tokens = needs_compaction_by_tokens(estimated, &config);
-            if by_tokens && !by_messages {
-                info!(
-                    agent_id = %agent_id,
-                    estimated_tokens = estimated,
-                    messages = session.messages.len(),
-                    "Token-based compaction triggered (messages below threshold but tokens above)"
-                );
-            }
-            by_messages || by_tokens
+        // Snapshot the compaction config so the spawned task can recompute the
+        // `needs_compact` flag *after* reloading the session under the lock.
+        // Computing it here on the pre-lock snapshot would make it stale: a
+        // concurrent turn that committed history while we were waiting for
+        // the lock could push us across (or back below) the threshold.
+        let compaction_config_snapshot = {
+            use librefang_runtime::compactor::CompactionConfig;
+            CompactionConfig::from_toml(&cfg.compaction)
         };
 
         let tools = self.available_tools(agent_id);
@@ -6255,18 +6317,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -6456,11 +6507,8 @@ system_prompt = "You are a helpful assistant."
         // reload barrier before spawning the async task.
         drop(_config_guard);
 
-        // Issue #3737: acquire the same session/agent lock as the non-streaming
-        // path so concurrent streaming + non-streaming turns on the same session
-        // are serialized (last-write-wins data loss on session history otherwise).
-        // We clone the Arc here (sync fn) and move it into the task; the lock
-        // itself is awaited inside the spawn where we can .await.
+        // Acquire the same session/agent lock as the non-streaming path so concurrent
+        // turns are serialized. Clone the Arc here (sync fn); lock inside the spawn.
         let session_lock = if session_id_override.is_some() {
             self.session_msg_locks
                 .entry(effective_session_id)
@@ -6482,12 +6530,62 @@ system_prompt = "You are a helpful assistant."
             },
         );
 
+        // Reload session after acquiring the lock so we never act on a stale
+        // snapshot captured before a concurrent turn's writes landed.
         let handle = tokio::spawn(async move {
             // Acquire the session/agent serialization lock for the duration of
             // this streaming turn.  This matches the non-streaming path and
             // prevents concurrent streaming + non-streaming writes from
-            // producing last-write-wins data loss on session history (#3737).
+            // producing last-write-wins data loss on session history.
             let _session_guard = session_lock.lock().await;
+
+            // Reload session under the lock; keep the placeholder on miss.
+            match memory.get_session(effective_session_id) {
+                Ok(Some(reloaded)) => {
+                    session = reloaded;
+                }
+                Ok(None) => {
+                    // Brand-new session — keep the empty placeholder.
+                }
+                Err(e) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        session_id = %effective_session_id,
+                        error = %e,
+                        "Failed to reload session under lock; proceeding with pre-lock snapshot (streaming)"
+                    );
+                }
+            }
+
+            // Recompute `needs_compact` against the freshly-reloaded session.
+            // Computing it on the pre-lock snapshot was racy: a concurrent
+            // turn that wrote history while we were queued on `session_lock`
+            // could have pushed us across (or back below) the threshold,
+            // causing this turn to either skip a compact that is now due or
+            // re-compact a session another turn just compacted.
+            let needs_compact = {
+                use librefang_runtime::compactor::{
+                    estimate_token_count, needs_compaction as check_compact,
+                    needs_compaction_by_tokens,
+                };
+                let by_messages = check_compact(&session, &compaction_config_snapshot);
+                let estimated = estimate_token_count(
+                    &session.messages,
+                    Some(&manifest.model.system_prompt),
+                    None,
+                );
+                let by_tokens = needs_compaction_by_tokens(estimated, &compaction_config_snapshot);
+                if by_tokens && !by_messages {
+                    info!(
+                        agent_id = %agent_id,
+                        estimated_tokens = estimated,
+                        messages = session.messages.len(),
+                        "Token-based compaction triggered (messages below threshold but tokens above)"
+                    );
+                }
+                by_messages || by_tokens
+            };
+
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on
             // the SAME session the outer loop just measured. Using the
@@ -6558,17 +6656,13 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
-            // Set up mid-turn injection channel (#956). Fork turns skip —
-            // inserting into `injection_senders[agent_id]` would overwrite
-            // the parent turn's channel, and external code trying to
-            // inject into the parent during the fork window would land on
-            // the fork's (about-to-be-dropped) sender instead. Forks are
-            // by design short synchronous derivative calls that don't
-            // need mid-turn injection themselves.
+            // Set up mid-turn injection channel. Fork turns skip — inserting
+            // would overwrite the parent turn's channel (forks share the parent's
+            // session id for prompt-cache alignment).
             let injection_rx = if loop_opts.is_fork {
                 None
             } else {
-                Some(kernel_clone.setup_injection_channel(agent_id))
+                Some(kernel_clone.setup_injection_channel(agent_id, effective_session_id))
             };
 
             let start_time = std::time::Instant::now();
@@ -6625,9 +6719,10 @@ system_prompt = "You are a helpful assistant."
 
             // Tear down injection channel after loop finishes (skipped for
             // forks since they never set one up — tearing down would
-            // remove the parent turn's entry).
+            // remove the parent turn's entry under the shared
+            // (agent, session) key).
             if !loop_opts.is_fork {
-                kernel_clone.teardown_injection_channel(agent_id);
+                kernel_clone.teardown_injection_channel(agent_id, effective_session_id);
             }
 
             let latency_ms = start_time.elapsed().as_millis() as u64;
@@ -6820,7 +6915,8 @@ system_prompt = "You are a helpful assistant."
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
                             let sid = session.id;
-                            tokio::spawn(async move {
+                            // #3740: spawn_logged so compaction panics surface in logs.
+                            spawn_logged("post_loop_compaction", async move {
                                 info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
                                 // Pass the session id explicitly (same
                                 // reason as the pre-loop path above).
@@ -6872,13 +6968,11 @@ system_prompt = "You are a helpful assistant."
                     Ok(result)
                 }
                 Err(e) => {
-                    // Release the pre-charged token reservation — the loop
-                    // failed so no tokens need to be permanently reserved.
-                    kernel_clone.scheduler.settle_reservation(
-                        agent_id,
-                        token_reservation,
-                        &Default::default(),
-                    );
+                    // Release the pre-charged token reservation — the
+                    // streaming loop failed, no usage to settle.
+                    kernel_clone
+                        .scheduler
+                        .release_reservation(agent_id, token_reservation);
                     kernel_clone.supervisor.record_panic();
                     warn!(agent_id = %agent_id, error = %e, "Streaming agent loop failed");
                     // Lifecycle: emit TurnFailed before cleanup so subscribers
@@ -6912,13 +7006,28 @@ system_prompt = "You are a helpful assistant."
         // (auto_memorize, dream) which has its own join handle and doesn't
         // need external cancellation via the registry.
         if !is_fork {
-            self.running_tasks.insert(
-                (agent_id, effective_session_id),
-                RunningTask {
-                    abort: handle.abort_handle(),
-                    started_at: chrono::Utc::now(),
-                },
-            );
+            // #3739: atomically swap in the new task and abort the previous
+            // one if any.  `DashMap::insert` returns the displaced value
+            // under the same shard write-lock, so two concurrent
+            // `send_message_full` calls for the same (agent, session)
+            // can never both observe an empty slot and lose one of the
+            // abort handles.  The earlier `remove(...) → insert(...)`
+            // sequence had exactly that race window.
+            let new_task = RunningTask {
+                abort: handle.abort_handle(),
+                started_at: chrono::Utc::now(),
+            };
+            if let Some(old_task) = self
+                .running_tasks
+                .insert((agent_id, effective_session_id), new_task)
+            {
+                tracing::debug!(
+                    agent_id = %agent_id,
+                    session_id = %effective_session_id,
+                    "aborting previous running task before starting new one"
+                );
+                old_task.abort.abort();
+            }
         }
 
         Ok((rx, handle))
@@ -7800,18 +7909,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> = self
-                .registry
-                .list()
-                .iter()
-                .map(|a| {
-                    (
-                        a.name.clone(),
-                        format!("{:?}", a.state),
-                        a.manifest.model.model.clone(),
-                    )
-                })
-                .collect();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -8158,8 +8256,8 @@ system_prompt = "You are a helpful assistant."
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
-        // Set up mid-turn injection channel (#956)
-        let injection_rx = self.setup_injection_channel(agent_id);
+        // Set up mid-turn injection channel.
+        let injection_rx = self.setup_injection_channel(agent_id, effective_session_id);
 
         // Session-scoped interrupt for tool-level cancellation.  Cloned into
         // each ToolExecutionContext so that cancelling the session (via
@@ -8250,8 +8348,8 @@ system_prompt = "You are a helpful assistant."
         )
         .await;
 
-        // Tear down injection channel after loop finishes
-        self.teardown_injection_channel(agent_id);
+        // Tear down injection channel after loop finishes.
+        self.teardown_injection_channel(agent_id, effective_session_id);
 
         // Clean up the interrupt handle regardless of outcome — the map must
         // not retain stale entries that would suppress cancellation on the
@@ -8477,53 +8575,101 @@ system_prompt = "You are a helpful assistant."
     /// Returns `Ok(true)` if the message was sent, `Ok(false)` if no active
     /// loop is running for this agent, or `Err` if the agent doesn't exist.
     pub async fn inject_message(&self, agent_id: AgentId, message: &str) -> KernelResult<bool> {
+        self.inject_message_for_session(agent_id, None, message)
+            .await
+    }
+
+    /// Session-aware variant of [`Self::inject_message`]; `None` fans out to all live sessions.
+    ///
+    /// Returns `Ok(true)` if at least one channel accepted, `Ok(false)` if no loop was running.
+    pub async fn inject_message_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+        message: &str,
+    ) -> KernelResult<bool> {
         // Verify the agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
-        if let Some(tx) = self.injection_senders.get(&agent_id) {
+
+        // Collect targets first so we don't hold any DashMap shard lock
+        // across the `try_send` calls (which themselves can briefly block on
+        // the per-channel internal lock).
+        let targets: Vec<(
+            (AgentId, SessionId),
+            tokio::sync::mpsc::Sender<AgentLoopSignal>,
+        )> = if let Some(sid) = session_id {
+            self.injection_senders
+                .get(&(agent_id, sid))
+                .map(|entry| (*entry.key(), entry.value().clone()))
+                .into_iter()
+                .collect()
+        } else {
+            self.injection_senders
+                .iter()
+                .filter(|e| e.key().0 == agent_id)
+                .map(|e| (*e.key(), e.value().clone()))
+                .collect()
+        };
+
+        if targets.is_empty() {
+            return Ok(false);
+        }
+
+        let mut delivered = false;
+        let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
+        for (key, tx) in targets {
             match tx.try_send(AgentLoopSignal::Message {
                 content: message.to_string(),
             }) {
                 Ok(()) => {
-                    info!(agent_id = %agent_id, "Mid-turn message injected");
-                    Ok(true)
+                    info!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Mid-turn message injected"
+                    );
+                    delivered = true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    warn!(agent_id = %agent_id, "Injection channel full — message dropped");
-                    Ok(false)
+                    warn!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Injection channel full — message dropped"
+                    );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Receiver dropped — loop is no longer running
-                    self.injection_senders.remove(&agent_id);
-                    Ok(false)
+                    // Receiver dropped — loop is no longer running.
+                    closed_keys.push(key);
                 }
             }
-        } else {
-            // No active loop for this agent
-            Ok(false)
         }
+        for key in closed_keys {
+            self.injection_senders.remove(&key);
+        }
+        Ok(delivered)
     }
 
-    /// Set up the injection channel for an agent before running its loop.
-    /// Returns the receiver wrapped in a Mutex for the agent loop to consume.
+    /// Creates the injection channel for `(agent_id, session_id)` and returns the receiver.
     fn setup_injection_channel(
         &self,
         agent_id: AgentId,
+        session_id: SessionId,
     ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentLoopSignal>(8);
-        self.injection_senders.insert(agent_id, tx);
+        self.injection_senders.insert((agent_id, session_id), tx);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        self.injection_receivers.insert(agent_id, Arc::clone(&rx));
+        self.injection_receivers
+            .insert((agent_id, session_id), Arc::clone(&rx));
         rx
     }
 
-    /// Tear down the injection channel after the agent loop finishes.
-    fn teardown_injection_channel(&self, agent_id: AgentId) {
-        self.injection_senders.remove(&agent_id);
-        self.injection_receivers.remove(&agent_id);
+    /// Tears down the `(agent_id, session_id)` injection channel after the loop finishes.
+    fn teardown_injection_channel(&self, agent_id: AgentId, session_id: SessionId) {
+        self.injection_senders.remove(&(agent_id, session_id));
+        self.injection_receivers.remove(&(agent_id, session_id));
     }
 
     /// Resolve a module path relative to the kernel's home directory.
@@ -8567,8 +8713,14 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.session_store.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate the error so callers see a half-failed reset instead
+        // of silently leaving orphan rows in `sessions` / `sessions_fts`
+        // (#3470). The deletion itself is transactional inside
+        // `delete_agent_sessions`.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -8629,8 +8781,12 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.session_store.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate so a failed reboot is visible instead of silently
+        // leaving the old history in place (#3470).
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session
         let new_session = self
@@ -8690,11 +8846,16 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete all regular sessions
-        let _ = self.session_store.delete_agent_sessions(agent_id);
-
-        // Delete canonical (cross-channel) session
-        let _ = self.session_store.delete_canonical_session(agent_id);
+        // Delete all regular sessions then the canonical (cross-channel)
+        // session. Propagate either failure: a half-cleared agent leaves
+        // orphan rows in `sessions` / `sessions_fts` / `canonical_sessions`
+        // and is the silent-data-loss vector behind #3470.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
+        self.memory
+            .delete_canonical_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -9011,6 +9172,13 @@ system_prompt = "You are a helpful assistant."
 
         // Phase 4: BeforeUser-position injections (appended; they logically
         // precede user messages that haven't arrived yet).
+        //
+        // Track message count before injection so we can roll back the
+        // in-memory state if the persist fails (issue #3672). Without a
+        // rollback, the next pass sees the injected messages in-memory but
+        // not on-disk, re-injects them, and silently invalidates the prompt
+        // cache.
+        let pre_before_user_len = session.messages.len();
         for inj in &all_injections {
             if inj.position == InjectionPosition::BeforeUser && condition_met(&inj.condition) {
                 session.messages.push(Message::system(inj.content.clone()));
@@ -9024,7 +9192,24 @@ system_prompt = "You are a helpful assistant."
 
         // Persist if anything was injected.
         if !session.messages.is_empty() {
-            let _ = self.session_store.save_session(session);
+            if let Err(e) = self.memory.save_session(session) {
+                // Persist failed — roll back the Phase 4 BeforeUser injections
+                // from the in-memory session so the next call does not
+                // re-inject the same items (which would cause duplicate
+                // context and invalidate the prompt cache).
+                let after_len = session.messages.len();
+                if after_len > pre_before_user_len {
+                    session.messages.truncate(pre_before_user_len);
+                }
+                tracing::error!(
+                    session_id = %session.id.0,
+                    error = %e,
+                    rolled_back = after_len.saturating_sub(pre_before_user_len),
+                    "Failed to persist session after before_user injection; \
+                     rolled back in-memory mutations to prevent duplicate injection \
+                     and prompt-cache invalidation"
+                );
+            }
         }
 
         // Run on_session_start_script if configured (fire-and-forget).
@@ -11700,59 +11885,74 @@ system_prompt = "You are a helpful assistant."
             }
 
             if !dispatches.is_empty() {
-                tokio::spawn(async move {
-                    // Execute trigger dispatches sequentially to preserve
-                    // the order in which the trigger engine evaluated them.
-                    // Each dispatch still acquires its semaphore permits
-                    // (global trigger-lane + per-agent) before calling
-                    // send_message_full, so back-pressure and concurrency
-                    // caps continue to apply correctly.
-                    for d in dispatches {
-                        let TriggerDispatch {
-                            kernel,
-                            aid,
-                            msg,
-                            mode_override,
-                            session_id_override,
-                            trigger_sem,
-                            agent_sem,
-                        } = d;
-
-                        // (1) Global trigger lane permit.
-                        let _lane_permit = match trigger_sem.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => return, // lane closed during shutdown
-                        };
-                        // (2) Per-agent permit.
-                        let _agent_permit = match agent_sem.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        // (3) Inner per-session mutex applies inside
-                        //     send_message_full when session_id_override is Some.
-                        let handle: Option<Arc<dyn KernelHandle>> = kernel
-                            .self_handle
-                            .get()
-                            .and_then(|w| w.upgrade())
-                            .map(|arc| arc as Arc<dyn KernelHandle>);
-                        let home_channel = kernel.resolve_agent_home_channel(aid);
-                        if let Err(e) = kernel
-                            .send_message_full(
+                // CRITICAL: tokio task-locals do NOT propagate across
+                // tokio::spawn.  Without re-establishing the
+                // PUBLISH_EVENT_DEPTH scope inside the spawned task,
+                // every send_message_full -> publish_event chain
+                // started from a triggered dispatch would observe an
+                // unscoped depth, fall into the "top-level scope"
+                // branch, and reset depth=0 — the exact path that
+                // breaks circular trigger detection across the spawn
+                // boundary (audit of #3929 / #3780).  Capture the
+                // parent depth here on the caller's task and rebuild
+                // the scope inside the spawn so trigger chains
+                // accumulate correctly.
+                let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                let task =
+                    PUBLISH_EVENT_DEPTH.scope(std::cell::Cell::new(parent_depth), async move {
+                        // Execute trigger dispatches sequentially to preserve
+                        // the order in which the trigger engine evaluated them.
+                        // Each dispatch still acquires its semaphore permits
+                        // (global trigger-lane + per-agent) before calling
+                        // send_message_full, so back-pressure and concurrency
+                        // caps continue to apply correctly.
+                        for d in dispatches {
+                            let TriggerDispatch {
+                                kernel,
                                 aid,
-                                &msg,
-                                handle,
-                                None,
-                                home_channel.as_ref(),
+                                msg,
                                 mode_override,
-                                None,
                                 session_id_override,
-                            )
-                            .await
-                        {
-                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                                trigger_sem,
+                                agent_sem,
+                            } = d;
+
+                            // (1) Global trigger lane permit.
+                            let _lane_permit = match trigger_sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return, // lane closed during shutdown
+                            };
+                            // (2) Per-agent permit.
+                            let _agent_permit = match agent_sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            // (3) Inner per-session mutex applies inside
+                            //     send_message_full when session_id_override is Some.
+                            let handle: Option<Arc<dyn KernelHandle>> = kernel
+                                .self_handle
+                                .get()
+                                .and_then(|w| w.upgrade())
+                                .map(|arc| arc as Arc<dyn KernelHandle>);
+                            let home_channel = kernel.resolve_agent_home_channel(aid);
+                            if let Err(e) = kernel
+                                .send_message_full(
+                                    aid,
+                                    &msg,
+                                    handle,
+                                    None,
+                                    home_channel.as_ref(),
+                                    mode_override,
+                                    None,
+                                    session_id_override,
+                                )
+                                .await
+                            {
+                                warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                            }
                         }
-                    }
-                });
+                    });
+                spawn_logged("trigger_dispatch", task);
             }
         }
 
@@ -12411,6 +12611,67 @@ system_prompt = "You are a helpful assistant."
             });
         }
 
+        // Periodic DB retention sweep — hard-deletes soft-deleted memories
+        // (#3467), finished task_queue rows (#3466), and approval_audit
+        // rows (#3468). Runs once a day on the same cadence as the audit
+        // prune below; each sub-step is independent so a config of `0` for
+        // any one of them only disables that step. Failures only log; the
+        // sweep is best-effort and re-runs at the next interval.
+        {
+            let memory_retention = cfg.memory.soft_delete_retention_days;
+            let queue_retention = cfg.queue.task_queue_retention_days;
+            let approval_retention = cfg.approval.audit_retention_days;
+            let any_enabled = memory_retention > 0 || queue_retention > 0 || approval_retention > 0;
+            if any_enabled {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        if memory_retention > 0 {
+                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
+                                Ok(n) if n > 0 => info!(
+                                    "Memory retention: hard-deleted {n} soft-deleted memories \
+                                     (older than {memory_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Memory retention sweep failed: {e}"),
+                            }
+                        }
+                        if queue_retention > 0 {
+                            match kernel.memory.task_prune_finished(queue_retention).await {
+                                Ok(n) if n > 0 => info!(
+                                    "Task queue retention: pruned {n} finished tasks \
+                                     (older than {queue_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Task queue retention sweep failed: {e}"),
+                            }
+                        }
+                        if approval_retention > 0 {
+                            let n = kernel.approval_manager.prune_audit(approval_retention);
+                            if n > 0 {
+                                info!(
+                                    "Approval audit retention: pruned {n} rows \
+                                     (older than {approval_retention} days)"
+                                );
+                            }
+                        }
+                    }
+                });
+                info!(
+                    "DB retention sweep scheduled daily \
+                     (memory={memory_retention}d, task_queue={queue_retention}d, \
+                     approval_audit={approval_retention}d)"
+                );
+            }
+        }
+
         // Periodic audit log pruning (daily, respects audit.retention_days)
         {
             let kernel = Arc::clone(self);
@@ -12721,7 +12982,8 @@ system_prompt = "You are a helpful assistant."
         // Start extension health monitor background task
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            // #3740: spawn_logged so panics in the health loop surface in logs.
+            spawn_logged("mcp_health_loop", async move {
                 kernel.run_mcp_health_loop().await;
             });
         }
@@ -12734,7 +12996,8 @@ system_prompt = "You are a helpful assistant."
         // Cron scheduler tick loop — fires due jobs every 15 seconds
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            // #3740: spawn_logged so panics in the cron loop surface in logs.
+            spawn_logged("cron_scheduler", async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
                 // Use Skip to avoid burst-firing after a long job blocks the loop.
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -12854,7 +13117,21 @@ system_prompt = "You are a helpful assistant."
                                 //     every fire back to the persistent
                                 //     `(agent, "cron")` session — see
                                 //     CLAUDE.md note on cron + session_mode.
-                                let wants_new_session = job.session_mode
+                                //
+                                // Resolution order (#3597): per-job override >
+                                // agent manifest default > historical persistent.
+                                // When the job has no per-job `session_mode` set
+                                // (`None`), we fall back to the agent manifest's
+                                // `session_mode` so that agents with
+                                // `session_mode = "new"` in agent.toml get
+                                // per-fire isolation for cron jobs as well.
+                                let effective_session_mode = job.session_mode.or_else(|| {
+                                    kernel
+                                        .registry
+                                        .get(agent_id)
+                                        .map(|entry| entry.manifest.session_mode)
+                                });
+                                let wants_new_session = effective_session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 let cron_sender = SenderContext {
                                     channel: SYSTEM_CHANNEL_CRON.to_string(),
@@ -12871,7 +13148,7 @@ system_prompt = "You are a helpful assistant."
                                 let (mode_override, fire_session_override) =
                                     crate::cron::cron_fire_session_override(
                                         agent_id,
-                                        job.session_mode,
+                                        effective_session_mode,
                                         job.id,
                                         chrono::Utc::now(),
                                     );
@@ -12899,6 +13176,9 @@ system_prompt = "You are a helpful assistant."
                                     }
                                 };
                                 let kernel_job = kernel.clone();
+                                // Shadow so outer `job_name` survives the move
+                                // for the post-arm per-job persist warn.
+                                let job_name = job_name.clone();
                                 tokio::spawn(async move {
                                     // Hold the permit for the full duration of this job.
                                     let _permit = permit;
@@ -12963,6 +13243,12 @@ system_prompt = "You are a helpful assistant."
                                         Ok(Ok(result)) => {
                                             tracing::info!(job = %job_name, "Cron job completed successfully");
                                             kernel_job.cron_scheduler.record_success(job_id);
+                                            // Persist last_run before delivery
+                                            // so a slow/failed channel push
+                                            // can't strand last_run on disk.
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                             // Deliver response to configured channel (skip NO_REPLY/silent)
                                             if !result.silent {
                                                 cron_deliver_response(
@@ -12990,6 +13276,9 @@ system_prompt = "You are a helpful assistant."
                                             kernel_job
                                                 .cron_scheduler
                                                 .record_failure(job_id, &err_msg);
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                         }
                                         Err(_) => {
                                             tracing::warn!(job = %job_name, timeout_s, "Cron job timed out");
@@ -12997,6 +13286,9 @@ system_prompt = "You are a helpful assistant."
                                                 job_id,
                                                 &format!("timed out after {timeout_s}s"),
                                             );
+                                            if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
+                                            }
                                         }
                                     }
                                 }); // end tokio::spawn for AgentTurn
@@ -13075,9 +13367,15 @@ system_prompt = "You are a helpful assistant."
                                 }
                             }
                         }
+                        // Persist immediately after each job execution so that
+                        // last_run / next_run are durable on disk even if the
+                        // daemon crashes before the periodic flush fires.
+                        if let Err(e) = kernel.cron_scheduler.persist() {
+                            tracing::warn!(job = %job_name, "Cron per-job persist failed: {e}");
+                        }
                     }
 
-                    // Persist every ~5 minutes (20 ticks * 15s)
+                    // Periodic persist as a safety net (every ~5 minutes / 20 ticks * 15s)
                     persist_counter += 1;
                     if persist_counter >= 20 {
                         persist_counter = 0;
@@ -13163,6 +13461,8 @@ system_prompt = "You are a helpful assistant."
             node_id: node_id.clone(),
             node_name: node_name.clone(),
             shared_secret: cfg.network.shared_secret.clone(),
+            max_messages_per_peer_per_minute: cfg.network.max_messages_per_peer_per_minute,
+            max_llm_tokens_per_peer_per_hour: cfg.network.max_llm_tokens_per_peer_per_hour,
         };
 
         let registry = PeerRegistry::new();
@@ -13289,11 +13589,15 @@ system_prompt = "You are a helpful assistant."
                                 "Agent \"{}\" is unresponsive (inactive for {}s)",
                                 status.name, status.inactive_secs,
                             );
+                            // health_check_failed is agent-level, not
+                            // session-scoped — pass None so the alert
+                            // doesn't get a misleading [session=…] suffix.
                             kernel
                                 .push_notification(
                                     &status.agent_id.to_string(),
                                     "health_check_failed",
                                     &msg,
+                                    None,
                                 )
                                 .await;
                         }
@@ -13998,9 +14302,11 @@ system_prompt = "You are a helpful assistant."
             .cloned()
             .collect();
 
-        // 4. Update effective list
+        // 4. Update effective list; bump mcp_generation inside the same write lock so cached summaries invalidate atomically.
         if let Ok(mut effective) = self.effective_mcp_servers.write() {
             *effective = new_configs;
+            self.mcp_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // 5. Connect new servers
@@ -14434,7 +14740,7 @@ system_prompt = "You are a helpful assistant."
                 .read()
                 .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
                 .unwrap_or_default();
-            let mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
+            let mut mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
                 mcp_tools.iter().cloned().collect()
             } else {
                 let normalized: Vec<String> = mcp_allowlist
@@ -14457,6 +14763,9 @@ system_prompt = "You are a helpful assistant."
                     .cloned()
                     .collect()
             };
+            // Sort MCP tools by name so connect / hot-reload order does not
+            // mutate the prompt prefix and invalidate provider cache (#3765).
+            mcp_candidates.sort_by(|a, b| a.name.cmp(&b.name));
             for t in mcp_candidates {
                 // MCP tools are NOT filtered by capabilities.tools.
                 // mcp_candidates is already scoped to the agent's allowed servers
@@ -15528,16 +15837,32 @@ system_prompt = "You are a helpful assistant."
         summary
     }
 
-    /// Build a compact MCP server/tool summary for the system prompt so the
-    /// agent knows what external tool servers are connected.
+    /// Build a compact MCP server/tool summary for the system prompt; caches per allowlist + mcp_generation to skip Mutex and re-render on hit.
     fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
-        let tools = match self.mcp_tools.lock() {
-            Ok(t) => t.clone(),
+        let mcp_gen = self
+            .mcp_generation
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cache_key = mcp_summary_cache_key(mcp_allowlist);
+
+        // Cache hit on the current generation: clone the cached String.
+        if let Some(entry) = self.mcp_summary_cache.get(&cache_key) {
+            let (cached_gen, cached_str) = entry.value();
+            if *cached_gen == mcp_gen {
+                return cached_str.clone();
+            }
+        }
+
+        // Cache miss / stale: extract only names under the lock, then release before rendering.
+        let tool_names: Vec<String> = match self.mcp_tools.lock() {
+            Ok(t) => {
+                if t.is_empty() {
+                    return String::new();
+                }
+                t.iter().map(|t| t.name.clone()).collect()
+            }
             Err(_) => return String::new(),
         };
-        if tools.is_empty() {
-            return String::new();
-        }
+        // Lock released here — all further work is lock-free.
 
         let configured_servers: Vec<String> = self
             .effective_mcp_servers
@@ -15545,8 +15870,10 @@ system_prompt = "You are a helpful assistant."
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
 
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist)
+        let rendered = render_mcp_summary(&tool_names, &configured_servers, mcp_allowlist);
+        self.mcp_summary_cache
+            .insert(cache_key, (mcp_gen, rendered.clone()));
+        rendered
     }
 
     // inject_user_personalization() — logic moved to prompt_builder::build_user_section()
@@ -15635,6 +15962,16 @@ enum ReviewError {
     /// Parse / validation / security-blocked; retry would be
     /// non-idempotent (fresh LLM call, different output each time).
     Permanent(String),
+}
+
+/// Build a deterministic cache key for the per-agent MCP allowlist; sorts and joins with `\x1f` so insertion-order variants share one entry.
+fn mcp_summary_cache_key(mcp_allowlist: &[String]) -> String {
+    if mcp_allowlist.is_empty() {
+        return String::from("*");
+    }
+    let mut sorted = mcp_allowlist.to_vec();
+    sorted.sort();
+    sorted.join("\x1f")
 }
 
 /// Render the MCP-server tool summary that lands in the system prompt.
@@ -16336,7 +16673,20 @@ impl LibreFangKernel {
 
     /// Push a notification to all configured targets, resolving routing rules.
     /// Resolution: per-agent rules (matching event) > global channels for that event type.
-    async fn push_notification(&self, agent_id: &str, event_type: &str, message: &str) {
+    ///
+    /// When `session_id` is `Some`, ` [session=<uuid>]` is appended to the
+    /// delivered message so operators can correlate the alert with the
+    /// failing session's history (matches the `session_id` field in the
+    /// `Agent loop failed — recorded in supervisor` warn log).
+    /// Pass `None` for agent-level alerts that aren't session-scoped
+    /// (e.g. `health_check_failed`).
+    async fn push_notification(
+        &self,
+        agent_id: &str,
+        event_type: &str,
+        message: &str,
+        session_id: Option<&SessionId>,
+    ) {
         use librefang_types::capability::glob_matches;
         let cfg = self.config.load_full();
 
@@ -16365,8 +16715,13 @@ impl LibreFangKernel {
             }
         };
 
+        let delivered: std::borrow::Cow<'_, str> = match session_id {
+            Some(sid) => std::borrow::Cow::Owned(format!("{message} [session={sid}]")),
+            None => std::borrow::Cow::Borrowed(message),
+        };
+
         for target in &targets {
-            self.push_to_target(target, message).await;
+            self.push_to_target(target, &delivered).await;
         }
     }
 
@@ -18016,6 +18371,50 @@ impl KernelHandle for LibreFangKernel {
         librefang_types::config::EnvPassthroughPolicy::from_skills_config(&cfg.skills)
     }
 
+    fn roster_upsert(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+        display_name: &str,
+        username: Option<&str>,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .upsert(channel, chat_id, user_id, display_name, username);
+        Ok(())
+    }
+
+    fn roster_members(
+        &self,
+        channel: &str,
+        chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let members = self.memory.roster().members(channel, chat_id);
+        Ok(members
+            .into_iter()
+            .map(|(user_id, display_name, username)| {
+                serde_json::json!({
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "username": username,
+                })
+            })
+            .collect())
+    }
+
+    fn roster_remove_member(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        user_id: &str,
+    ) -> Result<(), String> {
+        self.memory
+            .roster()
+            .remove_member(channel, chat_id, user_id);
+        Ok(())
+    }
+
     fn fire_agent_step(&self, agent_id: &str, step: u32) {
         self.external_hooks.fire(
             crate::hooks::ExternalHookEvent::AgentStep,
@@ -18561,8 +18960,7 @@ impl LibreFangKernel {
         }
     }
 
-    /// Notify the running agent loop about an approval resolution via an explicit
-    /// mid-turn signal.
+    /// Notify the running agent loop about an approval resolution via an explicit mid-turn signal.
     fn notify_agent_of_resolution(
         &self,
         agent_id: &AgentId,
@@ -18570,7 +18968,27 @@ impl LibreFangKernel {
         decision: &librefang_types::approval::ApprovalDecision,
         result: &librefang_types::tool::ToolResult,
     ) -> bool {
-        if let Some(tx) = self.injection_senders.get(agent_id) {
+        let senders: Vec<(
+            (AgentId, SessionId),
+            tokio::sync::mpsc::Sender<AgentLoopSignal>,
+        )> = self
+            .injection_senders
+            .iter()
+            .filter(|e| e.key().0 == *agent_id)
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+
+        if senders.is_empty() {
+            debug!(
+                agent_id = %agent_id,
+                "Approval resolution: no active agent loop to notify"
+            );
+            return false;
+        }
+
+        let mut delivered = false;
+        let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
+        for (key, tx) in senders {
             match tx.try_send(AgentLoopSignal::ApprovalResolved {
                 tool_use_id: deferred.tool_use_id.clone(),
                 tool_name: deferred.tool_name.clone(),
@@ -18580,31 +18998,34 @@ impl LibreFangKernel {
                 result_status: result.status,
             }) {
                 Ok(()) => {
-                    debug!(agent_id = %agent_id, "Approval resolution injected into agent loop");
-                    true
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Approval resolution injected into agent loop"
+                    );
+                    delivered = true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         agent_id = %agent_id,
+                        session_id = %key.1,
                         "Approval resolution injection channel full — falling back to session patch"
                     );
-                    false
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!(
                         agent_id = %agent_id,
+                        session_id = %key.1,
                         "Approval resolution: agent loop is not running (injection channel closed)"
                     );
-                    false
+                    closed_keys.push(key);
                 }
             }
-        } else {
-            debug!(
-                agent_id = %agent_id,
-                "Approval resolution: no active agent loop to notify"
-            );
-            false
         }
+        for key in closed_keys {
+            self.injection_senders.remove(&key);
+        }
+        delivered
     }
 }
 

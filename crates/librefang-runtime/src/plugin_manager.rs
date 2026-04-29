@@ -829,7 +829,8 @@ async fn install_from_registry(
         .map_err(|e| format!("Failed to parse registry response: {e}"))?;
 
     // Create target directory
-    std::fs::create_dir_all(&target_dir)
+    tokio::fs::create_dir_all(&target_dir)
+        .await
         .map_err(|e| format!("Failed to create plugin dir: {e}"))?;
 
     // Download each file — cleanup on failure
@@ -843,7 +844,7 @@ async fn install_from_registry(
 
     if let Err(e) = download_result {
         // Clean up partial download
-        let _ = std::fs::remove_dir_all(&target_dir);
+        let _ = tokio::fs::remove_dir_all(&target_dir).await;
         return Err(format!("Failed to download plugin '{name}': {e}"));
     }
 
@@ -852,9 +853,11 @@ async fn install_from_registry(
         Some(expected) => {
             // For registry plugins installed file-by-file, compute checksum over
             // the serialised manifest as a representative integrity check.
-            let manifest_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
+            let manifest_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
+                .await
+                .unwrap_or_default();
             if let Err(e) = verify_checksum(&manifest_bytes, &expected) {
-                let _ = std::fs::remove_dir_all(&target_dir);
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
                 return Err(e);
             }
             info!(plugin = name, "Checksum verified OK");
@@ -873,7 +876,9 @@ async fn install_from_registry(
     // refuse installation rather than silently skip.  An attacker who knows the
     // key is all-zero bytes can trivially craft valid signatures, so accepting
     // plugins while the placeholder is active is equivalent to no verification.
-    let archive_bytes = std::fs::read(target_dir.join("plugin.toml")).unwrap_or_default();
+    let archive_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
+        .await
+        .unwrap_or_default();
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
     } else {
@@ -898,7 +903,7 @@ async fn install_from_registry(
         if let Err(e) =
             verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
         {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
             return Err(e);
         }
     }
@@ -979,7 +984,7 @@ async fn install_from_registry(
 
     // Bust the registry cache so subsequent searches see an up-to-date index.
     let cache_path = registry_cache_path(github_repo);
-    let _ = std::fs::remove_file(&cache_path);
+    let _ = tokio::fs::remove_file(&cache_path).await;
 
     get_plugin_info(name)
 }
@@ -1244,7 +1249,7 @@ async fn install_from_git(
     // Remove .git directory to save space
     let git_dir = target_dir.join(".git");
     if git_dir.exists() {
-        let _ = std::fs::remove_dir_all(&git_dir);
+        let _ = tokio::fs::remove_dir_all(&git_dir).await;
     }
 
     info!(plugin = manifest.name, "Installed plugin from git");

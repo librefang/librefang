@@ -4,9 +4,13 @@
 //! Provides [`InputSanitizer`] which is configured via [`SanitizeConfig`]
 //! (in `librefang-types`). Three modes:
 //!
-//! * **Off** — no checking (default).
+//! * **Off** — no checking; set `mode = "off"` in `[sanitize]` to opt out.
 //! * **Warn** — log a warning but let the message through.
-//! * **Block** — reject the message and send an error to the user.
+//! * **Block** — reject the message and send an error to the user (**default**).
+//!
+//! The sanitizer is **enabled by default** (`mode = "block"`). It checks
+//! both `Text`-type and `Command`-type channel messages. Set
+//! `disable_input_sanitizer = true` in `[sanitize]` for an emergency opt-out.
 
 use librefang_types::config::{SanitizeConfig, SanitizeMode};
 use regex_lite::Regex;
@@ -17,6 +21,8 @@ pub struct InputSanitizer {
     mode: SanitizeMode,
     max_message_length: usize,
     patterns: Vec<CompiledPattern>,
+    /// Set to `true` when `disable_input_sanitizer = true` in config.
+    disabled: bool,
 }
 
 struct CompiledPattern {
@@ -103,6 +109,7 @@ impl InputSanitizer {
             mode: config.mode,
             max_message_length: config.max_message_length,
             patterns,
+            disabled: config.disable_input_sanitizer,
         }
     }
 
@@ -111,7 +118,7 @@ impl InputSanitizer {
     /// Returns [`SanitizeResult::Clean`] when mode is `Off` or no patterns
     /// matched and the message is within length limits.
     pub fn check(&self, text: &str) -> SanitizeResult {
-        if self.mode == SanitizeMode::Off {
+        if self.disabled || self.mode == SanitizeMode::Off {
             return SanitizeResult::Clean;
         }
 
@@ -154,7 +161,7 @@ impl InputSanitizer {
 
     /// Whether the sanitizer is effectively disabled.
     pub fn is_off(&self) -> bool {
-        self.mode == SanitizeMode::Off
+        self.disabled || self.mode == SanitizeMode::Off
     }
 }
 
@@ -188,6 +195,7 @@ mod tests {
             mode: SanitizeMode::Warn,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 
@@ -196,6 +204,7 @@ mod tests {
             mode: SanitizeMode::Block,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 
@@ -204,6 +213,7 @@ mod tests {
             mode: SanitizeMode::Off,
             max_message_length: 32768,
             custom_block_patterns: Vec::new(),
+            disable_input_sanitizer: false,
         }
     }
 

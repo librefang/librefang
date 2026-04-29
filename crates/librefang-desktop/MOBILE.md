@@ -66,6 +66,21 @@ The following features are compiled out on iOS/Android via `cfg(not(any(target_o
 - Auto-updater
 - CLI process spawning (shell plugin)
 
+## Release & distribution
+
+- CI builds (signed `.aab` / `.apk` / `.ipa`) live in
+  `.github/workflows/release.yml` jobs `mobile_android` / `mobile_ios`.
+- Unattended TestFlight + Play Internal Testing upload, store-account
+  prerequisites, version-mapping rules, and the recovery runbook for
+  failed uploads are documented in
+  [`docs/src/app/operations/mobile-release/page.mdx`](../../docs/src/app/operations/mobile-release/page.mdx).
+- All upload secrets are tracked in
+  [`.github/SECRETS.md`](../../.github/SECRETS.md).
+- The privacy policy required by both stores is drafted (pending legal
+  review) at
+  [`.github/templates/PRIVACY_MOBILE_TEMPLATE.md`](../../.github/templates/PRIVACY_MOBILE_TEMPLATE.md);
+  publish it under `docs/src/app/privacy-mobile/` once reviewed.
+
 ## Related issues
 
 - Epic: #3351

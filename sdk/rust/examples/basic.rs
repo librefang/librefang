@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Skills: {}", skills["skills"].as_array().map(|a| a.len()).unwrap_or(0));
 
     // List models
-    let models = client.models.list_models().await?;
+    let models = client.models.list_all_models().await?;
     println!("Models: {}", models["models"].as_array().map(|a| a.len()).unwrap_or(0));
 
     // List providers

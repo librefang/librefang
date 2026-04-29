@@ -61,10 +61,17 @@ COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-# CIS Docker Benchmark §4.1: run the service as a dedicated non-root user with
-# no login shell. The entrypoint starts as root (to chown /data on first boot)
-# and then drops privileges with `gosu librefang` before exec'ing the binary.
-RUN groupadd -r librefang && useradd -r -g librefang -s /sbin/nologin librefang
+# CIS Docker Benchmark §4.1: run the service as a dedicated non-root
+# user with no login shell.  The user `librefang` (uid/gid 1001) is
+# already created above via addgroup/adduser; the redundant
+# `groupadd -r librefang && useradd -r ...` block introduced by #3948
+# collides with that user — `groupadd` exits with code 9 ('group
+# already exists'), breaking `docker build` on every clean tree.
+# Apply the CIS shell-restriction with `usermod` instead, then chown
+# /opt/librefang/packages so the runtime user can read its own asset
+# tree (the COPYs above land as root:root by default).
+RUN usermod -s /sbin/nologin librefang && \
+    chown -R librefang:librefang /opt/librefang/packages
 EXPOSE 4545
 ENV LIBREFANG_HOME=/data
 # docker-entrypoint.sh uses gosu to exec as the librefang user, so we

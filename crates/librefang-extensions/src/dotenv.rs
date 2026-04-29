@@ -109,7 +109,7 @@ fn load_env_file(path: &Path) {
     }
 }
 
-/// Parse a single `KEY=VALUE` line. Handles optional quotes.
+/// Parses a `KEY=VALUE` line; undoes double-quote escape sequences, single-quoted values are literal.
 fn parse_env_line(line: &str) -> Option<(String, String)> {
     let eq_pos = line.find('=')?;
     let key = line[..eq_pos].trim().to_string();
@@ -119,15 +119,58 @@ fn parse_env_line(line: &str) -> Option<(String, String)> {
         return None;
     }
 
-    // Strip matching quotes
-    if ((value.starts_with('"') && value.ends_with('"'))
-        || (value.starts_with('\'') && value.ends_with('\'')))
-        && value.len() >= 2
-    {
-        value = value[1..value.len() - 1].to_string();
+    // Strip matching quotes and remember which kind we stripped, so we
+    // only undo escapes inside double quotes (single-quoted = literal).
+    let mut was_double_quoted = false;
+    if value.len() >= 2 {
+        if value.starts_with('"') && value.ends_with('"') {
+            value = value[1..value.len() - 1].to_string();
+            was_double_quoted = true;
+        } else if value.starts_with('\'') && value.ends_with('\'') {
+            value = value[1..value.len() - 1].to_string();
+        }
+    }
+
+    if was_double_quoted {
+        value = unescape_env_value(&value);
     }
 
     Some((key, value))
+}
+
+/// Escapes `\`, `\n`, `\r`, `"` for writing inside double-quoted `.env` values.
+fn escape_env_value(value: &str) -> String {
+    value
+        // Backslash must come first; otherwise the \n replacement produces \\n which decodes back as a newline.
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('"', "\\\"")
+}
+
+/// Inverse of [`escape_env_value`]; single-pass to avoid double-decoding `\\n`.
+fn unescape_env_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            // Unknown escape: keep both chars verbatim so we don't lose data.
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Upsert a key in `$LIBREFANG_HOME/.env`.
@@ -212,20 +255,56 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
     content.push_str("# Do not edit while the daemon is running.\n\n");
 
     for (key, value) in entries {
-        if value.contains(' ') || value.contains('#') || value.contains('"') {
-            content.push_str(&format!("{key}=\"{}\"\n", value.replace('"', "\\\"")));
+        let needs_quoting = value.contains(' ')
+            || value.contains('#')
+            || value.contains('"')
+            || value.contains('\\')
+            || value.contains('\n')
+            || value.contains('\r')
+            || value.contains('\'')
+            || value.contains('=')
+            || value.contains('$');
+        if needs_quoting {
+            let escaped = escape_env_value(value);
+            content.push_str(&format!("{key}=\"{escaped}\"\n"));
         } else {
             content.push_str(&format!("{key}={value}\n"));
         }
     }
 
-    std::fs::write(path, &content).map_err(|e| format!("Failed to write .env file: {e}"))?;
+    // Atomic save: open <path>.tmp.<pid> with mode 0600 (Unix) at open
+    // time, write_all + flush + sync_all + rename(tmp, final).  Closes
+    // three #3944 holes left by the bare std::fs::write:
+    //   * Crash mid-write no longer leaves a truncated/empty .env
+    //     (the loader silently accepts that, so the API key the user
+    //     just configured vanishes on next boot).
+    //   * Default-perms TOCTOU window is gone: the file is created
+    //     0600 instead of 0644-then-tightened, so a parallel local
+    //     reader can't grab the key during the open syscall.
+    //   * Two concurrent saves no longer share the same staging path
+    //     because the tmp filename is uniquified by PID.
+    let tmp_path = path.with_extension(format!("env.tmp.{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, path)
+    })();
 
-    // Set 0600 permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    if let Err(e) = result {
+        // Clean up an abandoned tmp on either write or rename failure.
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("Failed to write .env file: {e}"));
     }
 
     Ok(())
@@ -284,6 +363,57 @@ mod tests {
     fn test_load_env_file_nonexistent() {
         // Should not panic
         load_env_file(&PathBuf::from("/nonexistent/.env"));
+    }
+
+    /// Regression for #3790: a value containing a literal newline must
+    /// be written as a single `KEY="..."` line (escaped) and must round
+    /// trip back to the original bytes via `parse_env_line`.
+    #[test]
+    fn write_env_file_escapes_newlines_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let mut entries = BTreeMap::new();
+        entries.insert(
+            "PEM_KEY".to_string(),
+            "-----BEGIN PRIVATE KEY-----\nABC\nDEF\n-----END PRIVATE KEY-----".to_string(),
+        );
+        entries.insert("PLAIN".to_string(), "simple".to_string());
+        entries.insert("BACKSLASH".to_string(), r"a\b\c".to_string());
+        entries.insert("QUOTED".to_string(), r#"has "quotes""#.to_string());
+        write_env_file(&path, &entries).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Header is two comment lines + blank line; every entry must occupy
+        // exactly one line (no embedded newline leaks).
+        let key_lines: Vec<&str> = raw.lines().filter(|l| l.contains('=')).collect();
+        assert_eq!(
+            key_lines.len(),
+            entries.len(),
+            "expected one line per key; raw:\n{raw}"
+        );
+
+        // Round-trip: re-parse and ensure values match exactly.
+        let parsed = read_env_file(&path);
+        for (k, v) in &entries {
+            assert_eq!(
+                parsed.get(k).map(String::as_str),
+                Some(v.as_str()),
+                "round-trip mismatch for {k}: wrote {v:?}, read {:?}",
+                parsed.get(k)
+            );
+        }
+    }
+
+    /// Backslash MUST round-trip correctly — the escape ordering bug from
+    /// #3790 caused `\\\n` to decode as a real newline.
+    #[test]
+    fn escape_unescape_backslash_then_newline() {
+        let raw = "\\\n";
+        let escaped = escape_env_value(raw);
+        // \  →  \\, \n → \n  ⇒  \\\n
+        assert_eq!(escaped, r"\\\n");
+        assert!(!escaped.contains('\n'));
+        assert_eq!(unescape_env_value(&escaped), raw);
     }
 
     /// `load_env_file` must not override existing process env vars —

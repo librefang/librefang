@@ -241,8 +241,12 @@ impl AgentScheduler {
     ///
     /// Returns `Ok(estimated_tokens)` (the amount reserved) on success, or
     /// `Err(QuotaExceeded)` if the reservation would breach the limit.
-    /// Returns `Ok(0)` when no quota is configured for the agent (caller
-    /// should still call `record_usage` normally in that case).
+    /// Returns `Ok(0)` whenever no reservation was actually pre-charged —
+    /// either because no quota is registered for the agent, or because the
+    /// effective token limit is `0` (unlimited).  The caller must treat the
+    /// returned value as the exact amount to pass to `settle_reservation` /
+    /// `release_reservation`; a non-zero return is the only signal that
+    /// `total_tokens` was incremented.
     pub fn check_quota_and_reserve(
         &self,
         agent_id: AgentId,
@@ -260,27 +264,30 @@ impl AgentScheduler {
         tracker.reset_if_expired();
 
         let token_limit = quota.effective_token_limit();
-        if token_limit > 0 {
-            let projected = tracker.total_tokens.saturating_add(estimated_tokens);
-            if projected > token_limit {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Token limit would be exceeded: {} + {} reserved > {}",
-                    tracker.total_tokens, estimated_tokens, token_limit
-                )));
-            }
-            // Burst check against the projected spend
-            let burst_cap = token_limit / 5;
-            let tokens_last_min = tracker.tokens_in_last_minute();
-            if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
-                return Err(LibreFangError::QuotaExceeded(format!(
-                    "Token burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
-                    tokens_last_min, estimated_tokens, burst_cap
-                )));
-            }
-            // Atomically pre-charge inside the same DashMap entry write-lock
-            tracker.total_tokens = projected;
+        if token_limit == 0 {
+            // Unlimited quota: nothing to reserve. Returning 0 ensures
+            // callers won't later ask settle/release to subtract a
+            // reservation that was never added to `total_tokens`.
+            return Ok(0);
         }
-
+        let projected = tracker.total_tokens.saturating_add(estimated_tokens);
+        if projected > token_limit {
+            return Err(LibreFangError::QuotaExceeded(format!(
+                "Token limit would be exceeded: {} + {} reserved > {}",
+                tracker.total_tokens, estimated_tokens, token_limit
+            )));
+        }
+        // Burst check against the projected spend
+        let burst_cap = token_limit / 5;
+        let tokens_last_min = tracker.tokens_in_last_minute();
+        if burst_cap > 0 && tokens_last_min.saturating_add(estimated_tokens) > burst_cap {
+            return Err(LibreFangError::QuotaExceeded(format!(
+                "Token burst limit would be exceeded: {} + {} reserved in last minute (max {}/min)",
+                tokens_last_min, estimated_tokens, burst_cap
+            )));
+        }
+        // Atomically pre-charge inside the same DashMap entry write-lock
+        tracker.total_tokens = projected;
         Ok(estimated_tokens)
     }
 
@@ -321,6 +328,29 @@ impl AgentScheduler {
             tracker
                 .token_timestamps
                 .push_back((Instant::now(), actual_tokens));
+        }
+    }
+
+    /// Release a prior `check_quota_and_reserve` reservation without
+    /// recording an LLM call.
+    ///
+    /// Use this on paths that pre-charged a reservation but then never
+    /// actually invoked the LLM: a suspended agent skipped at dispatch
+    /// time, a non-LLM (wasm/python) agent that errored out before any
+    /// LLM hop, an agent loop that failed before the first LLM call.
+    /// Decreasing `total_tokens` by the reserved amount restores the
+    /// pre-reservation state without inflating `llm_calls` or polluting
+    /// the burst-detection sliding window with zero-value entries.
+    ///
+    /// Distinct from `settle_reservation`, which is for paths where an
+    /// LLM call **was** attempted (it always increments `llm_calls`).
+    pub fn release_reservation(&self, agent_id: AgentId, estimated_tokens: u64) {
+        if estimated_tokens == 0 {
+            return;
+        }
+        if let Some(mut tracker) = self.usage.get_mut(&agent_id) {
+            tracker.reset_if_expired();
+            tracker.total_tokens = tracker.total_tokens.saturating_sub(estimated_tokens);
         }
     }
 
@@ -634,5 +664,103 @@ mod tests {
         );
         // llm_calls is still incremented — the call was attempted.
         assert_eq!(after.llm_calls, 1);
+    }
+
+    /// `release_reservation` must roll back the pre-charged total without
+    /// counting an LLM call or polluting the burst window with a zero-token
+    /// timestamp.  Used by paths that pre-charged a reservation but never
+    /// actually invoked the LLM (suspended-agent skip, non-LLM agent
+    /// failure, agent loop failing before the first LLM hop).
+    #[test]
+    fn test_release_reservation_does_not_count_as_llm_call() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        let quota = ResourceQuota {
+            max_llm_tokens_per_hour: Some(100_000),
+            max_tool_calls_per_minute: 0,
+            ..Default::default()
+        };
+        scheduler.register(id, quota);
+
+        let reserved = scheduler.check_quota_and_reserve(id, 500).unwrap();
+        let before = scheduler.get_usage(id).unwrap();
+        assert_eq!(before.total_tokens, 500, "reservation pre-charged");
+        assert_eq!(before.llm_calls, 0);
+
+        scheduler.release_reservation(id, reserved);
+
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(after.total_tokens, 0, "reservation rolled back");
+        assert_eq!(
+            after.llm_calls, 0,
+            "release path must not count as an LLM call"
+        );
+        assert_eq!(after.input_tokens, 0);
+        assert_eq!(after.output_tokens, 0);
+    }
+
+    /// `release_reservation(0, _)` is a no-op (used when no quota is
+    /// configured and `check_quota_and_reserve` returned 0).
+    #[test]
+    fn test_release_reservation_zero_is_noop() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        scheduler.register(id, ResourceQuota::default());
+        scheduler.release_reservation(id, 0);
+        let after = scheduler.get_usage(id).unwrap();
+        assert_eq!(after.total_tokens, 0);
+        assert_eq!(after.llm_calls, 0);
+    }
+
+    /// `check_quota_and_reserve` must return 0 when the agent has a quota
+    /// registered but its effective token limit is 0 (unlimited).  A
+    /// non-zero return would tell callers a reservation had been
+    /// pre-charged, so settle/release would later subtract from
+    /// `total_tokens` even though the reserve step never added anything.
+    #[test]
+    fn test_check_quota_and_reserve_unlimited_returns_zero() {
+        let scheduler = AgentScheduler::new();
+        let id = AgentId::new();
+        // Quota registered, but max_llm_tokens_per_hour = None → unlimited.
+        scheduler.register(id, ResourceQuota::default());
+
+        // First record some real usage so total_tokens is non-zero — this
+        // is the state where the bug would have been observable.
+        scheduler.record_usage(
+            id,
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+        );
+        let before = scheduler.get_usage(id).unwrap();
+        assert_eq!(before.total_tokens, 150);
+
+        // Reserve under an unlimited quota — should return 0 (no charge).
+        let reserved = scheduler.check_quota_and_reserve(id, 1000).unwrap();
+        assert_eq!(reserved, 0, "unlimited quota must not pre-charge");
+
+        // total_tokens unchanged by the reserve call.
+        let after_reserve = scheduler.get_usage(id).unwrap();
+        assert_eq!(after_reserve.total_tokens, 150);
+
+        // Settle with the returned reservation (0) — falls through to the
+        // `record_usage`-equivalent branch and adds actual to total.
+        scheduler.settle_reservation(
+            id,
+            reserved,
+            &TokenUsage {
+                input_tokens: 200,
+                output_tokens: 80,
+                ..Default::default()
+            },
+        );
+        let after_settle = scheduler.get_usage(id).unwrap();
+        assert_eq!(
+            after_settle.total_tokens, 430,
+            "150 prior + 280 actual; no reservation to subtract"
+        );
+        assert_eq!(after_settle.llm_calls, 2);
     }
 }

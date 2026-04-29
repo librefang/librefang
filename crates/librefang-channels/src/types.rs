@@ -52,6 +52,22 @@ pub struct ChannelUser {
     pub librefang_user: Option<String>,
 }
 
+/// A known member of a group chat, accumulated from past messages.
+///
+/// Used to populate multi-user context in the system prompt so agents can
+/// distinguish between the current sender and other users mentioned in a
+/// message (e.g. `@pepe`, `@jose`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupMember {
+    /// Platform-specific user ID.
+    pub user_id: String,
+    /// Human-readable display name (what the platform shows).
+    pub display_name: String,
+    /// Optional `@handle` for platforms that expose one (Telegram, Discord, ...).
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
 /// Typing indicator event from a channel.
 #[derive(Debug, Clone)]
 pub struct TypingEvent {
@@ -304,6 +320,18 @@ pub struct SenderContext {
     /// Divergence count threshold for `sticky_heuristic` strategy.
     #[serde(default)]
     pub auto_route_divergence_count: u32,
+    /// The bot's own platform `@handle` on this channel (e.g. `fandangorodelo_bot`
+    /// on Telegram). Used so the agent knows its own alias in the prompt.
+    #[serde(default)]
+    pub bot_username: Option<String>,
+    /// The current sender's `@handle` on the platform, when available.
+    #[serde(default)]
+    pub sender_username: Option<String>,
+    /// Known members of the group chat where this message was sent.
+    /// Empty for DMs and for the very first message in a group before the
+    /// roster has accumulated any entries.
+    #[serde(default)]
+    pub group_members: Vec<GroupMember>,
     /// Group participant roster (Phase 2 §C OB-04/OB-05/GS-01).
     ///
     /// Populated by the WhatsApp gateway via `sock.groupMetadata(groupJid)`

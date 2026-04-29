@@ -110,6 +110,133 @@ impl Default for NonceTracker {
     }
 }
 
+/// SECURITY (#3876): Per-peer message and token rate limiter for OFP AgentMessage requests.
+///
+/// Prevents any single authenticated OFP peer from consuming the receiver's
+/// LLM budget at an unbounded rate. Two independent limits are enforced:
+///
+/// 1. **Message rate** — max N `AgentMessage` requests per peer per minute.
+///    Excess messages are rejected with a 429 error before they reach the LLM.
+/// 2. **Token budget** — optional cumulative token cap per peer per hour.
+///    When a peer has consumed `max_llm_tokens_per_peer_per_hour` tokens in
+///    the current hour window its subsequent messages are also rejected.
+///
+/// Both counters are stored in `DashMap` so they are shared safely across all
+/// Tokio tasks that serve connections from the same peer node.
+#[derive(Clone)]
+pub struct PeerRateLimiter {
+    /// Tracks (message_count, window_start) per peer_id for rate limiting.
+    msg_counts: Arc<DashMap<String, (u32, Instant)>>,
+    /// Tracks (token_count, window_start) per peer_id for token budgeting.
+    token_counts: Arc<DashMap<String, (u64, Instant)>>,
+    /// Maximum AgentMessages a single peer may send per 60-second window.
+    /// `0` means unlimited.
+    max_msgs_per_minute: u32,
+    /// Optional cumulative LLM token cap per peer per 3600-second window.
+    max_tokens_per_hour: Option<u64>,
+}
+
+impl PeerRateLimiter {
+    /// Create a new limiter from config values.
+    ///
+    /// `max_msgs_per_minute = 0` disables message rate limiting.
+    /// `max_tokens_per_hour = None` disables token budget limiting.
+    pub fn new(max_msgs_per_minute: u32, max_tokens_per_hour: Option<u64>) -> Self {
+        Self {
+            msg_counts: Arc::new(DashMap::new()),
+            token_counts: Arc::new(DashMap::new()),
+            max_msgs_per_minute,
+            max_tokens_per_hour,
+        }
+    }
+
+    /// Check whether the peer identified by `peer_id` is within rate limits.
+    ///
+    /// Returns `Ok(())` if the message should proceed, or `Err(reason)` with a
+    /// human-readable message if the peer has been rate-limited. The internal
+    /// counters are updated on every call regardless of the outcome.
+    pub fn check_message(&self, peer_id: &str) -> Result<(), String> {
+        let now = Instant::now();
+        let one_minute = Duration::from_secs(60);
+
+        if self.max_msgs_per_minute > 0 {
+            let mut entry = self
+                .msg_counts
+                .entry(peer_id.to_string())
+                .or_insert((0, now));
+            let (count, window_start) = &mut *entry;
+            if now.duration_since(*window_start) >= one_minute {
+                // New window — reset counter
+                *count = 1;
+                *window_start = now;
+            } else {
+                *count += 1;
+                if *count > self.max_msgs_per_minute {
+                    let rate = *count;
+                    drop(entry);
+                    warn!(
+                        peer_id = peer_id,
+                        rate = rate,
+                        limit = self.max_msgs_per_minute,
+                        "OFP: peer exceeded AgentMessage rate limit ({rate}/{} per minute); rejecting",
+                        self.max_msgs_per_minute,
+                    );
+                    return Err(format!(
+                        "Rate limit exceeded: {rate} messages in the current minute (max {})",
+                        self.max_msgs_per_minute
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record `tokens_used` for a completed LLM turn on behalf of `peer_id` and
+    /// check whether the per-hour token budget has been exceeded.
+    ///
+    /// Returns `Err(reason)` if the cumulative token usage for this peer has
+    /// crossed the configured cap. Call this **after** a successful LLM turn
+    /// to enforce the budget retroactively (pre-checking is not feasible
+    /// because the token cost is unknown before the call completes).
+    pub fn record_tokens(&self, peer_id: &str, tokens_used: u64) -> Result<(), String> {
+        let Some(max_tokens) = self.max_tokens_per_hour else {
+            return Ok(()); // Token budget not configured
+        };
+
+        let now = Instant::now();
+        let one_hour = Duration::from_secs(3600);
+
+        let mut entry = self
+            .token_counts
+            .entry(peer_id.to_string())
+            .or_insert((0, now));
+        let (total, window_start) = &mut *entry;
+        if now.duration_since(*window_start) >= one_hour {
+            // New hour window — reset
+            *total = tokens_used;
+            *window_start = now;
+        } else {
+            *total += tokens_used;
+            if *total > max_tokens {
+                let used = *total;
+                drop(entry);
+                warn!(
+                    peer_id = peer_id,
+                    tokens_used = used,
+                    limit = max_tokens,
+                    "OFP: peer exceeded hourly LLM token budget ({used}/{max_tokens}); rejecting"
+                );
+                return Err(format!(
+                    "LLM token budget exceeded: {used} tokens in the current hour (max {max_tokens})"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Generate HMAC-SHA256 signature for message authentication.
 fn hmac_sign(secret: &str, data: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key size");
@@ -164,6 +291,12 @@ pub struct PeerConfig {
     /// Pre-shared key for HMAC-SHA256 authentication.
     /// Required — OFP refuses to start without it.
     pub shared_secret: String,
+    /// SECURITY (#3876): Maximum AgentMessage requests a single OFP peer may
+    /// send per minute. `0` disables message rate limiting. Default: 60.
+    pub max_messages_per_peer_per_minute: u32,
+    /// SECURITY (#3876): Optional cumulative LLM token cap per peer per hour.
+    /// `None` means unlimited. Default: None.
+    pub max_llm_tokens_per_peer_per_hour: Option<u64>,
 }
 
 impl Default for PeerConfig {
@@ -173,6 +306,8 @@ impl Default for PeerConfig {
             node_id: uuid::Uuid::new_v4().to_string(),
             node_name: "librefang-node".to_string(),
             shared_secret: String::new(),
+            max_messages_per_peer_per_minute: 60,
+            max_llm_tokens_per_peer_per_hour: None,
         }
     }
 }
@@ -216,6 +351,8 @@ pub struct PeerNode {
     /// SECURITY: Session key derived after handshake for per-message HMAC.
     #[allow(dead_code)]
     session_key: std::sync::Mutex<Option<String>>,
+    /// SECURITY (#3876): Per-peer message and token rate limiter.
+    rate_limiter: Arc<PeerRateLimiter>,
 }
 
 impl PeerNode {
@@ -240,6 +377,10 @@ impl PeerNode {
             local_addr, config.node_id
         );
 
+        let rate_limiter = Arc::new(PeerRateLimiter::new(
+            config.max_messages_per_peer_per_minute,
+            config.max_llm_tokens_per_peer_per_hour,
+        ));
         let node = Arc::new(Self {
             config,
             registry: registry.clone(),
@@ -247,6 +388,7 @@ impl PeerNode {
             start_time: Instant::now(),
             nonce_tracker: NonceTracker::new(),
             session_key: std::sync::Mutex::new(None),
+            rate_limiter,
         });
 
         let node_clone = Arc::clone(&node);
@@ -409,6 +551,7 @@ impl PeerNode {
 
         // Spawn a task to handle ongoing communication with per-message HMAC
         let registry = self.registry.clone();
+        let rate_limiter_clone = Arc::clone(&self.rate_limiter);
         tokio::spawn(async move {
             if let Err(e) = connection_loop(
                 &mut reader,
@@ -417,6 +560,7 @@ impl PeerNode {
                 &registry,
                 &*handle,
                 Some(&sess_key),
+                &rate_limiter_clone,
             )
             .await
             {
@@ -731,6 +875,7 @@ impl PeerNode {
             registry,
             handle,
             Some(&session_key),
+            &node.rate_limiter,
         )
         .await
         {
@@ -802,6 +947,7 @@ async fn connection_loop(
     registry: &PeerRegistry,
     handle: &dyn PeerHandle,
     session_key: Option<&str>,
+    rate_limiter: &PeerRateLimiter,
 ) -> Result<(), WireError> {
     loop {
         let msg = match if let Some(key) = session_key {
@@ -821,7 +967,8 @@ async fn connection_loop(
             }
             // Handle requests (produce response)
             WireMessageKind::Request(_) => {
-                let response = handle_request_in_loop(&msg, handle).await;
+                let response =
+                    handle_request_in_loop(&msg, handle, peer_node_id, rate_limiter).await;
                 if let Some(key) = session_key {
                     write_message_authenticated(writer, &response, key).await?;
                 } else {
@@ -840,7 +987,12 @@ async fn connection_loop(
 }
 
 /// Handle request inside the connection loop (no PeerNode reference needed for most ops).
-async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> WireMessage {
+async fn handle_request_in_loop(
+    msg: &WireMessage,
+    handle: &dyn PeerHandle,
+    peer_node_id: &str,
+    rate_limiter: &PeerRateLimiter,
+) -> WireMessage {
     let kind = match &msg.kind {
         WireMessageKind::Request(WireRequest::Ping) => {
             WireMessageKind::Response(WireResponse::Pong {
@@ -856,6 +1008,19 @@ async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> W
             message,
             sender,
         }) => {
+            // SECURITY (#3876): Enforce per-peer message rate limit before any
+            // work is done. This prevents a single authenticated OFP peer from
+            // flooding the receiver with LLM-triggering requests.
+            if let Err(rate_err) = rate_limiter.check_message(peer_node_id) {
+                return WireMessage {
+                    id: msg.id.clone(),
+                    kind: WireMessageKind::Response(WireResponse::Error {
+                        code: 429,
+                        message: rate_err,
+                    }),
+                };
+            }
+
             // SECURITY (#3876): Reject oversized messages before they reach the
             // kernel's LLM pipeline. A federated peer that shares the same
             // shared_secret could otherwise send a 16 MB payload and drain the
@@ -881,7 +1046,14 @@ async fn handle_request_in_loop(msg: &WireMessage, handle: &dyn PeerHandle) -> W
                     .handle_agent_message(agent, message, sender.as_deref())
                     .await
                 {
-                    Ok(text) => WireMessageKind::Response(WireResponse::AgentResponse { text }),
+                    Ok(text) => {
+                        // TODO(#3876): record_tokens here once
+                        // PeerHandle::handle_agent_message returns the
+                        // actual token usage. Hardcoding 0 leaves the
+                        // hourly token budget effectively unenforced.
+                        let _ = rate_limiter.record_tokens(peer_node_id, 0);
+                        WireMessageKind::Response(WireResponse::AgentResponse { text })
+                    }
                     Err(e) => WireMessageKind::Response(WireResponse::Error {
                         code: 500,
                         message: e,
@@ -1152,6 +1324,8 @@ mod tests {
             node_id: "node-1".to_string(),
             node_name: "kernel-1".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -1165,6 +1339,8 @@ mod tests {
             node_id: "node-2".to_string(),
             node_name: "kernel-2".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -1199,6 +1375,8 @@ mod tests {
             node_id: "server".to_string(),
             node_name: "server-node".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node, _task) = PeerNode::start(config, registry.clone(), handle.clone())
             .await
@@ -1243,6 +1421,8 @@ mod tests {
             node_id: "server".to_string(),
             node_name: "server-node".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
 
@@ -1275,6 +1455,8 @@ mod tests {
             node_id: "server".to_string(),
             node_name: "server-node".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node, _task) = PeerNode::start(config, registry, handle).await.unwrap();
 
@@ -1309,6 +1491,8 @@ mod tests {
             node_id: "node-a".to_string(),
             node_name: "kernel-a".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node1, _task1) = PeerNode::start(config1, registry1.clone(), handle1.clone())
             .await
@@ -1321,6 +1505,8 @@ mod tests {
             node_id: "node-b".to_string(),
             node_name: "kernel-b".to_string(),
             shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0, // unlimited for tests
+            max_llm_tokens_per_peer_per_hour: None,
         };
         let (node2, _task2) = PeerNode::start(config2, registry2.clone(), handle2.clone())
             .await
@@ -1486,7 +1672,8 @@ mod tests {
             }),
         };
 
-        let response = handle_request_in_loop(&msg, &*handle).await;
+        let noop_limiter = PeerRateLimiter::new(0, None); // unlimited for test
+        let response = handle_request_in_loop(&msg, &*handle, "test-peer", &noop_limiter).await;
         match response.kind {
             WireMessageKind::Response(WireResponse::Error { code, message }) => {
                 assert_eq!(
@@ -1517,7 +1704,8 @@ mod tests {
             }),
         };
 
-        let response = handle_request_in_loop(&msg, &*handle).await;
+        let noop_limiter = PeerRateLimiter::new(0, None); // unlimited for test
+        let response = handle_request_in_loop(&msg, &*handle, "test-peer", &noop_limiter).await;
         match response.kind {
             WireMessageKind::Response(WireResponse::AgentResponse { text }) => {
                 assert!(

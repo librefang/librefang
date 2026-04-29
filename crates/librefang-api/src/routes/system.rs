@@ -1616,7 +1616,15 @@ pub async fn list_approvals(
     Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let pending = state.kernel.approvals().list_pending();
-    let recent = state.kernel.approvals().list_recent(50);
+    // Pull the full in-memory recent buffer (capped at
+    // MAX_RECENT_APPROVALS = 100 by approval.rs), not a hard-coded 50.
+    // The earlier limit meant `total` reported pending + 50 even when
+    // the buffer held more, so a frontend asking for `offset=50` got
+    // an empty page despite `total > offset` — pagination contract
+    // broken (audit of #3958).  The buffer cap is the real bound;
+    // surfacing the full set here lets the skip/take below paginate
+    // over the actual window the server can serve.
+    let recent = state.kernel.approvals().list_recent(usize::MAX);
 
     let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
@@ -1830,34 +1838,29 @@ pub async fn approve_request(
         match body.totp_code.as_deref() {
             Some(code) => {
                 if ApprovalManager::is_recovery_code_format(code) {
-                    match state.kernel.vault_get("totp_recovery_codes") {
-                        Some(stored) => {
-                            match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                                &stored, code,
-                            ) {
-                                Ok((true, updated)) => {
-                                    if let Err(e) =
-                                        state.kernel.vault_set("totp_recovery_codes", &updated)
-                                    {
-                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
-                                    }
-                                    true
-                                }
-                                Ok((false, _)) => {
-                                    state.kernel.approvals().record_totp_failure("api_admin");
-                                    return ApiErrorResponse::bad_request("Invalid recovery code")
-                                        .into_json_tuple()
-                                        .into_response();
-                                }
-                                Err(e) => {
-                                    return ApiErrorResponse::bad_request(e)
-                                        .into_json_tuple()
-                                        .into_response();
-                                }
+                    // Atomically redeem the recovery code (fixes TOCTOU #3560
+                    // and vault_set-failure bypass #3633).
+                    match state.kernel.vault_redeem_recovery_code(code) {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_failure("api_admin")
+                                .is_err()
+                            {
+                                return ApiErrorResponse::internal(
+                                    "Failed to persist TOTP failure counter",
+                                )
+                                .into_json_tuple()
+                                .into_response();
                             }
+                            return ApiErrorResponse::bad_request("Invalid recovery code")
+                                .into_json_tuple()
+                                .into_response();
                         }
-                        None => {
-                            return ApiErrorResponse::bad_request("No recovery codes configured")
+                        Err(e) => {
+                            return ApiErrorResponse::internal(e)
                                 .into_json_tuple()
                                 .into_response();
                         }
@@ -1876,7 +1879,7 @@ pub async fn approve_request(
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -1894,7 +1897,19 @@ pub async fn approve_request(
                             true
                         }
                         Ok(false) => {
-                            state.kernel.approvals().record_totp_failure("api_admin");
+                            // Fail-secure: reject even if counter persist fails (#3372).
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_failure("api_admin")
+                                .is_err()
+                            {
+                                return ApiErrorResponse::internal(
+                                    "Failed to persist TOTP failure counter",
+                                )
+                                .into_json_tuple()
+                                .into_response();
+                            }
                             return ApiErrorResponse::bad_request("Invalid TOTP code")
                                 .into_json_tuple()
                                 .into_response();
@@ -2490,29 +2505,17 @@ pub async fn totp_setup(
             }
             Some(code) => {
                 let verified = if ApprovalManager::is_recovery_code_format(code) {
-                    // Recovery code
-                    match state.kernel.vault_get("totp_recovery_codes") {
-                        Some(stored) => {
-                            match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                                &stored, code,
-                            ) {
-                                Ok((true, updated)) => {
-                                    if let Err(e) =
-                                        state.kernel.vault_set("totp_recovery_codes", &updated)
-                                    {
-                                        tracing::warn!("Failed to persist updated TOTP recovery codes after use: {e}");
-                                    }
-                                    true
-                                }
-                                _ => false,
-                            }
+                    // Atomically redeem the recovery code (fixes TOCTOU #3560 / #3633).
+                    match state.kernel.vault_redeem_recovery_code(code) {
+                        Ok(matched) => matched,
+                        Err(e) => {
+                            return ApiErrorResponse::internal(e).into_json_tuple();
                         }
-                        None => false,
                     }
                 } else {
                     // TOTP code — check replay before verifying (#3359).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2535,7 +2538,18 @@ pub async fn totp_setup(
                     }
                 };
                 if !verified {
-                    state.kernel.approvals().record_totp_failure("api_admin");
+                    // Fail-secure: reject even if counter persist fails (#3372).
+                    if state
+                        .kernel
+                        .approvals()
+                        .record_totp_failure("api_admin")
+                        .is_err()
+                    {
+                        return ApiErrorResponse::internal(
+                            "Failed to persist TOTP failure counter",
+                        )
+                        .into_json_tuple();
+                    }
                     return ApiErrorResponse::bad_request(
                         "Invalid current_code. Provide a valid TOTP or recovery code to reset.",
                     )
@@ -2633,7 +2647,7 @@ pub async fn totp_confirm(
 
     // Replay-prevention check (#3359): reject a code already used in the last 60 s.
     if state.kernel.approvals().is_totp_code_used(&body.code) {
-        state.kernel.approvals().record_totp_failure("api_admin");
+        let _ = state.kernel.approvals().record_totp_failure("api_admin");
         return ApiErrorResponse::bad_request(
             "TOTP code has already been used. Wait for the next 30-second window.",
         )
@@ -2657,7 +2671,16 @@ pub async fn totp_confirm(
             )
         }
         Ok(false) => {
-            state.kernel.approvals().record_totp_failure("api_admin");
+            // Fail-secure: reject even if counter persist fails (#3372).
+            if state
+                .kernel
+                .approvals()
+                .record_totp_failure("api_admin")
+                .is_err()
+            {
+                return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                    .into_json_tuple();
+            }
             ApiErrorResponse::bad_request(
                 "Invalid TOTP code. Check your authenticator app and try again.",
             )
@@ -2718,58 +2741,99 @@ pub async fn totp_revoke(
         return ApiErrorResponse::bad_request("TOTP is not enrolled.").into_json_tuple();
     }
 
-    // Verify the provided code (recovery codes are consumed on use)
+    // Verify the provided code (recovery codes are consumed on use).
+    // For recovery codes, use the atomic vault_redeem_recovery_code path
+    // (fixes TOCTOU #3560 and vault_set-failure bypass #3633).
     let verified = if ApprovalManager::is_recovery_code_format(&body.code) {
-        match state.kernel.vault_get("totp_recovery_codes") {
-            Some(stored) => {
-                match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                    &stored, &body.code,
-                ) {
-                    Ok((true, updated)) => {
-                        if let Err(e) = state.kernel.vault_set("totp_recovery_codes", &updated) {
-                            tracing::warn!(
-                                "Failed to persist updated TOTP recovery codes after use: {e}"
-                            );
-                        }
-                        true
-                    }
-                    _ => false,
-                }
+        match state.kernel.vault_redeem_recovery_code(&body.code) {
+            Ok(matched) => matched,
+            Err(e) => {
+                return ApiErrorResponse::internal(e).into_json_tuple();
             }
-            None => false,
         }
     } else {
+        // TOTP replay check first (#3952).  Most damaging path of all:
+        // a single replayed code disables 2FA entirely.  approve_request
+        // and totp_confirm both check this; totp_revoke was missed.
+        if state.kernel.approvals().is_totp_code_used(&body.code) {
+            // Don't count toward the lockout — the code itself isn't
+            // wrong, it's already-spent.  Return the same 400 shape so
+            // the caller can't distinguish "already used" from "wrong".
+            return ApiErrorResponse::bad_request("TOTP code already used. Wait for a new code.")
+                .into_json_tuple();
+        }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
-                librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
                     &secret,
                     &body.code,
                     &totp_issuer,
                 )
-                .unwrap_or(false)
+                .unwrap_or(false);
+                if ok {
+                    // Mark consumption only after a true verify.
+                    state.kernel.approvals().record_totp_code_used(&body.code);
+                }
+                ok
             }
             None => false,
         }
     };
 
     if !verified {
-        state.kernel.approvals().record_totp_failure("api_admin");
+        // Fail-secure: reject even if counter persist fails (#3372).
+        if state
+            .kernel
+            .approvals()
+            .record_totp_failure("api_admin")
+            .is_err()
+        {
+            return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                .into_json_tuple();
+        }
         return ApiErrorResponse::bad_request(
             "Invalid code. Provide a valid TOTP or recovery code.",
         )
         .into_json_tuple();
     }
 
-    // Remove TOTP data from vault
-    // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
-    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
-        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
-    }
+    // #3633: clearing must not be best-effort and must avoid creating a
+    // partial state that BYPASSES 2FA on login. The login gate
+    // (server.rs ~334) reads `if totp_enrolled && totp_confirmed` to decide
+    // whether to prompt for a TOTP code, so:
+    //   * `totp_confirmed=false` alone is enough to disable 2FA on login,
+    //     even if `totp_secret` is still present.
+    // An earlier fail-fast version cleared `totp_confirmed` first and
+    // returned 500 if `totp_secret` then failed to wipe — that
+    // simultaneously told the user "TOTP is still active, retry" while
+    // actually disabling 2FA. To prevent that, we:
+    //   1. Wipe `totp_secret` and `totp_recovery_codes` FIRST so the
+    //      verify path is dead before we ever flip the `totp_confirmed`
+    //      flag. Even if writing the flag later fails, secret/recovery are
+    //      already gone, so a retry is purely a state-flag fix and 2FA is
+    //      effectively disabled either way.
+    //   2. Attempt every write (collect-all, not fail-fast) so a transient
+    //      failure on field N doesn't leave fields >N untouched on retry.
+    //   3. Aggregate failures into a single 500 with all field errors.
+    let mut failures: Vec<String> = Vec::new();
     if let Err(e) = state.kernel.vault_set("totp_secret", "") {
-        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_secret: {e}");
+        failures.push(format!("totp_secret: {e}"));
     }
     if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
-        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_recovery_codes: {e}");
+        failures.push(format!("totp_recovery_codes: {e}"));
+    }
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        tracing::error!("totp_revoke: failed to clear totp_confirmed: {e}");
+        failures.push(format!("totp_confirmed: {e}"));
+    }
+    if !failures.is_empty() {
+        return ApiErrorResponse::internal(format!(
+            "TOTP revocation partially failed; the secret and recovery codes have been wiped first so 2FA is no longer verifiable, but vault state is inconsistent. Retry. Details: {}",
+            failures.join("; ")
+        ))
+        .into_json_tuple();
     }
 
     (

@@ -184,6 +184,10 @@ pub struct ClawHubSkillDetail {
     /// Moderation status (null when clean).
     #[serde(default)]
     pub moderation: Option<serde_json::Value>,
+    /// Expected SHA256 hex digest of the skill archive, provided by the registry.
+    /// When present the installer validates the download before extraction.
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 // -- Sort enum -------------------------------------------------------------
@@ -508,7 +512,8 @@ impl ClawHubClient {
     /// Install a skill from ClawHub into the target directory.
     ///
     /// Security pipeline:
-    /// 1. Download skill zip and compute SHA256
+    /// 0. Fetch skill detail (to obtain `expected_sha256` when the registry provides it)
+    /// 1. Download skill zip and compute SHA256; validate against expected when present
     /// 2. Detect format (SKILL.md vs package.json)
     /// 3. Convert to LibreFang manifest
     /// 4. Run manifest security scan
@@ -521,6 +526,17 @@ impl ClawHubClient {
         target_dir: &Path,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
+
+        // Step 0: Fetch skill detail to get expected_sha256 (best-effort —
+        // if the registry does not provide it we still install with a warning).
+        let expected_sha256: Option<String> = match self.get_skill(slug).await {
+            Ok(detail) => detail.expected_sha256,
+            Err(e) => {
+                warn!(slug, error = %e, "Could not fetch ClawHub skill detail; proceeding without checksum verification");
+                None
+            }
+        };
+
         // Use /api/v1/download?slug=... endpoint
         let url = format!("{}/download?slug={}", self.base_url, urlencoded(slug));
 
@@ -534,18 +550,39 @@ impl ClawHubClient {
             .await
             .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
 
-        self.install_from_bytes(slug, target_dir, &bytes).await
+        self.install_with_expected_sha256(slug, target_dir, &bytes, expected_sha256.as_deref())
+            .await
     }
 
     /// Install a skill from raw bytes (zip or SKILL.md).
     ///
     /// Shared extraction + security scan logic used by both ClawHub download
-    /// and Skillhub COS download paths.
+    /// and Skillhub COS download paths.  No checksum validation is performed
+    /// because the Skillhub COS path does not provide an expected hash; use
+    /// `install_with_expected_sha256` when a hash is available.
     pub async fn install_from_bytes(
         &self,
         slug: &str,
         target_dir: &Path,
         bytes: &[u8],
+    ) -> Result<ClawHubInstallResult, SkillError> {
+        self.install_with_expected_sha256(slug, target_dir, bytes, None)
+            .await
+    }
+
+    /// Install a skill from raw bytes with optional SHA256 checksum validation.
+    ///
+    /// When `expected_sha256` is `Some`, the computed digest of `bytes` is
+    /// compared against it before extraction.  A mismatch deletes any partially
+    /// written files and returns a `SkillError::SecurityBlocked` error.
+    /// When `expected_sha256` is `None`, a `warn!` is emitted and installation
+    /// continues (backward-compatible behaviour).
+    async fn install_with_expected_sha256(
+        &self,
+        slug: &str,
+        target_dir: &Path,
+        bytes: &[u8],
+        expected_sha256: Option<&str>,
     ) -> Result<ClawHubInstallResult, SkillError> {
         validate_slug(slug)?;
 
@@ -557,16 +594,44 @@ impl ClawHubClient {
         };
         info!(slug, sha256 = %sha256, "Downloaded skill");
 
-        // Create skill directory
+        // Step 1a: Validate checksum against registry-supplied expected hash
+        // BEFORE creating any directories so we fail fast on supply-chain
+        // tampering (issue #3827).
+        match expected_sha256 {
+            Some(expected) => {
+                let expected_lower = expected.to_lowercase();
+                if sha256 != expected_lower {
+                    return Err(SkillError::SecurityBlocked(format!(
+                        "Skill {slug} hash mismatch: expected {expected_lower}, got {sha256}"
+                    )));
+                }
+                info!(slug, "SHA256 checksum verified OK");
+            }
+            None => {
+                warn!(
+                    slug,
+                    "ClawHub did not provide expected_sha256 — install unverified"
+                );
+            }
+        }
+
+        // Install into a temporary directory first, then atomically rename to
+        // the final skill directory.  This prevents partial installs from being
+        // loaded on the next daemon start if extraction is interrupted.
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
-        std::fs::create_dir_all(&skill_dir)?;
+        let tmp_dir = target_dir.join(format!(".installing-{}-{}", slug, std::process::id()));
+        // Clean up any leftover temp dir from a previous crashed install.
+        if tmp_dir.exists() {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+        }
+        std::fs::create_dir_all(&tmp_dir)?;
 
         // Detect content type and extract accordingly
         let content_str = String::from_utf8_lossy(bytes);
         let is_skillmd = content_str.trim_start().starts_with("---");
 
         if is_skillmd {
-            let skill_md_path = resolve_skill_child_path(&skill_dir, Path::new("SKILL.md"))?;
+            let skill_md_path = resolve_skill_child_path(&tmp_dir, Path::new("SKILL.md"))?;
             std::fs::write(skill_md_path, bytes)?;
         } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
             // Zip archive — extract all files
@@ -585,7 +650,7 @@ impl ClawHubClient {
                             warn!("Skipping zip entry with unsafe path");
                             continue;
                         };
-                        let out_path = match resolve_skill_child_path(&skill_dir, &enclosed_name) {
+                        let out_path = match resolve_skill_child_path(&tmp_dir, &enclosed_name) {
                             Ok(path) => path,
                             Err(e) => {
                                 warn!(index = i, error = %e, "Skipping zip entry with unsafe path");
@@ -606,22 +671,22 @@ impl ClawHubClient {
                 }
                 Err(e) => {
                     warn!(slug, error = %e, "Failed to read zip, saving raw");
-                    let zip_path = resolve_skill_child_path(&skill_dir, Path::new("skill.zip"))?;
+                    let zip_path = resolve_skill_child_path(&tmp_dir, Path::new("skill.zip"))?;
                     std::fs::write(zip_path, bytes)?;
                 }
             }
         } else {
-            let package_path = resolve_skill_child_path(&skill_dir, Path::new("package.json"))?;
+            let package_path = resolve_skill_child_path(&tmp_dir, Path::new("package.json"))?;
             std::fs::write(package_path, bytes)?;
         }
 
-        // Step 2-3: Detect format and convert
+        // Step 2-3: Detect format and convert (operate on tmp_dir throughout)
         let mut all_warnings = Vec::new();
         let mut tool_translations = Vec::new();
         let mut is_prompt_only = false;
 
-        let manifest = if is_skillmd || openclaw_compat::detect_skillmd(&skill_dir) {
-            let converted = openclaw_compat::convert_skillmd(&skill_dir)?;
+        let manifest = if is_skillmd || openclaw_compat::detect_skillmd(&tmp_dir) {
+            let converted = openclaw_compat::convert_skillmd(&tmp_dir)?;
             tool_translations = converted.tool_translations;
             is_prompt_only =
                 converted.manifest.runtime.runtime_type == crate::SkillRuntime::PromptOnly;
@@ -639,8 +704,8 @@ impl ClawHubClient {
                     .map(|w| w.message.clone())
                     .collect();
 
-                // Clean up skill directory on blocked install
-                let _ = std::fs::remove_dir_all(&skill_dir);
+                // Clean up the temporary directory on blocked install.
+                let _ = std::fs::remove_dir_all(&tmp_dir);
 
                 return Err(SkillError::SecurityBlocked(format!(
                     "Skill blocked due to prompt injection: {}",
@@ -649,8 +714,8 @@ impl ClawHubClient {
             }
             all_warnings.extend(prompt_warnings);
 
-            // Write prompt context
-            openclaw_compat::write_prompt_context(&skill_dir, &converted.prompt_context)?;
+            // Write prompt context into tmp_dir
+            openclaw_compat::write_prompt_context(&tmp_dir, &converted.prompt_context)?;
 
             // Step 6: Binary dependency check
             for bin in &converted.required_bins {
@@ -663,9 +728,11 @@ impl ClawHubClient {
             }
 
             converted.manifest
-        } else if openclaw_compat::detect_openclaw_skill(&skill_dir) {
-            openclaw_compat::convert_openclaw_skill(&skill_dir)?
+        } else if openclaw_compat::detect_openclaw_skill(&tmp_dir) {
+            openclaw_compat::convert_openclaw_skill(&tmp_dir)?
         } else {
+            // Remove the orphaned temp dir before returning the error.
+            let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(SkillError::InvalidManifest(
                 "Downloaded content is not a recognized skill format".to_string(),
             ));
@@ -675,8 +742,17 @@ impl ClawHubClient {
         let manifest_warnings = SkillVerifier::security_scan(&manifest);
         all_warnings.extend(manifest_warnings);
 
-        // Step 7: Write skill.toml
-        openclaw_compat::write_librefang_manifest(&skill_dir, &manifest)?;
+        // Step 7: Write skill.toml into tmp_dir
+        openclaw_compat::write_librefang_manifest(&tmp_dir, &manifest)?;
+
+        // Atomic promotion: remove the previous version (if any) and rename
+        // the fully-prepared temp directory into the final skill directory.
+        // If rename() fails the tmp dir is left behind; the next install will
+        // clean it up via the pre-install check at the top of this function.
+        if skill_dir.exists() {
+            std::fs::remove_dir_all(&skill_dir)?;
+        }
+        std::fs::rename(&tmp_dir, &skill_dir)?;
 
         let result = ClawHubInstallResult {
             skill_name: manifest.skill.name.clone(),

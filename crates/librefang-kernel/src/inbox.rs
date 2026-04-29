@@ -171,8 +171,31 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                 };
 
                 if content.trim().is_empty() {
-                    // Move empty files to processed without sending
-                    let _ = move_to_processed(&path, &processed_dir).await;
+                    // Move empty files to processed without sending.
+                    // If the move fails (permissions, race), delete the file so
+                    // we don't spin forever rescanning the same empty file.
+                    if let Err(e) = move_to_processed(&path, &processed_dir).await {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "Inbox: failed to move empty file to processed dir, removing to avoid spin loop"
+                        );
+                        if let Err(e2) = tokio::fs::remove_file(&path).await {
+                            // Move and delete both failed (read-only inbox,
+                            // EACCES, etc.).  Park the path in `in_flight`
+                            // so subsequent ticks skip it instead of
+                            // re-reading + re-warning every interval.  The
+                            // `retain(|p| p.exists())` sweep below still
+                            // unblocks the path the moment it disappears
+                            // by external means.
+                            warn!(
+                                path = %path.display(),
+                                error = %e2,
+                                "Inbox: also failed to remove empty file; suppressing rescan via in_flight"
+                            );
+                            in_flight.insert(path.clone());
+                        }
+                    }
                     continue;
                 }
 

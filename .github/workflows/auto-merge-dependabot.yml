@@ -13,10 +13,41 @@ jobs:
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Enable auto-merge for Dependabot PRs
+      # Inspect the dependabot PR's metadata so we can gate auto-merge
+      # on update-type.  Without this gate, a malicious major-version
+      # release in any watched ecosystem auto-lands on green CI — the
+      # supply-chain blast radius the post-merge audit of #3938 flagged
+      # (npm + pip ecosystems newly added by that PR widened the surface).
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@d7267f607e9d3fb96fc2fbe83e0af444713e90b7  # v2.4.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Auto-merge only patch + minor bumps.  Major bumps still open
+      # the PR for review.  Pass values via env so the gh command
+      # never interpolates anything attacker-controlled into the run
+      # block (consistent with the #3938 hardening pattern and #4046).
+      - name: Enable auto-merge for safe Dependabot bumps
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEP_NAME: ${{ steps.meta.outputs.dependency-names }}
         run: |
-          gh pr merge ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --auto --squash
+          echo "Auto-merging $DEP_NAME ($UPDATE_TYPE)"
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
+
+      - name: Skip auto-merge for major bumps
+        if: |
+          steps.meta.outputs.update-type != 'version-update:semver-patch' &&
+          steps.meta.outputs.update-type != 'version-update:semver-minor'
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEP_NAME: ${{ steps.meta.outputs.dependency-names }}
+        run: |
+          echo "Refusing to auto-merge $DEP_NAME ($UPDATE_TYPE) — manual review required."

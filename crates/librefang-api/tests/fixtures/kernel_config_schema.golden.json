@@ -62,7 +62,8 @@
         "second_factor": "none",
         "totp_issuer": "LibreFang",
         "totp_grace_period_secs": 300,
-        "totp_tools": []
+        "totp_tools": [],
+        "audit_retention_days": 90
       },
       "allOf": [
         {
@@ -85,7 +86,7 @@
       ]
     },
     "auth_profiles": {
-      "description": "Auth profiles for key rotation (provider name → profiles).",
+      "description": "Auth profiles for key rotation (provider name → profiles). Uses `BTreeMap` for deterministic serialisation order (avoids prompt-cache invalidation when the same providers are configured across restarts; see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -507,7 +508,8 @@
         "allowed_domains": [],
         "audience": "",
         "session_ttl_secs": 86400,
-        "providers": []
+        "providers": [],
+        "require_email_verified": true
       },
       "allOf": [
         {
@@ -714,7 +716,8 @@
           "overlap": 200
         },
         "vector_backend": null,
-        "vector_store_url": null
+        "vector_store_url": null,
+        "soft_delete_retention_days": 30
       },
       "allOf": [
         {
@@ -740,7 +743,8 @@
         "bootstrap_peers": [],
         "mdns_enabled": true,
         "max_peers": 50,
-        "shared_secret": ""
+        "shared_secret": "",
+        "max_messages_per_peer_per_minute": 60
       },
       "allOf": [
         {
@@ -882,7 +886,7 @@
       ]
     },
     "provider_api_keys": {
-      "description": "Provider API key env var overrides (provider ID → env var name). For custom/unknown providers, maps the provider name to the environment variable holding the API key. e.g. `nvidia = \"NVIDIA_API_KEY\"`. If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.",
+      "description": "Provider API key env var overrides (provider ID → env var name). For custom/unknown providers, maps the provider name to the environment variable holding the API key. e.g. `nvidia = \"NVIDIA_API_KEY\"`. If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -890,7 +894,7 @@
       }
     },
     "provider_proxy_urls": {
-      "description": "Per-provider proxy URL overrides (provider ID → proxy URL). Allows routing specific providers through a proxy while others connect directly. e.g. `openai = \"http://proxy.corp:8080\"`, `ollama = \"\"` (direct)",
+      "description": "Per-provider proxy URL overrides (provider ID → proxy URL). Allows routing specific providers through a proxy while others connect directly. e.g. `openai = \"http://proxy.corp:8080\"`, `ollama = \"\"` (direct) Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -898,7 +902,7 @@
       }
     },
     "provider_regions": {
-      "description": "Provider region selection (provider ID → region name). Selects a regional endpoint from the provider's `[provider.regions]` map. e.g. `qwen = \"us\"` to use the US endpoint instead of China mainland.",
+      "description": "Provider region selection (provider ID → region name). Selects a regional endpoint from the provider's `[provider.regions]` map. e.g. `qwen = \"us\"` to use the US endpoint instead of China mainland. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -906,7 +910,7 @@
       }
     },
     "provider_request_timeout_secs": {
-      "description": "Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).\n\nOverrides the HTTP client's default read timeout for LLM API requests to the specified provider. Useful for slower providers or long-context workloads. e.g. `ollama = 300`, `anthropic = 120`\n\nOnly applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.). CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.",
+      "description": "Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).\n\nOverrides the HTTP client's default read timeout for LLM API requests to the specified provider. Useful for slower providers or long-context workloads. e.g. `ollama = 300`, `anthropic = 120`\n\nOnly applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.). CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -916,7 +920,7 @@
       }
     },
     "provider_urls": {
-      "description": "Provider base URL overrides (provider ID → custom base URL). e.g. `ollama = \"http://192.168.1.100:11434/v1\"`",
+      "description": "Provider base URL overrides (provider ID → custom base URL). e.g. `ollama = \"http://192.168.1.100:11434/v1\"` Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "default": {},
       "type": "object",
       "additionalProperties": {
@@ -948,7 +952,8 @@
           "subagent_lane": 3,
           "trigger_lane": 8,
           "default_per_agent": 1
-        }
+        },
+        "task_queue_retention_days": 7
       },
       "allOf": [
         {
@@ -974,7 +979,8 @@
         "ws_terminal_messages_per_minute": 3600,
         "ws_idle_timeout_secs": 1800,
         "ws_debounce_ms": 100,
-        "ws_debounce_chars": 200
+        "ws_debounce_chars": 200,
+        "auth_rate_limit_per_ip": 10
       },
       "allOf": [
         {
@@ -1016,9 +1022,10 @@
     "sanitize": {
       "description": "Input sanitization / prompt-injection detection for channel messages.",
       "default": {
-        "mode": "off",
+        "mode": "block",
         "max_message_length": 32768,
-        "custom_block_patterns": []
+        "custom_block_patterns": [],
+        "disable_input_sanitizer": false
       },
       "allOf": [
         {
@@ -1500,6 +1507,13 @@
       "description": "Configurable approval policy.",
       "type": "object",
       "properties": {
+        "audit_retention_days": {
+          "description": "How many days to retain `approval_audit` rows before the periodic retention sweep hard-deletes them. Independent of `audit_entries` Merkle retention (see #3383); the approval log is a flat audit table that would otherwise grow forever (#3468). Default: 90. Set to 0 to disable pruning.",
+          "default": 90,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "auto_approve": {
           "description": "Alias: if `auto_approve = true`, clears the require list at boot.",
           "default": false,
@@ -4297,6 +4311,11 @@
           "default": "http://127.0.0.1:4545/api/auth/callback",
           "type": "string"
         },
+        "require_email_verified": {
+          "description": "Require `email_verified = true` in the OIDC ID token before allowing login. Defaults to `true`. Set to `false` only if your identity provider does not set this claim. When `true`, logins where the claim is absent or false are rejected — prevents `allowed_domains` impersonation via unverified addresses (#3703).",
+          "default": true,
+          "type": "boolean"
+        },
         "scopes": {
           "description": "OAuth2 scopes to request.",
           "default": [
@@ -6277,6 +6296,13 @@
             "null"
           ]
         },
+        "soft_delete_retention_days": {
+          "description": "How many days to keep soft-deleted memories (`deleted = 1`) before the periodic retention sweep hard-deletes them and reclaims their embedding BLOB. Default: 30. Set to 0 to disable hard-delete (rows stay forever, leaking embedding storage — see #3467).",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "sqlite_path": {
           "description": "Path to SQLite database file.",
           "default": null,
@@ -6553,6 +6579,22 @@
           "items": {
             "type": "string"
           }
+        },
+        "max_llm_tokens_per_peer_per_hour": {
+          "description": "SECURITY (#3876): Optional cumulative LLM token budget per OFP peer per hour.\n\nWhen set, the node tracks how many tokens each peer's requests have consumed in the current hour window. If a peer exceeds this budget the request is rejected with a 429 error.\n\nmeans no per-peer token cap (default). Set to a value like to bound the LLM spend a single federated peer can force.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_messages_per_peer_per_minute": {
+          "description": "SECURITY (#3876): Maximum number of  requests a single OFP peer may send per minute before being rate-limited.\n\nEach peer connection is tracked independently. Excess messages are rejected with a 429 error response; a  is emitted with the peer ID and current rate so operators can investigate abuse.\n\nSet to  to disable per-peer message rate limiting (not recommended for production federations). Default: 60.",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
         "max_peers": {
           "description": "Maximum number of connected peers.",
@@ -6948,6 +6990,14 @@
           "description": "OAuth2 redirect URI. Defaults to `http://127.0.0.1:4545/api/auth/callback`.",
           "default": "http://127.0.0.1:4545/api/auth/callback",
           "type": "string"
+        },
+        "require_email_verified": {
+          "description": "Override the global `require_email_verified` setting for this provider. `None` means inherit from `ExternalAuthConfig::require_email_verified`. Set to `false` only if this specific provider does not issue `email_verified` claims (e.g. GitHub's user API does not include the field for OAuth2 flows).",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "scopes": {
           "description": "OAuth2 scopes to request.",
@@ -9614,6 +9664,11 @@
                 "null"
               ]
             },
+            "allow_local": {
+              "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses. Defaults to `false`; set to `true` only when signal-cli runs on localhost.",
+              "default": false,
+              "type": "boolean"
+            },
             "allowed_users": {
               "description": "Allowed phone numbers (empty = allow all).",
               "default": [],
@@ -9621,6 +9676,14 @@
               "items": {
                 "type": "string"
               }
+            },
+            "api_key": {
+              "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request. If absent, requests are sent without an Authorization header.",
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "api_url": {
               "description": "URL of the signal-cli REST API (e.g., \"http://localhost:8080\").",
@@ -9889,9 +9952,14 @@
               ]
             },
             "security_token_env": {
-              "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. If the env var is absent or empty, verification is skipped with a warning.",
+              "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. Required by default; setting `signature_required = false` opts out (dev only).",
               "default": "",
               "type": "string"
+            },
+            "signature_required": {
+              "description": "Reject adapter startup unless a security token is configured (default `true`). Setting to `false` is strongly discouraged — webhook becomes a public endpoint.",
+              "default": true,
+              "type": "boolean"
             },
             "webhook_port": {
               "description": "Port for the incoming webhook.",
@@ -11836,6 +11904,13 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "task_queue_retention_days": {
+          "description": "How many days to keep `completed` / `failed` / `cancelled` rows in `task_queue` before the periodic retention sweep hard-deletes them. Default: 7. Set to 0 to disable pruning (queue grows forever — #3466).",
+          "default": 7,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "task_ttl_secs": {
           "description": "Task TTL in seconds (unprocessed tasks expire, 0 = unlimited).",
           "default": 3600,
@@ -11852,6 +11927,13 @@
         "api_requests_per_minute": {
           "description": "API token budget per minute per IP (GCRA algorithm). Default: 500.",
           "default": 500,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "auth_rate_limit_per_ip": {
+          "description": "Max login attempts per IP per 15-minute window on auth endpoints (`/api/auth/dashboard-login`, `/api/auth/login*`). Default: 10. Set to 0 to disable the per-IP auth rate limiter.",
+          "default": 10,
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
@@ -12270,7 +12352,7 @@
       }
     },
     "SanitizeConfig": {
-      "description": "Configuration for channel input sanitization / prompt-injection detection.\n\n```toml [sanitize] mode = \"warn\"           # off | warn | block max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] ```",
+      "description": "Configuration for channel input sanitization / prompt-injection detection.\n\nThe sanitizer is **enabled by default** (mode = \"block\"). To opt out set `disable_input_sanitizer = true` in `[sanitize]` or change `mode`:\n\n```toml [sanitize] mode = \"block\"          # off | warn | block  (default: block) max_message_length = 32768 custom_block_patterns = [\"(?i)secret\\\\s+code\"] # disable_input_sanitizer = true  # emergency opt-out ```",
       "type": "object",
       "properties": {
         "custom_block_patterns": {
@@ -12281,6 +12363,11 @@
             "type": "string"
           }
         },
+        "disable_input_sanitizer": {
+          "description": "Emergency opt-out: set to `true` to disable all input sanitization. Not recommended for production — prefer `mode = \"warn\"` for monitoring without blocking, or `mode = \"off\"` for a softer disable.",
+          "default": false,
+          "type": "boolean"
+        },
         "max_message_length": {
           "description": "Maximum allowed message length in bytes (default: 32 768).",
           "default": 32768,
@@ -12290,7 +12377,7 @@
         },
         "mode": {
           "description": "Sanitization mode.",
-          "default": "off",
+          "default": "block",
           "allOf": [
             {
               "$ref": "#/definitions/SanitizeMode"
@@ -12303,7 +12390,7 @@
       "description": "Input sanitization mode for channel messages.",
       "oneOf": [
         {
-          "description": "No checking — all messages pass through (default).",
+          "description": "No checking — all messages pass through. Set `mode = \"off\"` in `[sanitize]` to opt out of prompt-injection detection.",
           "type": "string",
           "enum": [
             "off"
@@ -12317,7 +12404,7 @@
           ]
         },
         {
-          "description": "Reject the message and send an error to the user.",
+          "description": "Reject the message and send an error to the user (default).",
           "type": "string",
           "enum": [
             "block"
@@ -12603,6 +12690,11 @@
             "null"
           ]
         },
+        "allow_local": {
+          "description": "When `true`, allow the `api_url` to point at loopback / RFC-1918 addresses. Defaults to `false`; set to `true` only when signal-cli runs on localhost.",
+          "default": false,
+          "type": "boolean"
+        },
         "allowed_users": {
           "description": "Allowed phone numbers (empty = allow all).",
           "default": [],
@@ -12610,6 +12702,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "api_key": {
+          "description": "Optional API key sent as `Authorization: Bearer <api_key>` on every request. If absent, requests are sent without an Authorization header.",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "api_url": {
           "description": "URL of the signal-cli REST API (e.g., \"http://localhost:8080\").",
@@ -13173,9 +13273,14 @@
           ]
         },
         "security_token_env": {
-          "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. If the env var is absent or empty, verification is skipped with a warning.",
+          "description": "Env var name holding the outgoing webhook security token (base64-encoded). Used for HMAC-SHA256 verification of inbound webhook requests. Required by default; setting `signature_required = false` opts out (dev only).",
           "default": "",
           "type": "string"
+        },
+        "signature_required": {
+          "description": "Reject adapter startup unless a security token is configured (default `true`). Setting to `false` is strongly discouraged — webhook becomes a public endpoint.",
+          "default": true,
+          "type": "boolean"
         },
         "webhook_port": {
           "description": "Port for the incoming webhook.",

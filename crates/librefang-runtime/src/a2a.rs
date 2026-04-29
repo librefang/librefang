@@ -361,7 +361,16 @@ impl A2aTaskStore {
         }
     }
 
-    /// Load all tasks from the DB into the in-memory map.
+    /// Load the most recent `max_tasks` rows from the DB into the in-memory
+    /// map.
+    ///
+    /// Bound matters: a long-running daemon accumulates rows up to the
+    /// 7-day retention window, which can be far more than `max_tasks`.
+    /// Loading every row would (a) blow `max_tasks` on boot and force an
+    /// immediate cascade of capacity evictions and (b) hold the full
+    /// row set in memory during decode.  Older rows still live in the
+    /// DB and stay reachable through `get()`'s SQLite fallback when a
+    /// poller asks for them by ID.
     fn db_load_into_memory(&mut self) {
         let db_arc = match &self.db {
             Some(d) => d,
@@ -369,7 +378,10 @@ impl A2aTaskStore {
         };
         let conn = db_arc.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn.prepare(
-            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id FROM a2a_tasks_v2",
+            "SELECT id, status, session_id, messages_json, artifacts_json, agent_id, caller_a2a_agent_id
+             FROM a2a_tasks_v2
+             ORDER BY updated_at DESC
+             LIMIT ?1",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -378,7 +390,7 @@ impl A2aTaskStore {
             }
         };
 
-        let rows: Vec<_> = match stmt.query_map([], |row| {
+        let rows: Vec<_> = match stmt.query_map(rusqlite::params![self.max_tasks as i64], |row| {
             Ok((
                 row.get::<_, String>(0)?,         // id
                 row.get::<_, String>(1)?,         // status (JSON)
@@ -794,17 +806,31 @@ pub struct A2aClient {
 }
 
 impl A2aClient {
-    /// Create a new A2A client.
+    /// Create a new A2A client with an empty SSRF allowlist.
     pub fn new() -> Self {
+        Self::new_with_allowlist(Vec::new())
+    }
+
+    /// Create a new A2A client; every redirect hop is re-validated via `check_ssrf` (#3782).
+    pub fn new_with_allowlist(allowed_hosts: Vec<String>) -> Self {
+        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("too many redirects");
+            }
+            // Re-validate every hop; a 302 response can otherwise bypass the entry-point SSRF check.
+            let target = attempt.url().as_str().to_owned();
+            match crate::web_fetch::check_ssrf(&target, &allowed_hosts) {
+                Ok(_) => attempt.follow(),
+                Err(reason) => {
+                    attempt.error(format!("A2A SSRF blocked redirect to {target}: {reason}"))
+                }
+            }
+        });
+
         Self {
             client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
-                // Disable automatic redirect following (SSRF prevention, #3782).
-                // An initial URL may pass SSRF validation but redirect to a private
-                // IP.  With `redirect::Policy::none()` we return an error on any
-                // 3xx response so the caller must explicitly re-validate the new URL
-                // before following it.
-                .redirect(reqwest::redirect::Policy::none())
+                .redirect(redirect_policy)
                 .build()
                 .expect("HTTP client build"),
         }
@@ -1389,5 +1415,92 @@ mod tests {
             .expect("evicted task must still be retrievable from the DB");
         assert_eq!(got.id, "evicted-1");
         assert_eq!(got.session_id.as_deref(), Some("s1"));
+    }
+
+    /// `with_persistence` must not load more than `max_tasks` rows on boot,
+    /// even when the DB has accumulated many more (long-running daemon
+    /// inside the 7-day retention window).  The `LIMIT` clause picks the
+    /// most recently updated rows; older rows stay reachable via the
+    /// `get()` SQLite fallback path.
+    #[test]
+    fn test_persistence_load_respects_max_tasks_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("a2a.db");
+
+        // First daemon lifetime: insert 10 tasks under a generous cap.
+        {
+            let store = A2aTaskStore::with_persistence(20, &db_path);
+            for i in 0..10 {
+                store.insert(A2aTask {
+                    id: format!("t-{i:02}"),
+                    session_id: None,
+                    status: A2aTaskStatus::Completed.into(),
+                    messages: vec![],
+                    artifacts: vec![],
+                    agent_id: None,
+                    caller_a2a_agent_id: None,
+                });
+            }
+        }
+
+        // Second lifetime: tighter cap.  The DB still has 10 rows, but the
+        // in-memory map must hold at most 3 to honour the new cap.
+        let restarted = A2aTaskStore::with_persistence(3, &db_path);
+        let in_memory_len = {
+            let tasks = restarted.tasks.lock().unwrap();
+            tasks.len()
+        };
+        assert_eq!(
+            in_memory_len, 3,
+            "boot load must respect max_tasks=3, got {in_memory_len}"
+        );
+
+        // Older rows still reachable through the DB fallback path.
+        for i in 0..10 {
+            assert!(
+                restarted.get(&format!("t-{i:02}")).is_some(),
+                "task t-{i:02} must remain queryable after restart (DB fallback)"
+            );
+        }
+    }
+    /// Regression: 302 redirect to cloud-metadata IP must be blocked even when the originating host is allowlisted (#3782).
+    #[tokio::test]
+    async fn redirect_to_cloud_metadata_is_blocked_by_ssrf_revalidation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // TCP listener that replies 302 → cloud-metadata IP; allowlisted so the initial connect succeeds.
+        let attacker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+
+        let attacker_task = tokio::spawn(async move {
+            let (mut stream, _) = attacker.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            let response = concat!(
+                "HTTP/1.1 302 Found\r\n",
+                "Location: http://169.254.169.254/latest/meta-data/iam/security-credentials/\r\n",
+                "Content-Length: 0\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+            )
+            .as_bytes();
+            let _ = stream.write_all(response).await;
+            let _ = stream.shutdown().await;
+        });
+
+        // 127.0.0.1 allowlisted for test reachability; 169.254.0.0/16 is unconditionally blocked.
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let url = format!("http://{}", attacker_addr);
+        let result = client.discover(&url).await;
+
+        let _ = attacker_task.await;
+
+        let err = result
+            .expect_err("discover() must fail when the peer 302-redirects to a cloud metadata IP");
+        assert!(
+            err.starts_with("A2A discovery failed:") || err.contains("redirect"),
+            "expected an A2A request failure, got: {err}"
+        );
     }
 }

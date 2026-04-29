@@ -123,6 +123,10 @@ pub fn detect_skillmd(dir: &Path) -> bool {
 /// # Markdown body
 /// Instructions for the LLM...
 /// ```
+/// Maximum allowed size for a SKILL.md file (1 MiB).
+/// Files larger than this are rejected to prevent billion-laughs / zip-bomb DoS.
+pub const MAX_SKILL_MD_BYTES: usize = 1_048_576;
+
 pub fn parse_skillmd(path: &Path) -> Result<(SkillMdFrontmatter, String), SkillError> {
     if has_parent_dir_component(path) {
         return Err(SkillError::InvalidManifest(format!(
@@ -130,7 +134,26 @@ pub fn parse_skillmd(path: &Path) -> Result<(SkillMdFrontmatter, String), SkillE
             path.display()
         )));
     }
+    // Check file size before reading to guard against DoS via oversized files.
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_SKILL_MD_BYTES as u64 => {
+            return Err(SkillError::InvalidManifest(format!(
+                "SKILL.md at {} exceeds the 1 MiB size limit ({} bytes)",
+                path.display(),
+                meta.len()
+            )));
+        }
+        Err(e) => return Err(SkillError::Io(e)),
+        Ok(_) => {}
+    }
     let content = std::fs::read_to_string(path)?;
+    // Double-check in-memory size after read (accounts for encoding differences).
+    if content.len() > MAX_SKILL_MD_BYTES {
+        return Err(SkillError::InvalidManifest(format!(
+            "SKILL.md at {} exceeds the 1 MiB size limit",
+            path.display()
+        )));
+    }
     parse_skillmd_str(&content)
 }
 

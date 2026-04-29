@@ -3023,6 +3023,7 @@
           "budget"
         ],
         "summary": "GET /api/budget/agents — Per-agent cost ranking (top spenders).",
+        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.",
         "operationId": "agent_budget_ranking",
         "responses": {
           "200": {
@@ -5939,7 +5940,7 @@
         "tags": [
           "models"
         ],
-        "operationId": "list_models",
+        "operationId": "list_all_models",
         "responses": {
           "200": {
             "description": "List available models",

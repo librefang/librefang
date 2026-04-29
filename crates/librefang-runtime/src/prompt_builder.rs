@@ -2209,4 +2209,39 @@ mod tests {
         let input = "\u{4f60}\u{597d}";
         assert_eq!(cap_str(input, 10), input);
     }
+
+    #[test]
+    fn build_system_prompt_is_byte_stable_for_fixed_current_date() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Wednesday, April 29, 2026 (2026-04-29 UTC)".to_string());
+        let first = build_system_prompt(&ctx);
+        let second = build_system_prompt(&ctx);
+        assert_eq!(
+            first, second,
+            "system prompt must be byte-identical across calls with the same context"
+        );
+    }
+
+    #[test]
+    fn current_date_section_omits_minute_precision_timestamp() {
+        let mut ctx = basic_ctx();
+        ctx.current_date = Some("Wednesday, April 29, 2026 (2026-04-29 UTC)".to_string());
+        let prompt = build_system_prompt(&ctx);
+        let date_section = prompt
+            .split("## Current Date")
+            .nth(1)
+            .and_then(|rest| rest.split("\n##").next())
+            .unwrap_or("");
+        let has_hh_mm = date_section.as_bytes().windows(5).any(|w| {
+            w[2] == b':'
+                && w[0].is_ascii_digit()
+                && w[1].is_ascii_digit()
+                && w[3].is_ascii_digit()
+                && w[4].is_ascii_digit()
+        });
+        assert!(
+            !has_hh_mm,
+            "## Current Date section must not embed a HH:MM timestamp. Got: {date_section:?}"
+        );
+    }
 }

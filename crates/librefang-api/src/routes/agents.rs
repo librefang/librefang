@@ -1324,6 +1324,52 @@ fn mime_from_url(url: &str) -> Option<String> {
     }
 }
 
+/// RAII guard that aborts a spawned task when dropped. Used so client
+/// disconnect cancels the kernel call and releases per-agent locks +
+/// LLM bandwidth instead of letting the round-trip finish unobserved
+/// (#3464).
+///
+/// `disarm()` releases the abort handle without aborting — call it when
+/// the spawned task has already produced its observable output and the
+/// remaining work (metering settle, canonical session append, audit log
+/// write) MUST run to completion. The streaming path uses this once
+/// `ContentComplete` has reached the client, so the natural end of the
+/// SSE stream (which drops the unfold state and hence the guard) does
+/// not race-cancel post-stream cleanup.
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl AbortOnDrop {
+    fn new(handle: tokio::task::AbortHandle) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Release the abort permission without aborting.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+    }
+}
+
+/// Run `fut` in a spawned task; abort it if the awaiting future is dropped.
+async fn run_cancel_on_disconnect<F, T>(fut: F) -> Result<T, tokio::task::JoinError>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = tokio::spawn(fut);
+    let _guard = AbortOnDrop::new(handle.abort_handle());
+    handle.await
+}
+
 /// POST /api/agents/:id/message — Send a message to an agent.
 #[utoipa::path(
     post,
@@ -1455,24 +1501,55 @@ pub async fn send_message(
 
     let result = if is_ephemeral {
         // Ephemeral "side question" — use a temp session, no persistence
-        state
-            .kernel
-            .send_message_ephemeral(agent_id, &effective_message)
-            .await
+        let kernel = state.kernel.clone();
+        let msg = effective_message.clone();
+        match run_cancel_on_disconnect(async move {
+            kernel.send_message_ephemeral(agent_id, &msg).await
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(join_err) if join_err.is_cancelled() => {
+                tracing::info!("send_message cancelled: client disconnected");
+                return StatusCode::from_u16(499)
+                    .unwrap_or(StatusCode::BAD_REQUEST)
+                    .into_response();
+            }
+            Err(e) => Err(librefang_kernel::error::KernelError::LibreFang(
+                librefang_types::error::LibreFangError::Internal(format!("task panicked: {e}")),
+            )),
+        }
     } else {
         let sender_context = request_sender_context(&req);
-        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-        state
-            .kernel
-            .send_message_with_session_override(
-                agent_id,
-                &effective_message,
-                Some(kernel_handle),
-                sender_context.as_ref(),
-                thinking_override,
-                session_id_override,
-            )
-            .await
+        let kernel = state.kernel.clone();
+        let kernel_handle: Arc<dyn KernelHandle> = kernel.clone() as Arc<dyn KernelHandle>;
+        let msg = effective_message.clone();
+        let sc = sender_context;
+        match run_cancel_on_disconnect(async move {
+            kernel
+                .send_message_with_session_override(
+                    agent_id,
+                    &msg,
+                    Some(kernel_handle),
+                    sc.as_ref(),
+                    thinking_override,
+                    session_id_override,
+                )
+                .await
+        })
+        .await
+        {
+            Ok(r) => r,
+            Err(join_err) if join_err.is_cancelled() => {
+                tracing::info!("send_message cancelled: client disconnected");
+                return StatusCode::from_u16(499)
+                    .unwrap_or(StatusCode::BAD_REQUEST)
+                    .into_response();
+            }
+            Err(e) => Err(librefang_kernel::error::KernelError::LibreFang(
+                librefang_types::error::LibreFangError::Internal(format!("task panicked: {e}")),
+            )),
+        }
     };
 
     match result {
@@ -2192,7 +2269,7 @@ pub async fn send_message_stream(
     };
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    let (rx, _handle) = match state
+    let (rx, handle) = match state
         .kernel
         .send_message_streaming_with_routing_and_session_override(
             agent_id,
@@ -2211,63 +2288,92 @@ pub async fn send_message_stream(
         }
     };
 
+    // Tie the agent loop's lifetime to the SSE stream — when the client
+    // disconnects, axum drops the SSE response future, which drops the
+    // unfold state and this guard, aborting the spawned LLM task and
+    // releasing per-agent locks immediately (#3464).
+    //
+    // CRITICAL: the kernel task does substantial post-stream work AFTER
+    // the agent loop emits `ContentComplete` — token-reservation settle,
+    // canonical session append, JSONL mirror, metering record, audit
+    // log, lifecycle bus publish, experiment recording. We MUST disarm
+    // the guard the moment we observe `ContentComplete`, otherwise the
+    // natural end of the SSE stream (sender drained → caller_rx returns
+    // None → unfold ends → guard drops) races against the post-stream
+    // cleanup and silently aborts settle/audit/canonical writes,
+    // leaking token reservations and dropping the user's last turn from
+    // history.
+    let abort_guard = AbortOnDrop::new(handle.abort_handle());
+
     // Defense against the agent loop emitting the same text span twice in a
     // single streaming turn (observed when multi-iteration loops re-assert a
     // final sentence after a tool step). The dedup window is per-request, so
     // legitimate repetitions across turns stay unaffected.
-    let sse_stream = stream::unfold((rx, StreamDedup::new()), |(mut rx, mut dedup)| async move {
-        loop {
-            let event = rx.recv().await?;
-            let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
-                StreamEvent::TextDelta { text } => {
-                    if dedup.is_duplicate(&text) {
-                        tracing::debug!(
-                            len = text.len(),
-                            preview = %text.chars().take(40).collect::<String>(),
-                            "stream dedup: dropping duplicate TextDelta",
-                        );
-                        continue;
-                    }
-                    dedup.record_sent(&text);
-                    Event::default()
-                        .event("chunk")
-                        .json_data(serde_json::json!({"content": text, "done": false}))
-                        .unwrap_or_else(|_| Event::default().data("error"))
-                }
-                StreamEvent::ToolUseStart { name, .. } => Event::default()
-                    .event("tool_use")
-                    .json_data(serde_json::json!({"tool": name}))
-                    .unwrap_or_else(|_| Event::default().data("error")),
-                StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
-                    .event("tool_result")
-                    .json_data(serde_json::json!({"tool": name, "input": input}))
-                    .unwrap_or_else(|_| Event::default().data("error")),
-                StreamEvent::ContentComplete { usage, .. } => Event::default()
-                    .event("done")
-                    .json_data(serde_json::json!({
-                        "done": true,
-                        "usage": {
-                            "input_tokens": usage.input_tokens,
-                            "output_tokens": usage.output_tokens,
+    let sse_stream = stream::unfold(
+        (rx, StreamDedup::new(), abort_guard),
+        |(mut rx, mut dedup, mut abort_guard)| async move {
+            loop {
+                let event = rx.recv().await?;
+                let sse_event: Result<Event, std::convert::Infallible> = Ok(match event {
+                    StreamEvent::TextDelta { text } => {
+                        if dedup.is_duplicate(&text) {
+                            tracing::debug!(
+                                len = text.len(),
+                                preview = %text.chars().take(40).collect::<String>(),
+                                "stream dedup: dropping duplicate TextDelta",
+                            );
+                            continue;
                         }
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("error")),
-                StreamEvent::PhaseChange { phase, detail } => Event::default()
-                    .event("phase")
-                    .json_data(serde_json::json!({
-                        "phase": phase,
-                        "detail": detail,
-                    }))
-                    .unwrap_or_else(|_| Event::default().data("error")),
-                StreamEvent::OwnerNotice { text } => Event::default()
-                    .event("owner_notice")
-                    .json_data(serde_json::json!({ "text": text }))
-                    .unwrap_or_else(|_| Event::default().data("error")),
-                _ => Event::default().comment("skip"),
-            });
-            return Some((sse_event, (rx, dedup)));
-        }
-    });
+                        dedup.record_sent(&text);
+                        Event::default()
+                            .event("chunk")
+                            .json_data(serde_json::json!({"content": text, "done": false}))
+                            .unwrap_or_else(|_| Event::default().data("error"))
+                    }
+                    StreamEvent::ToolUseStart { name, .. } => Event::default()
+                        .event("tool_use")
+                        .json_data(serde_json::json!({"tool": name}))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::ToolUseEnd { name, input, .. } => Event::default()
+                        .event("tool_result")
+                        .json_data(serde_json::json!({"tool": name, "input": input}))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::ContentComplete { usage, .. } => {
+                        // The LLM stream is done — every byte the client
+                        // cares about has been emitted. Release the abort
+                        // permission BEFORE we yield the `done` event so
+                        // the kernel task is free to finish settle /
+                        // canonical / audit work even if the SSE stream
+                        // ends a few milliseconds later (#3464).
+                        abort_guard.disarm();
+                        Event::default()
+                            .event("done")
+                            .json_data(serde_json::json!({
+                                "done": true,
+                                "usage": {
+                                    "input_tokens": usage.input_tokens,
+                                    "output_tokens": usage.output_tokens,
+                                }
+                            }))
+                            .unwrap_or_else(|_| Event::default().data("error"))
+                    }
+                    StreamEvent::PhaseChange { phase, detail } => Event::default()
+                        .event("phase")
+                        .json_data(serde_json::json!({
+                            "phase": phase,
+                            "detail": detail,
+                        }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    StreamEvent::OwnerNotice { text } => Event::default()
+                        .event("owner_notice")
+                        .json_data(serde_json::json!({ "text": text }))
+                        .unwrap_or_else(|_| Event::default().data("error")),
+                    _ => Event::default().comment("skip"),
+                });
+                return Some((sse_event, (rx, dedup, abort_guard)));
+            }
+        },
+    );
 
     Sse::new(sse_stream)
         .keep_alive(
@@ -3690,12 +3796,17 @@ pub async fn update_agent(
 
     drop(t);
 
+    // `update_manifest` preserves workspace/name/tags, re-grants capabilities,
+    // refreshes scheduler quotas, persists to SQLite, and writes agent.toml.
+    // Per-agent concurrency caps and session_mode caches still require
+    // kill+respawn — flagged in the response note.
     match state.kernel.update_manifest(agent_id, manifest) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "agent_id": id,
+                "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
             })),
         ),
         Err(e) => (
@@ -5570,7 +5681,22 @@ pub async fn inject_message(
             .into_response();
     }
 
-    match state.kernel.inject_message(agent_id, &req.message).await {
+    // None falls back to a broadcast across every live session for the agent.
+    let session_id = match req.session_id.as_deref() {
+        Some(s) if !s.is_empty() => match s.parse::<uuid::Uuid>() {
+            Ok(u) => Some(librefang_types::agent::SessionId(u)),
+            Err(_) => {
+                return ApiErrorResponse::bad_request("invalid session_id").into_response();
+            }
+        },
+        _ => None,
+    };
+
+    match state
+        .kernel
+        .inject_message_for_session(agent_id, session_id, &req.message)
+        .await
+    {
         Ok(injected) => (
             StatusCode::OK,
             Json(serde_json::json!({"injected": injected})),
@@ -6149,6 +6275,84 @@ mod tests {
         assert!(req.temperature.is_none());
         assert_eq!(req.max_tokens, Some(4096));
     }
+
+    /// #3464 — when the awaiting future is dropped (simulates client
+    /// disconnect), the spawned task is aborted within ~10ms so the kernel
+    /// stops doing work for a vanished caller.
+    #[tokio::test]
+    async fn run_cancel_on_disconnect_aborts_inner_task_when_caller_drops() {
+        let observed_progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observed_completion = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let progress = observed_progress.clone();
+        let completion = observed_completion.clone();
+        let inner = async move {
+            for _ in 0..200 {
+                progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            completion.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+
+        // Spawn the helper, drop the join future after a short delay to
+        // simulate the axum response future being dropped.
+        let helper = run_cancel_on_disconnect(inner);
+        let join = tokio::spawn(helper);
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        join.abort();
+        let _ = join.await; // Reaping the JoinHandle drops the helper future.
+
+        // Give the abort signal time to propagate.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let snapshot = observed_progress.load(std::sync::atomic::Ordering::Relaxed);
+
+        // Wait further; if cancellation works the inner task stopped.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let later = observed_progress.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            snapshot, later,
+            "inner task must stop counting after caller drops (got {snapshot} → {later})"
+        );
+        assert!(
+            !observed_completion.load(std::sync::atomic::Ordering::Relaxed),
+            "inner task must not run to completion after cancellation"
+        );
+    }
+
+    /// #3464 — once `disarm()` has been called, dropping the guard MUST
+    /// NOT abort the spawned task. This is the streaming path's
+    /// invariant: after `ContentComplete` reaches the client, the
+    /// kernel still runs settle-reservation / canonical-append / audit
+    /// writes; if the SSE stream ends a few ms later and the guard
+    /// drops, those side-effects must complete instead of being
+    /// silently cancelled.
+    #[tokio::test]
+    async fn abort_on_drop_after_disarm_does_not_abort_task() {
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_inner = completed.clone();
+
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            completed_inner.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
+        let mut guard = AbortOnDrop::new(handle.abort_handle());
+        // Simulate observing `ContentComplete`: release abort permission.
+        guard.disarm();
+        // Drop the guard immediately, simulating SSE stream end racing
+        // ahead of the kernel post-stream cleanup.
+        drop(guard);
+
+        // The task must still be allowed to finish.
+        let _ = handle.await;
+        assert!(
+            completed.load(std::sync::atomic::Ordering::Relaxed),
+            "disarmed guard must NOT abort the task on drop — \
+             post-stream settle/audit work would be silently cancelled"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6401,6 +6605,8 @@ mod monitoring_tests {
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             config_write_lock: tokio::sync::Mutex::new(()),
             pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
+            gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
         });
         (state, tmp)
     }

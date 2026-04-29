@@ -171,6 +171,14 @@ pub struct ChatGptDriver {
     token_cache: ChatGptTokenCache,
     /// HTTP client.
     client: reqwest::Client,
+    /// Single-flight mutex for token refresh (issue #3625).
+    ///
+    /// OAuth 2.1 rotates the refresh token on every use: only the first
+    /// concurrent refresh wins; the rest receive `invalid_grant`. By
+    /// serialising refresh attempts here, concurrent 401 responders wait
+    /// for the in-flight refresh and then re-check the cache — avoiding the
+    /// thundering-herd that burns the refresh token.
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl ChatGptDriver {
@@ -195,6 +203,7 @@ impl ChatGptDriver {
             },
             token_cache: ChatGptTokenCache::new(),
             client,
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -228,7 +237,22 @@ impl ChatGptDriver {
     }
 
     /// Refresh the access token after the API explicitly rejects the current one.
+    ///
+    /// Uses a `tokio::sync::Mutex` to ensure only one refresh runs at a time
+    /// (issue #3625 — single-flight). After acquiring the lock we re-check the
+    /// cache: a sibling waiter may have already completed the refresh while we
+    /// were queued, so we can skip the network call and return the fresh token.
     async fn refresh_token(&self) -> Result<CachedSessionToken, LlmError> {
+        // Acquire the single-flight lock first.
+        let _lock = self.refresh_lock.lock().await;
+
+        // Re-check cache after acquiring the lock — a previous waiter may
+        // have already refreshed successfully while we were waiting.
+        if let Some(cached) = self.token_cache.get() {
+            debug!("ChatGPT token already refreshed by concurrent caller; reusing cached token");
+            return Ok(cached);
+        }
+
         let refresh_tok = std::env::var("CHATGPT_REFRESH_TOKEN").map_err(|_| {
             LlmError::AuthenticationFailed(
                 "ChatGPT session token was rejected and no refresh token is available. Run `librefang auth chatgpt` to re-authenticate."
@@ -243,7 +267,7 @@ impl ChatGptDriver {
             ));
         }
 
-        debug!("ChatGPT session token rejected; attempting OAuth refresh");
+        debug!("ChatGPT session token rejected; attempting OAuth refresh (single-flight)");
         let auth = tokio::time::timeout(
             Duration::from_secs(TOKEN_REFRESH_TIMEOUT_SECS),
             librefang_runtime_oauth::chatgpt_oauth::refresh_access_token(&refresh_tok),

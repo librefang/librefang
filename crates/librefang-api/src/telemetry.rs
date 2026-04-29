@@ -41,9 +41,12 @@ pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Regi
         // If the caller registers this second layer as the active subscriber
         // layer, OTel spans would silently never reach it.
         //
-        // Tracing isn't up yet (we're still building the subscriber), so
-        // `tracing::warn!` would be lost. Use stderr directly so a confused
-        // future reader has a lead to pull on.
+        // NOTE: `tracing::warn!` is intentionally NOT used here.  This
+        // function is called during subscriber construction — the global
+        // tracing dispatcher is not yet installed, so any `tracing!` macro
+        // invocation would be a no-op and the warning would be silently
+        // dropped.  `eprintln!` is the only channel guaranteed to reach
+        // the operator at this point in the startup sequence.
         eprintln!(
             "warning: install_otel_reload_layer called more than once; the \
              second layer is NOT wired to the OTel reload handle and will \
@@ -59,13 +62,29 @@ pub fn install_otel_reload_layer() -> reload::Layer<Option<OtelBoxedLayer>, Regi
 /// `OnceLock` and subsequent calls return a clone of the existing handle.
 /// This is important for test environments where multiple tests may build
 /// their own app state in parallel within the same process.
+///
+/// If another metrics recorder was already registered (e.g. by a test harness
+/// or a second crate initialising first), the error is demoted to a warning
+/// and a standalone handle is returned. The `/api/metrics` endpoint calls
+/// `handle.render()` directly so it continues to work; global `metrics::*`
+/// macros will route to whichever recorder was registered first.
 pub fn init_prometheus() -> PrometheusHandle {
     PROMETHEUS_HANDLE
         .get_or_init(|| {
             let builder = PrometheusBuilder::new();
-            builder
-                .install_recorder()
-                .expect("failed to install prometheus recorder")
+            match builder.install_recorder() {
+                Ok(handle) => handle,
+                Err(e) => {
+                    tracing::warn!(
+                        "metrics recorder already registered; prometheus endpoint will \
+                         use a standalone handle (double-registration is harmless): {e}"
+                    );
+                    // Build a fresh recorder without registering a global one.
+                    // `PrometheusHandle::render()` works on any recorder, so
+                    // the `/api/metrics` scrape endpoint remains functional.
+                    PrometheusBuilder::new().build_recorder().handle()
+                }
+            }
         })
         .clone()
 }

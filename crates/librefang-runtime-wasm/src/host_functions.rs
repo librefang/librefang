@@ -63,6 +63,29 @@ fn check_capability(
             return Ok(());
         }
     }
+    // macOS aliases /tmp → /private/tmp, /var → /private/var, /etc → /private/etc
+    // at the firmlink layer, so safe_resolve_path's canonicalize() always
+    // pushes guest-supplied paths under /private/. Strip the prefix so
+    // operator grants written against the user-facing path (/tmp/*, /var/log/*, …)
+    // match the canonicalised value.
+    if cfg!(target_os = "macos") {
+        let aliased = match required {
+            Capability::FileRead(p) => p
+                .strip_prefix("/private/")
+                .map(|rest| Capability::FileRead(format!("/{rest}"))),
+            Capability::FileWrite(p) => p
+                .strip_prefix("/private/")
+                .map(|rest| Capability::FileWrite(format!("/{rest}"))),
+            _ => None,
+        };
+        if let Some(aliased) = aliased {
+            for granted in capabilities {
+                if capability_matches(granted, &aliased) {
+                    return Ok(());
+                }
+            }
+        }
+    }
     Err(json!({"error": format!("Capability denied: {required:?}")}))
 }
 
@@ -121,6 +144,7 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 // ---------------------------------------------------------------------------
 
 /// SSRF-validated DNS resolution result for the WASM host function path.
+#[derive(Debug)]
 struct SsrfResolved {
     hostname: String,
     resolved: Vec<std::net::SocketAddr>,
@@ -133,6 +157,16 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
     // Only allow http:// and https:// schemes (block file://, gopher://, ftp://)
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
+    }
+
+    // Reject userinfo (@) in authority — prevents SSRF bypass via host confusion (#3527).
+    if let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) {
+        let authority_end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        if after_scheme[..authority_end].contains('@') {
+            return Err(json!({"error": "SSRF blocked: URLs with userinfo are not permitted"}));
+        }
     }
 
     let host = extract_host_from_url(url);
@@ -276,10 +310,70 @@ fn host_fs_write(state: &GuestState, params: &serde_json::Value) -> serde_json::
     ) {
         return e;
     }
-    match std::fs::write(&write_path, content) {
-        Ok(()) => json!({"ok": true}),
-        Err(e) => json!({"error": format!("fs_write failed: {e}")}),
+    // SECURITY: refuse to follow a leaf symlink.
+    //
+    // safe_resolve_parent canonicalises the *parent* directory and appends
+    // file_name verbatim, so the capability check sees a path inside the
+    // grant — but if the leaf itself is a symlink that points out of the
+    // grant (e.g. attacker pre-stages /grant/dir/sym -> /etc/passwd) then
+    // std::fs::write follows it and clobbers the real target.  The audit
+    // of #3925 flagged this as a HIGH symlink bypass.
+    //
+    // Cross-platform approach: refuse the write if the leaf is a symlink
+    // (symlink_metadata does not follow).  On Unix we additionally pass
+    // O_NOFOLLOW so the kernel rejects the open atomically — closes the
+    // narrow TOCTOU window between the lstat and the open.  Linux's
+    // O_NOFOLLOW value is 0o400000; we hard-code rather than pull in
+    // libc since this crate doesn't already depend on it.
+    if let Ok(meta) = std::fs::symlink_metadata(&write_path) {
+        if meta.file_type().is_symlink() {
+            return json!({
+                "error": "fs_write denied: refusing to follow a symlink leaf"
+            });
+        }
     }
+    use std::io::Write;
+    let mut open_opts = std::fs::OpenOptions::new();
+    open_opts.write(true).truncate(true).create(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Linux O_NOFOLLOW. The BSD family uses a different value
+        // (0x0100) and gets its own block below.
+        open_opts.custom_flags(0o0_400_000);
+    }
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // BSD-family O_NOFOLLOW = 0x0100. Closes the same TOCTOU
+        // window the Linux block above closes (between lstat and open),
+        // so an attacker who can write to the parent dir can't race a
+        // regular file → symlink swap.
+        open_opts.custom_flags(0x0100);
+    }
+    let mut f = match open_opts.open(&write_path) {
+        Ok(f) => f,
+        Err(e) => {
+            // ELOOP (40) is the kernel rejecting O_NOFOLLOW on Linux;
+            // surface it as a deny rather than a generic open failure.
+            #[cfg(target_os = "linux")]
+            if e.raw_os_error() == Some(40) {
+                return json!({
+                    "error": "fs_write denied: refusing to follow a symlink leaf"
+                });
+            }
+            return json!({"error": format!("fs_write failed: {e}")});
+        }
+    };
+    if let Err(e) = f.write_all(content.as_bytes()) {
+        return json!({"error": format!("fs_write failed: {e}")});
+    }
+    json!({"ok": true})
 }
 
 fn host_fs_list(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -410,7 +504,7 @@ const WASM_SHELL_SAFE_ENV_VARS: &[&str] = &[
 /// etc. — regardless of how tightly its Wasm fuel and epoch budget were
 /// capped. This closes that exfiltration hole while leaving the capability
 /// gate above untouched.
-fn sanitize_shell_env(cmd: &mut std::process::Command) {
+fn sanitize_shell_env(cmd: &mut tokio::process::Command) {
     cmd.env_clear();
     for var in WASM_SHELL_SAFE_ENV_VARS {
         if let Ok(val) = std::env::var(var) {
@@ -433,6 +527,11 @@ fn sanitize_shell_env(cmd: &mut std::process::Command) {
     }
 }
 
+/// Wall-clock timeout per `shell_exec` invocation (#3529).
+const SHELL_EXEC_TIMEOUT_SECS: u64 = 30;
+/// Per-stream stdout/stderr byte cap; child is killed on overflow (#3529).
+const SHELL_EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
 fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let command = match params.get("command").and_then(|c| c.as_str()) {
         Some(c) => c,
@@ -445,41 +544,206 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
         return e;
     }
 
-    let args: Vec<&str> = params
+    let args: Vec<String> = params
         .get("args")
         .and_then(|a| a.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
+    let command = command.to_string();
+    let handle = state.tokio_handle.clone();
+
+    // block_in_place to bridge sync WASM host call → async tokio::process (same pattern as host_net_fetch).
+    tokio::task::block_in_place(|| {
+        handle.block_on(async move { run_shell_exec(&command, &args).await })
+    })
+}
+
+async fn run_shell_exec(command: &str, args: &[String]) -> serde_json::Value {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
     // Command::new does NOT use a shell — safe from shell injection.
-    // Each argument is passed directly to the process.
-    let mut cmd = std::process::Command::new(command);
-    cmd.args(&args);
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(args);
     sanitize_shell_env(&mut cmd);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        // CREATE_NO_WINDOW; tokio Command exposes this directly on Windows.
+        cmd.creation_flags(0x0800_0000);
     }
-    match cmd.output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return json!({"error": format!("shell_exec failed to spawn: {e}")}),
+    };
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    let timeout = std::time::Duration::from_secs(SHELL_EXEC_TIMEOUT_SECS);
+    let exec = async {
+        // select! loop drains both pipes concurrently. Breaking as soon as
+        // either hits the cap lets us kill the child immediately, which causes
+        // the other pipe to see EOF instead of hanging indefinitely (#3529).
+        let cap = SHELL_EXEC_MAX_OUTPUT_BYTES;
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let mut truncated = false;
+        let mut out_done = false;
+        let mut err_done = false;
+        while !out_done || !err_done {
+            let mut out_chunk = [0u8; 8192];
+            let mut err_chunk = [0u8; 8192];
+            tokio::select! {
+                n = stdout_pipe.read(&mut out_chunk), if !out_done => match n? {
+                    0 => out_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stdout_buf.len()).min(n);
+                        stdout_buf.extend_from_slice(&out_chunk[..take]);
+                        if stdout_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+                n = stderr_pipe.read(&mut err_chunk), if !err_done => match n? {
+                    0 => err_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stderr_buf.len()).min(n);
+                        stderr_buf.extend_from_slice(&err_chunk[..take]);
+                        if stderr_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+            }
+        }
+        if truncated {
+            let _ = child.start_kill();
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf, truncated))
+    };
+
+    match tokio::time::timeout(timeout, exec).await {
+        Ok(Ok((status, stdout_bytes, stderr_bytes, truncated))) => {
+            if truncated {
+                return json!({"error": format!(
+                    "shell_exec output exceeded {SHELL_EXEC_MAX_OUTPUT_BYTES} bytes; child killed"
+                )});
+            }
+            let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             json!({
                 "ok": {
-                    "exit_code": output.status.code(),
+                    "exit_code": status.code(),
                     "stdout": stdout,
                     "stderr": stderr,
                 }
             })
         }
-        Err(e) => json!({"error": format!("shell_exec failed: {e}")}),
+        Ok(Err(e)) => json!({"error": format!("shell_exec failed: {e}")}),
+        Err(_) => {
+            // child + pipes drop here → kill_on_drop reaps the subprocess.
+            json!({"error": format!(
+                "shell_exec timed out after {SHELL_EXEC_TIMEOUT_SECS}s; child killed"
+            )})
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Environment (capability-checked)
 // ---------------------------------------------------------------------------
+
+/// Hard-coded blocklist of env var name substrings that WASM plugins can
+/// NEVER read, regardless of their declared `EnvRead` capability.
+///
+/// The check is case-insensitive. Any variable whose upper-cased name
+/// contains one of these substrings is silently suppressed — the caller
+/// receives `null` rather than the real value, and no error is returned so
+/// that well-behaved plugins can't probe for the existence of secrets.
+const BLOCKED_ENV_SUBSTRINGS: &[&str] = &[
+    "KEY",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "CREDENTIAL",
+    "PRIVATE",
+];
+
+/// Specific full names (upper-cased) that are always blocked regardless of
+/// whether they contain a blocked substring. This catches names that are
+/// conventional secrets but do not contain any of the substrings above.
+const BLOCKED_ENV_EXACT: &[&str] = &[
+    "LIBREFANG_VAULT_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "GITHUB_TOKEN",
+    "NPM_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
+/// Returns `true` if the env var name matches the blocklist and must not be
+/// returned to a WASM guest.
+fn is_blocked_env_var(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    // Exact-name check (belt-and-suspenders — all of these also match the
+    // boundary check below, but an explicit list is easier to audit).
+    if BLOCKED_ENV_EXACT.contains(&upper.as_str()) {
+        return true;
+    }
+    // Word-boundary substring check.  Plain `contains` flagged
+    // `MONKEYHOUSE`, `KEYBOARD_LAYOUT`, `TOKENIZER_OPTS`,
+    // `PRIVATELABEL_NAME` and similar non-secret config vars, leaving
+    // `EnvRead("*")` plugins unable to read benign settings.  Require a
+    // non-alphanumeric boundary on at least one side of the match
+    // (start/end of string counts), so e.g. `AWS_API_KEY` and
+    // `MY_PASSWORD_HASH` still match while `MONKEYHOUSE` does not.
+    BLOCKED_ENV_SUBSTRINGS
+        .iter()
+        .any(|sub| has_word_boundary_substring(&upper, sub))
+}
+
+/// `true` iff `needle` appears in `haystack` as its own word —
+/// i.e. with a non-alphanumeric boundary (string edge or any char that
+/// is not an ASCII letter / digit) on **both** sides.  Env-var
+/// convention separates words with `_`; `-` / `.` are also covered for
+/// odd names like `MY-API-KEY` or `KEY.PRIVATE`.
+///
+/// Both-sides matters: a single-side rule would still flag
+/// `KEYBOARD_LAYOUT` (left edge = start-of-string is a boundary, but
+/// right edge = `'B'` is alphanumeric, so it isn't actually a `KEY`
+/// word).  Real secret names always have a boundary on the side
+/// closest to the credential token: `OPENAI_API_KEY`, `MY_PASSWORD`,
+/// `FOO_TOKEN`, `KEY_FOO` all satisfy both-sides.
+fn has_word_boundary_substring(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let n = needle.len();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(needle) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let end = idx + n;
+        let after_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        // Advance past this occurrence to find any later one with a
+        // boundary.  Stop if we'd loop on a zero-length needle.
+        start = idx + n.max(1);
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
 
 fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let name = match params.get("name").and_then(|n| n.as_str()) {
@@ -488,6 +752,12 @@ fn host_env_read(state: &GuestState, params: &serde_json::Value) -> serde_json::
     };
     if let Err(e) = check_capability(&state.capabilities, &Capability::EnvRead(name.to_string())) {
         return e;
+    }
+    // SECURITY: Never expose secrets to WASM guests even when the capability
+    // grants wildcard access.  Silently return null so the caller cannot
+    // distinguish "blocked" from "variable not set".
+    if is_blocked_env_var(name) {
+        return json!({"ok": null});
     }
     match std::env::var(name) {
         Ok(val) => json!({"ok": val}),
@@ -514,7 +784,11 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_recall(key, None) {
+    // SECURITY: Prefix the key with the agent_id to give each agent its own
+    // isolated KV namespace (Bug #3837). Without this prefix all agents share
+    // a flat key space, so agent A can read or overwrite agent B's keys.
+    let namespaced_key = format!("{}:{key}", state.agent_id);
+    match kernel.memory_recall(&namespaced_key, None) {
         Ok(Some(val)) => json!({"ok": val}),
         Ok(None) => json!({"ok": null}),
         Err(e) => json!({"error": e}),
@@ -540,7 +814,11 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
     };
-    match kernel.memory_store(key, value, None) {
+    // SECURITY: Prefix the key with the agent_id so each agent's KV entries
+    // live in a separate namespace and cannot be accessed by other agents
+    // (Bug #3837).
+    let namespaced_key = format!("{}:{key}", state.agent_id);
+    match kernel.memory_store(&namespaced_key, value, None) {
         Ok(()) => json!({"ok": true}),
         Err(e) => json!({"error": e}),
     }
@@ -612,12 +890,56 @@ mod tests {
     use super::*;
 
     fn test_state(capabilities: Vec<Capability>) -> GuestState {
-        GuestState::for_testing(
+        GuestState::for_test(
             capabilities,
             None,
             "test-agent".to_string(),
             tokio::runtime::Handle::current(),
         )
+    }
+
+    /// Word-boundary blocklist: real secret-shaped names match, benign
+    /// names that merely embed the substring don't.
+    #[test]
+    fn test_is_blocked_env_var_word_boundary() {
+        // Real secrets — must block.
+        for name in &[
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "MY_PASSWORD",
+            "DB_PRIVATE_KEY",
+            "API_CREDENTIAL_FILE",
+            // Standalone tokens at string start/end.
+            "KEY",
+            "SECRET_FOO",
+            "FOO_TOKEN",
+        ] {
+            assert!(
+                is_blocked_env_var(name),
+                "{name} must be blocked (real secret)"
+            );
+        }
+
+        // Benign config — must NOT block.  These were all false positives
+        // under the old plain `contains` check.
+        for name in &[
+            "MONKEYHOUSE",
+            "KEYBOARD_LAYOUT",
+            "TOKENIZER_OPTS",
+            "PRIVATELABEL_NAME",
+            "PASSWORDLIST_FILE",
+            "MASTERKEYBOARD",
+        ] {
+            assert!(
+                !is_blocked_env_var(name),
+                "{name} must NOT be blocked (benign config)"
+            );
+        }
+
+        // Boundary punctuation other than `_` is also a boundary.
+        assert!(is_blocked_env_var("MY-API-KEY"));
+        assert!(is_blocked_env_var("KEY.PRIVATE"));
     }
 
     #[tokio::test]
@@ -681,7 +1003,7 @@ mod tests {
     /// fake secret into the parent environment, drive the host call, and
     /// verify that the child's `env` output does not contain it.
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shell_exec_strips_parent_env_secrets() {
         // Use a unique key per run so concurrent tests don't collide.
         let key = format!("LF_WASM_FAKE_SECRET_{}", std::process::id());
@@ -724,6 +1046,34 @@ mod tests {
         );
     }
 
+    /// Regression for #3529: a runaway child must be killed once it
+    /// exceeds the per-stream output cap. `yes` floods stdout indefinitely;
+    /// without the cap + kill_on_drop the host would happily fill memory.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shell_exec_kills_child_on_output_cap() {
+        let state = test_state(vec![Capability::ShellExec("/usr/bin/yes".to_string())]);
+        let started = std::time::Instant::now();
+        let result = host_shell_exec(
+            &state,
+            &json!({
+                "command": "/usr/bin/yes",
+                "args": [],
+            }),
+        );
+        let elapsed = started.elapsed();
+        let err = result["error"].as_str().expect("expected output-cap error");
+        assert!(
+            err.contains("output exceeded"),
+            "expected output-cap kill, got: {err}"
+        );
+        // Must have aborted well before the 30s timeout fires.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "child not killed promptly; elapsed = {elapsed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_env_read_denied() {
         let state = test_state(vec![]);
@@ -739,12 +1089,279 @@ mod tests {
         assert!(result.get("ok").is_some(), "Expected ok: {:?}", result);
     }
 
+    /// Regression: #3362 — a WASM guest with `EnvRead("*")` must not be able
+    /// to read secrets even with a wildcard capability.  The blocklist must
+    /// suppress any variable whose name contains KEY, SECRET, TOKEN, PASSWORD,
+    /// CREDENTIAL, or PRIVATE (case-insensitive).
+    #[tokio::test]
+    async fn test_env_read_blocklist_suppresses_secrets() {
+        let state = test_state(vec![Capability::EnvRead("*".to_string())]);
+
+        let blocked_names = [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "LIBREFANG_VAULT_KEY",
+            "GITHUB_TOKEN",
+            "NPM_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "MY_CUSTOM_SECRET",
+            "DATABASE_PASSWORD",
+            "DEPLOY_CREDENTIAL",
+            "RSA_PRIVATE_KEY",
+            // Lower-case variants must also be blocked.
+            "my_api_key",
+            "db_password",
+        ];
+
+        for var_name in &blocked_names {
+            // Stamp a known value so we'd catch any leak.
+            std::env::set_var(var_name, "should-not-leak");
+            let result = host_env_read(&state, &json!({"name": var_name}));
+            // Must NOT return an error (no capability denial) — but value must be null.
+            assert!(
+                result.get("error").is_none(),
+                "Blocklist should not return capability error for {var_name}: {result:?}"
+            );
+            let val = result.get("ok");
+            assert!(
+                val.is_some() && val.unwrap().is_null(),
+                "Blocked var {var_name} must return null, got: {result:?}"
+            );
+            std::env::remove_var(var_name);
+        }
+    }
+
+    #[test]
+    fn test_is_blocked_env_var() {
+        // Exact names
+        assert!(is_blocked_env_var("ANTHROPIC_API_KEY"));
+        assert!(is_blocked_env_var("LIBREFANG_VAULT_KEY"));
+        assert!(is_blocked_env_var("AWS_SESSION_TOKEN"));
+        // Substring matches
+        assert!(is_blocked_env_var("MY_SECRET_THING"));
+        assert!(is_blocked_env_var("DB_PASSWORD"));
+        assert!(is_blocked_env_var("DEPLOY_TOKEN"));
+        assert!(is_blocked_env_var("PRIVATE_KEY_DATA"));
+        // Case-insensitive
+        assert!(is_blocked_env_var("my_api_key"));
+        assert!(is_blocked_env_var("db_password"));
+        // Safe vars must NOT be blocked
+        assert!(!is_blocked_env_var("PATH"));
+        assert!(!is_blocked_env_var("HOME"));
+        assert!(!is_blocked_env_var("LANG"));
+        assert!(!is_blocked_env_var("TERM"));
+        assert!(!is_blocked_env_var("USER"));
+    }
+
     #[tokio::test]
     async fn test_kv_get_no_kernel() {
         let state = test_state(vec![Capability::MemoryRead("*".to_string())]);
         let result = host_kv_get(&state, &json!({"key": "test"}));
         let err = result["error"].as_str().unwrap();
         assert!(err.contains("kernel"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Mock KernelHandle for KV namespace isolation tests (Bug #3837)
+    // ---------------------------------------------------------------------------
+
+    struct RecordingKernel {
+        /// Records every (namespaced_key, value) passed to memory_store.
+        stored: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        /// Records every namespaced_key passed to memory_recall.
+        recalled: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingKernel {
+        fn new() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                stored: std::sync::Mutex::new(Vec::new()),
+                recalled: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl librefang_kernel_handle::KernelHandle for RecordingKernel {
+        async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
+            Err("not implemented".to_string())
+        }
+        async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        fn list_agents(&self) -> Vec<librefang_kernel_handle::AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _: &str) -> Result<(), String> {
+            Err("not implemented".to_string())
+        }
+        fn memory_store(
+            &self,
+            key: &str,
+            value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            self.stored.lock().unwrap().push((key.to_string(), value));
+            Ok(())
+        }
+        fn memory_recall(
+            &self,
+            key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            self.recalled.lock().unwrap().push(key.to_string());
+            Ok(None)
+        }
+        fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+        fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
+            vec![]
+        }
+        async fn task_post(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+            Err("not implemented".to_string())
+        }
+        async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Ok(vec![])
+        }
+        async fn task_delete(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_retry(&self, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
+            Ok(())
+        }
+        async fn knowledge_add_entity(
+            &self,
+            _: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not implemented".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Ok(vec![])
+        }
+    }
+
+    fn state_with_kernel(
+        agent_id: &str,
+        capabilities: Vec<Capability>,
+        kernel: std::sync::Arc<RecordingKernel>,
+    ) -> GuestState {
+        GuestState::for_test(
+            capabilities,
+            Some(kernel),
+            agent_id.to_string(),
+            tokio::runtime::Handle::current(),
+        )
+    }
+
+    /// Regression test for Bug #3837: kv_get must namespace the key with
+    /// agent_id so that two agents cannot read each other's KV entries.
+    #[tokio::test]
+    async fn test_kv_get_key_is_namespaced_with_agent_id() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-alice",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        host_kv_get(&state, &json!({"key": "secret"}));
+
+        let recalled = kernel.recalled.lock().unwrap();
+        assert_eq!(recalled.len(), 1, "Expected exactly one memory_recall call");
+        assert_eq!(
+            recalled[0], "agent-alice:secret",
+            "kv_get must prefix the key with agent_id to isolate namespaces"
+        );
+    }
+
+    /// Regression test for Bug #3837: kv_set must namespace the key with
+    /// agent_id so that two agents cannot overwrite each other's KV entries.
+    #[tokio::test]
+    async fn test_kv_set_key_is_namespaced_with_agent_id() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        host_kv_set(&state, &json!({"key": "counter", "value": 42}));
+
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(stored.len(), 1, "Expected exactly one memory_store call");
+        assert_eq!(
+            stored[0].0, "agent-bob:counter",
+            "kv_set must prefix the key with agent_id to isolate namespaces"
+        );
+    }
+
+    /// Two agents using the same guest key must produce different namespaced
+    /// keys — that is the whole point of the namespace isolation.
+    #[tokio::test]
+    async fn test_kv_two_agents_same_guest_key_different_namespaced_keys() {
+        let kernel_a = RecordingKernel::new();
+        let state_a = state_with_kernel(
+            "agent-alice",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel_a),
+        );
+        host_kv_get(&state_a, &json!({"key": "shared_name"}));
+
+        let kernel_b = RecordingKernel::new();
+        let state_b = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryRead("*".to_string())],
+            std::sync::Arc::clone(&kernel_b),
+        );
+        host_kv_get(&state_b, &json!({"key": "shared_name"}));
+
+        let recalled_a = kernel_a.recalled.lock().unwrap();
+        let recalled_b = kernel_b.recalled.lock().unwrap();
+
+        assert_ne!(
+            recalled_a[0], recalled_b[0],
+            "Different agents must produce different namespaced keys for the same guest key"
+        );
+        assert!(
+            recalled_a[0].starts_with("agent-alice:"),
+            "Alice's key must be prefixed with her agent_id"
+        );
+        assert!(
+            recalled_b[0].starts_with("agent-bob:"),
+            "Bob's key must be prefixed with his agent_id"
+        );
     }
 
     #[tokio::test]
@@ -786,32 +1403,6 @@ mod tests {
         assert!(safe_resolve_path("foo/../bar").is_err());
     }
 
-    /// Regression for #3814: capability check must run AFTER canonicalization.
-    ///
-    /// A capability granting access to `/tmp/allowed` must NOT permit a guest
-    /// that passes `../allowed` when the working directory is `/tmp/sub` —
-    /// the raw string does not literally match `/tmp/allowed`, but
-    /// canonicalization would resolve it to the same inode. Conversely, a
-    /// traversal attempt aimed at a path outside any granted capability must
-    /// be denied even if the raw string superficially matches a prefix.
-    ///
-    /// We test the deny path here: a FileRead("*") wildcard is granted but
-    /// the path `../etc/passwd` is rejected during canonicalization (contains
-    /// `..`), so the capability check is never even reached. This validates
-    /// that canonicalization is the first gate.
-    #[tokio::test]
-    async fn test_fs_read_traversal_rejected_before_capability_check() {
-        // Even with a wildcard capability, ".." in the path must be caught by
-        // safe_resolve_path before we ever consult the capability list.
-        let state = test_state(vec![Capability::FileRead("*".to_string())]);
-        let result = host_fs_read(&state, &json!({"path": "../etc/passwd"}));
-        let err = result["error"].as_str().unwrap_or("");
-        assert!(
-            err.contains("traversal") || err.contains("resolve") || err.contains("Cannot"),
-            "Expected path-traversal or resolution error, got: {err}"
-        );
-    }
-
     #[test]
     fn test_safe_resolve_parent_traversal() {
         assert!(safe_resolve_parent("../malicious.txt").is_err());
@@ -837,6 +1428,32 @@ mod tests {
         assert!(is_ssrf_target("file:///etc/passwd").is_err());
         assert!(is_ssrf_target("gopher://evil.com").is_err());
         assert!(is_ssrf_target("ftp://example.com").is_err());
+    }
+
+    /// Regression for #3527: reject userinfo (@) in authority to prevent SSRF bypass.
+    #[test]
+    fn test_ssrf_rejects_urls_with_userinfo() {
+        // Bare userinfo, attacker-controlled real host
+        let r = is_ssrf_target("http://x@169.254.169.254/");
+        assert!(r.is_err(), "must reject userinfo URLs");
+        let err = r.unwrap_err()["error"].as_str().unwrap_or("").to_string();
+        assert!(err.contains("userinfo"), "wrong error: {err}");
+
+        // user:pass form
+        assert!(is_ssrf_target("http://user:pass@127.0.0.1/").is_err());
+
+        // The exact bypass shape: parser-confusing host:port@evil
+        assert!(is_ssrf_target("http://allowed.com:80@169.254.169.254/").is_err());
+        assert!(is_ssrf_target("https://allowed.com@127.0.0.1:9000/x").is_err());
+
+        // Userinfo with empty password is still userinfo
+        assert!(is_ssrf_target("http://user:@8.8.8.8/").is_err());
+
+        // `@` later in the path is fine
+        assert!(is_ssrf_target("https://api.openai.com/v1/users/me@example").is_ok());
+
+        // `@` in query string is fine
+        assert!(is_ssrf_target("https://api.openai.com/?email=me@example.com").is_ok());
     }
 
     #[test]

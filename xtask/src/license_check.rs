@@ -3,6 +3,30 @@ use clap::Parser;
 use std::path::Path;
 use std::process::Command;
 
+/// Licenses denied by default.  This list deliberately covers copyleft and
+/// source-available licenses that are incompatible with commercial distribution
+/// of a proprietary or permissively-licensed product.
+///
+/// The list is intentionally broad:
+/// - GPL / LGPL (all versions and flavors)
+/// - AGPL (all versions and flavors)
+/// - SSPL (MongoDB server-side public license)
+/// - BUSL (Business Source License — time-delayed open source)
+///
+/// Crates with `license = null` or `"UNKNOWN"` are flagged separately as
+/// unverified rather than hard-blocked, because they often just have
+/// non-SPDX license strings that need manual inspection.
+const DEFAULT_DENIED_LICENSES: &str = concat!(
+    "AGPL-3.0-only,AGPL-3.0-or-later,",
+    "GPL-2.0,GPL-2.0-only,GPL-2.0-or-later,",
+    "GPL-3.0,GPL-3.0-only,GPL-3.0-or-later,",
+    "LGPL-2.0,LGPL-2.0-only,LGPL-2.0-or-later,",
+    "LGPL-2.1,LGPL-2.1-only,LGPL-2.1-or-later,",
+    "LGPL-3.0,LGPL-3.0-only,LGPL-3.0-or-later,",
+    "SSPL-1.0,",
+    "BUSL-1.1"
+);
+
 #[derive(Parser, Debug)]
 pub struct LicenseCheckArgs {
     /// Check only Rust dependencies
@@ -13,9 +37,17 @@ pub struct LicenseCheckArgs {
     #[arg(long)]
     pub web: bool,
 
-    /// Denied licenses (comma-separated, e.g. "GPL-3.0,AGPL-3.0")
-    #[arg(long, default_value = "AGPL-3.0-only,AGPL-3.0-or-later")]
+    /// Denied licenses (comma-separated).
+    /// Defaults to GPL/LGPL/AGPL/SSPL/BUSL variants.
+    #[arg(long, default_value = DEFAULT_DENIED_LICENSES)]
     pub deny: String,
+}
+
+/// Returns `true` if the license string contains any fragment that resembles the
+/// "Commons Clause" rider (e.g. `"Commons Clause"` or `"Commons-Clause"`).
+fn has_commons_clause(license: &str) -> bool {
+    let lc = license.to_lowercase();
+    lc.contains("commons clause") || lc.contains("commons-clause")
 }
 
 fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
@@ -47,23 +79,54 @@ fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::err
 
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let mut violations = Vec::new();
+    let mut unverified = Vec::new();
     let mut checked = 0;
 
     if let Some(packages) = metadata["packages"].as_array() {
         for pkg in packages {
             let name = pkg["name"].as_str().unwrap_or("unknown");
-            let license = pkg["license"].as_str().unwrap_or("UNKNOWN");
             checked += 1;
 
+            // `license` is null when the Cargo.toml field is absent.
+            let license_opt = pkg["license"].as_str();
+            let license = license_opt.unwrap_or("UNKNOWN");
+
+            // Flag crates with no declared license for manual review.
+            if license_opt.is_none() || license == "UNKNOWN" || license.is_empty() {
+                unverified.push(format!(
+                    "  {} — no license declared (manual review needed)",
+                    name
+                ));
+                continue;
+            }
+
+            // Check for "Commons Clause" rider (often appended to Apache-2.0 etc.).
+            if has_commons_clause(license) {
+                violations.push(format!(
+                    "  {} ({}) — Commons Clause rider detected",
+                    name, license
+                ));
+            }
+
+            // Check against the explicit deny list.
             for &deny in denied {
                 if license.contains(deny) {
                     violations.push(format!("  {} ({}) — {}", name, license, deny));
+                    break; // one violation per crate is enough
                 }
             }
         }
     }
 
     println!("  Checked {} workspace crates", checked);
+
+    if !unverified.is_empty() {
+        println!("  Unverified (no license field) — manual review required:");
+        for u in &unverified {
+            println!("WARN {}", u);
+        }
+    }
+
     if violations.is_empty() {
         println!("  No license violations found.");
     } else {

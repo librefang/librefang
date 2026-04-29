@@ -1213,6 +1213,43 @@ impl UsageStore {
         Ok(cost)
     }
 
+    /// Query today's cost for every agent in a single SQL pass.
+    ///
+    /// Returns a `Vec<(AgentId, f64)>` sorted by cost descending. Using a
+    /// single `GROUP BY` query instead of N per-agent `SUM` queries eliminates
+    /// the N+1 pattern in `/api/budget/agents`, which was responsible for up
+    /// to 1200 queries/min under typical dashboard polling. See #3684.
+    pub fn query_all_agents_daily(&self) -> LibreFangResult<Vec<(AgentId, f64)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent_id, SUM(cost_usd) as total_cost
+                 FROM usage_events
+                 WHERE timestamp > datetime('now', 'start of day')
+                 GROUP BY agent_id
+                 ORDER BY total_cost DESC",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let id_str: String = row.get(0)?;
+                let cost: f64 = row.get(1)?;
+                Ok((id_str, cost))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut results = Vec::new();
+        for row in rows {
+            let (id_str, cost) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if let Ok(agent_id) = id_str.parse::<AgentId>() {
+                results.push((agent_id, cost));
+            }
+        }
+        Ok(results)
+    }
+
     /// Delete usage events older than the given number of days.
     pub fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
         let conn = self

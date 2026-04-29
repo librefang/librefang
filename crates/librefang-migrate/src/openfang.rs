@@ -116,16 +116,33 @@ fn item_kind_for_path(rel: &Path) -> ItemKind {
 }
 
 /// Returns true if the file's content should be rewritten (openfang → librefang).
+///
+/// `.env` and `.key` files are explicitly excluded even though they are text
+/// files.  These files often contain API tokens, secrets, and other credential
+/// values whose strings must be preserved verbatim.  A key such as
+/// `OPENFANG_API_KEY=sk-openfang-abc123` would be silently corrupted into
+/// `LIBREFANG_API_KEY=sk-librefang-abc123`, which would break authentication
+/// against the upstream provider.  Tokens are not symbolic references — they
+/// are opaque values assigned by a third party — so they must never be
+/// subject to mechanical text substitution.
 fn should_rewrite(path: &Path) -> bool {
+    // Guard: never rewrite env or key files regardless of extension match.
+    // These files carry secrets whose values must be preserved verbatim.
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if file_name == "secrets.env" || file_name.ends_with(".env") || file_name.ends_with(".key") {
+        return false;
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    matches!(ext, "toml" | "env")
+    matches!(ext, "toml")
 }
 
 /// Rewrite openfang references in TOML file content.
 ///
 /// Replaces all occurrences of "openfang", "OPENFANG", and "OpenFang" with
 /// their LibreFang equivalents. Safe for TOML because TOML values are
-/// structured config, not secrets.
+/// structured config, not secrets.  MUST NOT be called on `.env` or `.key`
+/// files — see [`should_rewrite`] and `rewrite_env_content`.
 fn rewrite_toml_content(content: &str) -> String {
     content
         .replace("openfang", "librefang")
@@ -351,10 +368,18 @@ mod tests {
         assert!(!config_content.contains("openfang"));
         assert!(!config_content.contains("OPENFANG"));
 
-        // Verify secrets.env was rewritten
+        // Verify secrets.env was NOT rewritten — env files are excluded from
+        // substitution so that API-key values (which are opaque tokens, not
+        // symbolic references) are preserved verbatim.
         let secrets_content = std::fs::read_to_string(dst.path().join("secrets.env")).unwrap();
-        assert!(secrets_content.contains("LIBREFANG_API_KEY"));
-        assert!(!secrets_content.contains("OPENFANG_API_KEY"));
+        assert!(
+            secrets_content.contains("OPENFANG_API_KEY"),
+            "secrets.env key name must be preserved verbatim"
+        );
+        assert!(
+            secrets_content.contains("secret123"),
+            "secrets.env key value must be preserved verbatim"
+        );
 
         // Verify agent.toml was rewritten
         let agent_content =
@@ -507,8 +532,14 @@ mod tests {
     #[test]
     fn test_should_rewrite() {
         assert!(should_rewrite(Path::new("config.toml")));
-        assert!(should_rewrite(Path::new("secrets.env")));
         assert!(should_rewrite(Path::new("agents/coder/agent.toml")));
+
+        // env and key files must never be rewritten — their values are opaque
+        // secrets that must be preserved verbatim (see should_rewrite doc).
+        assert!(!should_rewrite(Path::new("secrets.env")));
+        assert!(!should_rewrite(Path::new("custom.env")));
+        assert!(!should_rewrite(Path::new("server.key")));
+
         assert!(!should_rewrite(Path::new("data/index.db")));
         assert!(!should_rewrite(Path::new("memory/MEMORY.md")));
         assert!(!should_rewrite(Path::new("sessions/main.jsonl")));

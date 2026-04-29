@@ -369,10 +369,29 @@ function AuthBadge({
   }, [authState, polling, serverIdentity, onAuthSuccess, addToast, queryClient, t]);
 
   const handleStartAuth = useCallback(async () => {
-    const authWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+    // We deliberately do NOT pass `noopener` here.  Per the HTML spec
+    // `window.open(url, target, "noopener")` returns null, so the
+    // dashboard loses its handle to the popup, the `if (authWindow)`
+    // branch is dead, and the fallback navigates the dashboard tab
+    // ITSELF to the OAuth provider — destroying the in-dashboard UX
+    // (#3945 follow-up).  `noreferrer` implies `noopener` so it has
+    // the same problem; drop both.
+    //
+    // Tabnabbing risk is mitigated below by setting
+    // `authWindow.opener = null` immediately after navigation, which
+    // achieves the same isolation `noopener` was meant to provide
+    // without nuking the window handle we need.  Referer leak is not
+    // a credential issue here — the OAuth provider already learns
+    // the dashboard origin from `redirect_uri`.
+    const authWindow = window.open("about:blank", "_blank");
     try {
       const result = await startAuthMutation.mutateAsync(serverIdentity);
       if (authWindow && !authWindow.closed) {
+        // Nullify opener BEFORE navigation: the popup is still on
+        // about:blank (same origin) so the assignment can't throw, and
+        // once the navigation kicks the window into the IdP origin,
+        // .opener is already null. No race window.
+        authWindow.opener = null;
         authWindow.location.href = result.auth_url;
       } else {
         window.location.href = result.auth_url;
