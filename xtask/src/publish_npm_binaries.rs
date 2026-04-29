@@ -122,15 +122,7 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
-/// Download and verify the .sha256 checksum file for an asset.
-///
-/// Downloads `{asset_url}.sha256`, parses the expected hash, then computes
-/// sha256 of the already-downloaded `asset_path` and compares. Returns an
-/// error if the download fails or the hashes do not match.
-///
-/// Note: the `.sha256` sidecar lives in the same GitHub Release as the
-/// binary, so this guards against transport corruption / partial downloads,
-/// not against an attacker who has write access to the release assets.
+/// Downloads `{asset}.sha256` from the release and returns an error if the hash does not match.
 fn verify_asset_sha256(
     repo: &str,
     tag: &str,
