@@ -446,6 +446,7 @@ admin_role = "admin"
         assert_eq!(t.app_password_env, "TEAMS_APP_PASSWORD");
         assert_eq!(t.webhook_port, 3978);
         assert!(t.allowed_tenants.is_empty());
+        assert!(t.signature_required, "default-deny on Teams webhook");
     }
 
     #[test]
