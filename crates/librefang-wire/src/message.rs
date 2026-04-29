@@ -28,6 +28,11 @@ pub enum WireMessageKind {
     /// One-way notification (no response expected).
     #[serde(rename = "notification")]
     Notification(WireNotification),
+    /// Forward-compat fallback: any unknown message `type` from a peer
+    /// running a newer protocol version. Decodes successfully so the TCP
+    /// link stays alive (#3544); callers should ignore the message.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Request messages.
@@ -71,6 +76,9 @@ pub enum WireRequest {
     /// Ping to check if the peer is alive.
     #[serde(rename = "ping")]
     Ping,
+    /// Forward-compat fallback for unknown `method` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Response messages.
@@ -114,6 +122,9 @@ pub enum WireResponse {
         /// Error message.
         message: String,
     },
+    /// Forward-compat fallback for unknown `method` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Notification messages (one-way, no response).
@@ -129,6 +140,9 @@ pub enum WireNotification {
     /// Peer is shutting down.
     #[serde(rename = "shutting_down")]
     ShuttingDown,
+    /// Forward-compat fallback for unknown `event` values. See `WireMessageKind::Unknown`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Information about a remote agent.
@@ -275,6 +289,48 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("agent_spawned"));
         let _: WireMessage = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn test_unknown_message_type_decodes() {
+        // A peer running a newer protocol version may emit message types we
+        // don't understand. The TCP link must stay alive (#3544).
+        let json = r#"{"id":"x","type":"future_message","payload":{"foo":1}}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Unknown => {}
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_request_method_decodes() {
+        let json = r#"{"id":"x","type":"request","method":"future_method","x":1}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Request(WireRequest::Unknown) => {}
+            other => panic!("expected Request(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_response_method_decodes() {
+        let json = r#"{"id":"x","type":"response","method":"future_method"}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Response(WireResponse::Unknown) => {}
+            other => panic!("expected Response(Unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_notification_event_decodes() {
+        let json = r#"{"id":"x","type":"notification","event":"future_event"}"#;
+        let decoded: WireMessage = serde_json::from_str(json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Notification(WireNotification::Unknown) => {}
+            other => panic!("expected Notification(Unknown), got {other:?}"),
+        }
     }
 
     #[test]

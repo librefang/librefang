@@ -2976,6 +2976,11 @@ fn calculate_backoff(current: Duration, max: Duration) -> Duration {
 /// Escapes angle brackets that are NOT part of Telegram-allowed HTML tags.
 /// Allowed tags: b, i, u, s, tg-spoiler, a, code, pre, blockquote.
 /// Everything else (e.g. `<name>`, `<thinking>`) gets escaped to `&lt;...&gt;`.
+///
+/// For `<a>` tags, only `https`, `http`, `mailto`, and `tg` URL schemes are
+/// allowed; tags with disallowed/unparseable schemes (e.g. `javascript:`)
+/// are stripped to plain text. All attribute values are HTML-escaped to
+/// prevent attribute injection past Telegram's parse_mode=HTML boundary.
 fn sanitize_telegram_html(text: &str) -> String {
     const ALLOWED: &[&str] = &[
         "b",
@@ -3012,26 +3017,39 @@ fn sanitize_telegram_html(text: &str) -> String {
                 if !tag_name_raw.is_empty()
                     && ALLOWED.iter().any(|a| a.eq_ignore_ascii_case(tag_name_raw))
                 {
-                    let tag_name = tag_name_raw.to_ascii_lowercase();
+                    let tag_name_lc = tag_name_raw.to_ascii_lowercase();
                     if is_closing {
-                        if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name) {
+                        if let Some(pos) = open_tags.iter().rposition(|t| t == &tag_name_lc) {
                             open_tags.remove(pos);
+                            // Preserve original case of close tag.
                             result.push_str(&text[i..tag_end + 1]);
                         } else {
                             result.push_str("&lt;");
-                            result.push_str(tag_content);
+                            result.push_str(&escape_html_text(tag_content));
                             result.push_str("&gt;");
                         }
-                    } else if tag_content.ends_with('/') {
-                        result.push_str(&text[i..tag_end + 1]);
                     } else {
-                        open_tags.push(tag_name);
-                        result.push_str(&text[i..tag_end + 1]);
+                        // Self-closing or opening: rebuild tag with sanitized attrs.
+                        let self_closing = tag_content.ends_with('/');
+                        let attrs_raw = &tag_content[tag_name_raw.len()..];
+                        let attrs_raw = attrs_raw.trim_end_matches('/').trim();
+                        match rebuild_safe_tag(tag_name_raw, attrs_raw, self_closing) {
+                            Some(rebuilt) => {
+                                result.push_str(&rebuilt);
+                                if !self_closing {
+                                    open_tags.push(tag_name_lc);
+                                }
+                            }
+                            None => {
+                                // Tag rejected (e.g. <a> with bad scheme): drop the
+                                // tag entirely; surrounding inner text still renders.
+                            }
+                        }
                     }
                 } else {
-                    // Unknown tag — escape both brackets
+                    // Unknown tag — escape both brackets, escape inner content too.
                     result.push_str("&lt;");
-                    result.push_str(tag_content);
+                    result.push_str(&escape_html_text(tag_content));
                     result.push_str("&gt;");
                 }
                 // Advance past the whole tag
@@ -3060,6 +3078,142 @@ fn sanitize_telegram_html(text: &str) -> String {
     }
 
     result
+}
+
+/// Escape `<`, `>`, `&`, `"` in arbitrary text (not pre-escaped HTML).
+fn escape_html_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// URL schemes allowed inside `<a href>` for Telegram HTML.
+const ALLOWED_HREF_SCHEMES: &[&str] = &["https", "http", "mailto", "tg"];
+
+/// Returns true if `url` starts with one of the allowed schemes (case-insensitive).
+/// Relative URLs (no scheme) are rejected — Telegram requires absolute URLs.
+fn is_safe_href(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some(colon) = trimmed.find(':') else {
+        return false;
+    };
+    let scheme = &trimmed[..colon];
+    ALLOWED_HREF_SCHEMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
+}
+
+/// Parse simple `key="value"` / `key='value'` attributes into an ordered list.
+fn parse_attrs(attrs: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // Read key
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let key = attrs[key_start..i].to_ascii_lowercase();
+        if key.is_empty() {
+            break;
+        }
+        // Expect '='
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            // Bare attribute, no value
+            out.push((key, String::new()));
+            continue;
+        }
+        i += 1; // consume =
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        // Read value (quoted or bare)
+        if i < bytes.len() && (bytes[i] == b'"' || bytes[i] == b'\'') {
+            let quote = bytes[i];
+            i += 1;
+            let val_start = i;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            let val = attrs[val_start..i].to_string();
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.push((key, val));
+        } else {
+            let val_start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            out.push((key, attrs[val_start..i].to_string()));
+        }
+    }
+    out
+}
+
+/// Rebuild an opening tag with sanitized attributes. Returns `None` if the
+/// tag should be rejected entirely (e.g. `<a>` with an unsafe href).
+/// `tag_name` keeps its original case; `self_closing` adds a trailing `/`.
+fn rebuild_safe_tag(tag_name: &str, attrs_raw: &str, self_closing: bool) -> Option<String> {
+    let attrs = parse_attrs(attrs_raw);
+    let mut buf = String::from("<");
+    buf.push_str(tag_name);
+    match tag_name.to_ascii_lowercase().as_str() {
+        "a" => {
+            // Find href; reject tag if missing or unsafe.
+            let href = attrs.iter().find(|(k, _)| k == "href").map(|(_, v)| v);
+            let href = href?;
+            if !is_safe_href(href) {
+                return None;
+            }
+            buf.push_str(" href=\"");
+            buf.push_str(&escape_html_text(href));
+            buf.push('"');
+        }
+        "code" => {
+            // Telegram supports a single `class="language-xxx"` on code.
+            if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "class") {
+                buf.push_str(" class=\"");
+                buf.push_str(&escape_html_text(v));
+                buf.push('"');
+            }
+        }
+        "tg-emoji" => {
+            // Telegram custom emoji uses `emoji-id="…"`.
+            if let Some((_, v)) = attrs.iter().find(|(k, _)| k == "emoji-id") {
+                buf.push_str(" emoji-id=\"");
+                buf.push_str(&escape_html_text(v));
+                buf.push('"');
+            }
+        }
+        _ => {
+            // Other allowed tags: drop all attributes.
+        }
+    }
+    if self_closing {
+        buf.push('/');
+    }
+    buf.push('>');
+    Some(buf)
 }
 
 #[cfg(test)]
@@ -4327,6 +4481,69 @@ mod tests {
         let input = "<b>hello";
         let output = sanitize_telegram_html(input);
         assert_eq!(output, "<b>hello</b>");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_javascript_href_dropped() {
+        // javascript: scheme must be stripped, inner text preserved.
+        let input = r#"<a href="javascript:alert(1)">click</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("javascript:"), "got: {output}");
+        assert!(!output.contains("href="), "got: {output}");
+        assert!(output.contains("click"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_data_href_dropped() {
+        let input = r#"<a href="data:text/html,<script>">x</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("data:"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_relative_href_dropped() {
+        // No scheme → relative URL → reject.
+        let input = r#"<a href="/admin">x</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("href="), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_safe_schemes_kept() {
+        for scheme in ["https", "http", "mailto", "tg"] {
+            let input = format!(r#"<a href="{scheme}://x">x</a>"#);
+            let output = sanitize_telegram_html(&input);
+            assert!(
+                output.contains(&format!("{scheme}://x")),
+                "scheme {scheme} should be kept: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_attr_injection_escaped() {
+        // Attribute value with embedded quote/bracket must be escaped.
+        let input = r#"<a href="https://x"" onclick="hack()"">click</a>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("onclick"), "got: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_unknown_tag_attr_escaped() {
+        // Unknown tag with HTML-special characters in body must be escaped.
+        let input = r#"<thinking attr="&">"#;
+        let output = sanitize_telegram_html(input);
+        assert!(output.contains("&amp;"), "ampersand should be escaped: {output}");
+    }
+
+    #[test]
+    fn test_sanitize_telegram_html_drops_disallowed_attrs_on_b() {
+        // Allowed tag with extra attrs: attrs should be dropped.
+        let input = r#"<b style="color:red" onclick="x()">bold</b>"#;
+        let output = sanitize_telegram_html(input);
+        assert!(!output.contains("style"), "got: {output}");
+        assert!(!output.contains("onclick"), "got: {output}");
+        assert!(output.contains("<b>"), "got: {output}");
     }
 
     #[test]

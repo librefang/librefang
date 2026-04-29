@@ -1091,6 +1091,12 @@ fn handle_notification(peer_node_id: &str, notif: &WireNotification, registry: &
             info!("OFP: peer {} is shutting down", peer_node_id);
             registry.mark_disconnected(peer_node_id);
         }
+        WireNotification::Unknown => {
+            debug!(
+                "OFP: ignoring unknown notification from peer {}",
+                peer_node_id
+            );
+        }
     }
 }
 

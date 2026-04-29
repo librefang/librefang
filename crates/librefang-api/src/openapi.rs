@@ -18,7 +18,7 @@ use crate::types;
         title = "LibreFang API",
         version = env!("CARGO_PKG_VERSION"),
         description = "LibreFang Agent Operating System — REST API for managing AI agents, tools, workflows, and more.",
-        license(name = "Apache-2.0", url = "https://www.apache.org/licenses/LICENSE-2.0"),
+        license(name = "MIT", url = "https://opensource.org/licenses/MIT"),
     ),
     paths(
         // ── System / Health ──

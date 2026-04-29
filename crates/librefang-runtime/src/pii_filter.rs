@@ -13,12 +13,18 @@
 
 use librefang_channels::types::SenderContext;
 use librefang_types::config::PrivacyMode;
+use parking_lot::RwLock;
 use regex_lite::Regex;
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
 
 /// Placeholder used in `Redact` mode.
 const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
+
+/// Maximum number of distinct PII values cached for stable pseudonyms.
+/// When exceeded, the oldest entries are evicted in FIFO order.
+/// At ~100 bytes per entry this caps the map at ~1 MB — bounded enough
+/// to prevent multi-GB growth on long-running daemons (#3489).
+const PSEUDONYM_MAP_CAP: usize = 10_000;
 
 /// Built-in PII regex patterns (label, pattern).
 ///
@@ -44,14 +50,28 @@ const BUILTIN_PATTERNS: &[(&str, &str)] = &[
 ///
 /// Maintains a pseudonym map for stable replacements within a session
 /// (e.g. the same email always maps to the same pseudonym).
+///
+/// The map is bounded (`PSEUDONYM_MAP_CAP`) and evicts FIFO-style — long-lived
+/// pseudonyms for hot values stay stable; cold values may be re-pseudonymized
+/// once evicted, which is acceptable for the redaction use case.
 pub struct PiiFilter {
     /// Compiled built-in + custom regex patterns with their labels.
     patterns: Vec<(String, Regex)>,
-    /// Pseudonym mapping: original PII value -> pseudonym label.
-    /// Protected by Mutex for interior mutability (pseudonym map grows over time).
-    pseudonym_map: Mutex<HashMap<String, String>>,
-    /// Counter for generating sequential pseudonyms per category.
-    pseudonym_counters: Mutex<HashMap<String, u32>>,
+    /// Bounded LRU-ish state for stable pseudonyms, behind a single
+    /// RwLock so reads (the common case: existing PII value lookup) are
+    /// concurrent and writes serialize.
+    state: RwLock<PseudonymState>,
+}
+
+/// Combined state for the bounded pseudonym map. Kept under one lock so
+/// insertion order and counters cannot drift apart under concurrent writes.
+struct PseudonymState {
+    /// `category:value` -> pseudonym label.
+    map: HashMap<String, String>,
+    /// Insertion order — used to evict the oldest entry when the cap is hit.
+    order: VecDeque<String>,
+    /// Per-category sequential counter for generating new pseudonyms.
+    counters: HashMap<String, u32>,
 }
 
 impl PiiFilter {
@@ -81,8 +101,11 @@ impl PiiFilter {
 
         Self {
             patterns,
-            pseudonym_map: Mutex::new(HashMap::new()),
-            pseudonym_counters: Mutex::new(HashMap::new()),
+            state: RwLock::new(PseudonymState {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+                counters: HashMap::new(),
+            }),
         }
     }
 
@@ -176,26 +199,39 @@ impl PiiFilter {
     ///
     /// Pseudonyms follow the pattern `[{Category}-{Letter}]` where the letter
     /// increments (A, B, C, ...) for each new unique value in that category.
+    /// Hot path: read-only lookup under a shared lock. Slow path takes a
+    /// write lock to insert (and possibly evict the oldest entry).
     fn get_or_create_pseudonym(&self, value: &str, category: &str) -> String {
-        let mut map = self.pseudonym_map.lock().unwrap_or_else(|e| e.into_inner());
-
         // Key includes category to avoid collisions between different PII types
         let key = format!("{category}:{value}");
-        if let Some(existing) = map.get(&key) {
+
+        // Fast path: shared read lock.
+        if let Some(existing) = self.state.read().map.get(&key) {
             return existing.clone();
         }
 
-        let mut counters = self
-            .pseudonym_counters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let counter = counters.entry(category.to_string()).or_insert(0);
+        // Slow path: take exclusive lock, double-check, insert.
+        let mut state = self.state.write();
+        if let Some(existing) = state.map.get(&key) {
+            return existing.clone();
+        }
+        let counter = state.counters.entry(category.to_string()).or_insert(0);
         let letter = index_to_label(*counter);
         *counter += 1;
 
         let label = capitalize_category(category);
         let pseudonym = format!("[{label}-{letter}]");
-        map.insert(key, pseudonym.clone());
+        state.map.insert(key.clone(), pseudonym.clone());
+        state.order.push_back(key);
+
+        // Evict FIFO until under cap.
+        while state.map.len() > PSEUDONYM_MAP_CAP {
+            if let Some(oldest) = state.order.pop_front() {
+                state.map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
         pseudonym
     }
 }
@@ -407,6 +443,30 @@ mod tests {
         let result = filter.filter_sender_context(&sender, &PrivacyMode::Off);
         assert_eq!(result.user_id, "U123");
         assert_eq!(result.display_name, "Charlie");
+    }
+
+    // -- bounded pseudonym map (#3489) --
+
+    #[test]
+    fn test_pseudonym_map_is_bounded() {
+        let filter = make_filter();
+        // Insert more than the cap of distinct emails — map size must stay
+        // under the cap, oldest entries should be evicted.
+        let cap = PSEUDONYM_MAP_CAP;
+        let total = cap + 100;
+        for i in 0..total {
+            let text = format!("contact user{i}@example.com");
+            filter.filter_message(&text, &PrivacyMode::Pseudonymize);
+        }
+        let len = filter.state.read().map.len();
+        assert!(
+            len <= cap,
+            "pseudonym map should stay <= {cap}, got {len}"
+        );
+        assert!(
+            len >= cap - 10,
+            "should be near the cap, got {len}"
+        );
     }
 
     // -- index_to_label --
