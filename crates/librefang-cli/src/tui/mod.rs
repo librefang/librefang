@@ -632,8 +632,20 @@ impl App {
             }
 
             // ── Async chat helpers (previously blocked the event-loop thread) ──
-            AppEvent::ChatModelLabelLoaded { agent_id: _, label } => {
-                self.chat.model_label = label;
+            AppEvent::ChatModelLabelLoaded { agent_id, label } => {
+                // The variant carries the agent id specifically so a late
+                // response from a previously-entered chat target can't
+                // clobber the current header.  Drop labels that don't
+                // match the current daemon target.
+                let still_current = self
+                    .chat_target
+                    .as_ref()
+                    .and_then(|t| t.agent_id_daemon.as_deref())
+                    .map(|cur| cur == agent_id.as_str())
+                    .unwrap_or(false);
+                if still_current {
+                    self.chat.model_label = label;
+                }
             }
             AppEvent::ChatModelsForPicker(models) => {
                 if models.is_empty() {
