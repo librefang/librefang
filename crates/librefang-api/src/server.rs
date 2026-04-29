@@ -1347,15 +1347,24 @@ pub async fn run_daemon(
 
     // Config file hot-reload watcher (polls every 30 seconds).
     // Spawned after `build_router` so it can access `AppState` for bridge reload.
+    //
+    // Uses `tokio::fs::metadata` (issue #3377): the previous `std::fs::metadata`
+    // call was synchronous and ran on a tokio worker thread, so a slow filesystem
+    // (NFS, sleeping disk) blocked the worker for the duration of `stat()`. With
+    // a single-threaded runtime this stalled every other task on each 30s tick.
     {
         let k = kernel.clone();
         let st = state.clone();
         let config_path = kernel.home_dir().join("config.toml");
         let mut shutdown_rx = bg_shutdown_tx.subscribe();
         bg_tasks.push(tokio::spawn(async move {
-            let mut last_modified = std::fs::metadata(&config_path)
-                .and_then(|m| m.modified())
-                .ok();
+            // Helper: async stat → mtime, swallowing all errors (file may not
+            // exist yet, FS may be unreachable). Identical semantics to the
+            // pre-#3377 `.and_then(|m| m.modified()).ok()` chain.
+            async fn read_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+                tokio::fs::metadata(path).await.ok()?.modified().ok()
+            }
+            let mut last_modified = read_mtime(&config_path).await;
             loop {
                 tokio::select! {
                     // Graceful shutdown signal: exit the loop so the task
@@ -1363,9 +1372,7 @@ pub async fn run_daemon(
                     _ = shutdown_rx.wait_for(|v| *v) => break,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
                 }
-                let current = std::fs::metadata(&config_path)
-                    .and_then(|m| m.modified())
-                    .ok();
+                let current = read_mtime(&config_path).await;
                 if current != last_modified && current.is_some() {
                     last_modified = current;
                     tracing::info!("Config file changed, reloading...");

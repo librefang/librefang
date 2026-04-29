@@ -37,7 +37,11 @@ const SINGLETON_DEPS = [
   "@xyflow/react",
   "zustand",
   "lucide-react",
-  "lucide-react/dynamic",
+  // NOTE: `lucide-react/dynamic` is intentionally NOT listed (issue #3768).
+  // It looks up icons by name string at runtime, so bundlers cannot tree-shake
+  // it and including it pulls the full ~1500-icon registry (~1.4 MB raw,
+  // ~200-300 KB gzipped) into the shared chunk. McpServersPage now uses a
+  // `lazy()` wrapper around named imports from `lucide-react` instead.
 ];
 
 export default defineConfig({
@@ -117,6 +121,10 @@ export default defineConfig({
           router: ["@tanstack/react-router", "@tanstack/react-query"],
           charts: ["recharts"],
           flow: ["@xyflow/react"],
+          // Isolate lucide-react named imports into their own chunk so adding
+          // a single icon to a route doesn't bloat its first-load bundle.
+          // See issue #3768.
+          icons: ["lucide-react"],
         }
       }
     }
