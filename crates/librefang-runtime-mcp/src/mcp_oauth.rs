@@ -222,7 +222,21 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
         return true;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    // `Url::host_str()` returns IPv6 literals WITH `[ ]` brackets per the
+    // url crate docs ("IPv6 addresses are given between [ and ] brackets"),
+    // but `IpAddr::from_str` rejects bracketed forms.  Without stripping,
+    // every IPv6 host falls through to `false` here — that's the exact
+    // SSRF bypass the IPv4-mapped/NAT64/loopback IPv6 tests catch:
+    // `well_known_url("http://[::ffff:7f00:0001]/mcp")` hands us
+    // `[::ffff:7f00:0001]`, parse fails, function says "not blocked", and
+    // the daemon happily fetches OAuth metadata over the V6 socket that
+    // routes to 127.0.0.1.  Strip exactly one matching bracket pair.
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+
+    if let Ok(ip) = ip_str.parse::<IpAddr>() {
         return match ip {
             IpAddr::V4(v4) => blocked_v4(v4),
             IpAddr::V6(v6) => {
