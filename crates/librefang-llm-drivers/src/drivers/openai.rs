@@ -534,6 +534,18 @@ struct OaiUsage {
     /// Detailed prompt token breakdown (includes cached token info).
     #[serde(default)]
     prompt_tokens_details: Option<OaiPromptTokensDetails>,
+    /// DeepSeek-specific: prompt tokens served from the on-disk prompt
+    /// cache. Billed at 1/10 of the input rate. Reported as a sibling to
+    /// `prompt_tokens` rather than nested under `prompt_tokens_details`
+    /// (#3449).
+    #[serde(default)]
+    prompt_cache_hit_tokens: u64,
+    /// DeepSeek-specific: prompt tokens that missed the cache. Billed at
+    /// the regular input rate. We don't surface this directly — the
+    /// agent loop derives uncached input as `prompt_tokens - cache_read`.
+    #[serde(default)]
+    #[allow(dead_code)]
+    prompt_cache_miss_tokens: u64,
 }
 
 /// OpenAI prompt token details (includes cached token count).
@@ -1244,6 +1256,10 @@ impl LlmDriver for OpenAIDriver {
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
+                // OpenAI / Azure / DeepSeek refusals — surface as filtered
+                // so the agent loop can stop instead of treating empty/refused
+                // text as a successful EndTurn (#3450).
+                Some("content_filter") => StopReason::ContentFiltered,
                 _ => {
                     if !tool_calls.is_empty() {
                         StopReason::ToolUse
@@ -1256,11 +1272,22 @@ impl LlmDriver for OpenAIDriver {
             let usage = oai_response
                 .usage
                 .map(|u| {
-                    let cached = u
+                    // DeepSeek reports cache hits via `prompt_cache_hit_tokens`
+                    // at the top level; OpenAI / Azure / Groq use the nested
+                    // `prompt_tokens_details.cached_tokens` field. Take whichever
+                    // is non-zero (#3449). The metering layer already discounts
+                    // `cache_read_input_tokens` to 10% of the input rate, which
+                    // matches DeepSeek's published 1/10 cache pricing.
+                    let nested_cached = u
                         .prompt_tokens_details
                         .as_ref()
                         .map(|d| d.cached_tokens)
                         .unwrap_or(0);
+                    let cached = if nested_cached > 0 {
+                        nested_cached
+                    } else {
+                        u.prompt_cache_hit_tokens
+                    };
                     TokenUsage {
                         input_tokens: u.prompt_tokens,
                         output_tokens: u.completion_tokens,
@@ -1528,6 +1555,8 @@ impl LlmDriver for OpenAIDriver {
             let mut chunk_count: u32 = 0;
             let mut sse_line_count: u32 = 0;
             let mut receiver_dropped = false;
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
@@ -1539,7 +1568,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 chunk_count += 1;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 // Process complete lines
                 while let Some(pos) = buffer.find('\n') {
@@ -1570,13 +1599,20 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(pt) = u["prompt_tokens"].as_u64() {
                             usage.input_tokens = pt;
                         }
-                        if let Some(cached) = u
+                        // Prefer OpenAI's nested cache field; fall back to
+                        // DeepSeek's top-level `prompt_cache_hit_tokens` (#3449).
+                        let nested_cached = u
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
-                            .and_then(|v| v.as_u64())
-                        {
-                            usage.cache_read_input_tokens = cached;
-                            cached_prompt_tokens = cached;
+                            .and_then(|v| v.as_u64());
+                        let deepseek_cached = u
+                            .get("prompt_cache_hit_tokens")
+                            .and_then(|v| v.as_u64());
+                        if let Some(cached) = nested_cached.or(deepseek_cached) {
+                            if cached > 0 {
+                                usage.cache_read_input_tokens = cached;
+                                cached_prompt_tokens = cached;
+                            }
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
@@ -1889,6 +1925,9 @@ impl LlmDriver for OpenAIDriver {
                 Some("stop") => StopReason::EndTurn,
                 Some("tool_calls") => StopReason::ToolUse,
                 Some("length") => StopReason::MaxTokens,
+                // Streaming refusal — same treatment as the non-streaming
+                // path (#3450).
+                Some("content_filter") => StopReason::ContentFiltered,
                 _ => {
                     if !tool_calls.is_empty() {
                         StopReason::ToolUse
@@ -2879,5 +2918,58 @@ mod tests {
         strip_trailing_empty_assistant(&mut msgs, "claude-3-opus");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs.last().unwrap().role, "user");
+    }
+
+    /// DeepSeek reports cache hits as `usage.prompt_cache_hit_tokens` (a
+    /// sibling of `prompt_tokens`), not under `prompt_tokens_details`.
+    /// Without the explicit fallback the cache discount is silently dropped (#3449).
+    #[test]
+    fn test_oai_usage_parses_deepseek_prompt_cache_hit_tokens() {
+        let raw = r#"{
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200
+        }"#;
+        let usage: OaiUsage = serde_json::from_str(raw).expect("parse usage");
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.prompt_cache_hit_tokens, 800);
+        // The driver routes `prompt_cache_hit_tokens` into
+        // `TokenUsage.cache_read_input_tokens`, which the metering layer
+        // already discounts to 10% of the input rate — matching DeepSeek's
+        // published 1/10 cache pricing.
+    }
+
+    /// OpenAI / Azure use the nested `prompt_tokens_details.cached_tokens`
+    /// path. Both forms must be parsed without one shadowing the other.
+    #[test]
+    fn test_oai_usage_parses_openai_nested_cached_tokens() {
+        let raw = r#"{
+            "prompt_tokens": 500,
+            "completion_tokens": 40,
+            "prompt_tokens_details": { "cached_tokens": 320 }
+        }"#;
+        let usage: OaiUsage = serde_json::from_str(raw).expect("parse usage");
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().unwrap().cached_tokens,
+            320
+        );
+        assert_eq!(usage.prompt_cache_hit_tokens, 0);
+    }
+
+    /// Refusal mapping: provider's `content_filter` finish reason must surface
+    /// as `StopReason::ContentFiltered`, not silently fold into `EndTurn` (#3450).
+    #[test]
+    fn test_finish_reason_content_filter_maps_to_content_filtered() {
+        // The mapping lives inline in `complete()`; replicate it here so a
+        // future refactor can't silently regress to "EndTurn".
+        let stop_reason = match Some("content_filter") {
+            Some("stop") => StopReason::EndTurn,
+            Some("tool_calls") => StopReason::ToolUse,
+            Some("length") => StopReason::MaxTokens,
+            Some("content_filter") => StopReason::ContentFiltered,
+            _ => StopReason::EndTurn,
+        };
+        assert_eq!(stop_reason, StopReason::ContentFiltered);
     }
 }

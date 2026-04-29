@@ -414,10 +414,12 @@ impl ChatGptDriver {
         // tool_accum: (call_id, name, arguments, arguments_done_emitted) indexed by output_index
         let mut tool_accum: Vec<(String, String, String, bool)> = Vec::new();
         let mut completed_response: Option<serde_json::Value> = None;
+        // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+        let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
         while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk.map_err(|e| LlmError::Http(format!("SSE stream error: {e}")))?;
-            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+            line_buf.push_str(&utf8.decode(&bytes));
 
             while let Some(newline_pos) = line_buf.find('\n') {
                 let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
@@ -634,15 +636,22 @@ impl ChatGptDriver {
                                     ..Default::default()
                                 };
                             }
-                            // Extract stop reason from status
-                            match resp_obj
+                            // Extract stop reason from status. Responses API
+                            // surfaces refusals via incomplete_details.reason
+                            // — treat as ContentFiltered (#3450).
+                            let status = resp_obj
                                 .get("status")
                                 .and_then(|s| s.as_str())
-                                .unwrap_or("completed")
-                            {
-                                "incomplete" => stop_reason = StopReason::MaxTokens,
-                                _ => stop_reason = StopReason::EndTurn,
-                            }
+                                .unwrap_or("completed");
+                            let incomplete_reason = resp_obj
+                                .get("incomplete_details")
+                                .and_then(|d| d.get("reason"))
+                                .and_then(|r| r.as_str());
+                            stop_reason = match (status, incomplete_reason) {
+                                (_, Some("content_filter")) => StopReason::ContentFiltered,
+                                ("incomplete", _) => StopReason::MaxTokens,
+                                _ => StopReason::EndTurn,
+                            };
                             completed_response = Some(resp_obj.clone());
                         }
                     }

@@ -326,6 +326,10 @@ pub enum StopReason {
     MaxTokens,
     /// The model hit a stop sequence.
     StopSequence,
+    /// The provider blocked or refused the response (safety / policy filter).
+    /// Distinct from `EndTurn` so callers can surface refusals instead of
+    /// treating them as a successful completion (#3450).
+    ContentFiltered,
 }
 
 /// Token usage information from an LLM call.

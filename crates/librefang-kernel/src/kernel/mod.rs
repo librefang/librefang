@@ -5315,6 +5315,16 @@ system_prompt = "You are a helpful assistant."
                             agent_name, iterations, error_count
                         ),
                     ),
+                    // Provider safety / content filter — distinct from generic
+                    // task_failed so operators can route refusals separately (#3450).
+                    KernelError::LibreFang(LibreFangError::ContentFiltered { message }) => (
+                        "content_filtered",
+                        format!(
+                            "Agent \"{}\" response blocked by provider safety filter: {}",
+                            agent_name,
+                            message.chars().take(200).collect::<String>()
+                        ),
+                    ),
                     other => (
                         "task_failed",
                         format!(

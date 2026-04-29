@@ -592,11 +592,13 @@ impl LlmDriver for AnthropicDriver {
             let mut blocks: Vec<ContentBlockAccum> = Vec::new();
             let mut stop_reason = StopReason::EndTurn;
             let mut usage = TokenUsage::default();
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 while let Some(pos) = buffer.find("\n\n") {
                     let event_text = buffer[..pos].to_string();
@@ -750,6 +752,8 @@ impl LlmDriver for AnthropicDriver {
                                     "tool_use" => StopReason::ToolUse,
                                     "max_tokens" => StopReason::MaxTokens,
                                     "stop_sequence" => StopReason::StopSequence,
+                                    // Anthropic refusals (#3450).
+                                    "refusal" => StopReason::ContentFiltered,
                                     _ => StopReason::EndTurn,
                                 };
                             }
@@ -1151,6 +1155,8 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         "stop_sequence" => StopReason::StopSequence,
+        // Anthropic refusals (#3450).
+        "refusal" => StopReason::ContentFiltered,
         _ => StopReason::EndTurn,
     };
 

@@ -643,6 +643,8 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
         "end_turn" => StopReason::EndTurn,
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
+        // Bedrock Converse: guardrail-triggered refusals (#3450).
+        "guardrail_intervened" | "content_filtered" => StopReason::ContentFiltered,
         _ if !tool_calls.is_empty() => StopReason::ToolUse,
         _ => StopReason::EndTurn,
     };

@@ -3998,6 +3998,29 @@ pub async fn run_agent_loop(
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit, continuing");
             }
+            StopReason::ContentFiltered => {
+                // Provider refused / safety-filtered the response (#3450).
+                // Persist any partial text and surface as a structured error
+                // — never fall through into the EndTurn success path.
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter"
+                );
+                session.messages.push(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                return Err(LibreFangError::ContentFiltered { message: partial });
+            }
         }
     }
 
@@ -5428,6 +5451,28 @@ pub async fn run_agent_loop_streaming(
                 session.messages.push(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit (streaming), continuing");
+            }
+            StopReason::ContentFiltered => {
+                // Streaming twin of the non-streaming refusal handler (#3450).
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter (streaming)"
+                );
+                session.messages.push(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                signal_response_complete(&stream_tx).await;
+                return Err(LibreFangError::ContentFiltered { message: partial });
             }
         }
     }
