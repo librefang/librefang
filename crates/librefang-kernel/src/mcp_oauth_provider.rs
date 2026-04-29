@@ -266,8 +266,23 @@ impl McpOAuthProvider for KernelOAuthProvider {
     }
 
     async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
+        // #3369: aggregate per-field failures and surface them. Returning Ok
+        // when vault_remove failed lets the UI display "logged out" while the
+        // refresh/access tokens still sit in the vault — daemon keeps using
+        // them on the next request.
+        let mut failures: Vec<String> = Vec::new();
         for field in ALL_VAULT_FIELDS {
-            let _ = self.vault_remove(&Self::vault_key(server_url, field));
+            let key = Self::vault_key(server_url, field);
+            if let Err(e) = self.vault_remove(&key) {
+                warn!(server = %server_url, field = %field, error = %e, "MCP OAuth clear_tokens: vault_remove failed");
+                failures.push(format!("{field}: {e}"));
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "Sign-out failed to fully clear vault for {server_url}; tokens may still be valid. Retry. Details: {}",
+                failures.join("; ")
+            ));
         }
         debug!(server = %server_url, "MCP OAuth tokens cleared from vault");
         Ok(())
@@ -330,6 +345,44 @@ mod tests {
         assert_ne!(
             key_a, key_b,
             "Different servers should have different vault keys"
+        );
+    }
+
+    /// #3369: when vault_remove fails, clear_tokens MUST return Err so the
+    /// API layer can tell the user sign-out is incomplete. Pre-fix, this
+    /// returned Ok(()) and the UI showed "logged out" while the access token
+    /// stayed in the vault.
+    #[tokio::test]
+    async fn clear_tokens_returns_err_when_vault_unlock_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        // Write a garbage vault.enc so unlock() fails for every vault_remove call.
+        std::fs::write(home.join("vault.enc"), b"not-a-real-vault").expect("seed bad vault");
+        // Provide a syntactically valid master key so unlock() reaches the
+        // decrypt step and fails on the corrupt ciphertext rather than on a
+        // missing key.
+        unsafe {
+            std::env::set_var(
+                "LIBREFANG_VAULT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+        }
+
+        let provider = KernelOAuthProvider::new(home);
+        let result = provider.clear_tokens("https://example.com/mcp").await;
+        unsafe {
+            std::env::remove_var("LIBREFANG_VAULT_KEY");
+        }
+
+        assert!(
+            result.is_err(),
+            "clear_tokens must propagate vault failures (#3369), got {:?}",
+            result
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("retry") || err.to_lowercase().contains("sign-out"),
+            "error message should prompt the caller to retry, got: {err}"
         );
     }
 
