@@ -284,11 +284,15 @@ impl WasmSandbox {
         store.epoch_deadline_callback(|ctx| {
             let data = ctx.data();
             if data.start.elapsed() >= data.timeout {
-                // Real timeout — propagate as a trap.
-                anyhow::bail!(
+                // Real timeout — propagate as a trap.  Use wasmtime::Error
+                // (not anyhow) so the closure signature matches what
+                // epoch_deadline_callback expects: anyhow::Error and
+                // wasmtime::Error are re-exports from different paths and
+                // the compiler treats them as distinct.
+                return Err(wasmtime::Error::msg(format!(
                     "WASM guest exceeded wall-clock timeout of {}s",
                     data.timeout.as_secs()
-                );
+                )));
             }
             // False positive (some other guest's watchdog tripped this
             // engine's epoch). Resume with a fresh 1-tick deadline.
@@ -1220,8 +1224,7 @@ mod tests {
             SandboxError::FuelExhausted => {}
             SandboxError::Execution(msg) => {
                 assert!(
-                    msg.to_lowercase().contains("time")
-                        || msg.contains("epoch"),
+                    msg.to_lowercase().contains("time") || msg.contains("epoch"),
                     "Expected timeout-related Execution error, got: {msg}"
                 );
             }
