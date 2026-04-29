@@ -238,12 +238,15 @@ enum RoutingPhase {
     PickTier(usize),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum KeyTestState {
     Idle,
     Testing,
     Ok,
     Warn,
+    // #3629: validation succeeded but persisting to .env failed. Surface this
+    // explicitly so the user sees the disk error instead of a fake "Verified".
+    SaveFailed(String),
 }
 
 /// A model entry for list display.
@@ -617,31 +620,28 @@ pub fn run() -> InitResult {
         // initial Enter press (fixes #3629: write-before-validate).
         if state.key_test == KeyTestState::Testing {
             if let Ok(ok) = test_rx.try_recv() {
-                // Persist ONLY when the validation succeeded.  The
-                // pre-fix comment claimed the Warn path was "unverified
-                // but user confirmed", but the wizard auto-advances
-                // 600 ms after either Ok or Warn (see the matches!
-                // block below) — there is no explicit confirmation
-                // step.  Writing a failing key still landed it in
-                // .env, so the daemon booted with a key the wizard
-                // had just told the user was bad.  Now Warn keeps the
-                // user-typed value in `state.api_key_input` only, the
-                // UI surfaces the validation message, and nothing
-                // hits disk until the user retries with a key that
-                // actually authenticates.
+                // #3629: never advance silently. If the disk save fails after a
+                // verified key, surface it as SaveFailed so the user retries
+                // instead of seeing a fake "Verified" while ~/.librefang/.env
+                // is still empty.
                 state.key_test = if ok {
+                    let mut save_err: Option<String> = None;
                     if let Some(p) = state.provider() {
                         if !p.env_var.is_empty() {
                             if let Err(e) = dotenv::save_env_key(p.env_var, &state.api_key_input) {
-                                tracing::warn!(
+                                tracing::error!(
                                     provider = ?p.name,
                                     error = %e,
                                     "init wizard: failed to persist verified API key"
                                 );
+                                save_err = Some(e);
                             }
                         }
                     }
-                    KeyTestState::Ok
+                    match save_err {
+                        Some(e) => KeyTestState::SaveFailed(e),
+                        None => KeyTestState::Ok,
+                    }
                 } else {
                     KeyTestState::Warn
                 };
@@ -1871,7 +1871,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
     ))]));
     f.render_widget(prompt, chunks[0]);
 
-    match state.key_test {
+    match &state.key_test {
         KeyTestState::Idle => {
             let masked: String = "\u{2022}".repeat(state.api_key_input.len());
             let input = Paragraph::new(Line::from(vec![
@@ -1930,6 +1930,29 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
                     theme::dim_style(),
                 )])),
                 chunks[3],
+            );
+        }
+        KeyTestState::SaveFailed(err) => {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  \u{2716} ", Style::default().fg(theme::YELLOW)),
+                    Span::raw("Verified, but saving to .env failed"),
+                ])),
+                chunks[1],
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    format!("    {err}"),
+                    theme::dim_style(),
+                )])),
+                chunks[3],
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "    Press [Esc] to go back and retry. Nothing was written.",
+                    theme::dim_style(),
+                )])),
+                chunks[4],
             );
         }
     }
@@ -2411,4 +2434,32 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
         widgets::hint_bar("  [\u{2191}\u{2193}/jk] Navigate  [Enter] Launch  [1/2/3] Quick select"),
         chunks[15],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #3629: SaveFailed must not be treated as a successful key state. Pre-fix,
+    /// a failed .env write was logged-then-ignored and the wizard auto-advanced
+    /// while the key was never on disk.
+    #[test]
+    fn save_failed_does_not_auto_advance() {
+        let s = KeyTestState::SaveFailed("disk full".to_string());
+        assert!(
+            !matches!(s, KeyTestState::Ok | KeyTestState::Warn),
+            "SaveFailed must NOT match the auto-advance arm"
+        );
+    }
+
+    #[test]
+    fn save_failed_blocks_input_until_user_acks() {
+        // The ApiKey step uses `matches!(state.key_test, Ok | Warn)` to short-
+        // circuit input handling and let the auto-advance timer fire. SaveFailed
+        // must fall through that guard so Esc can still bring the user back to
+        // the provider step (where they can retry from a clean state).
+        let s = KeyTestState::SaveFailed("io error".to_string());
+        let auto_advance_match = matches!(s, KeyTestState::Ok | KeyTestState::Warn);
+        assert!(!auto_advance_match);
+    }
 }

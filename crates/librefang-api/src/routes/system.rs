@@ -2797,16 +2797,29 @@ pub async fn totp_revoke(
         .into_json_tuple();
     }
 
-    // Remove TOTP data from vault
-    // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
+    // #3633: clearing must not be best-effort. If any vault_set fails, the
+    // secret / recovery codes can still verify and the caller would see a
+    // "revoked" response while 2FA remains active. Fail the request instead.
     if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
-        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_confirmed: {e}");
+        return ApiErrorResponse::internal(format!(
+            "TOTP revocation failed to persist: {e}. TOTP is still active — retry."
+        ))
+        .into_json_tuple();
     }
     if let Err(e) = state.kernel.vault_set("totp_secret", "") {
-        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_secret: {e}");
+        return ApiErrorResponse::internal(format!(
+            "TOTP revocation partially failed: {e}. Retry to fully clear stored secret."
+        ))
+        .into_json_tuple();
     }
     if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
-        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_recovery_codes: {e}");
+        return ApiErrorResponse::internal(format!(
+            "TOTP revocation partially failed: {e}. Recovery codes may still be valid — retry."
+        ))
+        .into_json_tuple();
     }
 
     (
