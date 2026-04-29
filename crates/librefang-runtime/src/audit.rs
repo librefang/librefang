@@ -13,7 +13,7 @@ use librefang_types::config::AuditRetentionConfig;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 /// Hard cap on the number of audit entries kept in memory.
@@ -195,15 +195,6 @@ pub struct AuditLog {
     /// genesis sentinel, that `prev_hash` IS the anchor (it points at
     /// the dropped predecessor). No new schema column required.
     chain_anchor: Mutex<Option<String>>,
-    /// Sequence numbers whose SQLite persistence failed.  The post-merge
-    /// audit of #3957 caught that the cap-trim drained these entries
-    /// silently — they were in memory but never on disk, and the trim
-    /// code assumed everything below the cap had already been
-    /// `INSERT`-ed by the caller above.  We now track which seqs missed
-    /// the DB write so the trim can leave them in memory.  See
-    /// `record_with_context` (records misses) and the trim block
-    /// (skips them when choosing which prefix to drop).
-    non_persisted_seqs: Mutex<HashSet<u64>>,
 }
 
 /// Per-trim summary returned by [`AuditLog::trim`].
@@ -250,7 +241,6 @@ impl AuditLog {
             db: None,
             anchor_path: None,
             chain_anchor: Mutex::new(None),
-            non_persisted_seqs: Mutex::new(HashSet::new()),
         }
     }
 
@@ -463,7 +453,6 @@ impl AuditLog {
             db: Some(conn),
             anchor_path: None,
             chain_anchor: Mutex::new(recovered_anchor),
-            non_persisted_seqs: Mutex::new(HashSet::new()),
         };
 
         // Verify chain integrity on load
@@ -558,10 +547,33 @@ impl AuditLog {
         // Persist to database if available. Schema v22 added the
         // `user_id` / `channel` columns; old NULL rows keep working
         // because the hash function omits absent fields.
-        let mut persisted_to_db = self.db.is_none();
-        if let Some(ref db) = self.db {
-            if let Ok(conn) = db.lock() {
-                match conn.execute(
+        //
+        // CRITICAL: chain integrity requires that the in-memory tip and
+        // the persisted tail agree at all times.  If the SQLite INSERT
+        // fails but we still push the entry into `entries` and advance
+        // `tip`, the next record() reads the new tip, hashes it into
+        // the next entry's `prev_hash`, and writes *that* row to disk.
+        // After a restart, `with_db()` reloads the DB and finds an
+        // entry whose `prev_hash` points at a row that was never
+        // persisted — `verify_integrity()` then reports
+        // `chain break at seq N` on every subsequent boot, and the
+        // operator has to run `audit-reset` to recover.
+        //
+        // The earlier in-memory `non_persisted_seqs` queue (#4050)
+        // tried to delay this corruption by retrying inside the
+        // process, but the queue lived only in memory — any restart
+        // (graceful or otherwise) before the retry succeeded
+        // committed the broken on-disk chain.
+        //
+        // We invert the trade-off: a transient DB write failure drops
+        // the audit event and leaves chain state untouched.  The ERROR
+        // log below is the operator's signal to investigate.  The
+        // next call uses the same `seq` (since `entries.last()` did
+        // not advance) with a fresh timestamp and tries again.
+        let persisted = match self.db.as_ref() {
+            None => true, // pure in-memory mode: memory IS the source of truth
+            Some(db) => match db.lock() {
+                Ok(conn) => match conn.execute(
                     "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
                         entry.seq as i64,
@@ -570,175 +582,64 @@ impl AuditLog {
                         entry.action.to_string(),
                         &entry.detail,
                         &entry.outcome,
-                        entry.user_id.map(|u| u.to_string()),
+                        entry.user_id.as_ref().map(|u| u.to_string()),
                         entry.channel.as_deref(),
                         &entry.prev_hash,
                         &entry.hash,
                     ],
                 ) {
-                    Ok(_) => {
-                        persisted_to_db = true;
-                        // Piggy-back recovery: while we still hold the
-                        // DB connection lock and the buffer guard,
-                        // opportunistically retry the oldest few
-                        // entries that previously failed.  A transient
-                        // outage (disk full, locked DB, schema swap
-                        // mid-write) parks rows in `non_persisted_seqs`;
-                        // without a retry path they sit there forever
-                        // until process exit, and the trim block keeps
-                        // them in memory permanently — slow leak.
-                        // Once the DB starts accepting writes again
-                        // we backfill in small batches so a successful
-                        // user-action write also drains the backlog.
-                        const RETRY_BATCH: usize = 16;
-                        let mut dirty = self
-                            .non_persisted_seqs
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner());
-                        if !dirty.is_empty() {
-                            let mut to_retry: Vec<u64> =
-                                dirty.iter().copied().collect();
-                            to_retry.sort();
-                            to_retry.truncate(RETRY_BATCH);
-                            for retry_seq in to_retry {
-                                let Some(re) = entries.iter().find(|e| e.seq == retry_seq) else {
-                                    // Entry was trimmed before we could
-                                    // retry it — pre-trim sweep should
-                                    // not happen because the trim block
-                                    // refuses dirty rows, but if it does
-                                    // we'd otherwise track this seq
-                                    // forever.  Drop it.
-                                    dirty.remove(&retry_seq);
-                                    continue;
-                                };
-                                let r = conn.execute(
-                                    "INSERT INTO audit_entries (seq, timestamp, agent_id, action, detail, outcome, user_id, channel, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                                    rusqlite::params![
-                                        re.seq as i64,
-                                        &re.timestamp,
-                                        &re.agent_id,
-                                        re.action.to_string(),
-                                        &re.detail,
-                                        &re.outcome,
-                                        re.user_id.map(|u| u.to_string()),
-                                        re.channel.as_deref(),
-                                        &re.prev_hash,
-                                        &re.hash,
-                                    ],
-                                );
-                                match r {
-                                    Ok(_) => {
-                                        dirty.remove(&retry_seq);
-                                        tracing::info!(
-                                            seq = retry_seq,
-                                            "Audit DB recovered — backfilled previously-failed entry"
-                                        );
-                                    }
-                                    Err(_) => {
-                                        // Still failing; abort the batch
-                                        // rather than thrash the same DB
-                                        // error N times in this scope.
-                                        // The next successful write will
-                                        // try again.
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Ok(_) => true,
                     Err(e) => {
-                        // Pre-#3957 the trim block silently dropped these
-                        // entries off the front of the buffer; they were
-                        // never on disk, so the audit chain lost rows.
-                        // Track the seq so the trim can leave it in place
-                        // until the operator notices and fixes the DB.
                         tracing::error!(
                             seq = entry.seq,
+                            agent_id = %entry.agent_id,
+                            action = %entry.action,
                             error = %e,
-                            "Audit DB INSERT failed — entry held in memory only; \
-                             trim will preserve it.  Investigate disk space / \
-                             permissions and run `librefang security verify`."
+                            "Audit DB INSERT failed; chain NOT advanced. \
+                             Entry dropped to preserve on-disk chain integrity. \
+                             Investigate disk space, permissions, or DB state."
                         );
+                        false
                     }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        seq = entry.seq,
+                        "Audit DB mutex poisoned ({e:?}); chain NOT advanced."
+                    );
+                    false
                 }
-            } else {
-                tracing::error!(
-                    seq = entry.seq,
-                    "Audit DB mutex poisoned — entry held in memory only"
-                );
-            }
-        }
-        if !persisted_to_db {
-            self.non_persisted_seqs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .insert(entry.seq);
+            },
+        };
+
+        if !persisted {
+            // Drop locks without mutating; caller's discarded return
+            // value is the (uncommitted) hash, mirroring the success
+            // path's signature.  The next record() will reuse the same
+            // `seq` because `entries.last()` is unchanged.
+            return hash;
         }
 
         entries.push(entry);
         *tip = hash.clone();
 
         // Hard cap: if the in-memory buffer grew beyond MAX_AUDIT_ENTRIES,
-        // drain the oldest entries that *are* known persisted on disk.
-        // Entries whose SQLite write failed (tracked in
-        // `non_persisted_seqs`) are skipped — dropping them would lose
-        // forensic data that exists nowhere else.  Once the DB recovers
-        // and their next-tick re-record succeeds, they roll out of
-        // `non_persisted_seqs` and become eligible for trim again.
+        // drain the oldest prefix.  Every entry in `entries` is now
+        // known to be persisted on disk (the only path that pushes is
+        // the success branch above), so dropping the prefix loses no
+        // forensic data — a restart would reload the same rows from
+        // SQLite anyway.  We update `chain_anchor` to the hash of the
+        // last dropped entry so `verify_integrity()` keeps working
+        // across the trim boundary.
         if entries.len() > MAX_AUDIT_ENTRIES {
             let overflow = entries.len() - MAX_AUDIT_ENTRIES;
-            let dirty = self
-                .non_persisted_seqs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-
-            // Drop a contiguous prefix of clean entries.  We MUST stop
-            // at the first dirty entry: dropping non-contiguous indices
-            // would leave a dirty entry in front of newer clean ones,
-            // breaking the in-buffer hash chain (each entry's
-            // `prev_hash` points at the entry that *was* in front of it,
-            // so removing a clean entry from the middle invalidates the
-            // next entry's `prev_hash` linkage and `verify_integrity`
-            // returns Err on the next call).  Trade-off: if the front
-            // entry is dirty the buffer grows past the cap until disk
-            // recovers and the recovery path drains it, which is exactly
-            // the fail-safe shape we want — better an unbounded buffer
-            // (with operator-visible error logs every push) than a
-            // silently corrupted chain.
-            let mut drop_count = 0;
-            for e in entries.iter() {
-                if drop_count >= overflow {
-                    break;
-                }
-                if dirty.contains(&e.seq) {
-                    break;
-                }
-                drop_count += 1;
+            let new_anchor = entries[overflow - 1].hash.clone();
+            {
+                let mut anchor =
+                    self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
+                *anchor = Some(new_anchor);
             }
-            drop(dirty);
-
-            if drop_count == 0 {
-                // Front entry is non-persisted.  Don't drop anything —
-                // let the buffer grow.  The error log on each failed
-                // INSERT above is the operator's signal to intervene
-                // before this becomes an OOM.
-                tracing::warn!(
-                    cap = MAX_AUDIT_ENTRIES,
-                    in_memory = entries.len(),
-                    "Audit cap reached but oldest in-memory entry is unpersisted; \
-                     refusing to trim to avoid forensic loss"
-                );
-            } else {
-                // Anchor at the hash of the last dropped entry so
-                // verify_integrity() stays sound across the trim.
-                let new_anchor = entries[drop_count - 1].hash.clone();
-                {
-                    let mut anchor =
-                        self.chain_anchor.lock().unwrap_or_else(|e| e.into_inner());
-                    *anchor = Some(new_anchor);
-                }
-                entries.drain(..drop_count);
-            }
+            entries.drain(..overflow);
         }
 
         // Advance the external anchor so a later DB rewrite is detectable.
@@ -2178,63 +2079,104 @@ mod tests {
         assert!(!tmp.exists(), "tempfile should have been renamed away");
     }
 
-    /// The cap-trim must NOT drop non-contiguous indices.  Each entry's
-    /// `prev_hash` points at the entry that was directly in front of it
-    /// at write time, so removing a clean entry from the middle of the
-    /// buffer breaks the next entry's `prev_hash` linkage and
-    /// `verify_integrity` returns Err.
-    ///
-    /// Earlier draft of #4050 collected `to_drop = [idx of every clean
-    /// entry up to overflow]`, which on `[E1(dirty), E2(clean), E3(clean)]`
-    /// with overflow=1 dropped E2 and left `[E1, E3]` — E3.prev_hash
-    /// equalled E2.hash but the new anchor was set to E2.hash, so
-    /// verify_integrity walked anchor → E1.prev_hash and reported a
-    /// chain break.  This test pins the corrected behavior: when the
-    /// front entry is dirty, the trim must skip entirely and let the
-    /// buffer grow.
+    /// Regression for the chain-break-on-restart class of bugs
+    /// (#4078 reproduction): when a SQLite INSERT fails, the in-memory
+    /// chain MUST NOT advance.  Previous behaviour (#4050) pushed the
+    /// entry into the in-memory buffer regardless and tracked the
+    /// failed seq for later in-process retry, but the retry queue lived
+    /// only in memory — restart before recovery left an on-disk row
+    /// whose `prev_hash` pointed at a never-persisted hash, and every
+    /// subsequent boot logged `chain break at seq N`.
     #[test]
-    fn test_cap_trim_skips_when_front_entry_is_dirty() {
-        let log = AuditLog::new();
+    fn test_db_failure_does_not_advance_in_memory_chain() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_entries (
+                seq INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                user_id TEXT,
+                channel TEXT,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
 
-        // Push one entry that will be flagged dirty.
-        log.record("a", AuditAction::ToolInvoke, "front-dirty", "ok");
-        log.non_persisted_seqs
-            .lock()
+        let log = AuditLog::with_db(Arc::clone(&db));
+        log.record("a", AuditAction::ToolInvoke, "first", "ok");
+        assert_eq!(log.len(), 1);
+        let tip_after_first = log.tip_hash();
+
+        // Provoke a transient persistence failure by dropping the
+        // table.  The next record() will hit `no such table:
+        // audit_entries` from `conn.execute()`.
+        db.lock()
             .unwrap()
-            .insert(1);
+            .execute("DROP TABLE audit_entries", [])
+            .unwrap();
 
-        // Push enough clean entries to push the buffer past MAX_AUDIT_ENTRIES.
-        // Without the dirty-front guard, the cap-trim would remove an
-        // entry from inside the buffer and break the chain.
-        for i in 0..MAX_AUDIT_ENTRIES {
-            log.record("a", AuditAction::ToolInvoke, format!("clean-{i}"), "ok");
-        }
+        log.record("a", AuditAction::ToolInvoke, "would-be-lost", "ok");
 
-        // Buffer is allowed to grow past the cap because the front
-        // entry is dirty (we cannot drop it without losing forensic
-        // data, and we cannot drop later entries without breaking the
-        // chain).
         assert_eq!(
             log.len(),
-            MAX_AUDIT_ENTRIES + 1,
-            "buffer must grow past cap when front entry is dirty rather than corrupting the chain"
+            1,
+            "in-memory chain must not advance when the DB INSERT fails"
         );
-
-        // Chain must verify cleanly.
-        assert!(
-            log.verify_integrity().is_ok(),
-            "verify_integrity must succeed when trim refuses to break the chain"
-        );
-
-        // After the dirty entry recovers (gets backfilled to disk),
-        // the next push should be able to trim.
-        log.non_persisted_seqs.lock().unwrap().remove(&1);
-        log.record("a", AuditAction::ToolInvoke, "trigger-trim", "ok");
         assert_eq!(
-            log.len(),
-            MAX_AUDIT_ENTRIES,
-            "trim must resume once the dirty front entry recovers"
+            log.tip_hash(),
+            tip_after_first,
+            "tip must not advance when the DB INSERT fails"
         );
+
+        // Recreate the table to simulate the operator fixing the DB.
+        db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE audit_entries (
+                    seq INTEGER PRIMARY KEY,
+                    timestamp TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    user_id TEXT,
+                    channel TEXT,
+                    prev_hash TEXT NOT NULL,
+                    hash TEXT NOT NULL
+                )",
+            )
+            .unwrap();
+        // The single seq=0 row from before the drop is gone, but the
+        // in-memory entries vector still holds it.  Re-insert by
+        // recording a fresh event: we expect seq=1 (entries.last+1).
+        // The DB will end up with a single seq=1 row — that's a known
+        // gap (the DROP wiped seq=0), but the chain is internally
+        // consistent: seq=1's prev_hash = hash(seq=0), and with_db()
+        // recovers that as chain_anchor (first entry's prev_hash ≠
+        // genesis → anchor = that hash), so verify_integrity() passes.
+        log.record("a", AuditAction::ToolInvoke, "after-recovery", "ok");
+        assert_eq!(log.len(), 2);
         assert!(log.verify_integrity().is_ok());
+
+        // Restart simulation: a fresh AuditLog reading from the DB
+        // sees only the post-recovery row, and verify_integrity must
+        // succeed because the chain anchor recovery from `prev_hash`
+        // handles the dropped seq=0 prefix.
+        drop(log);
+        let log2 = AuditLog::with_db(db);
+        assert_eq!(
+            log2.len(),
+            1,
+            "DB should hold only the successfully-persisted row"
+        );
+        assert!(
+            log2.verify_integrity().is_ok(),
+            "reloaded chain must verify since no broken entry ever reached disk"
+        );
     }
 }
