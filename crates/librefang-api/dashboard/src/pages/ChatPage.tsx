@@ -424,20 +424,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
   const flushStreamingContent = useCallback((agentId: string, msgId: string) => {
     const buffered = streamingBufferRef.current.get(msgId);
     if (buffered === undefined) return;
-    // KEEP the buffer entry — DO NOT delete here.  React commits the
-    // new content asynchronously, so messagesRef.current still holds
-    // the pre-flush content for some unknown number of microtasks
-    // after this setState fires.  If the buffer were deleted now, a
-    // text_delta arriving before that commit would re-seed from the
-    // stale messagesRef (empty / pre-flush) and the next flush would
-    // overwrite the just-committed content — losing the chunk we
-    // just flushed.  Audit of #3945 caught this race.
-    //
-    // Instead, leave the buffer holding the just-flushed content as
-    // the "last known committed" baseline; subsequent deltas append
-    // to it, no re-seed required.  The terminal `typing/stop` path
-    // (and the explicit error/abort paths) call delete() once the
-    // stream ends, so the entry is reclaimed.
+    streamingBufferRef.current.delete(msgId);
     rafHandleRef.current.delete(msgId);
     updateAgentMessages(agentId, prev => {
       const idx = prev.findIndex(m => m.id === msgId);
