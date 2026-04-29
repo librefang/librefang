@@ -5379,7 +5379,7 @@ fn cron_create_handles_missing_peer_id() {
     assert_eq!(peer_id, None);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     let kernel = boot_kernel_for_display_tests();
     let agent_id = register_test_agent(&kernel, "twin");
@@ -5433,7 +5433,7 @@ async fn injection_senders_two_sessions_one_agent_do_not_collide() {
     kernel.shutdown();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn injection_teardown_only_removes_target_session() {
     let kernel = boot_kernel_for_display_tests();
     let agent_id = register_test_agent(&kernel, "twin2");

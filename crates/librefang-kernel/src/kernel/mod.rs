@@ -567,10 +567,8 @@ pub struct LibreFangKernel {
     hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
     /// Per-(agent, session) mid-turn injection senders; keyed by session so concurrent
     /// sessions on the same agent each get their own channel.
-    pub(crate) injection_senders: dashmap::DashMap<
-        (AgentId, SessionId),
-        tokio::sync::mpsc::Sender<AgentLoopSignal>,
-    >,
+    pub(crate) injection_senders:
+        dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>>,
     /// Per-(agent, session) injection receivers, created alongside senders
     /// and consumed by the agent loop.
     injection_receivers: dashmap::DashMap<
@@ -8216,20 +8214,22 @@ system_prompt = "You are a helpful assistant."
         // Collect targets first so we don't hold any DashMap shard lock
         // across the `try_send` calls (which themselves can briefly block on
         // the per-channel internal lock).
-        let targets: Vec<((AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>)> =
-            if let Some(sid) = session_id {
-                self.injection_senders
-                    .get(&(agent_id, sid))
-                    .map(|entry| (*entry.key(), entry.value().clone()))
-                    .into_iter()
-                    .collect()
-            } else {
-                self.injection_senders
-                    .iter()
-                    .filter(|e| e.key().0 == agent_id)
-                    .map(|e| (*e.key(), e.value().clone()))
-                    .collect()
-            };
+        let targets: Vec<(
+            (AgentId, SessionId),
+            tokio::sync::mpsc::Sender<AgentLoopSignal>,
+        )> = if let Some(sid) = session_id {
+            self.injection_senders
+                .get(&(agent_id, sid))
+                .map(|entry| (*entry.key(), entry.value().clone()))
+                .into_iter()
+                .collect()
+        } else {
+            self.injection_senders
+                .iter()
+                .filter(|e| e.key().0 == agent_id)
+                .map(|e| (*e.key(), e.value().clone()))
+                .collect()
+        };
 
         if targets.is_empty() {
             return Ok(false);
