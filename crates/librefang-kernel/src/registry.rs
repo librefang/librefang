@@ -140,17 +140,7 @@ impl AgentRegistry {
         entries
     }
 
-    /// Project a peer-agents summary `(name, state_debug, model)` for the
-    /// per-LLM-turn system prompt without cloning a single `AgentEntry`.
-    ///
-    /// Sorted by name so the resulting prompt section is byte-identical
-    /// across runs (provider prompt-cache stability — see #3298).
-    ///
-    /// This is the cheapest path: only the three short strings the prompt
-    /// builder actually consumes are cloned out. With 50 agents that's
-    /// ~150 small string allocations per turn instead of 50 full
-    /// `AgentEntry`s (each with a fat `AgentManifest` of ~6 nested
-    /// `Vec`/`HashMap` allocations). See #3685.
+    /// Projects `(name, state_debug, model)` per agent, sorted by name for prompt-cache stability.
     pub fn peer_agents_summary(&self) -> Vec<(String, String, String)> {
         let mut entries: Vec<(String, String, String)> = self
             .agents
@@ -706,10 +696,6 @@ mod tests {
 
     #[test]
     fn test_peer_agents_summary_is_sorted_and_projects_three_fields() {
-        // Determinism contract for #3685 / #3298: the per-LLM-turn
-        // peer-agents projection must be sorted by name regardless of
-        // insertion order so the resulting prompt section is byte-stable
-        // across processes (provider prompt-cache friendly).
         let registry = AgentRegistry::new();
         registry.register(test_entry("zeta")).unwrap();
         registry.register(test_entry("alpha")).unwrap();
@@ -718,15 +704,9 @@ mod tests {
         let summary = registry.peer_agents_summary();
         let names: Vec<&str> = summary.iter().map(|(n, _, _)| n.as_str()).collect();
         assert_eq!(names, vec!["alpha", "mu", "zeta"]);
-        // Each entry projects exactly the (name, state-debug, model)
-        // tuple the prompt builder consumes — no extra fat from the
-        // underlying `AgentEntry`/`AgentManifest`.
         for (name, state_debug, model) in &summary {
             assert!(!name.is_empty());
             assert!(!state_debug.is_empty());
-            // Whatever the default model is, every entry projects the
-            // same field — the contract is "no panic, three short
-            // strings per entry".
             assert!(!model.is_empty());
         }
     }

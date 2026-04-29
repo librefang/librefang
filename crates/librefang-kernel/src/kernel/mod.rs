@@ -460,16 +460,7 @@ pub struct LibreFangKernel {
         Arc<dyn librefang_runtime::mcp_oauth::McpOAuthProvider + Send + Sync>,
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
-    /// Cached rendered MCP summary strings, keyed by the agent's
-    /// `mcp_servers` allowlist. Each entry stores the
-    /// `mcp_generation` it was rendered under so we cheaply detect
-    /// staleness on the next read.
-    ///
-    /// Lets the per-LLM-turn prompt build skip re-extracting tool
-    /// names under the `mcp_tools` `Mutex` and re-running the
-    /// `BTreeMap`-based render when nothing has changed since the
-    /// previous turn — the common case between rare MCP
-    /// connect/disconnect events. See #3687.
+    /// Rendered MCP summary cache keyed by allowlist + mcp_generation; skips Mutex + re-render on hit.
     pub(crate) mcp_summary_cache:
         dashmap::DashMap<String, (u64, std::sync::Arc<String>)>,
     /// A2A task store for tracking task lifecycle.
@@ -4609,10 +4600,6 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use peer_agents_summary() so the per-LLM-turn peer-agent
-            // snapshot projects directly to the three short strings the
-            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
-            // allocation. See #3685.
             let peer_agents: Vec<(String, String, String)> =
                 self.registry.peer_agents_summary();
 
@@ -5938,10 +5925,6 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use peer_agents_summary() so the per-LLM-turn peer-agent
-            // snapshot projects directly to the three short strings the
-            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
-            // allocation. See #3685.
             let peer_agents: Vec<(String, String, String)> =
                 self.registry.peer_agents_summary();
 
@@ -7491,10 +7474,6 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            // Use peer_agents_summary() so the per-LLM-turn peer-agent
-            // snapshot projects directly to the three short strings the
-            // prompt builder consumes, skipping every `AgentEntry`/`Arc`
-            // allocation. See #3685.
             let peer_agents: Vec<(String, String, String)> =
                 self.registry.peer_agents_summary();
 
@@ -13747,11 +13726,7 @@ system_prompt = "You are a helpful assistant."
             .cloned()
             .collect();
 
-        // 4. Update effective list. Bump mcp_generation so any cached
-        //    `build_mcp_summary` entries that read `effective_mcp_servers`
-        //    invalidate immediately, even before per-server connect bumps
-        //    fire below — otherwise the prompt could briefly show a stale
-        //    server set after a hot-reload. See #3687.
+        // 4. Update effective list; bump mcp_generation inside the same write lock so cached summaries invalidate atomically.
         if let Ok(mut effective) = self.effective_mcp_servers.write() {
             *effective = new_configs;
             self.mcp_generation
@@ -15283,22 +15258,7 @@ system_prompt = "You are a helpful assistant."
         summary
     }
 
-    /// Build a compact MCP server/tool summary for the system prompt so the
-    /// agent knows what external tool servers are connected.
-    ///
-    /// Hot-path (~1 LLM turn for any agent with MCP servers): we cache the
-    /// rendered string per allowlist + `mcp_generation`. On a hit we skip
-    /// the `mcp_tools` `Mutex` acquisition and the `BTreeMap`-based render
-    /// entirely — both of which used to run unconditionally on every turn
-    /// even though the MCP tool registry only changes on connect /
-    /// disconnect / reload (which all bump `mcp_generation`). See #3687.
-    ///
-    /// Determinism is preserved: `render_mcp_summary` already sorts servers
-    /// (`BTreeMap`) and each server's tool list before joining, so the
-    /// cached `String` is byte-identical to a freshly rendered one for the
-    /// same `(allowlist, generation)` pair. The cache key normalises the
-    /// allowlist by sorting + joining so different insertion orders share
-    /// a single entry, matching the determinism guarantee in #3298.
+    /// Build a compact MCP server/tool summary for the system prompt; caches per allowlist + mcp_generation to skip Mutex and re-render on hit.
     fn build_mcp_summary(&self, mcp_allowlist: &[String]) -> String {
         let mcp_gen = self
             .mcp_generation
@@ -15313,11 +15273,7 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Cache miss / stale: re-render. Extract only the names we need
-        // while holding the lock, then drop it immediately. Cloning the
-        // entire `Vec<ToolDefinition>` (which may hold 60KB+ of JSON
-        // schema values) under the Mutex was the original bug fixed in
-        // an earlier pass on this issue.
+        // Cache miss / stale: extract only names under the lock, then release before rendering.
         let tool_names: Vec<String> = match self.mcp_tools.lock() {
             Ok(t) => {
                 if t.is_empty() {
@@ -15429,13 +15385,7 @@ enum ReviewError {
     Permanent(String),
 }
 
-/// Build a deterministic cache key for the per-agent MCP allowlist.
-///
-/// The render output only depends on the *set* of allowed servers, so we
-/// sort + join with a separator that cannot appear inside an MCP server
-/// name (`\x1f`, ASCII Unit Separator). Two manifests with the same set
-/// of `mcp_servers` in different listed orders share one cache entry,
-/// preserving the determinism guarantee in #3298 / #3687.
+/// Build a deterministic cache key for the per-agent MCP allowlist; sorts and joins with `\x1f` so insertion-order variants share one entry.
 fn mcp_summary_cache_key(mcp_allowlist: &[String]) -> String {
     if mcp_allowlist.is_empty() {
         return String::from("*");

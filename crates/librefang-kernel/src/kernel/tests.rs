@@ -4750,12 +4750,6 @@ fn mcp_summary_inner_tool_list_is_sorted() {
 
 #[test]
 fn mcp_summary_cache_key_is_order_independent() {
-    // Determinism contract for the #3687 cache: two manifests listing
-    // the same `mcp_servers` set in different declaration orders must
-    // hash to the SAME cache entry, otherwise we'd silently double the
-    // cache footprint and (worse) double-render an identical string.
-    // This dovetails with #3298 — a sorted key here is the cache-side
-    // counterpart of the sorted `BTreeMap` inside `render_mcp_summary`.
     let order_a = vec![
         "filesystem".to_string(),
         "github".to_string(),
@@ -4770,10 +4764,8 @@ fn mcp_summary_cache_key_is_order_independent() {
     assert_eq!(
         super::mcp_summary_cache_key(&order_a),
         super::mcp_summary_cache_key(&order_b),
-        "cache key must be insertion-order-independent (#3687 / #3298)"
+        "cache key must be insertion-order-independent"
     );
-    // Empty allowlist (= "all servers") gets its own well-known key
-    // so it never collides with a server literally named "*".
     assert_eq!(super::mcp_summary_cache_key(&[]), "*");
 }
 
