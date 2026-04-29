@@ -809,7 +809,7 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 async fn read_response_bytes_capped(mut response: reqwest::Response) -> Result<Vec<u8>, String> {
     // Fast-path: reject via Content-Length before reading a single byte.
     if let Some(content_length) = response.content_length() {
-        if content_length as usize > MAX_RESPONSE_BYTES {
+        if content_length > MAX_RESPONSE_BYTES as u64 {
             return Err(format!(
                 "MCP response Content-Length ({content_length}) exceeds \
                  the {MAX_RESPONSE_BYTES}-byte cap — response rejected"
@@ -826,7 +826,7 @@ async fn read_response_bytes_capped(mut response: reqwest::Response) -> Result<V
         // Pre-allocate when Content-Length is honest; clamp to avoid a
         // malicious large hint forcing the allocation we're trying to
         // avoid.
-        let cap_hint = (hint as usize).min(MAX_RESPONSE_BYTES);
+        let cap_hint = hint.min(MAX_RESPONSE_BYTES as u64) as usize;
         buf.reserve(cap_hint);
     }
     loop {
