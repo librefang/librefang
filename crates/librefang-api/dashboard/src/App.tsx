@@ -889,6 +889,13 @@ export function App() {
     ];
   }, [t, terminalEnabled]);
 
+  const currentPageLabel = useMemo(() => {
+    const current = navGroups
+      .flatMap((group) => group.items)
+      .find((item) => item.to === location.pathname);
+    return current?.label ?? t("nav.overview", { defaultValue: "Overview" });
+  }, [location.pathname, navGroups, t]);
+
   // Until auth is confirmed, do NOT mount the shell — `<Outlet />` and
   // `<NotificationCenter />` both fire `useDashboardSnapshot` /
   // `useApprovalCount` (5s refetchInterval) the moment they render.
@@ -1055,7 +1062,12 @@ export function App() {
             a new stacking context. That traps our dropdown menus inside the
             header, where they get covered by KPI cards / chart bars rendered
             in the page below. Solid `bg-surface` is fine. */}
-        <header className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-4">
+        <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-4">
+          <div className="pointer-events-none absolute inset-x-0 top-0 hidden h-12 items-center justify-center lg:flex">
+            <span className="font-mono text-[11px] text-text-dim">
+              librefang · {currentPageLabel}
+            </span>
+          </div>
           <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -1076,15 +1088,32 @@ export function App() {
               </div>
               <strong className="text-[13px] font-semibold tracking-tight">librefang</strong>
             </div>
-            {/* Desktop: hostname / page hint */}
+            {/* Desktop: design-style breadcrumb. */}
             <div className="hidden lg:flex items-center gap-2 text-text-dim min-w-0">
-              {hostname && (
-                <span className="font-mono text-[11px] truncate">{hostname}</span>
-              )}
+              <span className="font-mono text-[11px] truncate">prod</span>
+              <ChevronRight className="h-3 w-3 text-text-dim/60" />
+              <span className="text-sm font-semibold text-text-main truncate">{currentPageLabel}</span>
             </div>
           </div>
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPaletteOpen(true)}
+              className="hidden sm:flex h-8 w-8 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+              title={t("common.search", { defaultValue: "Search" })}
+              aria-label={t("common.search", { defaultValue: "Search" })}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
             <NotificationCenter />
+            {terminalEnabled ? (
+              <Link
+                to="/terminal"
+                className="hidden sm:inline-flex h-8 items-center gap-1.5 rounded-md border border-border-subtle bg-surface-hover/70 px-2.5 text-xs font-semibold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Console</span>
+              </Link>
+            ) : null}
             {/* Avatar button — top-right pattern from the design canvas
                 (`shell.jsx::TopBar`, "user-menu" variant). Visible on every
                 breakpoint so the menu is always one click away from the
