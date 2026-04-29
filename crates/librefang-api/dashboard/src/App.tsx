@@ -605,6 +605,24 @@ export function App() {
     },
   ]; }, [t, terminalEnabled]);
 
+  // Until auth is confirmed, do NOT mount the shell — `<Outlet />` and
+  // `<NotificationCenter />` both fire `useDashboardSnapshot` /
+  // `useApprovalCount` (5s refetchInterval) the moment they render.
+  // Those endpoints sit behind the auth gate, so polling them before the
+  // user logs in (or after a token expiry) produces an endless 401 storm
+  // in server logs.  Render only the AuthDialog here, then fall through
+  // to the full layout once authentication is established.
+  if (!isNoAuthRoute && authChecked && authNeeded) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-main text-slate-900 dark:text-slate-100">
+        <AuthDialog
+          mode={authMode}
+          onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
       <a
@@ -860,9 +878,6 @@ export function App() {
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
       {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} />}
-      {authChecked && authNeeded && !isNoAuthRoute && (
-        <AuthDialog mode={authMode} onAuthenticated={() => { setAuthNeeded(false); window.location.hash = "#/overview"; }} />
-      )}
     </div>
   );
 }
