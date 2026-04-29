@@ -5835,29 +5835,14 @@ system_prompt = "You are a helpful assistant."
             );
         }
 
-        // Check if auto-compaction is needed: message-count OR token-count trigger
-        let needs_compact = {
-            use librefang_runtime::compactor::{
-                estimate_token_count, needs_compaction as check_compact,
-                needs_compaction_by_tokens, CompactionConfig,
-            };
-            let config = CompactionConfig::from_toml(&cfg.compaction);
-            let by_messages = check_compact(&session, &config);
-            let estimated = estimate_token_count(
-                &session.messages,
-                Some(&entry.manifest.model.system_prompt),
-                None,
-            );
-            let by_tokens = needs_compaction_by_tokens(estimated, &config);
-            if by_tokens && !by_messages {
-                info!(
-                    agent_id = %agent_id,
-                    estimated_tokens = estimated,
-                    messages = session.messages.len(),
-                    "Token-based compaction triggered (messages below threshold but tokens above)"
-                );
-            }
-            by_messages || by_tokens
+        // Snapshot the compaction config so the spawned task can recompute the
+        // `needs_compact` flag *after* reloading the session under the lock.
+        // Computing it here on the pre-lock snapshot would make it stale: a
+        // concurrent turn that committed history while we were waiting for
+        // the lock could push us across (or back below) the threshold.
+        let compaction_config_snapshot = {
+            use librefang_runtime::compactor::CompactionConfig;
+            CompactionConfig::from_toml(&cfg.compaction)
         };
 
         let tools = self.available_tools(agent_id);
@@ -6187,6 +6172,35 @@ system_prompt = "You are a helpful assistant."
                     );
                 }
             }
+
+            // Recompute `needs_compact` against the freshly-reloaded session.
+            // Computing it on the pre-lock snapshot was racy: a concurrent
+            // turn that wrote history while we were queued on `session_lock`
+            // could have pushed us across (or back below) the threshold,
+            // causing this turn to either skip a compact that is now due or
+            // re-compact a session another turn just compacted.
+            let needs_compact = {
+                use librefang_runtime::compactor::{
+                    estimate_token_count, needs_compaction as check_compact,
+                    needs_compaction_by_tokens,
+                };
+                let by_messages = check_compact(&session, &compaction_config_snapshot);
+                let estimated = estimate_token_count(
+                    &session.messages,
+                    Some(&manifest.model.system_prompt),
+                    None,
+                );
+                let by_tokens = needs_compaction_by_tokens(estimated, &compaction_config_snapshot);
+                if by_tokens && !by_messages {
+                    info!(
+                        agent_id = %agent_id,
+                        estimated_tokens = estimated,
+                        messages = session.messages.len(),
+                        "Token-based compaction triggered (messages below threshold but tokens above)"
+                    );
+                }
+                by_messages || by_tokens
+            };
 
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on

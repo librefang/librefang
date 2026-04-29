@@ -1122,7 +1122,7 @@ fn handle_mid_turn_signal(
         "Mid-turn signal injected — interrupting tool execution"
     );
     let injected_text = match signal {
-        AgentLoopSignal::Message { content } => content,
+        AgentLoopSignal::Message { content } => Some(content),
         AgentLoopSignal::ApprovalResolved {
             tool_use_id,
             tool_name,
@@ -1131,7 +1131,7 @@ fn handle_mid_turn_signal(
             result_is_error,
             result_status,
         } => {
-            apply_approval_resolution_signal(
+            let matched = apply_approval_resolution_signal(
                 session,
                 messages.as_mut_slice(),
                 &tool_use_id,
@@ -1139,16 +1139,35 @@ fn handle_mid_turn_signal(
                 result_is_error,
                 result_status,
             );
-            let result_preview = librefang_types::truncate_str(&result_content, 300);
-            format!(
-                "[System] Tool '{}' approval resolved ({}). Result: {}",
-                tool_name, decision, result_preview
-            )
+            if matched {
+                let result_preview = librefang_types::truncate_str(&result_content, 300);
+                Some(format!(
+                    "[System] Tool '{}' approval resolved ({}). Result: {}",
+                    tool_name, decision, result_preview
+                ))
+            } else {
+                // The kernel fans approval resolutions to every live session
+                // for the agent (because `DeferredToolExecution` carries no
+                // session id — see `LibreFangKernel::notify_agent_of_resolution`).
+                // When this session does not own the resolved `tool_use_id`,
+                // the broadcast is for someone else; consume it silently
+                // instead of polluting our history with a stray `[System]
+                // Tool '…' approval resolved` user message that references
+                // a tool this session never invoked.
+                debug!(
+                    agent = %manifest_name,
+                    tool_use_id = %tool_use_id,
+                    "Ignoring broadcast approval resolution for unknown tool_use_id (different session)"
+                );
+                None
+            }
         }
     };
-    let inject_msg = Message::user(&injected_text);
-    session.messages.push(inject_msg.clone());
-    messages.push(inject_msg);
+    if let Some(text) = injected_text {
+        let inject_msg = Message::user(&text);
+        session.messages.push(inject_msg.clone());
+        messages.push(inject_msg);
+    }
     Some(flushed_outcomes)
 }
 
@@ -1227,6 +1246,16 @@ fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) ->
     }
 }
 
+/// Patches the matching `WaitingApproval` ToolResult block(s) in `session.messages`
+/// and the in-flight `messages` slice with the resolved decision.
+///
+/// Returns `true` when at least one matching block was patched. Callers rely on
+/// this flag to suppress the user-facing `[System] Tool '…' approval resolved`
+/// notice when the signal was a broadcast intended for a different live
+/// session that happens to share the same agent (the kernel fans approval
+/// resolutions to every `(agent, *)` injection channel because
+/// `DeferredToolExecution` does not currently carry a session id — see
+/// `LibreFangKernel::notify_agent_of_resolution`).
 fn apply_approval_resolution_signal(
     session: &mut Session,
     messages: &mut [Message],
@@ -1234,7 +1263,7 @@ fn apply_approval_resolution_signal(
     result_content: &str,
     result_is_error: bool,
     result_status: librefang_types::tool::ToolExecutionStatus,
-) {
+) -> bool {
     fn patch_message_blocks(
         msg: &mut Message,
         tool_use_id: &str,
@@ -1269,6 +1298,7 @@ fn apply_approval_resolution_signal(
         false
     }
 
+    let mut matched = false;
     for msg in session.messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1277,6 +1307,7 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
+            matched = true;
             break;
         }
     }
@@ -1288,9 +1319,11 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
+            matched = true;
             break;
         }
     }
+    matched
 }
 
 /// Strip images from all messages except the last user message.
