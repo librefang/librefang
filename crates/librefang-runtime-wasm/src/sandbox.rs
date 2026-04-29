@@ -950,10 +950,7 @@ mod tests {
             "lossy decode must keep the valid prefix instead of falling \
              back to the strict sentinel"
         );
-        assert!(
-            lossy.contains('中'),
-            "valid prefix codepoints must survive"
-        );
+        assert!(lossy.contains('中'), "valid prefix codepoints must survive");
         assert!(
             lossy.contains('\u{FFFD}'),
             "the partial trailing codepoint must surface as U+FFFD"
