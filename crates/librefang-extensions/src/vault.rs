@@ -747,11 +747,50 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
                 .map_err(|e| format!("cipher init: {e}"))?;
             let nonce = Nonce::from_slice(&nonce_bytes);
-            let plaintext = cipher
-                .decrypt(nonce, ciphertext.as_slice())
-                .map_err(|e| format!("decrypt: {e}"))?;
-            let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
-            return Ok(Zeroizing::new(key_str));
+            match cipher.decrypt(nonce, ciphertext.as_slice()) {
+                Ok(plaintext) => {
+                    let key_str =
+                        String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    return Ok(Zeroizing::new(key_str));
+                }
+                Err(_) => {
+                    // #3634 backwards-compat: a vault written before the
+                    // os-machine-id mix-in landed used the legacy username+
+                    // hostname derivation. Try it once; on success we re-wrap
+                    // with the new derivation so the upgrade is one-shot.
+                    debug!(
+                        "v2 keyring decrypt failed with current fingerprint; \
+                         retrying with legacy username+hostname derivation \
+                         for one-shot migration"
+                    );
+                    let legacy_id = legacy_predictable_fingerprint();
+                    let legacy_key = derive_wrapping_key(&legacy_id, &salt)
+                        .map_err(|e| format!("kdf legacy: {e}"))?;
+                    let legacy_cipher = Aes256Gcm::new_from_slice(legacy_key.as_ref())
+                        .map_err(|e| format!("cipher init legacy: {e}"))?;
+                    let plaintext = legacy_cipher
+                        .decrypt(nonce, ciphertext.as_slice())
+                        .map_err(|e| format!("decrypt: {e}"))?;
+                    let key_str =
+                        String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    // Re-wrap with the new fingerprint to migrate this vault
+                    // off the recoverable derivation. Best-effort: a write
+                    // failure leaves the vault on legacy derivation, which is
+                    // no worse than before.
+                    if let Err(e) = store_keyring_key(&key_str) {
+                        warn!(
+                            "Decrypted v2 keyring with legacy derivation but \
+                             could not re-wrap with new derivation: {e}"
+                        );
+                    } else {
+                        info!(
+                            "Migrated v2 keyring wrap-key from legacy \
+                             username+hostname to OS-machine-id derivation (#3634)"
+                        );
+                    }
+                    return Ok(Zeroizing::new(key_str));
+                }
+            }
         }
 
         // Legacy v1 fallback: XOR-obfuscated format (base64-encoded XOR blob).
@@ -915,11 +954,51 @@ fn machine_fingerprint() -> Vec<u8> {
 }
 
 /// Predictable fallback derivation used when no random machine-id can be
-/// persisted.  Same security level as the pre-#3944 code; documented so
-/// operators know that on this path the vault is only as secret as the
-/// hostname + username.
+/// persisted. #3634: the original derivation used only `SHA256(username ||
+/// hostname)`, which a local attacker recovers offline by reading `whoami`
+/// and `hostname`. We now mix in an OS-provided machine-unique identifier
+/// (`/etc/machine-id` on Linux, ioreg / WMI on macOS / Windows) so the
+/// fingerprint cannot be reconstructed from public-facing fields alone.
+/// On systems where none of the OS sources are readable we still fall back
+/// to username+hostname and emit a warning — that path is no worse than the
+/// pre-#3634 baseline, but operators should set `LIBREFANG_VAULT_KEY`.
 #[cfg(not(test))]
 fn predictable_machine_fingerprint() -> Vec<u8> {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    let mut had_os_secret = false;
+    for secret in os_machine_secrets() {
+        if !secret.is_empty() {
+            hasher.update(b"os-secret:");
+            hasher.update(&secret);
+            had_os_secret = true;
+        }
+    }
+    if !had_os_secret {
+        warn!(
+            "No OS machine-id source available — keyring fallback wrap-key \
+             will be derived from hostname+username only. Set \
+             LIBREFANG_VAULT_KEY for a secure alternative."
+        );
+    }
+    if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
+        hasher.update(b"user:");
+        hasher.update(user.as_bytes());
+    }
+    if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+        hasher.update(b"host:");
+        hasher.update(host.as_bytes());
+    }
+    hasher.update(b"librefang-vault-v2");
+    hasher.finalize().to_vec()
+}
+
+/// Pre-#3634 derivation: SHA256(user || host || tag). Kept ONLY so that vaults
+/// written before the OS-machine-id mix-in can still be decrypted on first
+/// load and then re-wrapped with the new derivation. Never used for new
+/// stores.
+#[cfg(not(test))]
+fn legacy_predictable_fingerprint() -> Vec<u8> {
     use sha2::Digest;
     let mut hasher = Sha256::new();
     if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
@@ -930,6 +1009,79 @@ fn predictable_machine_fingerprint() -> Vec<u8> {
     }
     hasher.update(b"librefang-vault-v1");
     hasher.finalize().to_vec()
+}
+
+/// Collect OS-provided machine-unique identifiers. Returns the first non-empty
+/// readable source per platform; multiple are tried so a missing file on one
+/// distro/kernel doesn't fail closed. None of these are secrets at the OS
+/// level, but they are not derivable from `whoami`/`hostname` and require
+/// local-read access to the host.
+#[cfg(not(test))]
+fn os_machine_secrets() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    #[cfg(target_os = "linux")]
+    {
+        for path in &["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    out.push(trimmed.as_bytes().to_vec());
+                    break;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(idx) = line.find("IOPlatformUUID") {
+                        if let Some(eq) = line[idx..].find('=') {
+                            let v = line[idx + eq + 1..].trim().trim_matches('"');
+                            if !v.is_empty() {
+                                out.push(v.as_bytes().to_vec());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // MachineGuid lives under HKLM\SOFTWARE\Microsoft\Cryptography. Read
+        // via `reg query` to avoid pulling in a winreg dependency just for
+        // the fallback path.
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                "HKLM\\SOFTWARE\\Microsoft\\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(idx) = line.find("REG_SZ") {
+                        let v = line[idx + "REG_SZ".len()..].trim();
+                        if !v.is_empty() {
+                            out.push(v.as_bytes().to_vec());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Derive a 256-bit wrapping key from a machine fingerprint + salt using Argon2id.

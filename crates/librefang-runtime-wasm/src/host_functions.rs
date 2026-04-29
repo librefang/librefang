@@ -1532,4 +1532,57 @@ mod tests {
             "traversal path must be rejected; got: {err}"
         );
     }
+
+    /// Regression for #3457: a guest with a narrow workspace FileRead grant
+    /// must not be able to escape via a symlink that lives inside the
+    /// workspace but points outside it. The capability check must see the
+    /// canonicalized target, not the raw symlink path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fs_read_symlink_escape_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        // External target the symlink will point at.
+        let outside = tmp.path().join("outside.secret");
+        std::fs::write(&outside, b"secret").unwrap();
+        // Plant the symlink inside the (fake) workspace.
+        let escape = workspace.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        // Grant only the workspace prefix.
+        let grant = format!("{}/*", workspace.to_string_lossy());
+        let state = test_state(vec![Capability::FileRead(grant)]);
+        let result = host_fs_read(&state, &json!({"path": escape.to_str().unwrap()}));
+        let err = result["error"]
+            .as_str()
+            .expect("symlink-escape read must fail");
+        assert!(
+            err.contains("denied") || err.contains("Capability"),
+            "symlink-escape must be capability-denied, got: {err}"
+        );
+    }
+
+    /// Regression for #3457 (fs_list variant): same escape via symlink-dir
+    /// must be capability-denied for directory listings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fs_list_symlink_escape_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        let escape = workspace.join("escape_dir");
+        std::os::unix::fs::symlink(&outside_dir, &escape).unwrap();
+        let grant = format!("{}/*", workspace.to_string_lossy());
+        let state = test_state(vec![Capability::FileRead(grant)]);
+        let result = host_fs_list(&state, &json!({"path": escape.to_str().unwrap()}));
+        let err = result["error"]
+            .as_str()
+            .expect("symlink-escape list must fail");
+        assert!(
+            err.contains("denied") || err.contains("Capability"),
+            "symlink-escape must be capability-denied, got: {err}"
+        );
+    }
 }
