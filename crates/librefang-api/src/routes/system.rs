@@ -2495,7 +2495,11 @@ pub async fn totp_setup(
     let already_confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
 
     if already_confirmed {
-        if state.kernel.approvals().is_totp_locked_out(SETUP_LOCKOUT_KEY) {
+        if state
+            .kernel
+            .approvals()
+            .is_totp_locked_out(SETUP_LOCKOUT_KEY)
+        {
             return ApiErrorResponse::bad_request(
                 "Too many failed TOTP attempts. Try again later.",
             )

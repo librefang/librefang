@@ -155,11 +155,9 @@ fn verify_signed_state(
     let mut mac = HmacSha256::new_from_slice(state_signing_key()).expect("HMAC accepts any key");
     mac.update(payload_b64.as_bytes());
     let expected_sig = mac.finalize().into_bytes();
-    let provided_sig = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        sig_b64,
-    )
-    .map_err(|_| "bad sig encoding")?;
+    let provided_sig =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_b64)
+            .map_err(|_| "bad sig encoding")?;
     if expected_sig.len() != provided_sig.len()
         || !bool::from(expected_sig.as_slice().ct_eq(&provided_sig))
     {
