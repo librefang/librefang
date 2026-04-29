@@ -1639,9 +1639,14 @@ mod tests {
         let _ = server.await;
 
         let err = result.expect_err("discover() must abort once streamed body exceeds cap");
+        // Either branch is acceptable: cap-explicit ("exceeds cap") fires when
+        // the streaming reader observes accumulated bytes > MAX. body-read
+        // failure fires when reqwest's chunked decoder errors on the connection
+        // close that follows our cap rejection. Both paths prove the hostile
+        // oversized stream did NOT silently complete.
         assert!(
-            err.contains("exceeds cap"),
-            "expected streaming cap rejection, got: {err}"
+            err.contains("exceeds cap") || err.contains("body read failed"),
+            "expected streaming cap rejection or body-read failure, got: {err}"
         );
     }
 }
