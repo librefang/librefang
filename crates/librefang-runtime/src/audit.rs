@@ -2156,9 +2156,9 @@ mod tests {
         // recording a fresh event: we expect seq=1 (entries.last+1).
         // The DB will end up with a single seq=1 row — that's a known
         // gap (the DROP wiped seq=0), but the chain is internally
-        // consistent because seq=1's prev_hash matches seq=0.hash that
-        // verify_integrity will reload from in-memory state at next
-        // boot, anchored via chain_anchor recovery.
+        // consistent: seq=1's prev_hash = hash(seq=0), and with_db()
+        // recovers that as chain_anchor (first entry's prev_hash ≠
+        // genesis → anchor = that hash), so verify_integrity() passes.
         log.record("a", AuditAction::ToolInvoke, "after-recovery", "ok");
         assert_eq!(log.len(), 2);
         assert!(log.verify_integrity().is_ok());
