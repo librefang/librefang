@@ -1879,7 +1879,22 @@ pub async fn approve_request(
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
+                        // Fail-secure on lockout-counter persist failure
+                        // (#3372): if the DB write drops we cannot enforce
+                        // brute-force caps across restarts, so reject 5xx
+                        // rather than silently allow further attempts.
+                        if state
+                            .kernel
+                            .approvals()
+                            .record_totp_failure("api_admin")
+                            .is_err()
+                        {
+                            return ApiErrorResponse::internal(
+                                "Failed to persist TOTP failure counter",
+                            )
+                            .into_json_tuple()
+                            .into_response();
+                        }
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -1892,8 +1907,28 @@ pub async fn approve_request(
                         &totp_issuer,
                     ) {
                         Ok(true) => {
-                            // Mark this code as used to prevent replay within the window.
-                            state.kernel.approvals().record_totp_code_used(code);
+                            // SECURITY (#3360): Bind the consumed code to the
+                            // approval id it authorized. The replay window is
+                            // still global (`is_totp_code_used` keys on the
+                            // hash alone) so the code is single-use across
+                            // all actions; the binding only documents *which*
+                            // action used it for post-incident audit.
+                            state
+                                .kernel
+                                .approvals()
+                                .record_totp_code_used_for(code, Some(&format!("approval:{uuid}")));
+                            // Audit trail: write the binding alongside the
+                            // approval resolution so an auditor can correlate
+                            // (totp_code_hash, approval_uuid) without joining
+                            // tables.
+                            state.kernel.audit().record_with_context(
+                                "system",
+                                librefang_runtime::audit::AuditAction::AuthAttempt,
+                                format!("totp_used_for_approval:{uuid}"),
+                                "totp_verified",
+                                None,
+                                Some("api".to_string()),
+                            );
                             true
                         }
                         Ok(false) => {
@@ -2524,10 +2559,18 @@ pub async fn totp_setup(
                 } else {
                     // TOTP code — check replay before verifying (#3359).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state
+                        // Fail-secure on counter persist failure (#3372).
+                        if state
                             .kernel
                             .approvals()
-                            .record_totp_failure(SETUP_LOCKOUT_KEY);
+                            .record_totp_failure(SETUP_LOCKOUT_KEY)
+                            .is_err()
+                        {
+                            return ApiErrorResponse::internal(
+                                "Failed to persist TOTP failure counter",
+                            )
+                            .into_json_tuple();
+                        }
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2659,7 +2702,16 @@ pub async fn totp_confirm(
 
     // Replay-prevention check (#3359): reject a code already used in the last 60 s.
     if state.kernel.approvals().is_totp_code_used(&body.code) {
-        let _ = state.kernel.approvals().record_totp_failure("api_admin");
+        // Fail-secure on counter persist failure (#3372).
+        if state
+            .kernel
+            .approvals()
+            .record_totp_failure("api_admin")
+            .is_err()
+        {
+            return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                .into_json_tuple();
+        }
         return ApiErrorResponse::bad_request(
             "TOTP code has already been used. Wait for the next 30-second window.",
         )

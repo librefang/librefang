@@ -1920,6 +1920,33 @@ pub async fn config_set(
         );
     }
 
+    // SECURITY (#3458): Restrict /api/config/set to a curated allowlist of
+    // user-tunable config paths. Without this gate any caller authorized to
+    // change config (Owner role, post-auth) can clobber structured tables
+    // (e.g. overwrite `[channels]` with a string), corrupt nested credentials
+    // (`default_model.api_key`), or flip security-critical flags
+    // (`auth.bypass = true` style). The allowlist deliberately excludes:
+    //   - auth/credentials/api_key/users     (account takeover)
+    //   - default_model / providers / *.api_key  (silent provider hijack)
+    //   - approval / second_factor / totp_*  (2FA bypass)
+    //   - migration_state / schema_version   (DB corruption)
+    //   - network / shared_secret / cors_*   (federation hijack)
+    // Operators who genuinely need those paths must edit `config.toml` on
+    // disk — that path keeps an audit trail (file mtime, git, etc.) and
+    // requires shell access, raising the bar above a leaked API key.
+    if !is_writable_config_path(&path) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "config path '{path}' is not user-tunable via /api/config/set; \
+                     edit ~/.librefang/config.toml directly to change it"
+                )
+            })),
+        );
+    }
+
     let config_path = state.kernel.home_dir().join("config.toml");
     // Block path-traversal (`..`) but allow Windows drive-letter prefixes
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
@@ -2130,6 +2157,79 @@ pub async fn config_set(
         body["reload_error"] = serde_json::Value::String(err);
     }
     (StatusCode::OK, Json(body))
+}
+
+/// Allowlist of user-tunable config paths writable via POST /api/config/set
+/// (#3458). Anything not in this list MUST be edited on disk.
+///
+/// Each entry is matched against the dot-separated path the caller supplies.
+/// Trailing `.*` wildcards permit any single key under a section (used for
+/// per-channel toggles like `channels.telegram.enabled`).
+fn is_writable_config_path(path: &str) -> bool {
+    // Exact-match list — single user-tunable scalars.
+    const EXACT: &[&str] = &[
+        // UI / locale (no security impact).
+        "ui.theme",
+        "ui.locale",
+        "ui.timezone",
+        "ui.language",
+        "log_level",
+        // History trim cap (gotcha bound by MIN_HISTORY_MESSAGES on reload).
+        "max_history_messages",
+        // Approval policy display knobs (NOT the second_factor enforcement
+        // mode, NOT totp_* — those would let an Owner-role attacker silently
+        // turn off 2FA after an API-key leak).
+        "approval.auto_approve_autonomous",
+        "approval.auto_approve",
+        "approval.totp_grace_period_secs",
+    ];
+    if EXACT.iter().any(|p| *p == path) {
+        return true;
+    }
+
+    // Section prefixes — any leaf under these prefixes is allowed. The
+    // section itself is NOT writable as a whole (would clobber the table),
+    // because validate_config_key_path requires the path to have a leaf.
+    const SECTION_PREFIXES: &[&str] = &[
+        // Per-channel enable/feature toggles. Excludes `*.token` /
+        // `*.shared_secret` because those keys are scrubbed below.
+        "channels.",
+        // Web search / fetch knobs (URLs and timeouts).
+        "web.",
+        // Rate-limit display knobs.
+        "rate_limit.",
+        // Queue / concurrency tuning.
+        "queue.",
+    ];
+    let in_section = SECTION_PREFIXES.iter().any(|pfx| {
+        path.starts_with(pfx) && path.len() > pfx.len() && !path[pfx.len()..].contains('.')
+            // Allow a single nested level too (e.g. "channels.telegram.enabled")
+            || path.starts_with(pfx) && {
+                let rest = &path[pfx.len()..];
+                rest.split('.').count() == 2
+            }
+    });
+    if !in_section {
+        return false;
+    }
+
+    // Within an allowed section, refuse keys that obviously carry secrets or
+    // override security-critical knobs even if the operator points us at one
+    // of the curated sections by name.
+    const SCRUB_SUFFIXES: &[&str] = &[
+        ".api_key",
+        ".token",
+        ".secret",
+        ".shared_secret",
+        ".password",
+        ".bypass",
+        ".admin",
+        ".owner",
+    ];
+    if SCRUB_SUFFIXES.iter().any(|s| path.ends_with(s)) {
+        return false;
+    }
+    true
 }
 
 /// Convert a serde_json::Value to a toml_edit::Value (format-preserving).
@@ -2578,6 +2678,42 @@ url = "https://search.example.com"
         let cfg: KernelConfig = toml::from_str(toml_src)
             .expect("init-template layout + appended [web.searxng] must parse (issue #4016)");
         assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_3458_writable_path_allowlist() {
+        // User-tunable scalars are accepted.
+        assert!(super::is_writable_config_path("ui.theme"));
+        assert!(super::is_writable_config_path("ui.locale"));
+        assert!(super::is_writable_config_path("max_history_messages"));
+        assert!(super::is_writable_config_path("log_level"));
+        assert!(super::is_writable_config_path("approval.auto_approve"));
+        assert!(super::is_writable_config_path(
+            "approval.totp_grace_period_secs"
+        ));
+
+        // Sectioned tunables — single leaf and one nested level both allowed.
+        assert!(super::is_writable_config_path("web.search_provider"));
+        assert!(super::is_writable_config_path("rate_limit.max_ws_per_ip"));
+        assert!(super::is_writable_config_path("channels.telegram.enabled"));
+
+        // Account / credential paths MUST be rejected.
+        assert!(!super::is_writable_config_path("default_model.api_key"));
+        assert!(!super::is_writable_config_path("api_key"));
+        assert!(!super::is_writable_config_path("users.alice.role"));
+        assert!(!super::is_writable_config_path("auth.bypass"));
+        assert!(!super::is_writable_config_path("approval.second_factor"));
+
+        // Secret-suffix scrub catches accidentally-exposed leaves inside
+        // an otherwise-allowed section.
+        assert!(!super::is_writable_config_path("channels.telegram.token"));
+        assert!(!super::is_writable_config_path("web.searxng.api_key"));
+        assert!(!super::is_writable_config_path("queue.shared_secret"));
+
+        // Unknown sections fall through to deny by default.
+        assert!(!super::is_writable_config_path("network.shared_secret"));
+        assert!(!super::is_writable_config_path("migration_state"));
+        assert!(!super::is_writable_config_path("nonsense.key"));
     }
 
     #[test]

@@ -877,15 +877,9 @@ export function buildAuthenticatedWebSocket(path: string): {
   return { url, protocols };
 }
 
-/**
- * @deprecated Use `buildAuthenticatedWebSocket()` to avoid leaking the token
- * via the URL. This shim returns the URL without the token; callers must
- * supply the bearer protocol separately.
- */
-export function buildAuthenticatedWebSocketUrl(path: string): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}${path}`;
-}
+// Removed in #3610 cleanup: `buildAuthenticatedWebSocketUrl` deprecated shim.
+// All in-tree callers migrated to `buildAuthenticatedWebSocket`, which uses
+// the `bearer.<token>` sub-protocol so the credential never enters the URL.
 
 async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)

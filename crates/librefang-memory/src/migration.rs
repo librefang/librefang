@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 30;
+const SCHEMA_VERSION: u32 = 31;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -69,6 +69,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(28, migrate_v28);
     run_step!(29, migrate_v29);
     run_step!(30, migrate_v30);
+    run_step!(31, migrate_v31);
 
     Ok(())
 }
@@ -923,6 +924,24 @@ fn migrate_v30(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 31: Bind TOTP used codes to the action they authorized (#3360).
+///
+/// Adds a nullable `bound_to` column on `totp_used_codes` so an auditor can
+/// prove which action a given TOTP code authorized (e.g.
+/// `"approval:<uuid>"`). Replay detection itself is unchanged — it still
+/// keys on `code_hash` so a code is single-use across all actions.
+fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "totp_used_codes", "bound_to") {
+        conn.execute_batch("ALTER TABLE totp_used_codes ADD COLUMN bound_to TEXT;")?;
+    }
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (31, datetime('now'), 'Bind totp_used_codes to the action they authorized (#3360)')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1161,5 +1180,29 @@ mod tests {
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap();
         assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+    }
+
+    /// Issue #3360: v31 adds the `bound_to` column on `totp_used_codes` so
+    /// each consumed TOTP code can be tied to the action it authorized.
+    #[test]
+    fn test_migrate_v31_adds_bound_to_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "totp_used_codes", "bound_to"));
+
+        // Inserting with an explicit binding works.
+        conn.execute(
+            "INSERT INTO totp_used_codes (code_hash, used_at, bound_to) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["deadbeef", 2_000_i64, "approval:abc"],
+        )
+        .unwrap();
+        let bound: String = conn
+            .query_row(
+                "SELECT bound_to FROM totp_used_codes WHERE code_hash = 'deadbeef'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, "approval:abc");
     }
 }
