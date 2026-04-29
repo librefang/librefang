@@ -18518,11 +18518,7 @@ impl LibreFangKernel {
         }
     }
 
-    /// Notify the running agent loop about an approval resolution via an explicit
-    /// mid-turn signal.
-    ///
-    /// `DeferredToolExecution` carries no session id, so the signal fans out to every
-    /// live session; only the one holding the matching `tool_use_id` will act on it.
+    /// Notify the running agent loop about an approval resolution via an explicit mid-turn signal.
     fn notify_agent_of_resolution(
         &self,
         agent_id: &AgentId,

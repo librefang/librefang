@@ -1146,14 +1146,7 @@ fn handle_mid_turn_signal(
                     tool_name, decision, result_preview
                 ))
             } else {
-                // The kernel fans approval resolutions to every live session
-                // for the agent (because `DeferredToolExecution` carries no
-                // session id — see `LibreFangKernel::notify_agent_of_resolution`).
-                // When this session does not own the resolved `tool_use_id`,
-                // the broadcast is for someone else; consume it silently
-                // instead of polluting our history with a stray `[System]
-                // Tool '…' approval resolved` user message that references
-                // a tool this session never invoked.
+                // Unknown tool_use_id means this approval broadcast was for a different live session; consume silently.
                 debug!(
                     agent = %manifest_name,
                     tool_use_id = %tool_use_id,
@@ -1246,16 +1239,7 @@ fn max_tokens_response_text(response: &crate::llm_driver::CompletionResponse) ->
     }
 }
 
-/// Patches the matching `WaitingApproval` ToolResult block(s) in `session.messages`
-/// and the in-flight `messages` slice with the resolved decision.
-///
-/// Returns `true` when at least one matching block was patched. Callers rely on
-/// this flag to suppress the user-facing `[System] Tool '…' approval resolved`
-/// notice when the signal was a broadcast intended for a different live
-/// session that happens to share the same agent (the kernel fans approval
-/// resolutions to every `(agent, *)` injection channel because
-/// `DeferredToolExecution` does not currently carry a session id — see
-/// `LibreFangKernel::notify_agent_of_resolution`).
+/// Patches `WaitingApproval` blocks in `session.messages` and the in-flight slice; returns `true` when at least one block was matched.
 fn apply_approval_resolution_signal(
     session: &mut Session,
     messages: &mut [Message],

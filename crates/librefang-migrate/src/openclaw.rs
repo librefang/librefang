@@ -4799,8 +4799,7 @@ mod tests {
         assert_eq!(dc_count, 1, "Duplicate DISCORD_BOT_TOKEN in secrets.env");
     }
 
-    /// When the marker is removed and a re-run is forced, user-edited files
-    /// must be backed up to `.bak.<timestamp>` siblings rather than overwritten.
+    /// Forced re-run (marker deleted) must back up user-edited files to `.bak.<timestamp>` siblings rather than overwriting them.
     #[test]
     fn test_rerun_backs_up_user_edits() {
         let source = TempDir::new().unwrap();
