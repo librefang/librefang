@@ -856,19 +856,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(agent_id)
     }
 
-    async fn get_agent_aliases(&self, agent_id: AgentId) -> Vec<String> {
+    async fn get_agent_group_trigger_patterns(&self, agent_id: AgentId) -> Vec<String> {
         self.kernel
             .agent_registry()
             .get(agent_id)
-            .map(|entry| {
-                // Collect aliases from channel_overrides.group_trigger_patterns
-                // which serve as the agent's known names/aliases in group chats.
+            .and_then(|entry| {
                 entry
                     .manifest
                     .channel_overrides
                     .as_ref()
                     .map(|ov| ov.group_trigger_patterns.clone())
-                    .unwrap_or_default()
             })
             .unwrap_or_default()
     }
