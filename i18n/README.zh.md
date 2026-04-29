@@ -144,7 +144,7 @@ xtask                       构建自动化
 
 ## 核心特性
 
-**57 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](https://docs.librefang.ai/integrations/channels)
+**45 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](https://docs.librefang.ai/integrations/channels)
 
 **28 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](https://docs.librefang.ai/configuration/providers)
 
