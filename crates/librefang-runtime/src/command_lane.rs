@@ -7,7 +7,7 @@
 //! - Subagent: spawned child agents (3 concurrent)
 //! - Trigger: event-trigger dispatches (8 concurrent)
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Semaphore;
 
 /// Command lane type.
@@ -48,45 +48,53 @@ pub struct LaneOccupancy {
     pub capacity: u32,
 }
 
+/// One lane's semaphore + the capacity that produced it.
+///
+/// Wrapped in an `Arc<RwLock<_>>` inside [`CommandQueue`] so a config
+/// reload can atomically swap in a fresh semaphore with the new
+/// capacity. In-flight permits remain valid against the **old**
+/// semaphore — they release into a slot that nobody else can acquire,
+/// which is fine: the slot just disappears once the last drains.
+#[derive(Debug)]
+struct LaneSlot {
+    sem: Arc<Semaphore>,
+    capacity: u32,
+}
+
 /// Command queue with lane-based concurrency control.
 #[derive(Debug, Clone)]
 pub struct CommandQueue {
-    main_sem: Arc<Semaphore>,
-    cron_sem: Arc<Semaphore>,
-    subagent_sem: Arc<Semaphore>,
-    trigger_sem: Arc<Semaphore>,
-    main_capacity: u32,
-    cron_capacity: u32,
-    subagent_capacity: u32,
-    trigger_capacity: u32,
+    main: Arc<RwLock<LaneSlot>>,
+    cron: Arc<RwLock<LaneSlot>>,
+    subagent: Arc<RwLock<LaneSlot>>,
+    trigger: Arc<RwLock<LaneSlot>>,
 }
 
 impl CommandQueue {
     /// Create a new command queue with default capacities.
     pub fn new() -> Self {
-        Self {
-            main_sem: Arc::new(Semaphore::new(3)),
-            cron_sem: Arc::new(Semaphore::new(2)),
-            subagent_sem: Arc::new(Semaphore::new(3)),
-            trigger_sem: Arc::new(Semaphore::new(8)),
-            main_capacity: 3,
-            cron_capacity: 2,
-            subagent_capacity: 3,
-            trigger_capacity: 8,
-        }
+        Self::with_capacities(3, 2, 3, 8)
     }
 
     /// Create with custom capacities.
     pub fn with_capacities(main: u32, cron: u32, subagent: u32, trigger: u32) -> Self {
         Self {
-            main_sem: Arc::new(Semaphore::new(main as usize)),
-            cron_sem: Arc::new(Semaphore::new(cron as usize)),
-            subagent_sem: Arc::new(Semaphore::new(subagent as usize)),
-            trigger_sem: Arc::new(Semaphore::new(trigger as usize)),
-            main_capacity: main,
-            cron_capacity: cron,
-            subagent_capacity: subagent,
-            trigger_capacity: trigger,
+            main: Arc::new(RwLock::new(LaneSlot {
+                sem: Arc::new(Semaphore::new(main as usize)),
+                capacity: main,
+            })),
+            cron: Arc::new(RwLock::new(LaneSlot {
+                sem: Arc::new(Semaphore::new(cron as usize)),
+                capacity: cron,
+            })),
+            subagent: Arc::new(RwLock::new(LaneSlot {
+                sem: Arc::new(Semaphore::new(subagent as usize)),
+                capacity: subagent,
+            })),
+            trigger: Arc::new(RwLock::new(LaneSlot {
+                sem: Arc::new(Semaphore::new(trigger as usize)),
+                capacity: trigger,
+            })),
         }
     }
 
@@ -95,7 +103,25 @@ impl CommandQueue {
     /// detached `tokio::spawn` task — the returned `Arc<Semaphore>` is
     /// cheap to clone.
     pub fn semaphore_for_lane(&self, lane: Lane) -> Arc<Semaphore> {
-        self.semaphore_for(lane).clone()
+        self.slot(lane).read().unwrap_or_else(|e| e.into_inner()).sem.clone()
+    }
+
+    /// Atomically swap in a fresh semaphore for `lane` sized to `new_capacity`
+    /// (#3628 — config hot-reload of `queue.concurrency.*`).
+    ///
+    /// In-flight permits keep their old semaphore alive until they
+    /// drain; new acquirers see the new semaphore immediately. A no-op
+    /// when the capacity is unchanged so reloads that didn't touch the
+    /// concurrency block don't churn the queue.
+    pub fn resize_lane(&self, lane: Lane, new_capacity: u32) -> bool {
+        let new_capacity = new_capacity.max(1);
+        let mut guard = self.slot(lane).write().unwrap_or_else(|e| e.into_inner());
+        if guard.capacity == new_capacity {
+            return false;
+        }
+        guard.sem = Arc::new(Semaphore::new(new_capacity as usize));
+        guard.capacity = new_capacity;
+        true
     }
 
     /// Submit work to a lane. Acquires a permit, executes the future, releases.
@@ -105,7 +131,7 @@ impl CommandQueue {
     where
         F: std::future::Future<Output = T>,
     {
-        let sem = self.semaphore_for(lane);
+        let sem = self.semaphore_for_lane(lane);
         let _permit = sem
             .acquire()
             .await
@@ -121,43 +147,35 @@ impl CommandQueue {
     where
         F: std::future::Future<Output = T>,
     {
-        let sem = self.semaphore_for(lane);
+        let sem = self.semaphore_for_lane(lane);
         let _permit = sem.try_acquire().ok()?;
         Some(work.await)
     }
 
     /// Get current occupancy for all lanes.
     pub fn occupancy(&self) -> Vec<LaneOccupancy> {
+        let mk = |lane: Lane| {
+            let g = self.slot(lane).read().unwrap_or_else(|e| e.into_inner());
+            LaneOccupancy {
+                lane,
+                active: g.capacity - g.sem.available_permits() as u32,
+                capacity: g.capacity,
+            }
+        };
         vec![
-            LaneOccupancy {
-                lane: Lane::Main,
-                active: self.main_capacity - self.main_sem.available_permits() as u32,
-                capacity: self.main_capacity,
-            },
-            LaneOccupancy {
-                lane: Lane::Cron,
-                active: self.cron_capacity - self.cron_sem.available_permits() as u32,
-                capacity: self.cron_capacity,
-            },
-            LaneOccupancy {
-                lane: Lane::Subagent,
-                active: self.subagent_capacity - self.subagent_sem.available_permits() as u32,
-                capacity: self.subagent_capacity,
-            },
-            LaneOccupancy {
-                lane: Lane::Trigger,
-                active: self.trigger_capacity - self.trigger_sem.available_permits() as u32,
-                capacity: self.trigger_capacity,
-            },
+            mk(Lane::Main),
+            mk(Lane::Cron),
+            mk(Lane::Subagent),
+            mk(Lane::Trigger),
         ]
     }
 
-    fn semaphore_for(&self, lane: Lane) -> &Arc<Semaphore> {
+    fn slot(&self, lane: Lane) -> &Arc<RwLock<LaneSlot>> {
         match lane {
-            Lane::Main => &self.main_sem,
-            Lane::Cron => &self.cron_sem,
-            Lane::Subagent => &self.subagent_sem,
-            Lane::Trigger => &self.trigger_sem,
+            Lane::Main => &self.main,
+            Lane::Cron => &self.cron,
+            Lane::Subagent => &self.subagent,
+            Lane::Trigger => &self.trigger,
         }
     }
 }
@@ -275,8 +293,8 @@ mod tests {
     async fn test_try_submit_when_full() {
         let queue = CommandQueue::with_capacities(1, 1, 1, 1);
 
-        // Acquire the main permit
-        let sem = queue.main_sem.clone();
+        // Acquire the main permit via the public accessor.
+        let sem = queue.semaphore_for_lane(Lane::Main);
         let _permit = sem.acquire().await.unwrap();
 
         // try_submit should return None since lane is full
@@ -292,5 +310,43 @@ mod tests {
         assert_eq!(occ[1].capacity, 4);
         assert_eq!(occ[2].capacity, 6);
         assert_eq!(occ[3].capacity, 5);
+    }
+
+    /// Regression for #3628 — `queue.concurrency.*` was set once at boot
+    /// and reload silently kept the old semaphore. After resize_lane the
+    /// occupancy snapshot must reflect the new capacity, and new
+    /// acquirers must see the new semaphore.
+    #[tokio::test]
+    async fn test_resize_lane_updates_capacity_and_new_semaphore() {
+        let queue = CommandQueue::with_capacities(1, 1, 1, 1);
+
+        // Hold a permit on the OLD trigger semaphore so we can verify
+        // it stays valid when we resize underneath it.
+        let old_sem = queue.semaphore_for_lane(Lane::Trigger);
+        let _old_permit = old_sem.try_acquire().expect("old sem has a free permit");
+
+        // Resize the trigger lane up to 5.
+        let changed = queue.resize_lane(Lane::Trigger, 5);
+        assert!(changed);
+
+        // Occupancy reports the new capacity from the fresh semaphore;
+        // the old one is no longer counted (the in-flight permit drains
+        // into a slot that nobody else can reach, by design).
+        let trig = queue
+            .occupancy()
+            .into_iter()
+            .find(|o| o.lane == Lane::Trigger)
+            .unwrap();
+        assert_eq!(trig.capacity, 5);
+        assert_eq!(trig.active, 0);
+
+        // A new acquirer sees the new semaphore with full 5 permits.
+        let new_sem = queue.semaphore_for_lane(Lane::Trigger);
+        assert!(!Arc::ptr_eq(&old_sem, &new_sem));
+        assert_eq!(new_sem.available_permits(), 5);
+
+        // No-op resize doesn't churn the semaphore.
+        let again = queue.resize_lane(Lane::Trigger, 5);
+        assert!(!again);
     }
 }

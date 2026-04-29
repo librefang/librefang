@@ -73,6 +73,11 @@ pub enum HotAction {
     /// previous policy is still being enforced. Supersedes the M6
     /// `ReloadUsers` action that only rebuilt the channel-binding index.
     ReloadAuth,
+    /// `[queue.concurrency]` changed — resize the global lane semaphores
+    /// so a smaller `trigger_lane` actually rate-limits new work (#3628).
+    /// Per-agent caps are NOT touched — see
+    /// `docs/architecture/trigger-dispatch-concurrency.md` for why.
+    UpdateQueueConcurrency,
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +387,13 @@ pub fn build_reload_plan_with_caps(
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
 
+    // #3628 — resize the lane semaphores when `[queue.concurrency]`
+    // changes. Without this the new caps are written into `self.config`
+    // but the live semaphores were sized at boot and never updated.
+    if field_changed(&old.queue.concurrency, &new.queue.concurrency) {
+        plan.hot_actions.push(HotAction::UpdateQueueConcurrency);
+    }
+
     if field_changed(&old.sanitize, &new.sanitize) {
         plan.noop_changes.push(
             "sanitize config changed (effective on next message via config swap)".to_string(),
@@ -656,6 +668,25 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::UpdateCronConfig));
+    }
+
+    /// Regression for #3628: changes to `[queue.concurrency]` must produce
+    /// an `UpdateQueueConcurrency` hot action so the lane semaphores get
+    /// resized. Without this the new caps were stored on `self.config` but
+    /// the live semaphores remained sized at boot.
+    #[test]
+    fn test_queue_concurrency_hot_reload_emits_resize_action() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.concurrency.trigger_lane = a.queue.concurrency.trigger_lane.saturating_add(4);
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required, "queue.concurrency must be hot-reloadable");
+        assert!(
+            plan.hot_actions
+                .contains(&HotAction::UpdateQueueConcurrency),
+            "expected UpdateQueueConcurrency in {:?}",
+            plan.hot_actions,
+        );
     }
 
     #[test]

@@ -65,12 +65,17 @@ impl MemorySubstrate {
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         let shared = Arc::new(Mutex::new(conn));
 
+        let sessions = SessionStore::new(Arc::clone(&shared));
+        // Repair any sessions/sessions_fts drift left over from #3451
+        // before save_session became transactional.
+        sessions.reconcile_fts_index();
+
         Ok(Self {
             conn: Arc::clone(&shared),
             structured: StructuredStore::new(Arc::clone(&shared)),
             semantic: SemanticStore::new(Arc::clone(&shared)),
             knowledge: KnowledgeStore::new(Arc::clone(&shared)),
-            sessions: SessionStore::new(Arc::clone(&shared)),
+            sessions,
             usage: UsageStore::new(Arc::clone(&shared)),
             roster: RosterStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),

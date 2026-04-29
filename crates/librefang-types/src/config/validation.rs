@@ -120,6 +120,95 @@ impl KernelConfig {
         unknown
     }
 
+    /// Detect unknown keys in selected nested config sections (#3460).
+    ///
+    /// Top-level [`detect_unknown_fields`] only catches typos at the root
+    /// of `config.toml`. Sub-sections like `[memory]`, `[queue.concurrency]`
+    /// or `[budget]` were silently accepted with `#[serde(default)]`, so a
+    /// typo such as `decay_ratee = 0.1` was deserialised into the
+    /// section's `Default` and the operator's intent never reached the
+    /// runtime.
+    ///
+    /// Each entry returns a dotted path (e.g. `"memory.decay_ratee"`) so
+    /// the warning is actionable. Returned in deterministic sorted order.
+    pub fn detect_unknown_nested_fields(raw: &toml::Value) -> Vec<String> {
+        // (section path, list of recognised keys)
+        let sections: &[(&str, &[&str])] = &[
+            (
+                "memory",
+                &[
+                    "decay_rate",
+                    "consolidation_threshold",
+                    "embedding_provider",
+                    "embedding_model",
+                    "embedding_api_key_env",
+                ],
+            ),
+            (
+                "proactive_memory",
+                &[
+                    "enabled",
+                    "auto_memorize",
+                    "auto_retrieve",
+                    "extraction_model",
+                    "max_retrieve",
+                    "session_ttl_hours",
+                    "confidence_decay_rate",
+                ],
+            ),
+            (
+                "budget",
+                &[
+                    "max_hourly_usd",
+                    "max_daily_usd",
+                    "max_monthly_usd",
+                    "alert_threshold",
+                    "default_max_llm_tokens_per_hour",
+                    "providers",
+                ],
+            ),
+            (
+                "queue.concurrency",
+                &[
+                    "main_lane",
+                    "cron_lane",
+                    "subagent_lane",
+                    "trigger_lane",
+                    "default_per_agent",
+                ],
+            ),
+            (
+                "triggers",
+                &[
+                    "max_per_event",
+                    "max_depth",
+                    "max_workflow_secs",
+                    "session_mode",
+                ],
+            ),
+        ];
+
+        let mut unknown = Vec::new();
+        for (path, known) in sections {
+            // Walk the dotted path through the toml tree.
+            let mut node: Option<&toml::Value> = Some(raw);
+            for segment in path.split('.') {
+                node = node.and_then(|v| v.as_table()).and_then(|t| t.get(segment));
+            }
+            let Some(toml::Value::Table(tbl)) = node else {
+                continue;
+            };
+            let known_set: std::collections::HashSet<&&str> = known.iter().collect();
+            for key in tbl.keys() {
+                if !known_set.contains(&key.as_str()) {
+                    unknown.push(format!("{path}.{key}"));
+                }
+            }
+        }
+        unknown.sort();
+        unknown
+    }
+
     /// Validate the configuration, returning a list of warnings.
     ///
     /// Checks for common misconfigurations such as missing API keys for

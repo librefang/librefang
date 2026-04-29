@@ -4,21 +4,175 @@ use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary}
 use librefang_types::agent::{AgentId, ResourceQuota, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::model_catalog::ModelCatalogEntry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_INPUT_COST_PER_M: f64 = 1.0;
 const DEFAULT_OUTPUT_COST_PER_M: f64 = 3.0;
+
+/// In-flight USD cost reservation ledger (#3616).
+///
+/// `check_global_budget` reads spent cost from the SQLite store, which only
+/// reflects calls that have already settled. When N triggers fire
+/// concurrently they all observe the same pre-call total, all pass the
+/// gate, and all commit — producing several-x overshoots of
+/// `max_hourly_usd` / `max_daily_usd`.
+///
+/// This ledger holds an *estimated* cost for every in-flight LLM call so
+/// the budget gate can include pending spend in its decision. Reserve
+/// before the network call, settle (or release) after.
+#[derive(Default)]
+struct CostReservationLedger {
+    /// Total reserved USD across all in-flight calls.
+    reserved_usd: Mutex<f64>,
+}
+
+impl CostReservationLedger {
+    fn current(&self) -> f64 {
+        *self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn add(&self, usd: f64) {
+        if usd <= 0.0 {
+            return;
+        }
+        let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
+        *g += usd;
+    }
+
+    /// Subtract a previously-reserved amount. Clamped at 0 to defend
+    /// against floating-point drift or double-release bugs.
+    fn release(&self, usd: f64) {
+        if usd <= 0.0 {
+            return;
+        }
+        let mut g = self.reserved_usd.lock().unwrap_or_else(|e| e.into_inner());
+        *g = (*g - usd).max(0.0);
+    }
+}
+
+/// Token returned by [`MeteringEngine::reserve_global_budget`]; on drop /
+/// settle it releases the matching reservation. The kernel calls
+/// [`MeteringReservation::settle`] once the actual usage record is in
+/// hand so the in-memory ledger doesn't double-count alongside the
+/// settled SQLite row.
+#[must_use = "a budget reservation must be settled or released"]
+pub struct MeteringReservation {
+    ledger: Arc<CostReservationLedger>,
+    estimated_usd: f64,
+    settled: bool,
+}
+
+impl MeteringReservation {
+    /// Settle the reservation. Call once the LLM response is recorded.
+    pub fn settle(mut self) {
+        self.ledger.release(self.estimated_usd);
+        self.settled = true;
+    }
+
+    /// Release without settling (call failed before any cost was incurred).
+    pub fn release(mut self) {
+        self.ledger.release(self.estimated_usd);
+        self.settled = true;
+    }
+
+    /// Estimated USD cost held by this reservation.
+    pub fn estimated_usd(&self) -> f64 {
+        self.estimated_usd
+    }
+}
+
+impl Drop for MeteringReservation {
+    fn drop(&mut self) {
+        if !self.settled {
+            // Defensive: a panic between reserve and settle still releases the slot.
+            self.ledger.release(self.estimated_usd);
+        }
+    }
+}
 
 /// The metering engine tracks usage cost and enforces quota limits.
 pub struct MeteringEngine {
     /// Persistent usage store (SQLite-backed).
     store: Arc<UsageStore>,
+    /// In-memory ledger of pre-charged but not-yet-settled USD cost (#3616).
+    pending: Arc<CostReservationLedger>,
 }
 
 impl MeteringEngine {
     /// Create a new metering engine with the given usage store.
     pub fn new(store: Arc<UsageStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            pending: Arc::new(CostReservationLedger::default()),
+        }
+    }
+
+    /// Reserve an estimated USD cost against the global budget *before*
+    /// dispatching an LLM call (#3616).
+    ///
+    /// Returns a [`MeteringReservation`] holding the reserved amount.
+    /// Callers must call `settle` (after recording the actual usage) or
+    /// `release` (on dispatch failure) — `Drop` releases as a safety net.
+    ///
+    /// Atomicity: this only synchronises in-process callers. Two
+    /// processes (or a process + an out-of-band SQL writer) can still
+    /// race; matching the SQLite atomicity of `check_all_and_record` is
+    /// the responsibility of the post-call settle path.
+    pub fn reserve_global_budget(
+        &self,
+        budget: &librefang_types::config::BudgetConfig,
+        estimated_usd: f64,
+    ) -> LibreFangResult<MeteringReservation> {
+        let pending = self.pending.current();
+
+        // Use ">" not ">=" so a fresh kernel with a single call exactly
+        // at the limit isn't rejected before it's ever recorded.
+        if budget.max_hourly_usd > 0.0 {
+            let spent = self.store.query_global_hourly()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_hourly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global hourly budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, budget.max_hourly_usd
+                )));
+            }
+        }
+        if budget.max_daily_usd > 0.0 {
+            let spent = self.store.query_today_cost()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_daily_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global daily budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, budget.max_daily_usd
+                )));
+            }
+        }
+        if budget.max_monthly_usd > 0.0 {
+            let spent = self.store.query_global_monthly()?;
+            let projected = spent + pending + estimated_usd.max(0.0);
+            if projected > budget.max_monthly_usd {
+                return Err(LibreFangError::QuotaExceeded(format!(
+                    "Global monthly budget would be exceeded: \
+                     spent ${:.4} + pending ${:.4} + this call ${:.4} > limit ${:.4}",
+                    spent, pending, estimated_usd, budget.max_monthly_usd
+                )));
+            }
+        }
+
+        self.pending.add(estimated_usd.max(0.0));
+        Ok(MeteringReservation {
+            ledger: Arc::clone(&self.pending),
+            estimated_usd: estimated_usd.max(0.0),
+            settled: false,
+        })
+    }
+
+    /// Currently-pending (reserved-but-not-settled) USD across all callers.
+    /// Exposed for diagnostics and tests.
+    pub fn pending_reserved_usd(&self) -> f64 {
+        self.pending.current()
     }
 
     /// Record a usage event (persists to SQLite).
@@ -66,12 +220,18 @@ impl MeteringEngine {
     }
 
     /// Check global budget limits (across all agents).
+    ///
+    /// Includes any in-flight pending cost held by
+    /// [`Self::reserve_global_budget`] so concurrent trigger fires don't
+    /// all see the same pre-call total and collectively overshoot the
+    /// configured cap (#3616).
     pub fn check_global_budget(
         &self,
         budget: &librefang_types::config::BudgetConfig,
     ) -> LibreFangResult<()> {
+        let pending = self.pending.current();
         if budget.max_hourly_usd > 0.0 {
-            let cost = self.store.query_global_hourly()?;
+            let cost = self.store.query_global_hourly()? + pending;
             if cost >= budget.max_hourly_usd {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} / ${:.4}",
@@ -81,7 +241,7 @@ impl MeteringEngine {
         }
 
         if budget.max_daily_usd > 0.0 {
-            let cost = self.store.query_today_cost()?;
+            let cost = self.store.query_today_cost()? + pending;
             if cost >= budget.max_daily_usd {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} / ${:.4}",
@@ -91,7 +251,7 @@ impl MeteringEngine {
         }
 
         if budget.max_monthly_usd > 0.0 {
-            let cost = self.store.query_global_monthly()?;
+            let cost = self.store.query_global_monthly()? + pending;
             if cost >= budget.max_monthly_usd {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} / ${:.4}",
@@ -1080,5 +1240,61 @@ mod tests {
         };
         assert!(engine.check_user_budget(alice, &budget).is_ok());
         assert!(engine.check_user_budget(bob, &budget).is_err());
+    }
+
+    /// Regression for #3616: parallel pre-call gates must see each other's
+    /// in-flight USD reservations. Previously every concurrent caller saw
+    /// the same pre-call total and all of them passed `check_global_budget`,
+    /// committing several-x the configured cap.
+    #[test]
+    fn pre_call_reservations_block_concurrent_overshoot() {
+        let engine = setup();
+        let budget = librefang_types::config::BudgetConfig {
+            max_hourly_usd: 1.0,
+            ..Default::default()
+        };
+
+        let r1 = engine.reserve_global_budget(&budget, 0.6).unwrap();
+        // The second caller observes r1's pending hold; 0.6 + 0.6 = 1.2 > 1.0.
+        let err = engine
+            .reserve_global_budget(&budget, 0.6)
+            .expect_err("second concurrent reservation must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hourly budget would be exceeded"),
+            "unexpected error: {msg}"
+        );
+        // After releasing r1, the slot opens up again.
+        r1.release();
+        assert_eq!(engine.pending_reserved_usd(), 0.0);
+        let r2 = engine.reserve_global_budget(&budget, 0.6).unwrap();
+        r2.settle();
+    }
+
+    /// Reservations must release on drop so a panic between reserve and
+    /// settle doesn't permanently lock the budget down.
+    #[test]
+    fn reservation_releases_on_drop() {
+        let engine = setup();
+        let budget = librefang_types::config::BudgetConfig {
+            max_hourly_usd: 1.0,
+            ..Default::default()
+        };
+        {
+            let _r = engine.reserve_global_budget(&budget, 0.5).unwrap();
+            assert!((engine.pending_reserved_usd() - 0.5).abs() < 1e-9);
+        }
+        assert_eq!(engine.pending_reserved_usd(), 0.0);
+    }
+
+    /// Zero-budget config must not gate at all — reservations are no-ops
+    /// for callers running without a configured global cap.
+    #[test]
+    fn zero_budget_disables_reservation_gate() {
+        let engine = setup();
+        let budget = librefang_types::config::BudgetConfig::default();
+        // Even a huge estimate must pass when no limit is configured.
+        let r = engine.reserve_global_budget(&budget, 9_999.0).unwrap();
+        r.settle();
     }
 }

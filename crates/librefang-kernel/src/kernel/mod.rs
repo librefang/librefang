@@ -4897,21 +4897,44 @@ system_prompt = "You are a helpful assistant."
         };
         let _guard = lock.lock().await;
 
-        // Pre-call global budget gate (issue #3616): best-effort check before
-        // dispatching to the LLM so parallel triggers cannot all slip past the
-        // post-call check simultaneously.  Not perfectly atomic — a concurrent
-        // call may have consumed the remaining budget between this read and the
-        // actual LLM round-trip — but it eliminates the common over-spend case
-        // where many triggers fire at the same instant.
-        // (The per-agent quota check is covered by `check_quota_and_reserve`
-        // below — no need to duplicate `check_quota` here.)
-        if let Err(e) = self.metering.check_global_budget(&self.budget_config()) {
-            return Err(KernelError::LibreFang(e));
-        }
-
+        // Pre-call global budget reservation (#3616). Estimate cost from
+        // the model's max output tokens and reserve it on the in-memory
+        // ledger so concurrent trigger fires can't all observe the same
+        // pre-call total and collectively overshoot the cap. Settled
+        // (after success) or released (on failure / suspended target)
+        // alongside the existing token reservation below.
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+        let estimated_usd = {
+            // Best-effort pre-call estimate: model.max_tokens worth of
+            // output, plus a conservative input estimate equal to the
+            // same token count. Real cost is settled later via
+            // `check_all_and_record`; this only sizes the in-memory hold.
+            let max_out = entry.manifest.model.max_tokens as u64;
+            let est_in = max_out;
+            match self.model_catalog.read() {
+                Ok(catalog) => MeteringEngine::estimate_cost_with_catalog(
+                    &catalog,
+                    &entry.manifest.model.name,
+                    est_in,
+                    max_out,
+                    0,
+                    0,
+                ),
+                Err(_) => MeteringEngine::estimate_cost(
+                    &entry.manifest.model.name,
+                    est_in,
+                    max_out,
+                    0,
+                    0,
+                ),
+            }
+        };
+        let usd_reservation = self
+            .metering
+            .reserve_global_budget(&self.budget_config(), estimated_usd)
+            .map_err(KernelError::LibreFang)?;
 
         // Enforce quota on the effective target agent (after routing).
         // Use check_quota_and_reserve so the estimated token budget is
@@ -4919,18 +4942,26 @@ system_prompt = "You are a helpful assistant."
         // race where N concurrent callers all pass the check before any of
         // them calls record_usage (#3736).
         let estimated_tokens = entry.manifest.model.max_tokens as u64;
-        let token_reservation = self
+        let token_reservation = match self
             .scheduler
             .check_quota_and_reserve(agent_id, estimated_tokens)
-            .map_err(KernelError::LibreFang)?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Roll back the USD reservation — the call never dispatched.
+                usd_reservation.release();
+                return Err(KernelError::LibreFang(e));
+            }
+        };
 
         // Skip suspended agents — cron/triggers should not dispatch to them
         if entry.state == AgentState::Suspended {
             tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
-            // No LLM call is made; release reservation without inflating
+            // No LLM call is made; release reservations without inflating
             // llm_calls or the burst window.
             self.scheduler
                 .release_reservation(agent_id, token_reservation);
+            usd_reservation.release();
             return Ok(AgentLoopResult::default());
         }
 
@@ -4978,12 +5009,14 @@ system_prompt = "You are a helpful assistant."
 
         match result {
             Ok(result) => {
-                // Settle the pre-charged reservation with actual usage.
-                // This replaces the old record_usage call — settle_reservation
-                // corrects total_tokens and updates per-dimension counters in
-                // one step so we never double-count.
+                // Settle the pre-charged token reservation with actual
+                // usage. The USD reservation is settled here too — actual
+                // cost will be recorded by `check_all_and_record` further
+                // down the call path; releasing the in-memory hold lets
+                // the next reservation pass see a consistent total.
                 self.scheduler
                     .settle_reservation(agent_id, token_reservation, &result.total_usage);
+                usd_reservation.settle();
                 // Record tool calls for rate limiting
                 let tool_count = result.decision_traces.len() as u32;
                 self.scheduler.record_tool_calls(agent_id, tool_count);
@@ -5271,10 +5304,11 @@ system_prompt = "You are a helpful assistant."
                 Ok(result)
             }
             Err(e) => {
-                // Release the pre-charged token reservation — the agent loop
-                // failed before completing, no usage to settle.
+                // Release the pre-charged token + USD reservations — the
+                // agent loop failed before completing, no usage to settle.
                 self.scheduler
                     .release_reservation(agent_id, token_reservation);
+                usd_reservation.release();
 
                 // SECURITY: Record failed message in audit trail
                 self.audit_log.record(
@@ -11250,6 +11284,26 @@ system_prompt = "You are a helpful assistant."
                          restart required for the new filter to take effect"
                     ),
                 },
+                HotAction::UpdateQueueConcurrency => {
+                    use librefang_runtime::command_lane::Lane;
+                    let cc = &new_config.queue.concurrency;
+                    info!(
+                        "Hot-reload: resizing lane semaphores (main={}, cron={}, subagent={}, trigger={})",
+                        cc.main_lane, cc.cron_lane, cc.subagent_lane, cc.trigger_lane,
+                    );
+                    // Per-agent caps (cc.default_per_agent, agent.toml's
+                    // max_concurrent_invocations) are NOT rebuilt — those
+                    // semaphores are owned by individual agents. Operators
+                    // need to respawn the agent for those to apply.
+                    self.command_queue
+                        .resize_lane(Lane::Main, cc.main_lane as u32);
+                    self.command_queue
+                        .resize_lane(Lane::Cron, cc.cron_lane as u32);
+                    self.command_queue
+                        .resize_lane(Lane::Subagent, cc.subagent_lane as u32);
+                    self.command_queue
+                        .resize_lane(Lane::Trigger, cc.trigger_lane as u32);
+                }
             }
         }
 
