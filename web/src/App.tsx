@@ -1291,7 +1291,7 @@ function BackToTop() {
 const REGISTRY_ROUTES: RegistryCategory[] = [
   'skills', 'mcp', 'plugins', 'hands', 'agents', 'providers', 'workflows', 'channels',
 ]
-const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es']
+const LOCALES = ['zh-TW', 'zh', 'ja', 'ko', 'de', 'es', 'pl']
 
 type RegistryMatch =
   | { kind: 'list'; category: RegistryCategory }
