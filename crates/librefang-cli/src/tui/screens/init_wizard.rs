@@ -818,6 +818,49 @@ pub fn run() -> InitResult {
                             continue;
                         }
 
+                        // #3629 follow-up: from SaveFailed the user has an
+                        // already-validated key in `api_key_input` — Enter
+                        // should retry ONLY the disk write (no re-validate, no
+                        // rate-limit hit), and Esc should preserve the key
+                        // text so the user is not forced to retype it after a
+                        // transient disk error. Other input (typing /
+                        // backspace) stays disabled to avoid mutating the
+                        // already-verified value.
+                        if let KeyTestState::SaveFailed(_) = &state.key_test {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    let mut new_err: Option<String> = None;
+                                    if let Some(p) = state.provider() {
+                                        if !p.env_var.is_empty() {
+                                            if let Err(e) = dotenv::save_env_key(
+                                                p.env_var,
+                                                &state.api_key_input,
+                                            ) {
+                                                tracing::error!(
+                                                    provider = ?p.name,
+                                                    error = %e,
+                                                    "init wizard: retry of save_env_key failed"
+                                                );
+                                                new_err = Some(e);
+                                            }
+                                        }
+                                    }
+                                    state.key_test = match new_err {
+                                        Some(e) => KeyTestState::SaveFailed(e),
+                                        None => KeyTestState::Ok,
+                                    };
+                                    state.key_test_started = Some(Instant::now());
+                                }
+                                KeyCode::Esc => {
+                                    // Keep `api_key_input` so the user can
+                                    // retry without re-typing or re-validating.
+                                    state.key_test = KeyTestState::Idle;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         match key.code {
                             KeyCode::Esc => {
                                 state.key_test = KeyTestState::Idle;
@@ -1949,7 +1992,7 @@ fn draw_api_key(f: &mut Frame, area: Rect, state: &mut State) {
             );
             f.render_widget(
                 Paragraph::new(Line::from(vec![Span::styled(
-                    "    Press [Esc] to go back and retry. Nothing was written.",
+                    "    [Enter] retry save  ·  [Esc] edit key  (key already verified — nothing on disk)",
                     theme::dim_style(),
                 )])),
                 chunks[4],
