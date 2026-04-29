@@ -723,6 +723,16 @@ pub async fn auth_callback_post(
 /// still leaves the nonce marked used — the legitimate user must
 /// restart the auth flow if anything goes wrong, which is exactly the
 /// fail-closed shape we want for credential flows.
+//
+// `axum::http::Response<Body>` is ~128 bytes, which trips clippy's
+// `result_large_err` lint.  The whole point of this helper is to
+// short-circuit the callback handler with a fully-formed Response
+// when the nonce was already redeemed — boxing the Err just to
+// satisfy the lint would force every caller to `.map_err(|b| *b)`
+// at the call site for no real benefit (the helper isn't on a hot
+// path; one allocation per OAuth callback is fine, and the Err
+// path is the rare-branch).  Suppress the lint here.
+#[allow(clippy::result_large_err)]
 fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Response> {
     if state.kernel.approvals().is_oauth_nonce_used(nonce) {
         warn!("OIDC nonce replay rejected (state.nonce already redeemed)");
