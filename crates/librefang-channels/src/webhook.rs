@@ -280,34 +280,47 @@ impl ChannelAdapter for WebhookAdapter {
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("");
 
-                        if !WebhookAdapter::verify_signature(&secret, &body, signature) {
-                            warn!("Webhook: invalid signature");
-                            return (
-                                axum::http::StatusCode::FORBIDDEN,
-                                "Forbidden: invalid signature",
-                            );
-                        }
-
-                        // Replay-attack protection: reject requests whose
-                        // X-Webhook-Timestamp is more than 5 minutes stale.
-                        if let Some(ts_header) = headers.get("X-Webhook-Timestamp") {
-                            if let Ok(ts_str) = ts_header.to_str() {
-                                if let Ok(ts_ms) = ts_str.parse::<i64>() {
-                                    let now_ms = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as i64;
-                                    if (now_ms - ts_ms).abs() > 5 * 60 * 1000 {
-                                        warn!("Webhook: timestamp too old — possible replay attack");
-                                        return (
-                                            axum::http::StatusCode::FORBIDDEN,
-                                            "Forbidden: timestamp too old",
-                                        );
-                                    }
-                                }
-                            }
+                        // Route through verify_request (#3948) so sig
+                        // and timestamp/skew are one atomic check.
+                        // Pre-fix the handler open-coded both
+                        // separately and verify_request was unused
+                        // dead code.  Timestamps stay optional for
+                        // backwards compatibility — clients that
+                        // don't send X-Webhook-Timestamp keep working
+                        // with sig-only verification.
+                        let ts_secs: Option<i64> = headers
+                            .get("X-Webhook-Timestamp")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .map(|ts_ms| ts_ms / 1000);
+                        let now_secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let verify_outcome = if ts_secs.is_some() {
+                            WebhookAdapter::verify_request(
+                                &secret, &body, signature, ts_secs, now_secs,
+                            )
                         } else {
                             warn!("Webhook: request has no X-Webhook-Timestamp — replay protection unavailable");
+                            if WebhookAdapter::verify_signature(&secret, &body, signature) {
+                                Ok(())
+                            } else {
+                                Err("invalid signature")
+                            }
+                        };
+                        if let Err(reason) = verify_outcome {
+                            warn!("Webhook: rejected — {reason}");
+                            // Collapse failure modes to a small public
+                            // surface so the caller can't distinguish
+                            // sig-vs-timestamp by response body.
+                            let public = match reason {
+                                "timestamp too old" | "timestamp in the future" => {
+                                    "Forbidden: timestamp too old"
+                                }
+                                _ => "Forbidden: invalid signature",
+                            };
+                            return (axum::http::StatusCode::FORBIDDEN, public);
                         }
 
                         let json_body: serde_json::Value = match serde_json::from_slice(&body) {
