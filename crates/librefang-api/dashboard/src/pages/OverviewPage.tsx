@@ -85,15 +85,41 @@ function formatUptime(seconds?: number): string {
   return "<1m";
 }
 
+// Backend serializes AgentState via `format!("{:?}", state)` so values
+// arrive Title-cased ("Running", "Suspended", "Crashed", "Terminated",
+// "Created"). Normalize to lowercase before matching, and map the Rust
+// variant names to the dashboard's canonical kinds.
+function normalizeState(state?: string): string {
+  return (state ?? "").toLowerCase();
+}
+
+function isRunning(state?: string): boolean {
+  return normalizeState(state) === "running";
+}
+
+function isErrored(state?: string): boolean {
+  const s = normalizeState(state);
+  return s === "crashed" || s === "failed" || s === "error";
+}
+
+function isIdle(state?: string): boolean {
+  const s = normalizeState(state);
+  // "Created" / "Terminated" / unset all read as idle on the hero. Suspended
+  // is its own kind (paused) so it's excluded.
+  return s === "" || s === "idle" || s === "created" || s === "terminated";
+}
+
 function pillKindForState(state?: string): "running" | "idle" | "error" | "pending" | "scheduled" | "paused" {
-  switch (state) {
-    case "running":   return "running";
+  switch (normalizeState(state)) {
+    case "running":                       return "running";
+    case "crashed":
     case "failed":
-    case "error":     return "error";
-    case "pending":   return "pending";
-    case "scheduled": return "scheduled";
-    case "paused":    return "paused";
-    default:          return "idle";
+    case "error":                         return "error";
+    case "pending":                       return "pending";
+    case "scheduled":                     return "scheduled";
+    case "suspended":
+    case "paused":                        return "paused";
+    default:                              return "idle";
   }
 }
 
@@ -154,10 +180,18 @@ export function OverviewPage() {
   void updatedTick;
 
   const agents       = snapshot?.agents ?? [];
-  const agentsRunning = useMemo(() => agents.filter((a) => a.state === "running").length, [agents]);
-  const agentsIdle    = useMemo(() => agents.filter((a) => a.state === "idle" || !a.state).length, [agents]);
-  const agentsError   = useMemo(() => agents.filter((a) => a.state === "failed" || a.state === "error").length, [agents]);
-  const agentsTotal   = snapshot?.status?.agent_count ?? agents.length;
+  // Prefer the backend's pre-computed active count when available — it's
+  // authoritative and matches the daemon's internal AgentState::Running
+  // check exactly. Fall back to a client-side filter (case-insensitive,
+  // see normalizeState) if the field is missing.
+  const agentsRunning = useMemo(
+    () => snapshot?.status?.active_agent_count
+      ?? agents.filter((a) => isRunning(a.state)).length,
+    [agents, snapshot?.status?.active_agent_count],
+  );
+  const agentsIdle  = useMemo(() => agents.filter((a) => isIdle(a.state)).length, [agents]);
+  const agentsError = useMemo(() => agents.filter((a) => isErrored(a.state)).length, [agents]);
+  const agentsTotal = snapshot?.status?.agent_count ?? agents.length;
 
   const mcpConfiguredCount = mcpServersQuery.data?.total_configured
     ?? mcpServersQuery.data?.configured?.length ?? 0;
@@ -207,7 +241,7 @@ export function OverviewPage() {
   const alerts = useMemo<AlertItem[]>(() => {
     const out: AlertItem[] = [];
     for (const a of agents) {
-      if (a.state === "failed" || a.state === "error") {
+      if (isErrored(a.state)) {
         out.push({
           id: `agent-${a.id}`,
           kind: "error",
