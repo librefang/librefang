@@ -144,6 +144,7 @@ fn safe_resolve_parent(path: &str) -> Result<std::path::PathBuf, serde_json::Val
 // ---------------------------------------------------------------------------
 
 /// SSRF-validated DNS resolution result for the WASM host function path.
+#[derive(Debug)]
 struct SsrfResolved {
     hostname: String,
     resolved: Vec<std::net::SocketAddr>,
@@ -158,16 +159,10 @@ fn is_ssrf_target(url: &str) -> Result<SsrfResolved, serde_json::Value> {
         return Err(json!({"error": "Only http:// and https:// URLs are allowed"}));
     }
 
-    // SECURITY (#3527): reject URLs containing userinfo. The authority
-    // grammar `user[:pass]@host` lets an attacker make our string-based host
-    // extraction look at `host_in_userinfo` while reqwest connects to the
-    // real authority host (e.g. `http://allowed.com:80@169.254.169.254/`
-    // would resolve `allowed.com` past SSRF checks but actually fetch IMDS).
-    // Detect the `@` inside the authority component (between `://` and the
-    // next `/`, `?`, or `#`) and refuse outright.
+    // Reject userinfo (@) in authority — prevents SSRF bypass via host confusion (#3527).
     if let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) {
         let authority_end = after_scheme
-            .find(|c: char| c == '/' || c == '?' || c == '#')
+            .find(['/', '?', '#'])
             .unwrap_or(after_scheme.len());
         if after_scheme[..authority_end].contains('@') {
             return Err(json!({"error": "SSRF blocked: URLs with userinfo are not permitted"}));
@@ -532,12 +527,9 @@ fn sanitize_shell_env(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Wall-clock timeout per `shell_exec` invocation (#3529). Longer-running
-/// guest jobs must be split — the host MUST NOT be parked indefinitely.
+/// Wall-clock timeout per `shell_exec` invocation (#3529).
 const SHELL_EXEC_TIMEOUT_SECS: u64 = 30;
-/// Per-stream byte cap for child stdout/stderr (#3529). Child is killed
-/// the moment either stream exceeds this, so a guest cannot exhaust host
-/// memory with `yes` or `dd if=/dev/zero`.
+/// Per-stream stdout/stderr byte cap; child is killed on overflow (#3529).
 const SHELL_EXEC_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
@@ -565,10 +557,7 @@ fn host_shell_exec(state: &GuestState, params: &serde_json::Value) -> serde_json
     let command = command.to_string();
     let handle = state.tokio_handle.clone();
 
-    // Bridge to async so we can use tokio::process (timeout, kill_on_drop,
-    // chunked output cap). spawn_blocking inside the WASM sandbox is the
-    // outer parking point; block_in_place keeps the scheduler progressing
-    // (matches the host_net_fetch pattern).
+    // block_in_place to bridge sync WASM host call → async tokio::process (same pattern as host_net_fetch).
     tokio::task::block_in_place(|| {
         handle.block_on(async move { run_shell_exec(&command, &args).await })
     })
@@ -599,42 +588,44 @@ async fn run_shell_exec(command: &str, args: &[String]) -> serde_json::Value {
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
 
-    // Bounded readers. If a stream exceeds the cap we abort the child.
-    async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
-        reader: &mut R,
-        cap: usize,
-    ) -> std::io::Result<(Vec<u8>, bool)> {
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = reader.read(&mut chunk).await?;
-            if n == 0 {
-                return Ok((buf, false));
-            }
-            if buf.len() + n > cap {
-                let take = cap.saturating_sub(buf.len());
-                buf.extend_from_slice(&chunk[..take]);
-                return Ok((buf, true));
-            }
-            buf.extend_from_slice(&chunk[..n]);
-        }
-    }
-
     let timeout = std::time::Duration::from_secs(SHELL_EXEC_TIMEOUT_SECS);
     let exec = async {
-        let (stdout_res, stderr_res) = tokio::join!(
-            read_capped(&mut stdout_pipe, SHELL_EXEC_MAX_OUTPUT_BYTES),
-            read_capped(&mut stderr_pipe, SHELL_EXEC_MAX_OUTPUT_BYTES),
-        );
-        let (stdout_bytes, stdout_truncated) = stdout_res?;
-        let (stderr_bytes, stderr_truncated) = stderr_res?;
-        let truncated = stdout_truncated || stderr_truncated;
+        // select! loop drains both pipes concurrently. Breaking as soon as
+        // either hits the cap lets us kill the child immediately, which causes
+        // the other pipe to see EOF instead of hanging indefinitely (#3529).
+        let cap = SHELL_EXEC_MAX_OUTPUT_BYTES;
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let mut truncated = false;
+        let mut out_done = false;
+        let mut err_done = false;
+        while !out_done || !err_done {
+            let mut out_chunk = [0u8; 8192];
+            let mut err_chunk = [0u8; 8192];
+            tokio::select! {
+                n = stdout_pipe.read(&mut out_chunk), if !out_done => match n? {
+                    0 => out_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stdout_buf.len()).min(n);
+                        stdout_buf.extend_from_slice(&out_chunk[..take]);
+                        if stdout_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+                n = stderr_pipe.read(&mut err_chunk), if !err_done => match n? {
+                    0 => err_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stderr_buf.len()).min(n);
+                        stderr_buf.extend_from_slice(&err_chunk[..take]);
+                        if stderr_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+            }
+        }
         if truncated {
-            // Output cap exceeded — kill before waiting on exit.
             let _ = child.start_kill();
         }
         let status = child.wait().await?;
-        Ok::<_, std::io::Error>((status, stdout_bytes, stderr_bytes, truncated))
+        Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf, truncated))
     };
 
     match tokio::time::timeout(timeout, exec).await {
@@ -1441,10 +1432,7 @@ mod tests {
         assert!(is_ssrf_target("ftp://example.com").is_err());
     }
 
-    /// Regression for #3527: any URL containing userinfo (`user[:pass]@host`)
-    /// in the authority must be rejected outright. Without this, an attacker
-    /// could make extract_host_from_url see a benign host while reqwest
-    /// connects to the real authority host (e.g. cloud IMDS).
+    /// Regression for #3527: reject userinfo (@) in authority to prevent SSRF bypass.
     #[test]
     fn test_ssrf_rejects_urls_with_userinfo() {
         // Bare userinfo, attacker-controlled real host
