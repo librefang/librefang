@@ -26,6 +26,8 @@ import { useMcpServers } from "../lib/queries/mcp";
 import { usePeers } from "../lib/queries/network";
 import { useSchedules } from "../lib/queries/schedules";
 import { useSessions } from "../lib/queries/sessions";
+import { useBudgetStatus } from "../lib/queries/analytics";
+import { formatCompact, formatCost } from "../lib/format";
 
 // Sample series for sparkline / cost chart trend until backend exposes them.
 // Replace with snapshot fields once /api/usage/daily / /api/sessions/density land.
@@ -51,6 +53,9 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
   const data2 = data.map((v) => v * 0.5);
   const path2 = data2.map((v, i) => `${i === 0 ? "M" : "L"}${i * stepX},${height - (v / max) * (height - 16)}`).join(" ");
   const fill2 = `${path2} L${w},${height} L0,${height} Z`;
+  const markerIndex = Math.min(data.length - 1, Math.max(0, Math.floor(data.length * 0.78)));
+  const markerX = markerIndex * stepX;
+  const markerY = height - (data[markerIndex] / max) * (height - 16);
   return (
     <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className="block w-full" style={{ height }} aria-hidden="true">
       <defs>
@@ -70,6 +75,8 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
       <path d={fill2} fill="url(#cc-2)" />
       <path d={path2} fill="none" stroke="#a78bfa" strokeWidth={1.5} />
       <path d={path} fill="none" stroke="#38bdf8" strokeWidth={2} />
+      <line x1={markerX} y1={0} x2={markerX} y2={height} stroke="rgba(56,189,248,0.4)" strokeWidth={1} strokeDasharray="2 2" />
+      <circle cx={markerX} cy={markerY} r={3.5} fill="#38bdf8" stroke="rgba(2,6,23,0.95)" strokeWidth={2} />
     </svg>
   );
 }
@@ -129,6 +136,45 @@ function pillKindForSessionStatus(status?: string): "ok" | "error" | "pending" {
   return "ok";
 }
 
+function formatDuration(ms?: number): string {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.round((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function sessionTokens(session: {
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  context_window_tokens?: number;
+}): number | undefined {
+  if (typeof session.total_tokens === "number") return session.total_tokens;
+  const input = typeof session.input_tokens === "number" ? session.input_tokens : undefined;
+  const output = typeof session.output_tokens === "number" ? session.output_tokens : undefined;
+  if (input != null || output != null) return (input ?? 0) + (output ?? 0);
+  if (typeof session.context_window_tokens === "number") return session.context_window_tokens;
+  return undefined;
+}
+
+function budgetUsageRatio(budget?: Record<string, unknown>): { ratio: number; used?: number; cap?: number } | null {
+  if (!budget) return null;
+  const usedCandidates = [
+    budget.spend_today_usd,
+    budget.today_spend_usd,
+    budget.daily_spend_usd,
+    budget.current_daily_usd,
+    budget.today_cost_usd,
+  ];
+  const capCandidates = [budget.max_daily_usd, budget.daily_cap_usd, budget.daily_budget_usd];
+  const used = usedCandidates.find((v): v is number => typeof v === "number" && Number.isFinite(v));
+  const cap = capCandidates.find((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0);
+  if (used == null || cap == null) return null;
+  return { ratio: used / cap, used, cap };
+}
+
 type AlertKind = "error" | "warning" | "pending";
 interface AlertItem {
   id: string;
@@ -155,6 +201,7 @@ export function OverviewPage() {
   const peersQuery = usePeers();
   const schedulesQuery = useSchedules();
   const sessionsQuery = useSessions();
+  const budgetStatusQuery = useBudgetStatus();
 
   const snapshot = snapshotQuery.data ?? null;
   const versionInfo = versionQuery.data;
@@ -202,8 +249,10 @@ export function OverviewPage() {
   const peersCount       = peersQuery.data?.length ?? 0;
   const schedulesCount   = schedulesQuery.data?.length ?? 0;
   const pendingApprovals = approvalCountQuery.data ?? 0;
+  const budgetUsage = budgetUsageRatio(budgetStatusQuery.data as Record<string, unknown> | undefined);
 
   const sessionsCount = snapshot?.status?.session_count ?? 0;
+  const defaultModel = agents.find((a) => a.model_name)?.model_name ?? "-";
 
   const rangeData = RANGE_DATA[range];
   const costDelta = rangeData.cost - rangeData.prior;
@@ -256,28 +305,21 @@ export function OverviewPage() {
         });
       }
     }
-    if (mcpDegradedCount > 0) {
+    if (budgetUsage && budgetUsage.ratio >= 0.75) {
       out.push({
-        id: "mcp-degraded",
-        kind: "warning",
-        title: t("overview.alerts.mcp_degraded", {
-          defaultValue: "{{count}} MCP server(s) degraded",
-          count: mcpDegradedCount,
+        id: "budget-threshold",
+        kind: budgetUsage.ratio >= 1 ? "error" : "warning",
+        title: t("overview.alerts.budget_threshold", {
+          defaultValue: "Daily budget at {{pct}}%",
+          pct: Math.round(budgetUsage.ratio * 100),
         }),
-        sub: `${mcpConnectedCount}/${mcpConfiguredCount} ${t("overview.alerts.connected", { defaultValue: "connected" })}`,
-        page: "/mcp",
+        sub: t("overview.alerts.budget_threshold_sub", {
+          defaultValue: "{{used}} / cap {{cap}}",
+          used: formatCost(budgetUsage.used ?? 0),
+          cap: formatCost(budgetUsage.cap ?? 0),
+        }),
+        page: "/analytics",
       });
-    }
-    for (const c of snapshot?.health?.checks ?? []) {
-      if (c.status !== "ok") {
-        out.push({
-          id: `health-${c.name}`,
-          kind: "warning",
-          title: c.name,
-          sub: c.status ?? t("overview.alerts.degraded", { defaultValue: "Degraded" }),
-          page: "/runtime",
-        });
-      }
     }
     if (pendingApprovals > 0) {
       out.push({
@@ -293,8 +335,31 @@ export function OverviewPage() {
         page: "/approvals",
       });
     }
+    if (mcpDegradedCount > 0) {
+      out.push({
+        id: "mcp-degraded",
+        kind: "warning",
+        title: t("overview.alerts.mcp_degraded", {
+          defaultValue: "{{count}} MCP server(s) degraded",
+          count: mcpDegradedCount,
+        }),
+        sub: `${mcpConnectedCount}/${mcpConfiguredCount} ${t("overview.alerts.connected", { defaultValue: "connected" })}`,
+        page: "/mcp",
+      });
+    }
+    for (const c of snapshot?.health?.checks ?? []) {
+      if (c.status !== "ok" && !(mcpDegradedCount > 0 && c.name.toLowerCase().includes("mcp"))) {
+        out.push({
+          id: `health-${c.name}`,
+          kind: "warning",
+          title: c.name,
+          sub: c.status ?? t("overview.alerts.degraded", { defaultValue: "Degraded" }),
+          page: "/runtime",
+        });
+      }
+    }
     return out;
-  }, [agents, mcpDegradedCount, mcpConnectedCount, mcpConfiguredCount, snapshot?.health?.checks, pendingApprovals, t]);
+  }, [agents, mcpDegradedCount, mcpConnectedCount, mcpConfiguredCount, snapshot?.health?.checks, pendingApprovals, budgetUsage, t]);
 
   const visibleAlerts = useMemo(
     () => alerts.filter((a) => !dismissedAlerts.includes(a.id)),
@@ -383,10 +448,15 @@ export function OverviewPage() {
                 <span>
                   {agentsRunning} {t("overview.agents_online", { defaultValue: "agents online" })}
                 </span>
-                <span className="text-text-dim font-normal">
-                  · {agentsIdle} {t("overview.idle", { defaultValue: "idle" })}
-                  {agentsError > 0 ? <> · {agentsError} {t("overview.error", { defaultValue: "error" })}</> : null}
-                </span>
+                {agentsIdle > 0 || agentsError > 0 ? (
+                  <span className="text-text-dim font-normal">
+                    {agentsIdle > 0 ? <>· {agentsIdle} {t("overview.idle", { defaultValue: "idle" })}</> : null}
+                    {agentsError > 0 ? <>{agentsIdle > 0 ? " · " : "· "}{agentsError} {t("overview.error", { defaultValue: "error" })}</> : null}
+                  </span>
+                ) : null}
+                <Pill kind={snapshot?.health?.status === "ok" ? "running" : "pending"} size="sm" mono>
+                  {snapshot?.health?.status === "ok" ? "live" : "degraded"}
+                </Pill>
               </>
             )}
           </h1>
@@ -468,10 +538,10 @@ export function OverviewPage() {
         />
         <Kpi
           label={`${t("nav.sessions", { defaultValue: "Sessions" })} · 24h`}
-          value={sessionsCount > 0 ? sessionsCount.toLocaleString() : "0"}
+          value={sessionsCount > 0 ? formatCompact(sessionsCount) : "0"}
           delta={sessionsCount > 0 ? `+${Math.floor(sessionsCount * 0.15)}` : undefined}
           trend="up"
-          sub={t("overview.kpi.peak", { defaultValue: "tokens/s peak" })}
+          sub={`3.4k ${t("overview.kpi.peak", { defaultValue: "tokens/s peak" })}`}
           sparkline={<Sparkline data={TOKEN_BARS.slice(-12)} width={70} height={28} color="#34d399" />}
           onClick={() => navigate({ to: "/sessions" })}
         />
@@ -481,7 +551,7 @@ export function OverviewPage() {
           unit="ms"
           delta="−14ms"
           trend="down"
-          sub={t("overview.kpi.default_model", { defaultValue: "default model" })}
+          sub={defaultModel}
           sparkline={<Sparkline data={LATENCY_TREND.slice(-12).map((x) => 600 - x)} width={70} height={28} color="#fbbf24" />}
           onClick={() => navigate({ to: "/telemetry" })}
         />
@@ -638,8 +708,10 @@ export function OverviewPage() {
                 <tr className="text-text-dim/80 text-left text-[10.5px] uppercase tracking-[0.08em]">
                   <th className="px-4 py-1.5 font-semibold">{t("overview.col.agent", { defaultValue: "Agent" })}</th>
                   <th className="px-2 py-1.5 font-semibold">{t("overview.col.task", { defaultValue: "Task" })}</th>
-                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell font-mono">{t("overview.col.msgs", { defaultValue: "Msgs" })}</th>
-                  <th className="px-4 py-1.5 font-semibold text-right">{t("overview.col.started", { defaultValue: "Started" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell font-mono">{t("overview.col.tokens", { defaultValue: "Tokens" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden md:table-cell font-mono">{t("overview.col.cost", { defaultValue: "Cost" })}</th>
+                  <th className="px-2 py-1.5 font-semibold hidden lg:table-cell font-mono">{t("overview.col.duration", { defaultValue: "Dur" })}</th>
+                  <th className="px-4 py-1.5 font-semibold text-right"></th>
                 </tr>
               </thead>
               <tbody>
@@ -648,6 +720,7 @@ export function OverviewPage() {
                     ? agentNameById.get(session.agent_id) ?? session.agent_id
                     : "—";
                   const status = session.active ? "running" : "ok";
+                  const tokens = sessionTokens(session);
                   return (
                     <tr
                       key={session.session_id}
@@ -664,11 +737,23 @@ export function OverviewPage() {
                       </td>
                       <td className="px-2 py-2 text-text-main">
                         <span className="block max-w-[120px] md:max-w-[280px] overflow-hidden text-ellipsis whitespace-nowrap">
-                          {session.label ?? t("overview.col.no_label", { defaultValue: "(no label)" })}
+                          {session.label
+                            ? session.label
+                            : (
+                              <span className="font-mono text-text-dim">
+                                #{session.session_id.slice(0, 8)}
+                              </span>
+                            )}
                         </span>
                       </td>
-                      <td className="px-2 py-2 text-text-dim hidden md:table-cell font-mono text-[11.5px]">
-                        {session.message_count ?? 0}
+                      <td className="px-2 py-2 text-text-dim hidden md:table-cell font-mono text-[11.5px] tabular-nums">
+                        {tokens == null ? "-" : formatCompact(tokens)}
+                      </td>
+                      <td className="px-2 py-2 text-text-dim hidden md:table-cell font-mono text-[11.5px] tabular-nums">
+                        {typeof session.cost_usd === "number" ? formatCost(session.cost_usd) : "-"}
+                      </td>
+                      <td className="px-2 py-2 text-text-dim hidden lg:table-cell font-mono text-[11.5px] tabular-nums">
+                        {formatDuration(session.duration_ms)}
                       </td>
                       <td className="px-4 py-2 text-right text-text-dim/80 font-mono text-[11px]">
                         {session.created_at ? formatRelativeTime(session.created_at) : "-"}
@@ -769,7 +854,7 @@ export function OverviewPage() {
               <button
                 key={tile.label}
                 onClick={() => navigate({ to: tile.page as any })}
-                className="px-2.5 py-2 rounded-md bg-slate-900/40 border border-border-subtle flex items-center justify-between gap-2 cursor-pointer text-left text-text-main hover:border-brand/40 transition-colors"
+                className="px-2.5 py-2 rounded-md bg-main/60 border border-border-subtle flex items-center justify-between gap-2 cursor-pointer text-left text-text-main hover:border-brand/40 transition-colors"
               >
                 <div className="min-w-0">
                   <div className="text-[10.5px] text-text-dim uppercase tracking-[0.08em] font-semibold">{tile.label}</div>
