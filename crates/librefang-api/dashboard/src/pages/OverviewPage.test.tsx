@@ -122,8 +122,10 @@ describe("OverviewPage", () => {
     useDashboardSnapshotMock.mockReturnValue({
       data: {
         status: {
-          active_agent_count: 3,
-          agent_count: 5,
+          // 2 of 3 mocked agents are in the "running" state — the backend's
+          // pre-computed count must match (it's authoritative for the hero).
+          active_agent_count: 2,
+          agent_count: 3,
           uptime_seconds: 3600,
           session_count: 7,
           config_exists: true,
