@@ -742,8 +742,6 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
 /// degraded security as before, but only as a last resort.
 #[cfg(not(test))]
 fn machine_fingerprint() -> Vec<u8> {
-    use sha2::Digest;
-
     let fingerprint_path = dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("librefang")
