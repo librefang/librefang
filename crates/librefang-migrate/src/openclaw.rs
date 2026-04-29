@@ -1255,7 +1255,7 @@ pub struct ScannedAgent {
 /// Run the OpenClaw migration.
 pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError> {
     let source = &options.source_dir;
-    let target = &options.target_dir;
+    let real_target = &options.target_dir;
 
     if !source.exists() {
         return Err(MigrateError::SourceNotFound(source.clone()));
@@ -1271,7 +1271,7 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
 
     // Refuse to re-run if the marker file is present; user edits since the
     // first import must not be overwritten.
-    let marker_path = target.join(MIGRATION_MARKER_FILENAME);
+    let marker_path = real_target.join(MIGRATION_MARKER_FILENAME);
     if marker_path.exists() && !options.dry_run {
         warn!(
             "OpenClaw migration already completed (marker {} present); skipping re-run to preserve user edits",
@@ -1290,34 +1290,154 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
         .as_ref()
         .is_some_and(|p| p.extension().is_some_and(|e| e == "json"));
 
-    if is_json5 {
-        migrate_from_json5(source, target, options.dry_run, &mut report)?;
-    } else {
-        migrate_from_legacy_yaml(source, target, options.dry_run, &mut report)?;
+    if options.dry_run {
+        // Dry-run never touches disk — no staging needed.
+        if is_json5 {
+            migrate_from_json5(source, real_target, true, &mut report)?;
+        } else {
+            migrate_from_legacy_yaml(source, real_target, true, &mut report)?;
+        }
+        return Ok(report);
     }
 
-    // Save report
-    if !options.dry_run {
-        let report_md = report.to_markdown();
-        let report_path = target.join("migration_report.md");
-        let _ = std::fs::write(&report_path, &report_md);
+    // #3798 — Workspace-level atomicity. All writes go to a sibling staging
+    // directory first; only after the entire migration succeeds is the
+    // staging tree promoted into the real target via per-entry same-fs
+    // renames. If anything fails partway, the staging directory is left
+    // behind so the user can inspect / retry without their `~/.librefang`
+    // ending up half-written.
+    let staging = staging_dir_for(real_target);
+    if staging.exists() {
+        // Stale staging from a previous failed run. Refuse rather than
+        // silently overwrite; require explicit cleanup.
+        return Err(MigrateError::StagingExists(staging));
+    }
+    std::fs::create_dir_all(&staging)?;
 
-        // Drop a marker so re-runs are no-ops. Best-effort: if the write fails,
-        // a future re-run will back up files again — no data lost.
-        let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-        let marker_body = format!(
-            "OpenClaw migration completed at {stamp}.\nDelete this file to force a re-import; existing files will be moved to .bak.<timestamp> siblings rather than overwritten.\n"
+    let inner = if is_json5 {
+        migrate_from_json5(source, &staging, false, &mut report)
+    } else {
+        migrate_from_legacy_yaml(source, &staging, false, &mut report)
+    };
+
+    if let Err(e) = inner {
+        warn!(
+            "Migration failed; staging directory left in place for inspection: {}",
+            staging.display()
         );
-        if let Err(e) = std::fs::write(&marker_path, marker_body) {
-            warn!(
-                "Failed to write migration marker {}: {} (re-runs will not be detected)",
-                marker_path.display(),
-                e
-            );
+        return Err(e);
+    }
+
+    // Write the report and marker inside staging so they get promoted with
+    // the rest in the same atomic step.
+    let report_md = report.to_markdown();
+    let _ = std::fs::write(staging.join("migration_report.md"), &report_md);
+    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let marker_body = format!(
+        "OpenClaw migration completed at {stamp}.\nDelete this file to force a re-import; existing files will be moved to .bak.<timestamp> siblings rather than overwritten.\n"
+    );
+    if let Err(e) = std::fs::write(staging.join(MIGRATION_MARKER_FILENAME), marker_body) {
+        warn!(
+            "Failed to write migration marker into staging: {} (re-runs will not be detected)",
+            e
+        );
+    }
+
+    // Promote staging → real target. Existing files in the real target are
+    // never clobbered (matches #3795 semantics).
+    if let Err(e) = promote_staging(&staging, real_target, &mut report) {
+        warn!(
+            "Promotion partially failed; staging directory left in place: {} ({e})",
+            staging.display()
+        );
+        return Err(e);
+    }
+
+    // Best-effort cleanup; a leftover empty staging is harmless.
+    let _ = std::fs::remove_dir_all(&staging);
+
+    Ok(report)
+}
+
+/// #3798 — Compute the sibling staging directory used during atomic migration.
+fn staging_dir_for(target: &Path) -> PathBuf {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let leaf = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(".librefang");
+    parent.join(format!("{leaf}.migrate-staging-{stamp}"))
+}
+
+/// #3798 — Recursively move entries from `staging` into `target`, never
+/// overwriting existing files. Imported destinations in `report` are
+/// rewritten so they point at the real target instead of staging.
+fn promote_staging(
+    staging: &Path,
+    target: &Path,
+    report: &mut MigrationReport,
+) -> Result<(), MigrateError> {
+    std::fs::create_dir_all(target)?;
+    promote_dir(staging, target, target, report)?;
+
+    let staging_str = staging.display().to_string();
+    let target_str = target.display().to_string();
+    for item in &mut report.imported {
+        if item.destination.starts_with(&staging_str) {
+            item.destination = item
+                .destination
+                .replacen(&staging_str, &target_str, 1);
         }
     }
 
-    Ok(report)
+    Ok(())
+}
+
+fn promote_dir(
+    src: &Path,
+    dst: &Path,
+    real_target_root: &Path,
+    report: &mut MigrationReport,
+) -> Result<(), MigrateError> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+
+        if ft.is_dir() {
+            // Recurse so we can merge into existing target subdirs without
+            // refusing the whole tree.
+            promote_dir(&from, &to, real_target_root, report)?;
+            // Prune the now-empty staging subdir.
+            let _ = std::fs::remove_dir(&from);
+        } else if to.exists() {
+            // #3795 — never clobber. Drop the staged copy.
+            report.warnings.push(format!(
+                "Skipped promoting {} — destination already exists",
+                to.strip_prefix(real_target_root)
+                    .unwrap_or(&to)
+                    .display()
+            ));
+            let _ = std::fs::remove_file(&from);
+        } else {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Same-filesystem rename — atomic per-entry. If for some reason
+            // the rename fails (e.g. cross-device), fall back to copy+remove.
+            if std::fs::rename(&from, &to).is_err() {
+                std::fs::copy(&from, &to)?;
+                let _ = std::fs::remove_file(&from);
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
