@@ -149,6 +149,57 @@ fn is_web_search_configured(web: &librefang_types::config::WebConfig) -> bool {
         || env_set(&web.perplexity.api_key_env)
 }
 
+/// Build the redacted `web` object the `/api/config` GET endpoint returns.
+///
+/// This must include EVERY provider sub-table the dashboard's "config save"
+/// flow can write back. Issue #4016 was caused by `searxng` and `jina` being
+/// missing here even though both have working struct definitions and serde
+/// derives: the dashboard PUTs `web.searxng = { url = "..." }`, the value
+/// hits disk and reload, but the next refresh of `/api/config` returned a
+/// `web` map without those keys, so the UI rendered the field as empty and
+/// users perceived the save as silently failing.
+fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
+    serde_json::json!({
+        "search_provider": format!("{:?}", web.search_provider),
+        "cache_ttl_minutes": web.cache_ttl_minutes,
+        "search_available": is_web_search_configured(web),
+        "brave": {
+            "api_key_env": web.brave.api_key_env,
+            "max_results": web.brave.max_results,
+            "country": web.brave.country,
+            "search_lang": web.brave.search_lang,
+            "freshness": web.brave.freshness,
+        },
+        "tavily": {
+            "api_key_env": web.tavily.api_key_env,
+            "search_depth": web.tavily.search_depth,
+            "max_results": web.tavily.max_results,
+            "include_answer": web.tavily.include_answer,
+        },
+        "perplexity": {
+            "api_key_env": web.perplexity.api_key_env,
+            "model": web.perplexity.model,
+        },
+        "jina": {
+            "api_key_env": web.jina.api_key_env,
+            "max_results": web.jina.max_results,
+            "country": web.jina.country,
+            "language": web.jina.language,
+            "use_eu_endpoint": web.jina.use_eu_endpoint,
+            "no_cache": web.jina.no_cache,
+        },
+        "searxng": {
+            "url": web.searxng.url,
+        },
+        "fetch": {
+            "max_chars": web.fetch.max_chars,
+            "max_response_bytes": web.fetch.max_response_bytes,
+            "timeout_secs": web.fetch.timeout_secs,
+            "readability": web.fetch.readability,
+        },
+    })
+}
+
 #[utoipa::path(
     get,
     path = "/api/status",
@@ -896,50 +947,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     );
 
     // ── Web ──
-    let search_available = is_web_search_configured(&config.web);
-    set!("web", {
-        "search_provider": format!("{:?}", config.web.search_provider),
-        "cache_ttl_minutes": config.web.cache_ttl_minutes,
-        "search_available": search_available,
-    });
-    // Web subsections built separately to avoid recursion limit
-    if let Some(web) = out.get_mut("web").and_then(|v| v.as_object_mut()) {
-        web.insert(
-            "brave".into(),
-            serde_json::json!({
-                "api_key_env": config.web.brave.api_key_env,
-                "max_results": config.web.brave.max_results,
-                "country": config.web.brave.country,
-                "search_lang": config.web.brave.search_lang,
-                "freshness": config.web.brave.freshness,
-            }),
-        );
-        web.insert(
-            "tavily".into(),
-            serde_json::json!({
-                "api_key_env": config.web.tavily.api_key_env,
-                "search_depth": config.web.tavily.search_depth,
-                "max_results": config.web.tavily.max_results,
-                "include_answer": config.web.tavily.include_answer,
-            }),
-        );
-        web.insert(
-            "perplexity".into(),
-            serde_json::json!({
-                "api_key_env": config.web.perplexity.api_key_env,
-                "model": config.web.perplexity.model,
-            }),
-        );
-        web.insert(
-            "fetch".into(),
-            serde_json::json!({
-                "max_chars": config.web.fetch.max_chars,
-                "max_response_bytes": config.web.fetch.max_response_bytes,
-                "timeout_secs": config.web.fetch.timeout_secs,
-                "readability": config.web.fetch.readability,
-            }),
-        );
-    }
+    set!("web", redacted_web(&config.web));
 
     set!("fallback_providers", fallback_providers);
 
@@ -1814,7 +1822,7 @@ pub fn ui_options_overlay(
         "/auto_dream/timeout_secs": {"min": 30, "max": 3600, "step": 30},
 
         // ── web ──
-        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"]},
+        "/web/search_provider": {"select": ["brave", "tavily", "perplexity", "jina", "searxng", "duck_duck_go", "auto"]},
         "/web/cache_ttl_minutes": {"min": 0, "max": 10_080, "step": 1},
 
         // ── browser ──
@@ -2447,5 +2455,138 @@ mod web_search_configured_tests {
             !is_web_search_configured(&web),
             "whitespace-only SearXNG URL must not satisfy the configured check"
         );
+    }
+}
+
+#[cfg(test)]
+mod redacted_web_tests {
+    //! Regression tests for issue #4016 — every search-provider sub-table the
+    //! dashboard knows how to write back through `/api/config/set` must round-
+    //! trip through the `/api/config` GET response. If a key is missing here
+    //! the dashboard sees `undefined` after a successful save and reports the
+    //! save as silently failed (the user-visible bug from #4016).
+    use super::redacted_web;
+    use librefang_types::config::WebConfig;
+
+    #[test]
+    fn redacted_web_includes_searxng_url_round_trip() {
+        let mut web = WebConfig::default();
+        web.searxng.url = "https://search.example.com".to_string();
+        let v = redacted_web(&web);
+        let searxng = v
+            .get("searxng")
+            .expect("redacted_web must include `searxng` (issue #4016)");
+        assert_eq!(
+            searxng.get("url").and_then(|u| u.as_str()),
+            Some("https://search.example.com"),
+            "searxng.url written by the dashboard must round-trip through GET /api/config"
+        );
+    }
+
+    #[test]
+    fn redacted_web_includes_jina_subtable() {
+        let mut web = WebConfig::default();
+        web.jina.api_key_env = "MY_JINA_KEY".to_string();
+        web.jina.use_eu_endpoint = true;
+        let v = redacted_web(&web);
+        let jina = v
+            .get("jina")
+            .expect("redacted_web must include `jina` (issue #4016)");
+        assert_eq!(
+            jina.get("api_key_env").and_then(|u| u.as_str()),
+            Some("MY_JINA_KEY"),
+        );
+        assert_eq!(
+            jina.get("use_eu_endpoint").and_then(|u| u.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn redacted_web_lists_all_provider_subtables() {
+        let v = redacted_web(&WebConfig::default());
+        // Every variant of `SearchProvider` that owns a config sub-table must
+        // appear here. `duck_duck_go` and `auto` are stateless so they are
+        // intentionally absent — they have no fields to surface.
+        for key in &["brave", "tavily", "perplexity", "jina", "searxng", "fetch"] {
+            assert!(
+                v.get(key).is_some(),
+                "redacted_web is missing the `{key}` sub-table; adding a new SearchProvider without surfacing its config here silently breaks the dashboard save flow (see #4016)",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod searxng_config_parse_tests {
+    //! Regression tests for issue #4016: the user reported that adding
+    //! `[web.searxng] url = "..."` to `~/.librefang/config.toml` and restarting
+    //! prevented the dashboard from connecting. Confirm that every shape the
+    //! reporter could plausibly have used — including the exact text from the
+    //! issue body — deserialises cleanly into `KernelConfig`.
+    use librefang_types::config::KernelConfig;
+
+    #[test]
+    fn issue_4016_minimal_searxng_section_parses() {
+        let toml_src = r#"[web.searxng]
+url = "https://search.example.com"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("config with bare `[web.searxng]` table must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_4016_local_searxng_url_parses() {
+        let toml_src = r#"[web.searxng]
+url = "http://192.168.10.21:8888"
+"#;
+        let cfg: KernelConfig =
+            toml::from_str(toml_src).expect("local SearXNG URL must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "http://192.168.10.21:8888");
+    }
+
+    #[test]
+    fn issue_4016_searxng_alongside_init_template_layout_parses() {
+        // Mirrors the layout `librefang init` produces: top-level scalars,
+        // `[default_model]`, `[web]`, `[web.fetch]`, then the user appends
+        // `[web.searxng]` to the bottom.
+        let toml_src = r#"
+log_level = "info"
+api_listen = "127.0.0.1:4545"
+
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[web]
+search_provider = "auto"
+
+[web.fetch]
+max_chars = 50000
+timeout_secs = 30
+
+[web.searxng]
+url = "https://search.example.com"
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("init-template layout + appended [web.searxng] must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
+    }
+
+    #[test]
+    fn issue_4016_inline_table_form_from_dashboard_save_parses() {
+        // The shape `/api/config/set` writes when the dashboard PUTs
+        // `path=web.searxng, value={"url":"..."}` (json_to_toml_edit_value
+        // builds an inline table for the JSON object).
+        let toml_src = r#"
+[web]
+search_provider = "auto"
+searxng = { url = "https://search.example.com" }
+"#;
+        let cfg: KernelConfig = toml::from_str(toml_src)
+            .expect("inline-table shape produced by /api/config/set must parse (issue #4016)");
+        assert_eq!(cfg.web.searxng.url, "https://search.example.com");
     }
 }
