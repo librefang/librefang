@@ -58,19 +58,7 @@ fn infer_capabilities(name: &str, families: Option<&[String]>) -> (bool, bool, b
     (supports_vision, true, supports_thinking)
 }
 
-/// Resolve `(supports_vision, supports_tools, supports_thinking)` for a model
-/// discovered via a local provider's listing endpoint.
-///
-/// When the probe carried an explicit `capabilities` array (Ollama ≥0.7
-/// `/api/tags` exposes one per model), we trust those tags verbatim — they are
-/// the authoritative signal for HuggingFace-imported models whose names carry
-/// no recognisable substring (e.g. `Gemma-4-26B-A4B-it-GGUF`). The previous
-/// code only honoured `vision`/`embedding` from the array and silently fell
-/// back to name-heuristics for `thinking`/`tools`, which dropped capabilities
-/// that the model server explicitly reported.
-///
-/// Falls back to [`infer_capabilities`] only when the array is empty
-/// (Ollama <0.7 or non-Ollama OpenAI-compat probes that omit it).
+/// Resolve capabilities from the explicit Ollama ≥0.7 `capabilities` array, falling back to name heuristics when empty.
 fn resolve_discovered_capabilities(
     name: &str,
     families: Option<&[String]>,
@@ -1800,20 +1788,11 @@ id = "acme"
         assert!(!llama.supports_thinking);
     }
 
-    /// Regression test for #4034: HuggingFace-imported models like
-    /// `Gemma-4-26B-A4B-it-GGUF` carry no recognisable substring in their
-    /// name, so capability inference must fall through to the explicit
-    /// `capabilities` array Ollama ≥0.7 reports in `/api/tags`. The pre-fix
-    /// code only honoured `vision`/`embedding` and silently dropped the
-    /// `thinking`/`tools` tags, causing the dashboard to show such models
-    /// as plain chat models.
+    /// Regression #4034: explicit `thinking`/`vision` capabilities from Ollama ≥0.7 must propagate for HF-imported models with opaque names.
     #[test]
     fn test_merge_honours_explicit_thinking_and_vision_capabilities() {
         let mut catalog = test_catalog();
         let models = vec![DiscoveredModelInfo {
-            // No `vision`/`r1`/`qwen3` in the name — the heuristic alone
-            // would return (false, true, false). The explicit capabilities
-            // array must override that.
             name: "Gemma-4-26B-A4B-it-GGUF:latest".to_string(),
             families: Some(vec!["gemma".to_string()]),
             family: Some("gemma".to_string()),
@@ -1843,12 +1822,7 @@ id = "acme"
         assert!(entry.supports_tools);
     }
 
-    /// Regression test for #4034 (part 2): a re-probe that newly reports
-    /// `vision`/`thinking` for an existing Local-tier entry must upgrade
-    /// the catalog in place rather than silently `continue`-ing past it.
-    /// This handles the case where the user upgrades Ollama from <0.7 to
-    /// ≥0.7 — the first probe stored capability=false, the second probe
-    /// must repair the entry.
+    /// Regression #4034 part 2: a re-probe with explicit capabilities must upgrade an existing Local-tier entry in place (handles Ollama <0.7 → ≥0.7 upgrades).
     #[test]
     fn test_merge_upgrades_existing_local_entry_capabilities() {
         let mut catalog = test_catalog();
@@ -1903,10 +1877,7 @@ id = "acme"
         assert!(post.supports_tools);
     }
 
-    /// Capability upgrades are monotonic — a transient probe that loses the
-    /// `capabilities` array (e.g. an older proxy in front of an upgraded
-    /// daemon) must not flip a previously-detected vision model back to
-    /// non-vision. Downgrades silently corrupt agent prompts.
+    /// Capability upgrades are monotonic — a transient probe with empty capabilities must not downgrade previously-detected vision/thinking flags.
     #[test]
     fn test_merge_never_downgrades_capabilities() {
         let mut catalog = test_catalog();
