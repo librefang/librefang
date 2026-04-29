@@ -8633,6 +8633,25 @@ fn cmd_config_get(key: &str) {
     }
 }
 
+/// Parse a string as a TOML integer, rejecting values outside i64 range.
+/// TOML integers are i64; we never silently truncate `u64 > i64::MAX` into
+/// negative numbers (#3461).
+fn parse_toml_integer(raw: &str) -> Result<toml::Value, String> {
+    if let Ok(v) = raw.parse::<i64>() {
+        return Ok(toml::Value::Integer(v));
+    }
+    if let Ok(v) = raw.parse::<u64>() {
+        return match i64::try_from(v) {
+            Ok(v) => Ok(toml::Value::Integer(v)),
+            Err(_) => Err(format!(
+                "value {v} exceeds i64::MAX ({}); TOML cannot store unsigned integers above this bound",
+                i64::MAX
+            )),
+        };
+    }
+    Err(format!("'{raw}' is not a valid integer"))
+}
+
 fn cmd_config_set(key: &str, value: &str) {
     let home = librefang_home();
     let config_path = home.join("config.toml");
@@ -8710,11 +8729,13 @@ fn cmd_config_set(key: &str, value: &str) {
     // Try to preserve type: if the existing value is an integer, parse as int, etc.
     let new_value = if let Some(existing) = tbl.get(last_key) {
         match existing {
-            toml::Value::Integer(_) => value
-                .parse::<u64>()
-                .map(|v| toml::Value::Integer(v as i64))
-                .or_else(|_| value.parse::<i64>().map(toml::Value::Integer))
-                .unwrap_or_else(|_| toml::Value::String(value.to_string())),
+            toml::Value::Integer(_) => match parse_toml_integer(value) {
+                Ok(v) => v,
+                Err(msg) => {
+                    ui::error(&msg);
+                    std::process::exit(1);
+                }
+            },
             toml::Value::Float(_) => value
                 .parse::<f64>()
                 .map(toml::Value::Float)
@@ -8729,10 +8750,15 @@ fn cmd_config_set(key: &str, value: &str) {
         // No existing value — infer type from the string content
         if let Ok(b) = value.parse::<bool>() {
             toml::Value::Boolean(b)
-        } else if let Ok(i) = value.parse::<u64>() {
-            toml::Value::Integer(i as i64)
-        } else if let Ok(i) = value.parse::<i64>() {
-            toml::Value::Integer(i)
+        } else if let Ok(v) = parse_toml_integer(value) {
+            v
+        } else if value.parse::<u64>().is_ok() {
+            // Numeric but overflows i64 — surface the error rather than silently storing as string.
+            ui::error(&format!(
+                "value {value} exceeds i64::MAX ({}); TOML cannot store unsigned integers above this bound",
+                i64::MAX
+            ));
+            std::process::exit(1);
         } else if let Ok(f) = value.parse::<f64>() {
             toml::Value::Float(f)
         } else {
@@ -12378,15 +12404,45 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
-        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
-        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
-        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
+        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_toml_integer,
+        parse_version_core, resolve_device_auth_start, resolve_hand_instance, AuthCommands,
+        ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
+
+    // --- Config set numeric parsing (#3461) ---
+
+    #[test]
+    fn parse_toml_integer_accepts_normal_i64() {
+        match parse_toml_integer("42").unwrap() {
+            toml::Value::Integer(v) => assert_eq!(v, 42),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_integer_accepts_i64_max() {
+        match parse_toml_integer(&i64::MAX.to_string()).unwrap() {
+            toml::Value::Integer(v) => assert_eq!(v, i64::MAX),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_toml_integer_rejects_u64_max_instead_of_truncating() {
+        // u64::MAX as i64 would silently become -1 — we must error instead.
+        let err = parse_toml_integer(&u64::MAX.to_string()).unwrap_err();
+        assert!(err.contains("exceeds i64::MAX"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_toml_integer_rejects_non_integer() {
+        assert!(parse_toml_integer("not-a-number").is_err());
+    }
 
     // --- Doctor command unit tests ---
 

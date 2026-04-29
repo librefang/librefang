@@ -49,11 +49,23 @@ export const ConfirmDialog = React.memo(function ConfirmDialog({
 
   useEffect(() => {
     if (!isOpen) return;
+    // Enter inside a textarea/input/contenteditable must NOT trigger confirm —
+    // users routinely have an editable field focused while a dialog is open
+    // (#3389).
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return true;
+      if (target.isContentEditable) return true;
+      return false;
+    };
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCloseRef.current();
       // Enter confirms — safer on non-destructive dialogs; for destructive
       // we still require a click so users can't accidentally nuke data.
-      if (e.key === "Enter" && tone !== "destructive") onConfirmRef.current();
+      if (e.key === "Enter" && tone !== "destructive" && !isEditableTarget(e.target)) {
+        onConfirmRef.current();
+      }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);

@@ -270,7 +270,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         (status = 200, description = "Quick init result", body = serde_json::Value)
     )
 )]
-pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let home = state.kernel.home_dir();
     let config_path = home.join("config.toml");
 
@@ -278,7 +278,8 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> impl IntoResponse
         return Json(serde_json::json!({
             "status": "already_initialized",
             "message": "config.toml already exists"
-        }));
+        }))
+        .into_response();
     }
 
     // Ensure directories exist
@@ -315,20 +316,38 @@ api_key_env = "{api_key_env}"
     );
 
     if let Err(e) = crate::atomic_write(&config_path, config_content.as_bytes()) {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to write config: {e}")
-        }));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to write config: {e}")
+            })),
+        )
+            .into_response();
     }
 
-    // Reload config so kernel picks up new settings
-    let _ = state.kernel.reload_config().await;
+    // Reload config so kernel picks up new settings. Surface failures (#3374) —
+    // before this fix the result was swallowed and the handler reported success
+    // even though the running daemon kept the stale config.
+    if let Err(e) = state.kernel.reload_config().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "reload_failed",
+                "message": format!("init succeeded but reload failed: {e}"),
+                "provider": provider,
+                "model": model,
+            })),
+        )
+            .into_response();
+    }
 
     Json(serde_json::json!({
         "status": "initialized",
         "provider": provider,
         "model": model,
     }))
+    .into_response()
 }
 
 /// POST /api/shutdown — Graceful shutdown.

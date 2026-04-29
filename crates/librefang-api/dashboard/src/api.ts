@@ -915,9 +915,22 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEOUT_MS): Promise<T> {
+async function post<T>(
+  path: string,
+  body: unknown,
+  timeout = DEFAULT_POST_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
+): Promise<T> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  // Forward external aborts (e.g. component unmount) into our controller so
+  // the fetch is actually cancelled, not just the awaited promise.
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
 
   try {
     const response = await fetch(path, {
@@ -935,10 +948,18 @@ async function post<T>(path: string, body: unknown, timeout = DEFAULT_POST_TIMEO
     return (await response.json()) as T;
   } catch (error) {
     clearTimeout(timeoutId);
+    if (externalSignal?.aborted) {
+      // Re-throw as DOMException so callers can identify caller-initiated aborts.
+      throw new DOMException("Aborted", "AbortError");
+    }
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(`Request timeout after ${Math.round(timeout / 1000)}s - operation may still be running`);
     }
     throw error;
+  } finally {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
   }
 }
 
@@ -1496,13 +1517,16 @@ export async function getSkillDetail(name: string): Promise<SkillDetail> {
   return get<SkillDetail>(`/api/skills/${encodeURIComponent(name)}`);
 }
 
-export async function createSkill(params: {
-  name: string;
-  description: string;
-  prompt_context: string;
-  tags?: string[];
-}): Promise<EvolutionResult> {
-  return post<EvolutionResult>("/api/skills/create", params);
+export async function createSkill(
+  params: {
+    name: string;
+    description: string;
+    prompt_context: string;
+    tags?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<EvolutionResult> {
+  return post<EvolutionResult>("/api/skills/create", params, undefined, signal);
 }
 
 export async function reloadSkills(): Promise<ApiActionResponse> {
