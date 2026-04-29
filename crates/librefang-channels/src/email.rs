@@ -628,10 +628,7 @@ mod tests {
             "attacker@notexample.com",
             &allowed
         ));
-        assert!(!sender_matches_allowlist(
-            "attacker@evil.com",
-            &allowed
-        ));
+        assert!(!sender_matches_allowlist("attacker@evil.com", &allowed));
         assert!(!sender_matches_allowlist("malformed", &allowed));
         assert!(!sender_matches_allowlist("trailing@", &allowed));
     }
@@ -654,10 +651,7 @@ mod tests {
 
     #[test]
     fn test_allowed_senders_mixed_entries() {
-        let allowed = vec![
-            "@example.com".to_string(),
-            "bob@partner.com".to_string(),
-        ];
+        let allowed = vec!["@example.com".to_string(), "bob@partner.com".to_string()];
         assert!(sender_matches_allowlist("anyone@example.com", &allowed));
         assert!(sender_matches_allowlist("bob@partner.com", &allowed));
         assert!(!sender_matches_allowlist("alice@partner.com", &allowed));
