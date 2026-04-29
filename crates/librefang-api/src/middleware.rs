@@ -238,12 +238,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    // Route by status class so the level reflects severity:
-    //   5xx → error  (server fault — must surface)
-    //   4xx → warn   (client error — auth storms / bad requests should not
-    //                 hide in INFO; ops needs to spot 401 reconnect loops)
-    //   GET 2xx/3xx → debug (routine polling would otherwise drown the log)
-    //   default → info (state-changing 2xx/3xx)
+    // 4xx/5xx elevated so auth storms and server faults surface; GET successes suppressed to avoid poll noise.
     if status >= 500 {
         error!(
             request_id = %request_id,
