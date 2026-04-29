@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Unique identifier for a workflow definition.
@@ -602,14 +602,25 @@ impl WorkflowEngine {
     }
 
     /// Async wrapper for `persist_runs` — delegates to a blocking task.
-    async fn persist_runs_async(&self) {
+    ///
+    /// Returns `Err` when the spawn_blocking task itself panics so callers
+    /// can surface the failure instead of silently dropping it (#3753).
+    /// The inner `persist_runs` already logs and swallows IO/serde errors;
+    /// only a JoinError (panic / cancel) bubbles up here.
+    async fn persist_runs_async(&self) -> Result<(), String> {
         if self.persist_path.is_none() {
-            return;
+            return Ok(());
         }
         let engine = self.clone();
         match tokio::task::spawn_blocking(move || engine.persist_runs()).await {
-            Ok(()) => {}
-            Err(e) => warn!("workflow persist task panicked: {e}"),
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // JoinError = the blocking task panicked or was cancelled.
+                // Log loudly AND propagate so the workflow run reports the
+                // persistence failure instead of pretending to have saved.
+                error!("workflow persist task panicked: {e}");
+                Err(format!("workflow persist task panicked: {e}"))
+            }
         }
     }
 
@@ -1255,7 +1266,13 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
-        self.persist_runs_async().await;
+        // If persistence panicked, surface it instead of returning a fake Ok.
+        if let Err(persist_err) = self.persist_runs_async().await {
+            return Err(match result {
+                Ok(_) => persist_err,
+                Err(run_err) => format!("{run_err}; additionally: {persist_err}"),
+            });
+        }
         result
     }
 
@@ -1312,7 +1329,13 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
-        self.persist_runs_async().await;
+        // Surface persist panics instead of swallowing them (#3753).
+        if let Err(persist_err) = self.persist_runs_async().await {
+            return Err(match result {
+                Ok(_) => persist_err,
+                Err(run_err) => format!("{run_err}; additionally: {persist_err}"),
+            });
+        }
         result
     }
 

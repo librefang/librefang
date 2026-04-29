@@ -474,6 +474,10 @@ fn resolve_dispatch_session_id(
 pub(crate) struct RunningTask {
     pub(crate) abort: tokio::task::AbortHandle,
     pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+    /// Unique id for this turn — used by cleanup to ensure a task only
+    /// removes its OWN entry from `running_tasks`, never a successor's
+    /// (#3445 stale-entry guard). Compared with `Uuid` equality.
+    pub(crate) task_id: uuid::Uuid,
 }
 
 pub struct LibreFangKernel {
@@ -914,23 +918,14 @@ use workspace_setup::*;
 /// `tokio::spawn` drops panics when the returned `JoinHandle` is not awaited.
 /// This wrapper catches any panic from the inner future and logs it at `error`
 /// level so it surfaces in traces and structured logs.
+///
+/// Thin alias over [`crate::supervised_spawn::spawn_supervised`] (#3740) — kept
+/// for the existing `spawn_logged(tag, fut)` call sites in this file.
 fn spawn_logged(
     tag: &'static str,
     fut: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    use futures::FutureExt as _;
-    tokio::spawn(async move {
-        if let Err(e) = std::panic::AssertUnwindSafe(fut).catch_unwind().await {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "(non-string panic payload)".to_string()
-            };
-            tracing::error!(tag, "spawned task panicked: {msg}");
-        }
-    })
+    crate::supervised_spawn::spawn_supervised(tag, fut)
 }
 
 // ── Public Facade Getters ────────────────────────────────────────────
@@ -956,9 +951,16 @@ impl LibreFangKernel {
     /// runtime via [`update_budget_config`], so callers always see the
     /// latest values set through the API.
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
+        // Recover from poisoning instead of panicking — a panic here would
+        // kill every LLM turn that needs a budget check (#3447).
         self.budget_config
             .read()
-            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or_else(|p| {
+                tracing::warn!(
+                    "budget_config read lock was poisoned, recovering with last-known state"
+                );
+                p.into_inner()
+            })
             .clone()
     }
 
@@ -971,7 +973,12 @@ impl LibreFangKernel {
         let mut guard = self
             .budget_config
             .write()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(|p| {
+                tracing::warn!(
+                    "budget_config write lock was poisoned, recovering with last-known state"
+                );
+                p.into_inner()
+            });
         f(&mut guard);
     }
 
@@ -5390,7 +5397,7 @@ system_prompt = "You are a helpful assistant."
                     let review_agent_id = agent_id;
                     let audit_log_success = audit_log.clone();
                     let agent_id_for_success = agent_id_str.clone();
-                    let review_handle = tokio::spawn(async move {
+                    let review_handle = spawn_logged("auto_memorize", async move {
                         // Move the permit into the task so it's released
                         // on task exit. Binding it to `_permit` keeps
                         // clippy happy (dropped at end of scope).
@@ -6339,6 +6346,11 @@ system_prompt = "You are a helpful assistant."
             },
         );
 
+        // Unique id for this turn — used by cleanup-side `remove_if` so a
+        // late-finishing predecessor never wipes out a successor's entry
+        // (#3445 stale-entry guard).
+        let turn_task_id = uuid::Uuid::new_v4();
+
         // Reload session after acquiring the lock so we never act on a stale
         // snapshot captured before a concurrent turn's writes landed.
         let handle = tokio::spawn(async move {
@@ -6771,9 +6783,14 @@ system_prompt = "You are a helpful assistant."
                         kernel_clone
                             .session_interrupts
                             .remove(&(agent_id, effective_session_id));
+                        // #3445: only remove if THIS turn's entry is still
+                        // present — a faster successor turn may have already
+                        // swapped it for its own RunningTask.
                         kernel_clone
                             .running_tasks
-                            .remove(&(agent_id, effective_session_id));
+                            .remove_if(&(agent_id, effective_session_id), |_, v| {
+                                v.task_id == turn_task_id
+                            });
                     }
                     Ok(result)
                 }
@@ -6798,9 +6815,13 @@ system_prompt = "You are a helpful assistant."
                         kernel_clone
                             .session_interrupts
                             .remove(&(agent_id, effective_session_id));
+                        // #3445: only remove if THIS turn's entry is still
+                        // present — see Ok branch above.
                         kernel_clone
                             .running_tasks
-                            .remove(&(agent_id, effective_session_id));
+                            .remove_if(&(agent_id, effective_session_id), |_, v| {
+                                v.task_id == turn_task_id
+                            });
                     }
                     Err(KernelError::LibreFang(e))
                 }
@@ -6823,20 +6844,43 @@ system_prompt = "You are a helpful assistant."
             // can never both observe an empty slot and lose one of the
             // abort handles.  The earlier `remove(...) → insert(...)`
             // sequence had exactly that race window.
-            let new_task = RunningTask {
-                abort: handle.abort_handle(),
-                started_at: chrono::Utc::now(),
-            };
-            if let Some(old_task) = self
-                .running_tasks
-                .insert((agent_id, effective_session_id), new_task)
-            {
+            //
+            // #3445: skip insert if the task already finished while we
+            // were preparing to register it. The task's own cleanup
+            // path uses `remove_if(... task_id matches ...)`, but if it
+            // ran before our insert, the cleanup found nothing to
+            // remove and our insert here would leave a stale handle
+            // forever. `is_finished()` closes that window.
+            //
+            // Residual race: if the task finishes between is_finished()
+            // returning false and the insert below, cleanup already ran
+            // and found nothing; insert then leaves a completed entry.
+            // The entry is harmless — AbortHandle::abort() on an already-
+            // finished task is a no-op, and the next turn for the same
+            // (agent, session) will overwrite it with a fresh RunningTask.
+            if handle.is_finished() {
                 tracing::debug!(
                     agent_id = %agent_id,
                     session_id = %effective_session_id,
-                    "aborting previous running task before starting new one"
+                    "spawned task already finished; skipping running_tasks registration"
                 );
-                old_task.abort.abort();
+            } else {
+                let new_task = RunningTask {
+                    abort: handle.abort_handle(),
+                    started_at: chrono::Utc::now(),
+                    task_id: turn_task_id,
+                };
+                if let Some(old_task) = self
+                    .running_tasks
+                    .insert((agent_id, effective_session_id), new_task)
+                {
+                    tracing::debug!(
+                        agent_id = %agent_id,
+                        session_id = %effective_session_id,
+                        "aborting previous running task before starting new one"
+                    );
+                    old_task.abort.abort();
+                }
             }
         }
 
@@ -7021,7 +7065,7 @@ system_prompt = "You are a helpful assistant."
         // Note: this is kernel-scoped (not agent-scoped) — sending owner
         // notifications via channel adapters touches `kernel.send_channel_message`
         // which has its own lifecycle. No per-agent tracking needed here.
-        tokio::spawn(async move {
+        spawn_logged("owner_notify", async move {
             let kernel = match weak.upgrade() {
                 Some(k) => k,
                 None => return,
@@ -11448,7 +11492,7 @@ system_prompt = "You are a helpful assistant."
                         // using the now-updated effective list).
                         if let Some(weak) = self.self_handle.get() {
                             if let Some(kernel) = weak.upgrade() {
-                                tokio::spawn(async move {
+                                spawn_logged("mcp_reconnect", async move {
                                     for name in &to_reconnect {
                                         kernel.disconnect_mcp_server(name).await;
                                     }
@@ -12530,7 +12574,7 @@ system_prompt = "You are a helpful assistant."
             let kernel = Arc::clone(self);
             // Stagger agent startup to prevent rate-limit storm on shared providers.
             // Each agent gets a 500ms delay before the next one starts.
-            tokio::spawn(async move {
+            spawn_logged("background_agents_staggered_start", async move {
                 for (i, (id, name, schedule)) in bg_agents.into_iter().enumerate() {
                     kernel.start_background_for_agent(id, &name, &schedule);
                     if i > 0 {
@@ -12550,7 +12594,7 @@ system_prompt = "You are a helpful assistant."
         // Start OFP peer node if network is enabled
         if cfg.network_enabled && !cfg.network.shared_secret.is_empty() {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("ofp_node", async move {
                 kernel.start_ofp_node().await;
             });
         }
@@ -12590,7 +12634,7 @@ system_prompt = "You are a helpful assistant."
                 60
             };
             let mut shutdown_rx = self.supervisor.subscribe();
-            tokio::spawn(async move {
+            spawn_logged("local_provider_probe", async move {
                 let mut interval =
                     tokio::time::interval(std::time::Duration::from_secs(probe_interval_secs));
                 // Race the tick against the shutdown watch so daemon
@@ -12614,7 +12658,7 @@ system_prompt = "You are a helpful assistant."
         // Periodic usage data cleanup (every 24 hours, retain 90 days)
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("metering_cleanup", async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
                 interval.tick().await; // Skip first immediate tick
                 loop {
@@ -12701,7 +12745,7 @@ system_prompt = "You are a helpful assistant."
             let kernel = Arc::clone(self);
             let retention = cfg.audit.retention_days;
             if retention > 0 {
-                tokio::spawn(async move {
+                spawn_logged("audit_log_pruner", async move {
                     let mut interval =
                         tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
                     interval.tick().await; // Skip first immediate tick
@@ -12734,7 +12778,7 @@ system_prompt = "You are a helpful assistant."
             if trim_interval > 0 {
                 let kernel = Arc::clone(self);
                 let retention = cfg.audit.retention.clone();
-                tokio::spawn(async move {
+                spawn_logged("audit_retention_trim", async move {
                     let mut interval =
                         tokio::time::interval(std::time::Duration::from_secs(trim_interval));
                     interval.tick().await; // Skip first immediate tick.
@@ -12786,7 +12830,7 @@ system_prompt = "You are a helpful assistant."
                 session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
             if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
                 let kernel = Arc::clone(self);
-                tokio::spawn(async move {
+                spawn_logged("session_retention_cleanup", async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                         u64::from(session_cfg.cleanup_interval_hours) * 3600,
                     ));
@@ -12872,7 +12916,7 @@ system_prompt = "You are a helpful assistant."
         // Periodic cleanup of expired image uploads (24h TTL)
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("upload_cleanup", async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // every hour
                 interval.tick().await; // skip first immediate tick
                 loop {
@@ -12907,7 +12951,7 @@ system_prompt = "You are a helpful assistant."
             let interval_hours = cfg.memory.consolidation_interval_hours;
             if interval_hours > 0 {
                 let kernel = Arc::clone(self);
-                tokio::spawn(async move {
+                spawn_logged("memory_consolidation", async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                         interval_hours * 3600,
                     ));
@@ -12944,7 +12988,7 @@ system_prompt = "You are a helpful assistant."
             if decay_config.enabled && decay_config.decay_interval_hours > 0 {
                 let kernel = Arc::clone(self);
                 let interval_hours = decay_config.decay_interval_hours;
-                tokio::spawn(async move {
+                spawn_logged("memory_decay", async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                         u64::from(interval_hours) * 3600,
                     ));
@@ -12973,7 +13017,7 @@ system_prompt = "You are a helpful assistant."
         // Periodic GC sweep for unbounded in-memory caches (every 5 minutes)
         {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("gc_sweep", async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
                 interval.tick().await; // Skip first immediate tick
                 loop {
@@ -12995,7 +13039,7 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or(false);
         if has_mcp {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("connect_mcp_servers", async move {
                 kernel.connect_mcp_servers().await;
             });
         }
@@ -13188,7 +13232,7 @@ system_prompt = "You are a helpful assistant."
                                 // Shadow so outer `job_name` survives the move
                                 // for the post-arm per-job persist warn.
                                 let job_name = job_name.clone();
-                                tokio::spawn(async move {
+                                spawn_logged("cron_agent_turn", async move {
                                     // Acquire the lane permit before any work
                                     // so concurrent fires are still capped.
                                     let _permit = match cron_sem_for_job.acquire_owned().await {
@@ -13482,7 +13526,7 @@ system_prompt = "You are a helpful assistant."
             if a2a_config.enabled && !a2a_config.external_agents.is_empty() {
                 let kernel = Arc::clone(self);
                 let agents = a2a_config.external_agents.clone();
-                tokio::spawn(async move {
+                spawn_logged("a2a_discover_external", async move {
                     let discovered =
                         librefang_runtime::a2a::discover_external_agents(&agents).await;
                     if let Ok(mut store) = kernel.a2a_external_agents.lock() {
@@ -13495,7 +13539,7 @@ system_prompt = "You are a helpful assistant."
         // Start WhatsApp Web gateway if WhatsApp channel is configured
         if cfg.channels.whatsapp.is_some() {
             let kernel = Arc::clone(self);
-            tokio::spawn(async move {
+            spawn_logged("whatsapp_gateway_starter", async move {
                 crate::whatsapp_gateway::start_whatsapp_gateway(&kernel).await;
             });
         }
@@ -13610,7 +13654,7 @@ system_prompt = "You are a helpful assistant."
         let config = HeartbeatConfig::from_toml(&kernel.config.load().heartbeat);
         let interval_secs = config.check_interval_secs;
 
-        tokio::spawn(async move {
+        spawn_logged("heartbeat_monitor", async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(config.check_interval_secs));
             // Track which agents are already known-unresponsive to avoid
@@ -17026,7 +17070,7 @@ impl KernelHandle for LibreFangKernel {
                 // depth=0 scope, defeating the depth cap on chains that
                 // travel through memory updates.
                 let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
-                tokio::spawn(PUBLISH_EVENT_DEPTH.scope(
+                spawn_logged("memory_event_publish", PUBLISH_EVENT_DEPTH.scope(
                     std::cell::Cell::new(parent_depth),
                     async move {
                         kernel.publish_event(event).await;
@@ -17897,7 +17941,7 @@ impl KernelHandle for LibreFangKernel {
                     .ok_or_else(|| "Kernel self-handle unavailable".to_string())?,
             );
             let deferred_clone = def.clone();
-            tokio::spawn(async move {
+            spawn_logged("approval_resolution", async move {
                 kernel
                     .handle_approval_resolution(request_id, decision_clone, deferred_clone)
                     .await;

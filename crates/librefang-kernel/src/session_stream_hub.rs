@@ -132,7 +132,7 @@ pub fn install_stream_fanout(
         tokio::sync::mpsc::channel::<StreamEvent>(SESSION_BROADCAST_CAPACITY);
     let broadcast_tx = hub.sender(session_id);
 
-    tokio::spawn(async move {
+    crate::supervised_spawn::spawn_supervised("session_stream_fanout", async move {
         while let Some(event) = producer_rx.recv().await {
             // Best-effort fan-out to attached clients. `broadcast::send`
             // returns Err only when there are zero receivers — fine, just
