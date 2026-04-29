@@ -247,7 +247,9 @@ async fn remove_device_drops_bearer_from_live_auth_table() {
     assert_eq!(h.state.user_api_keys.read().await.len(), 1);
 
     let status = delete_request(&h, &format!("/api/pairing/devices/{device_id}")).await;
-    assert_eq!(status, StatusCode::OK);
+    // DELETE on a successful resource removal returns 204 No Content
+    // (the endpoint emits no body, so 204 is more correct than 200).
+    assert_eq!(status, StatusCode::NO_CONTENT);
 
     // The bearer must be gone — otherwise a "revoked" device's stored
     // key would keep authenticating until the next process restart.
