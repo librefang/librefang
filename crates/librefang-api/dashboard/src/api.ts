@@ -592,6 +592,12 @@ export interface SessionListItem {
   session_id: string;
   agent_id?: string;
   message_count?: number;
+  context_window_tokens?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  duration_ms?: number;
   created_at?: string;
   label?: string | null;
   active?: boolean;
