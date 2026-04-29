@@ -1886,7 +1886,10 @@ fn sender_user_id(message: &ChannelMessage) -> &str {
 }
 
 /// Persists the observed group sender; skips DMs and messages without SENDER_USER_ID_KEY to avoid storing the group's own platform_id.
-async fn upsert_sender_into_roster(handle: &Arc<dyn ChannelBridgeHandle>, message: &ChannelMessage) {
+async fn upsert_sender_into_roster(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    message: &ChannelMessage,
+) {
     if !message.is_group {
         return;
     }

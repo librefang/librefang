@@ -632,9 +632,7 @@ pub fn run() -> InitResult {
                 state.key_test = if ok {
                     if let Some(p) = state.provider() {
                         if !p.env_var.is_empty() {
-                            if let Err(e) =
-                                dotenv::save_env_key(p.env_var, &state.api_key_input)
-                            {
+                            if let Err(e) = dotenv::save_env_key(p.env_var, &state.api_key_input) {
                                 tracing::warn!(
                                     provider = ?p.name,
                                     error = %e,

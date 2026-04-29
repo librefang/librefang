@@ -230,10 +230,7 @@ fn write_env_file(path: &Path, entries: &BTreeMap<String, String>) -> Result<(),
     //     reader can't grab the key during the open syscall.
     //   * Two concurrent saves no longer share the same staging path
     //     because the tmp filename is uniquified by PID.
-    let tmp_path = path.with_extension(format!(
-        "env.tmp.{}",
-        std::process::id()
-    ));
+    let tmp_path = path.with_extension(format!("env.tmp.{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         use std::io::Write as _;
         let mut opts = std::fs::OpenOptions::new();

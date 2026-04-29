@@ -11422,62 +11422,60 @@ system_prompt = "You are a helpful assistant."
                 // the scope inside the spawn so trigger chains
                 // accumulate correctly.
                 let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
-                let task = PUBLISH_EVENT_DEPTH.scope(
-                    std::cell::Cell::new(parent_depth),
-                    async move {
-                    // Execute trigger dispatches sequentially to preserve
-                    // the order in which the trigger engine evaluated them.
-                    // Each dispatch still acquires its semaphore permits
-                    // (global trigger-lane + per-agent) before calling
-                    // send_message_full, so back-pressure and concurrency
-                    // caps continue to apply correctly.
-                    for d in dispatches {
-                        let TriggerDispatch {
-                            kernel,
-                            aid,
-                            msg,
-                            mode_override,
-                            session_id_override,
-                            trigger_sem,
-                            agent_sem,
-                        } = d;
-
-                        // (1) Global trigger lane permit.
-                        let _lane_permit = match trigger_sem.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => return, // lane closed during shutdown
-                        };
-                        // (2) Per-agent permit.
-                        let _agent_permit = match agent_sem.acquire_owned().await {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-                        // (3) Inner per-session mutex applies inside
-                        //     send_message_full when session_id_override is Some.
-                        let handle: Option<Arc<dyn KernelHandle>> = kernel
-                            .self_handle
-                            .get()
-                            .and_then(|w| w.upgrade())
-                            .map(|arc| arc as Arc<dyn KernelHandle>);
-                        let home_channel = kernel.resolve_agent_home_channel(aid);
-                        if let Err(e) = kernel
-                            .send_message_full(
+                let task =
+                    PUBLISH_EVENT_DEPTH.scope(std::cell::Cell::new(parent_depth), async move {
+                        // Execute trigger dispatches sequentially to preserve
+                        // the order in which the trigger engine evaluated them.
+                        // Each dispatch still acquires its semaphore permits
+                        // (global trigger-lane + per-agent) before calling
+                        // send_message_full, so back-pressure and concurrency
+                        // caps continue to apply correctly.
+                        for d in dispatches {
+                            let TriggerDispatch {
+                                kernel,
                                 aid,
-                                &msg,
-                                handle,
-                                None,
-                                home_channel.as_ref(),
+                                msg,
                                 mode_override,
-                                None,
                                 session_id_override,
-                            )
-                            .await
-                        {
-                            warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                                trigger_sem,
+                                agent_sem,
+                            } = d;
+
+                            // (1) Global trigger lane permit.
+                            let _lane_permit = match trigger_sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => return, // lane closed during shutdown
+                            };
+                            // (2) Per-agent permit.
+                            let _agent_permit = match agent_sem.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+                            // (3) Inner per-session mutex applies inside
+                            //     send_message_full when session_id_override is Some.
+                            let handle: Option<Arc<dyn KernelHandle>> = kernel
+                                .self_handle
+                                .get()
+                                .and_then(|w| w.upgrade())
+                                .map(|arc| arc as Arc<dyn KernelHandle>);
+                            let home_channel = kernel.resolve_agent_home_channel(aid);
+                            if let Err(e) = kernel
+                                .send_message_full(
+                                    aid,
+                                    &msg,
+                                    handle,
+                                    None,
+                                    home_channel.as_ref(),
+                                    mode_override,
+                                    None,
+                                    session_id_override,
+                                )
+                                .await
+                            {
+                                warn!(agent = %aid, "Trigger dispatch failed: {e}");
+                            }
                         }
-                    }
-                    },
-                );
+                    });
                 spawn_logged("trigger_dispatch", task);
             }
         }

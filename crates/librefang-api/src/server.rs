@@ -800,10 +800,7 @@ fn save_sessions(
             // the bearer tokens during the gap.  open(mode 0600 +
             // truncate) + write_all + flush + sync_all + rename keeps
             // the file at owner-only mode for its entire lifetime.
-            let tmp_path = path.with_extension(format!(
-                "json.tmp.{}",
-                std::process::id()
-            ));
+            let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
             let result = (|| -> std::io::Result<()> {
                 use std::io::Write as _;
                 let mut opts = std::fs::OpenOptions::new();
