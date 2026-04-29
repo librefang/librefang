@@ -16,7 +16,7 @@ use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use librefang_telemetry::metrics;
 
@@ -238,8 +238,31 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
 
-    // GET 2xx — routine polling, keep out of INFO to reduce noise
-    if method == axum::http::Method::GET && status < 300 {
+    // Route by status class so the level reflects severity:
+    //   5xx → error  (server fault — must surface)
+    //   4xx → warn   (client error — auth storms / bad requests should not
+    //                 hide in INFO; ops needs to spot 401 reconnect loops)
+    //   GET 2xx/3xx → debug (routine polling would otherwise drown the log)
+    //   default → info (state-changing 2xx/3xx)
+    if status >= 500 {
+        error!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    } else if status >= 400 {
+        warn!(
+            request_id = %request_id,
+            method = %method,
+            path = %uri,
+            status = status,
+            latency_ms = elapsed.as_millis() as u64,
+            "API request"
+        );
+    } else if method == axum::http::Method::GET {
         debug!(
             request_id = %request_id,
             method = %method,
