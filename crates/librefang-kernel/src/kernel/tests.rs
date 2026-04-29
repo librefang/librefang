@@ -5378,3 +5378,92 @@ fn cron_create_handles_missing_peer_id() {
     let peer_id = job_json["peer_id"].as_str().map(|s| s.to_string());
     assert_eq!(peer_id, None);
 }
+
+// ---------------------------------------------------------------------------
+// #3734 — injection_senders is keyed by `(AgentId, SessionId)` so concurrent
+// sessions on the same agent each get their own sender. Pre-#3734 the second
+// `setup_injection_channel` silently overwrote the first one's entry under
+// the single `AgentId` key, so an HTTP `/inject` could only ever reach the
+// most recently spawned session.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn injection_senders_two_sessions_one_agent_do_not_collide() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin");
+
+    let session_a = SessionId::new();
+    let session_b = SessionId::new();
+
+    let _rx_a = kernel.setup_injection_channel(agent_id, session_a);
+    let _rx_b = kernel.setup_injection_channel(agent_id, session_b);
+
+    // Both senders must be live concurrently — pre-#3734 the second insert
+    // overwrote the first under the `AgentId` key.
+    assert!(
+        kernel
+            .injection_senders
+            .contains_key(&(agent_id, session_a)),
+        "session A sender lost under (agent, session) keying"
+    );
+    assert!(
+        kernel
+            .injection_senders
+            .contains_key(&(agent_id, session_b)),
+        "session B sender lost under (agent, session) keying"
+    );
+
+    // Targeted inject must reach exactly one session — the other's mpsc
+    // receiver still holds at-zero queue depth.
+    kernel
+        .inject_message_for_session(agent_id, Some(session_a), "hello A")
+        .await
+        .expect("inject A");
+
+    let queued_a = _rx_a.lock().await.try_recv();
+    let queued_b = _rx_b.lock().await.try_recv();
+    assert!(matches!(queued_a, Ok(_)), "session A must have received");
+    assert!(
+        matches!(queued_b, Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+        "session B must NOT have received a session-A inject"
+    );
+
+    // Untargeted inject (#3734 fallback) broadcasts to both sessions.
+    kernel
+        .inject_message_for_session(agent_id, None, "broadcast")
+        .await
+        .expect("inject broadcast");
+
+    assert!(matches!(_rx_a.lock().await.try_recv(), Ok(_)));
+    assert!(matches!(_rx_b.lock().await.try_recv(), Ok(_)));
+
+    kernel.teardown_injection_channel(agent_id, session_a);
+    kernel.teardown_injection_channel(agent_id, session_b);
+    kernel.shutdown();
+}
+
+#[tokio::test]
+async fn injection_teardown_only_removes_target_session() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin2");
+
+    let session_a = SessionId::new();
+    let session_b = SessionId::new();
+
+    let _rx_a = kernel.setup_injection_channel(agent_id, session_a);
+    let _rx_b = kernel.setup_injection_channel(agent_id, session_b);
+
+    // Tearing down session A must NOT clear session B's sender — pre-#3734
+    // a single `remove(&agent_id)` would orphan whichever session was still
+    // running.
+    kernel.teardown_injection_channel(agent_id, session_a);
+    assert!(!kernel
+        .injection_senders
+        .contains_key(&(agent_id, session_a)));
+    assert!(kernel
+        .injection_senders
+        .contains_key(&(agent_id, session_b)));
+
+    kernel.teardown_injection_channel(agent_id, session_b);
+    kernel.shutdown();
+}

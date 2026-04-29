@@ -565,14 +565,26 @@ pub struct LibreFangKernel {
     /// fresh `instance_id` doesn't accumulate stale mutexes across
     /// activate/deactivate cycles.
     hand_runtime_override_locks: dashmap::DashMap<uuid::Uuid, Arc<std::sync::Mutex<()>>>,
-    /// Per-agent mid-turn message injection senders (#956).
-    /// When an agent loop is running, it holds the receiver; callers use the sender
-    /// to inject messages between tool calls.
-    pub(crate) injection_senders:
-        dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>>,
-    /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
+    /// Per-(agent, session) mid-turn message injection senders (#956, #3734).
+    ///
+    /// When an agent loop is running, it holds the receiver; callers use the
+    /// sender to inject messages between tool calls. Keying by
+    /// `(AgentId, SessionId)` instead of just `AgentId` is required for
+    /// concurrent sessions on the same agent (multi-tab UI, multi-channel
+    /// agents) — under the previous `AgentId` keying, a second turn's
+    /// `setup_injection_channel` silently overwrote the first turn's sender,
+    /// so `/api/agents/{id}/inject` could only ever reach the most recently
+    /// started session and earlier sessions' approval-resolution signals
+    /// were silently dropped. See `inject_message` for how callers without a
+    /// session id fan out to all live sessions for the agent.
+    pub(crate) injection_senders: dashmap::DashMap<
+        (AgentId, SessionId),
+        tokio::sync::mpsc::Sender<AgentLoopSignal>,
+    >,
+    /// Per-(agent, session) injection receivers, created alongside senders
+    /// and consumed by the agent loop.
     injection_receivers: dashmap::DashMap<
-        AgentId,
+        (AgentId, SessionId),
         Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>>,
     >,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
@@ -1762,11 +1774,11 @@ impl LibreFangKernel {
         &self.whatsapp_gateway_pid
     }
 
-    /// Per-agent message injection senders.
+    /// Per-(agent, session) message injection senders (#3734).
     #[inline]
     pub fn injection_senders_ref(
         &self,
-    ) -> &dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<AgentLoopSignal>> {
+    ) -> &dashmap::DashMap<(AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>> {
         &self.injection_senders
     }
 
@@ -1864,17 +1876,19 @@ impl LibreFangKernel {
         }
 
         // 4. injection_senders / injection_receivers — remove for dead agents
+        // (#3734: keys are now `(AgentId, SessionId)`, so we filter on the
+        // tuple's agent component).
         {
-            let stale: Vec<AgentId> = self
+            let stale: Vec<(AgentId, SessionId)> = self
                 .injection_senders
                 .iter()
-                .filter(|e| !live_agents.contains(e.key()))
+                .filter(|e| !live_agents.contains(&e.key().0))
                 .map(|e| *e.key())
                 .collect();
             total_removed += stale.len();
-            for id in &stale {
-                self.injection_senders.remove(id);
-                self.injection_receivers.remove(id);
+            for key in &stale {
+                self.injection_senders.remove(key);
+                self.injection_receivers.remove(key);
             }
         }
 
@@ -6164,12 +6178,43 @@ system_prompt = "You are a helpful assistant."
             },
         );
 
+        // #3737 — `session` was loaded above before the spawn, OUTSIDE the
+        // serialization lock. If a concurrent turn (streaming or non-
+        // streaming) lands on the same `(agent, session)` between that read
+        // and the spawn acquiring the lock, the snapshot we captured is
+        // already stale and any messages the loop appends will overwrite
+        // the other turn's writes (last-write-wins). The spawn now reloads
+        // the session AFTER acquiring `session_lock` so the read+modify+
+        // write window is fully serialized — matching the non-streaming
+        // path which loads the session inside `_guard`.
         let handle = tokio::spawn(async move {
             // Acquire the session/agent serialization lock for the duration of
             // this streaming turn.  This matches the non-streaming path and
             // prevents concurrent streaming + non-streaming writes from
             // producing last-write-wins data loss on session history (#3737).
             let _session_guard = session_lock.lock().await;
+
+            // #3737 — Reload the session under the lock so we never feed the
+            // loop a snapshot that another concurrent turn has already
+            // mutated. If the session is missing (race with deletion or a
+            // brand-new session), keep the empty placeholder built above.
+            match memory.get_session(effective_session_id) {
+                Ok(Some(reloaded)) => {
+                    session = reloaded;
+                }
+                Ok(None) => {
+                    // Brand-new session — keep the empty placeholder.
+                }
+                Err(e) => {
+                    warn!(
+                        agent_id = %agent_id,
+                        session_id = %effective_session_id,
+                        error = %e,
+                        "Failed to reload session under lock; proceeding with pre-lock snapshot (streaming)"
+                    );
+                }
+            }
+
             // Auto-compact if the session is large before running the loop.
             // Pass the in-turn session id so the compactor operates on
             // the SAME session the outer loop just measured. Using the
@@ -6241,16 +6286,22 @@ system_prompt = "You are a helpful assistant."
                 });
 
             // Set up mid-turn injection channel (#956). Fork turns skip —
-            // inserting into `injection_senders[agent_id]` would overwrite
-            // the parent turn's channel, and external code trying to
-            // inject into the parent during the fork window would land on
-            // the fork's (about-to-be-dropped) sender instead. Forks are
-            // by design short synchronous derivative calls that don't
-            // need mid-turn injection themselves.
+            // inserting into `injection_senders[(agent_id, session_id)]`
+            // would overwrite the parent turn's channel (forks share the
+            // parent's session id for prompt-cache alignment), and external
+            // code trying to inject into the parent during the fork window
+            // would land on the fork's (about-to-be-dropped) sender
+            // instead. Forks are by design short synchronous derivative
+            // calls that don't need mid-turn injection themselves.
+            //
+            // #3734: keyed by `(agent_id, session_id)` so concurrent
+            // sessions on the same agent (multi-tab UI / multi-channel
+            // bridges) each get their own injection sender instead of the
+            // last writer winning under a single-AgentId key.
             let injection_rx = if loop_opts.is_fork {
                 None
             } else {
-                Some(kernel_clone.setup_injection_channel(agent_id))
+                Some(kernel_clone.setup_injection_channel(agent_id, effective_session_id))
             };
 
             let start_time = std::time::Instant::now();
@@ -6307,9 +6358,10 @@ system_prompt = "You are a helpful assistant."
 
             // Tear down injection channel after loop finishes (skipped for
             // forks since they never set one up — tearing down would
-            // remove the parent turn's entry).
+            // remove the parent turn's entry under the shared
+            // (agent, session) key).
             if !loop_opts.is_fork {
-                kernel_clone.teardown_injection_channel(agent_id);
+                kernel_clone.teardown_injection_channel(agent_id, effective_session_id);
             }
 
             let latency_ms = start_time.elapsed().as_millis() as u64;
@@ -7857,8 +7909,10 @@ system_prompt = "You are a helpful assistant."
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
-        // Set up mid-turn injection channel (#956)
-        let injection_rx = self.setup_injection_channel(agent_id);
+        // Set up mid-turn injection channel (#956, #3734 — keyed by
+        // `(agent_id, effective_session_id)` so concurrent sessions for the
+        // same agent each get their own sender).
+        let injection_rx = self.setup_injection_channel(agent_id, effective_session_id);
 
         // Session-scoped interrupt for tool-level cancellation.  Cloned into
         // each ToolExecutionContext so that cancelling the session (via
@@ -7949,8 +8003,9 @@ system_prompt = "You are a helpful assistant."
         )
         .await;
 
-        // Tear down injection channel after loop finishes
-        self.teardown_injection_channel(agent_id);
+        // Tear down injection channel after loop finishes (#3734 — same
+        // (agent_id, session_id) key as setup above).
+        self.teardown_injection_channel(agent_id, effective_session_id);
 
         // Clean up the interrupt handle regardless of outcome — the map must
         // not retain stale entries that would suppress cancellation on the
@@ -8176,53 +8231,115 @@ system_prompt = "You are a helpful assistant."
     /// Returns `Ok(true)` if the message was sent, `Ok(false)` if no active
     /// loop is running for this agent, or `Err` if the agent doesn't exist.
     pub async fn inject_message(&self, agent_id: AgentId, message: &str) -> KernelResult<bool> {
+        self.inject_message_for_session(agent_id, None, message)
+            .await
+    }
+
+    /// #3734 — Session-aware variant of [`Self::inject_message`].
+    ///
+    /// When `session_id` is `Some`, deliver the message to that exact
+    /// `(agent, session)` injection channel. When `None`, fan out to every
+    /// live session for the agent — useful for callers (HTTP `/inject`
+    /// without a session id, approval-resolution dispatch, …) that don't
+    /// know which concrete session a deferred operation belongs to and need
+    /// to wake whichever loop happens to be running.
+    ///
+    /// Returns `Ok(true)` if at least one channel accepted the message,
+    /// `Ok(false)` if no live loop was reachable, or `Err` when the agent
+    /// itself does not exist.
+    pub async fn inject_message_for_session(
+        &self,
+        agent_id: AgentId,
+        session_id: Option<SessionId>,
+        message: &str,
+    ) -> KernelResult<bool> {
         // Verify the agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
-        if let Some(tx) = self.injection_senders.get(&agent_id) {
+
+        // Collect targets first so we don't hold any DashMap shard lock
+        // across the `try_send` calls (which themselves can briefly block on
+        // the per-channel internal lock).
+        let targets: Vec<((AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>)> =
+            if let Some(sid) = session_id {
+                self.injection_senders
+                    .get(&(agent_id, sid))
+                    .map(|entry| (*entry.key(), entry.value().clone()))
+                    .into_iter()
+                    .collect()
+            } else {
+                self.injection_senders
+                    .iter()
+                    .filter(|e| e.key().0 == agent_id)
+                    .map(|e| (*e.key(), e.value().clone()))
+                    .collect()
+            };
+
+        if targets.is_empty() {
+            return Ok(false);
+        }
+
+        let mut delivered = false;
+        let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
+        for (key, tx) in targets {
             match tx.try_send(AgentLoopSignal::Message {
                 content: message.to_string(),
             }) {
                 Ok(()) => {
-                    info!(agent_id = %agent_id, "Mid-turn message injected");
-                    Ok(true)
+                    info!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Mid-turn message injected"
+                    );
+                    delivered = true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    warn!(agent_id = %agent_id, "Injection channel full — message dropped");
-                    Ok(false)
+                    warn!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Injection channel full — message dropped"
+                    );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Receiver dropped — loop is no longer running
-                    self.injection_senders.remove(&agent_id);
-                    Ok(false)
+                    // Receiver dropped — loop is no longer running.
+                    closed_keys.push(key);
                 }
             }
-        } else {
-            // No active loop for this agent
-            Ok(false)
         }
+        for key in closed_keys {
+            self.injection_senders.remove(&key);
+        }
+        Ok(delivered)
     }
 
-    /// Set up the injection channel for an agent before running its loop.
-    /// Returns the receiver wrapped in a Mutex for the agent loop to consume.
+    /// Set up the injection channel for an agent's specific session before
+    /// running its loop. Returns the receiver wrapped in a Mutex for the
+    /// agent loop to consume.
+    ///
+    /// #3734: keyed by `(AgentId, SessionId)` so concurrent sessions for the
+    /// same agent each get their own channel — previously, the second turn
+    /// silently overwrote the first's sender via the single-`AgentId` key.
     fn setup_injection_channel(
         &self,
         agent_id: AgentId,
+        session_id: SessionId,
     ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AgentLoopSignal>>> {
         let (tx, rx) = tokio::sync::mpsc::channel::<AgentLoopSignal>(8);
-        self.injection_senders.insert(agent_id, tx);
+        self.injection_senders.insert((agent_id, session_id), tx);
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
-        self.injection_receivers.insert(agent_id, Arc::clone(&rx));
+        self.injection_receivers
+            .insert((agent_id, session_id), Arc::clone(&rx));
         rx
     }
 
-    /// Tear down the injection channel after the agent loop finishes.
-    fn teardown_injection_channel(&self, agent_id: AgentId) {
-        self.injection_senders.remove(&agent_id);
-        self.injection_receivers.remove(&agent_id);
+    /// Tear down the injection channel for an agent's specific session
+    /// after its loop finishes (#3734).
+    fn teardown_injection_channel(&self, agent_id: AgentId, session_id: SessionId) {
+        self.injection_senders.remove(&(agent_id, session_id));
+        self.injection_receivers.remove(&(agent_id, session_id));
     }
 
     /// Resolve a module path relative to the kernel's home directory.
@@ -18443,6 +18560,14 @@ impl LibreFangKernel {
 
     /// Notify the running agent loop about an approval resolution via an explicit
     /// mid-turn signal.
+    ///
+    /// #3734 — `injection_senders` is keyed by `(AgentId, SessionId)`. The
+    /// `DeferredToolExecution` does not currently carry a `SessionId`, so we
+    /// fan the signal out to every live session for the agent. In practice
+    /// only one session has the matching `tool_use_id` outstanding, so the
+    /// other sessions will ignore the message; this is strictly more correct
+    /// than the pre-#3734 behaviour where a single-AgentId key meant only
+    /// the most recently spawned session ever received the signal at all.
     fn notify_agent_of_resolution(
         &self,
         agent_id: &AgentId,
@@ -18450,7 +18575,24 @@ impl LibreFangKernel {
         decision: &librefang_types::approval::ApprovalDecision,
         result: &librefang_types::tool::ToolResult,
     ) -> bool {
-        if let Some(tx) = self.injection_senders.get(agent_id) {
+        let senders: Vec<((AgentId, SessionId), tokio::sync::mpsc::Sender<AgentLoopSignal>)> =
+            self.injection_senders
+                .iter()
+                .filter(|e| e.key().0 == *agent_id)
+                .map(|e| (*e.key(), e.value().clone()))
+                .collect();
+
+        if senders.is_empty() {
+            debug!(
+                agent_id = %agent_id,
+                "Approval resolution: no active agent loop to notify"
+            );
+            return false;
+        }
+
+        let mut delivered = false;
+        let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
+        for (key, tx) in senders {
             match tx.try_send(AgentLoopSignal::ApprovalResolved {
                 tool_use_id: deferred.tool_use_id.clone(),
                 tool_name: deferred.tool_name.clone(),
@@ -18460,31 +18602,34 @@ impl LibreFangKernel {
                 result_status: result.status,
             }) {
                 Ok(()) => {
-                    debug!(agent_id = %agent_id, "Approval resolution injected into agent loop");
-                    true
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %key.1,
+                        "Approval resolution injected into agent loop"
+                    );
+                    delivered = true;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         agent_id = %agent_id,
+                        session_id = %key.1,
                         "Approval resolution injection channel full — falling back to session patch"
                     );
-                    false
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!(
                         agent_id = %agent_id,
+                        session_id = %key.1,
                         "Approval resolution: agent loop is not running (injection channel closed)"
                     );
-                    false
+                    closed_keys.push(key);
                 }
             }
-        } else {
-            debug!(
-                agent_id = %agent_id,
-                "Approval resolution: no active agent loop to notify"
-            );
-            false
         }
+        for key in closed_keys {
+            self.injection_senders.remove(&key);
+        }
+        delivered
     }
 }
 

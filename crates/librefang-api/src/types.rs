@@ -314,6 +314,12 @@ pub struct MessageResponse {
 pub struct InjectMessageRequest {
     /// The message to inject between tool calls.
     pub message: String,
+    /// Optional session id to target a specific running loop. When omitted
+    /// (#3734), the message is broadcast to every live session for the
+    /// agent — preserves backward compatibility with single-session callers
+    /// while allowing multi-session UIs to address one session at a time.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Response from a mid-turn message injection.
