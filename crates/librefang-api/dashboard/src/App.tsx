@@ -412,6 +412,127 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Sidebar user-row + dropdown menu. Mirrors the design canvas
+// `shell.jsx::Sidebar` footer (avatar + name + chevron) and reuses the
+// existing AppShell auth/theme/language wiring. The dropdown is anchored
+// above the row so it stays inside the viewport on short screens.
+type SidebarUserBlockProps = {
+  collapsed: boolean;
+  authMode: AuthMode;
+  hostname: string;
+  onOpenChangePassword: () => void;
+  onLogout: () => void | Promise<void>;
+  onToggleTheme: () => void;
+  onSwitchLanguage: () => void;
+  theme: "dark" | "light";
+  language: string;
+  t: ReturnType<typeof useTranslation>["t"];
+};
+
+function SidebarUserBlock({
+  collapsed,
+  authMode,
+  hostname,
+  onOpenChangePassword,
+  onLogout,
+  onToggleTheme,
+  onSwitchLanguage,
+  theme,
+  language,
+  t,
+}: SidebarUserBlockProps) {
+  const [open, setOpen] = useState(false);
+  const [username, setUsername] = useState<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    getDashboardUsername().then((u) => { if (!cancelled) setUsername(u); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  const initials = (username || "U").slice(0, 2).toUpperCase();
+
+  return (
+    <div className="relative border-t border-border-subtle">
+      <button
+        onClick={() => setOpen((x) => !x)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={`flex w-full items-center gap-2.5 ${collapsed ? "lg:justify-center px-2" : "px-3"} py-2.5 text-left transition-colors ${open ? "bg-brand/5" : "hover:bg-surface-hover"}`}
+      >
+        <div
+          className="h-[26px] w-[26px] rounded-full grid place-items-center text-white text-[11px] font-semibold shrink-0"
+          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+        >
+          {initials}
+        </div>
+        {!collapsed && (
+          <>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-text-main truncate">{username || t("common.user", { defaultValue: "User" })}</div>
+              <div className="font-mono text-[10px] text-text-dim truncate">
+                {hostname || (language === "en" ? "en-US" : "zh-CN")}
+              </div>
+            </div>
+            <ChevronRight className={`h-3 w-3 text-text-dim transition-transform ${open ? "rotate-90" : ""}`} />
+          </>
+        )}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className={`absolute z-50 ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"} rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5`}
+          >
+            <button
+              onClick={() => { setOpen(false); onToggleTheme(); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            >
+              {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+              <span className="flex-1 text-left">{t("common.toggle_theme")}</span>
+              <span className="font-mono text-[10px] text-text-dim/70">{theme === "dark" ? "dark" : "light"}</span>
+            </button>
+            <button
+              onClick={() => { setOpen(false); onSwitchLanguage(); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            >
+              <Globe className="h-3.5 w-3.5" />
+              <span className="flex-1 text-left">{t("common.change_language")}</span>
+              <span className="font-mono text-[10px] text-text-dim/70">{language === "en" ? "EN" : "中文"}</span>
+            </button>
+            <div className="my-1 h-px bg-border-subtle" />
+            <Link
+              to="/settings"
+              onClick={() => setOpen(false)}
+              className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span>{t("nav.settings")}</span>
+            </Link>
+            <button
+              onClick={() => { setOpen(false); onOpenChangePassword(); }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            >
+              <Lock className="h-3.5 w-3.5" />
+              <span>{t("settings.change_password")}</span>
+            </button>
+            {authMode !== "none" && (
+              <>
+                <div className="my-1 h-px bg-border-subtle" />
+                <button
+                  onClick={async () => { setOpen(false); await onLogout(); }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  <span>{t("nav.logout")}</span>
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Routes that must fill the remaining viewport height without scrolling.
 const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 
@@ -526,10 +647,14 @@ export function App() {
     }
   }, [theme]);
 
-  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
-    isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0" : "px-3 gap-3"
+  // Per design canvas (dashboard/project/app/shell.jsx::SidebarItem): 30px row,
+  // 13px font, brand-tinted bg, brand text, with a left-edge sky-blue glow bar
+  // marking the active state. Spacing matches the canvas to keep the nav dense
+  // enough for 5 sections to fit without scrolling on a 13" laptop.
+  const navBase = `relative flex items-center rounded-md border border-transparent text-[13px] text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
+    isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0 h-[30px]" : "px-2.5 gap-2.5 h-[30px]"
   }`;
-  const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
+  const navActive = "bg-brand/10 text-brand font-medium before:absolute before:left-[-4px] before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
 
   const navGroups = useMemo(() => {
     const advancedItems = [
@@ -640,44 +765,55 @@ export function App() {
       )}
 
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
-        ${isSidebarCollapsed ? "lg:w-24" : "lg:w-[280px]"}
+        ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}
       `}>
-        <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-          isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-4"
+        {/* Brand block — 26px sky-gradient square with the LibreFang fang glyph,
+            "librefang" + "v{version} · prod" subtitle. Mirrors the design's
+            shell.jsx::Sidebar header. */}
+        <div className={`flex h-14 items-center transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-3.5"
         }`}>
-          <div className={`flex items-center gap-3 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 shadow-[0_0_15px_rgba(14,165,233,0.3)] ring-1 ring-brand/40 shrink-0">
-              <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
+          <div className={`flex items-center gap-2.5 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
+            <div
+              className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] shrink-0 shadow-[0_0_16px_rgba(56,189,248,0.45),inset_0_1px_0_rgba(255,255,255,0.3)]"
+              style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" stroke="#0c1424" strokeWidth="0.5" strokeLinejoin="round" />
+              </svg>
             </div>
-            <div className="flex flex-col">
-              <strong className="text-sm font-bold tracking-tight whitespace-nowrap">LibreFang</strong>
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
+            <div className="flex flex-col min-w-0">
+              <strong className="text-[13.5px] font-semibold tracking-tight whitespace-nowrap leading-tight">librefang</strong>
+              <span className="text-[10px] font-mono text-text-dim/80 whitespace-nowrap leading-tight">
+                {appVersion ? `v${appVersion}` : "v0.0.0"} · prod
+              </span>
             </div>
           </div>
           <button
             onClick={toggleSidebar}
-            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            className="hidden lg:flex h-7 w-7 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             title={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-label={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-expanded={!isSidebarCollapsed}
           >
-            {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            {isSidebarCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
           </button>
         </div>
 
-        <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin max-h-[calc(100vh-160px)]">
+        <nav className="overflow-y-auto overflow-x-hidden px-2 pb-3 scrollbar-thin max-h-[calc(100vh-140px)]">
           <button
             onClick={() => setPaletteOpen(true)}
-            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+            className={`mx-1 mb-3 flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-hover/60 px-2.5 h-8 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
             title={`${t("common.search")} (⌘K)`}
             aria-label={`${t("common.search")} (⌘K)`}
+            style={{ width: "calc(100% - 8px)" }}
           >
-            <Search className="h-4 w-4" />
-            <span className="flex-1 text-left text-xs font-medium">{t("common.search")}</span>
-            <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
+            <Search className="h-3.5 w-3.5" />
+            <span className="flex-1 text-left text-xs">{t("common.search")}…</span>
+            <kbd className="text-[10px] font-mono bg-main border border-border-subtle px-1 py-px rounded">⌘K</kbd>
           </button>
 
           <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-6"}`}>
@@ -737,88 +873,104 @@ export function App() {
           </div>
         </nav>
 
-        <div className={`border-t border-border-subtle pt-4 px-4 pb-safe-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
-          <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
-            <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="relative flex h-2 w-2 shrink-0">
-                <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
-              </span>
-              <span className="text-xs font-semibold text-success">{t("common.daemon_online")}</span>
-            </div>
-            {(appVersion || hostname) && (
-              <div className="mt-1.5 space-y-0.5 text-[10px] font-mono text-text-dim">
-                {appVersion && <p className="truncate">v{appVersion}</p>}
-                {hostname && <p className="truncate">{hostname}</p>}
-              </div>
-            )}
-          </div>
-        </div>
+        {/* User-avatar footer — opens the unified user menu (theme / language /
+            settings / change credentials / logout). Replaces the old "daemon
+            online" status pane. Hostname & version moved into the brand block /
+            user menu so this row stays compact. */}
+        <SidebarUserBlock
+          collapsed={isSidebarCollapsed}
+          authMode={authMode}
+          hostname={hostname}
+          onOpenChangePassword={() => setShowChangePassword(true)}
+          onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+          onToggleTheme={toggleTheme}
+          onSwitchLanguage={() => setLanguage(language === "en" ? "zh" : "en")}
+          theme={theme}
+          language={language}
+          t={t}
+        />
       </aside>
 
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-6">
-          <div className="flex items-center gap-2">
+        {/* Compact topbar (h-12, ~48px). Theme/language/avatar moved into the
+            sidebar's user-row dropdown to match the design. Notifications
+            stays inline as a single iconed button. Mobile keeps a hamburger
+            and the brand block since the sidebar is hidden. */}
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 backdrop-blur-md px-3 sm:px-4">
+          <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
               aria-label={t("nav.open_menu", { defaultValue: "Open navigation menu" })}
               aria-expanded={isMobileMenuOpen}
             >
-              <Menu className="h-5 w-5" />
+              <Menu className="h-4 w-4" />
             </button>
             <div className="flex items-center gap-2 lg:hidden">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
-                <div className="h-2.5 w-2.5 rounded-full bg-brand animate-pulse" />
+              <div
+                className="flex h-6 w-6 items-center justify-center rounded-md shrink-0 shadow-[0_0_12px_rgba(56,189,248,0.4)]"
+                style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+              >
+                <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" />
+                </svg>
               </div>
-              <strong className="text-sm font-bold tracking-tight">LibreFang</strong>
+              <strong className="text-[13px] font-semibold tracking-tight">librefang</strong>
+            </div>
+            {/* Desktop: hostname / page hint */}
+            <div className="hidden lg:flex items-center gap-2 text-text-dim min-w-0">
+              {hostname && (
+                <span className="font-mono text-[11px] truncate">{hostname}</span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-1">
             <NotificationCenter />
-            <button
-              onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-              title={t("common.change_language")}
-              aria-label={t("common.change_language")}
-            >
-              <Globe className="h-4 w-4" />
-            </button>
-            <button
-              onClick={toggleTheme}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-              title={t("common.toggle_theme")}
-              aria-label={t("common.toggle_theme")}
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-            <div className="relative">
+            {/* Mobile-only: keep an avatar button so the user menu is reachable
+                without opening the drawer. Desktop users use the sidebar
+                user-row dropdown. */}
+            <div className="relative lg:hidden">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+                className="flex h-8 w-8 items-center justify-center rounded-full text-white text-[10px] font-semibold transition-transform duration-200 active:scale-95"
+                style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}
                 aria-haspopup="menu"
               >
-                <UserCircle className="h-5 w-5" />
+                <UserCircle className="h-4 w-4" />
               </button>
               {userMenuOpen && (
                 <>
                   <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-50 w-48 rounded-xl border border-border-subtle bg-surface shadow-xl py-1">
+                  <div className="absolute right-0 top-full mt-1.5 z-50 w-52 rounded-lg border border-border-subtle bg-surface shadow-2xl py-1.5">
+                    <button
+                      onClick={() => { setUserMenuOpen(false); toggleTheme(); }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                    >
+                      {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+                      <span className="flex-1 text-left">{t("common.toggle_theme")}</span>
+                    </button>
+                    <button
+                      onClick={() => { setUserMenuOpen(false); setLanguage(language === "en" ? "zh" : "en"); }}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                    >
+                      <Globe className="h-3.5 w-3.5" />
+                      <span className="flex-1 text-left">{t("common.change_language")}</span>
+                    </button>
+                    <div className="my-1 h-px bg-border-subtle" />
                     <Link
                       to="/settings"
                       onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     >
                       <Settings className="h-3.5 w-3.5" />
                       {t("nav.settings")}
                     </Link>
                     <button
                       onClick={() => { setUserMenuOpen(false); setShowChangePassword(true); }}
-                      className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
                     >
                       <Lock className="h-3.5 w-3.5" />
                       {t("settings.change_password")}
@@ -826,7 +978,7 @@ export function App() {
                     {authMode !== "none" && (
                       <button
                         onClick={async () => { await dashboardLogout(); window.location.reload(); }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
                       >
                         <LogOut className="h-3.5 w-3.5" />
                         {t("nav.logout")}
