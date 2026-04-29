@@ -112,25 +112,91 @@ body {
    variants). Only static (non-animated) helpers remain in this file — keep
    the easing CSS variables above so any inline transitions can reference them. */
 
-/* ── Card hover — Apple-style depth + glow ──────── */
+/* ── Card hover — depth + sky-blue glow signature ──────── */
 .card-glow {
-  transition: transform 0.4s var(--apple-spring),
-              box-shadow 0.4s var(--apple-ease),
-              border-color 0.3s ease;
+  transition: transform 0.24s var(--apple-spring),
+              box-shadow 0.24s var(--apple-ease),
+              border-color 0.24s var(--apple-ease);
 }
 
 .card-glow:hover {
+  transform: translateY(-1px);
+  border-color: rgba(2, 132, 199, 0.4);
   box-shadow:
-    0 0 0 1px rgba(2, 132, 199, 0.08),
-    0 8px 32px -8px rgba(2, 132, 199, 0.15),
-    0 2px 8px -2px rgba(0, 0, 0, 0.06);
+    0 0 0 1px rgba(2, 132, 199, 0.18),
+    0 8px 28px -12px rgba(2, 132, 199, 0.25),
+    0 0 36px -10px rgba(2, 132, 199, 0.18);
 }
 
 .dark .card-glow:hover {
+  border-color: rgba(56, 189, 248, 0.4);
   box-shadow:
-    0 0 0 1px rgba(56, 189, 248, 0.12),
-    0 8px 32px -8px rgba(56, 189, 248, 0.18),
-    0 2px 8px -2px rgba(0, 0, 0, 0.3);
+    0 0 0 1px rgba(56, 189, 248, 0.18),
+    0 8px 28px -12px rgba(56, 189, 248, 0.25),
+    0 0 36px -10px rgba(56, 189, 248, 0.18);
+}
+
+/* ── Surface "lit" highlight — subtle inner top-light ─── */
+.surface-lit { position: relative; }
+.surface-lit::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 1px; right: 1px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.18), transparent);
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* ── Glow text (KPI accent values) ─────────────────── */
+.glow-text { text-shadow: 0 0 24px rgba(56, 189, 248, 0.35); }
+
+/* ── Status dot pulse — scale-based, tighter than animate-pulse ── */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.9); }
+}
+@utility animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+/* ── Shimmer for skeletons / placeholder ─────────── */
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@utility animate-shimmer {
+  background: linear-gradient(90deg,
+    rgba(51, 65, 85, 0.15) 0%,
+    rgba(51, 65, 85, 0.35) 50%,
+    rgba(51, 65, 85, 0.15) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* ── Rise (toast / modal entry) ─────────────────── */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@utility animate-rise {
+  animation: rise 0.5s var(--apple-spring) both;
+}
+
+/* ── Approval glow ring ─────────────────────────── */
+@keyframes glow-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(251, 191, 36, 0); }
+}
+@utility animate-glow-ring {
+  animation: glow-ring 2.4s ease-in-out infinite;
+}
+
+/* ── Grid bg (canvas / scratchpad) ─────────────── */
+@utility bg-grid {
+  background-image:
+    linear-gradient(rgba(51, 65, 85, 0.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(51, 65, 85, 0.18) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 /* ── Smooth scrollbar ───────────────────────────── */
