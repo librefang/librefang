@@ -180,7 +180,21 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                             error = %e,
                             "Inbox: failed to move empty file to processed dir, removing to avoid spin loop"
                         );
-                        let _ = tokio::fs::remove_file(&path).await;
+                        if let Err(e2) = tokio::fs::remove_file(&path).await {
+                            // Move and delete both failed (read-only inbox,
+                            // EACCES, etc.).  Park the path in `in_flight`
+                            // so subsequent ticks skip it instead of
+                            // re-reading + re-warning every interval.  The
+                            // `retain(|p| p.exists())` sweep below still
+                            // unblocks the path the moment it disappears
+                            // by external means.
+                            warn!(
+                                path = %path.display(),
+                                error = %e2,
+                                "Inbox: also failed to remove empty file; suppressing rescan via in_flight"
+                            );
+                            in_flight.insert(path.clone());
+                        }
                     }
                     continue;
                 }
