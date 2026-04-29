@@ -459,14 +459,8 @@ mod tests {
             filter.filter_message(&text, &PrivacyMode::Pseudonymize);
         }
         let len = filter.state.read().map.len();
-        assert!(
-            len <= cap,
-            "pseudonym map should stay <= {cap}, got {len}"
-        );
-        assert!(
-            len >= cap - 10,
-            "should be near the cap, got {len}"
-        );
+        assert!(len <= cap, "pseudonym map should stay <= {cap}, got {len}");
+        assert!(len >= cap - 10, "should be near the cap, got {len}");
     }
 
     // -- index_to_label --

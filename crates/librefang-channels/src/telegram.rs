@@ -4533,7 +4533,10 @@ mod tests {
         // Unknown tag with HTML-special characters in body must be escaped.
         let input = r#"<thinking attr="&">"#;
         let output = sanitize_telegram_html(input);
-        assert!(output.contains("&amp;"), "ampersand should be escaped: {output}");
+        assert!(
+            output.contains("&amp;"),
+            "ampersand should be escaped: {output}"
+        );
     }
 
     #[test]
