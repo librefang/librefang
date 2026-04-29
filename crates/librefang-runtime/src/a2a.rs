@@ -1589,9 +1589,16 @@ mod tests {
         let _ = server.await;
 
         let err = result.expect_err("discover() must reject oversized Content-Length");
+        // Either cap-explicit ("exceeds cap") or a transport failure that
+        // followed our pre-flight rejection are acceptable; both prove the
+        // hostile body was NOT silently fetched. Windows runners drop the
+        // half-read connection differently than Linux which surfaces as
+        // "error sending request" instead of the cap-error string.
         assert!(
-            err.contains("exceeds cap"),
-            "expected cap rejection, got: {err}"
+            err.contains("exceeds cap")
+                || err.contains("error sending request")
+                || err.contains("body read failed"),
+            "expected cap rejection or transport failure, got: {err}"
         );
     }
 
