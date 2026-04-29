@@ -1458,30 +1458,31 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     }
                     match totp_code {
                         Some(code) if ApprovalManager::is_recovery_code_format(code) => {
-                            // Recovery code
-                            match self.kernel.vault_get("totp_recovery_codes") {
-                                Some(stored) => {
-                                    match librefang_kernel::approval::ApprovalManager::verify_recovery_code(
-                                        &stored,
-                                        code,
-                                    ) {
-                                        Ok((true, updated)) => {
-                                            let _ = self
-                                                .kernel
-                                                .vault_set("totp_recovery_codes", &updated);
-                                            true
-                                        }
-                                        Ok((false, _)) => {
-                                            let _ = self
-                                                .kernel
-                                                .approvals()
-                                                .record_totp_failure(sender_id);
-                                            return "Invalid recovery code.".into();
-                                        }
-                                        Err(e) => return format!("Recovery code error: {e}"),
+                            // Atomic redeem: read + verify + consume under
+                            // the kernel's recovery-code mutex.  The
+                            // earlier vault_get → verify → vault_set
+                            // triple let two concurrent channel approvals
+                            // both consume the same code (#3560 / #3943),
+                            // because nothing serialised the write.
+                            match self.kernel.vault_redeem_recovery_code(code) {
+                                Ok(true) => true,
+                                Ok(false) => {
+                                    // Fail-secure: if recording the failure
+                                    // hits a wedged audit DB, refuse the
+                                    // attempt rather than handing the
+                                    // attacker unlimited tries.  The HTTP
+                                    // path already does this.
+                                    if self
+                                        .kernel
+                                        .approvals()
+                                        .record_totp_failure(sender_id)
+                                        .is_err()
+                                    {
+                                        return "TOTP service temporarily unavailable.".into();
                                     }
+                                    return "Invalid recovery code.".into();
                                 }
-                                None => return "No recovery codes configured.".into(),
+                                Err(e) => return format!("Recovery code error: {e}"),
                             }
                         }
                         Some(code) => {
@@ -1498,10 +1499,17 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             ) {
                                 Ok(true) => true,
                                 Ok(false) => {
-                                    let _ = self
+                                    // Fail-secure parity with the HTTP path:
+                                    // a wedged audit DB must not silently
+                                    // grant unlimited TOTP attempts.
+                                    if self
                                         .kernel
                                         .approvals()
-                                        .record_totp_failure(sender_id);
+                                        .record_totp_failure(sender_id)
+                                        .is_err()
+                                    {
+                                        return "TOTP service temporarily unavailable.".into();
+                                    }
                                     return "Invalid TOTP code.".into();
                                 }
                                 Err(e) => return format!("TOTP error: {e}"),
