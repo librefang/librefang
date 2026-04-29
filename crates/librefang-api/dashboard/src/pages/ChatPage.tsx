@@ -141,8 +141,22 @@ function useWebSocket(
 ) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
-  // Bug #3849: announce connection state changes to screen readers
-  const [ariaAnnouncement, setAriaAnnouncement] = useState("");
+  // Bug #3849 / audit of #3930: announce connection state changes
+  // to screen readers.  Use a (msg, nonce) tuple instead of a bare
+  // string so re-emitting the same announcement (e.g. two
+  // 'Disconnected — reconnecting…' lines after a transient flap)
+  // still triggers a React commit — bare-string state updates with
+  // the same value are no-ops, and the live-region textContent
+  // therefore doesn't change, so VoiceOver / NVDA / Orca skip the
+  // re-announcement.  The JSX applies key={ariaNonce} so the
+  // live-region node remounts on every announce, forcing
+  // re-announcement.
+  const [ariaState, setAriaState] = useState({ msg: "", nonce: 0 });
+  const ariaAnnouncement = ariaState.msg;
+  const ariaNonce = ariaState.nonce;
+  const setAriaAnnouncement = useCallback((msg: string) => {
+    setAriaState(prev => ({ msg, nonce: prev.nonce + 1 }));
+  }, []);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
@@ -271,7 +285,7 @@ function useWebSocket(
     };
   }, [agentId, sessionId]);
 
-  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement };
+  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement, ariaNonce };
 }
 
 // Per-agent session cache — survives agent switches within the same page lifecycle
@@ -336,7 +350,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef, ariaAnnouncement } = useWebSocket(agentId, sessionId, onClearError);
+  const { ws, wsConnected, onDropRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -933,7 +947,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
   }, [agentId, updateAgentMessages, finishTurnIfCurrent, stopAgentMutation]);
 
-  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement };
+  return { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce };
 }
 
 // Message bubble component — memoized to skip re-render during streaming of other messages
@@ -2488,7 +2502,7 @@ export function ChatPage() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.sessions(selectedAgentId) });
   }, [selectedAgentId, navigate, queryClient]);
 
-  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement } = useChatMessages(
+  const { messages, isLoading, sendMessage, stopMessage, clearHistory, wsConnected, ariaAnnouncement, ariaNonce } = useChatMessages(
     selectedAgentId || null,
     agents,
     sessionVersion,
@@ -2717,7 +2731,7 @@ export function ChatPage() {
           new-message announcements are each surfaced independently — a single
           region with `||` would silence msgAriaAnnouncement whenever the WS
           connection string is non-empty. */}
-      <div aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
+      <div key={ariaNonce} aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
       {/* Header */}
       <header className="pb-2 sm:pb-4">
