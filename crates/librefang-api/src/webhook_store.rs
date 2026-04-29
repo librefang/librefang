@@ -105,8 +105,59 @@ pub fn compute_hmac_signature(secret: &str, payload: &[u8]) -> String {
     format!("sha256={}", hex::encode(bytes))
 }
 
+/// Resolve the URL's host via DNS and reject if any A/AAAA record points at
+/// a private, loopback, link-local, or cloud-metadata address. Run this at
+/// fire-time (not at registration) so a public hostname that flips to
+/// `169.254.169.254` (DNS rebind) or to RFC 1918 between checks cannot
+/// reach internal services. Issue #3701.
+///
+/// Falls through to [`validate_webhook_url`] for the cheap scheme + literal
+/// checks first, so a malformed or obviously-private URL is rejected without
+/// touching the resolver.
+pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<(), String> {
+    // Cheap literal/scheme guard first — also covers IP-literal URLs that
+    // the resolver wouldn't see.
+    validate_webhook_url(url_str)?;
+
+    let parsed =
+        url::Url::parse(url_str).map_err(|_| "url is not a valid URL".to_string())?;
+    let host = match parsed.host() {
+        Some(url::Host::Domain(d)) => d.to_string(),
+        // IP literals already handled by validate_webhook_url.
+        _ => return Ok(()),
+    };
+    // Default to port 443 for https, 80 for http when none is given —
+    // tokio's resolver requires a port.
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let lookup_target = format!("{host}:{port}");
+
+    let addrs = tokio::net::lookup_host(&lookup_target)
+        .await
+        .map_err(|e| format!("dns lookup failed for {host}: {e}"))?;
+
+    let mut any = false;
+    for sa in addrs {
+        any = true;
+        let ip = canonical_ip(sa.ip());
+        if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
+            return Err(format!(
+                "host '{host}' resolves to private/loopback/link-local address {ip}"
+            ));
+        }
+    }
+    if !any {
+        return Err(format!("dns lookup for {host} returned no addresses"));
+    }
+    Ok(())
+}
+
 /// Validate that a URL is safe to send webhooks to (mitigate SSRF).
 /// Only allows http and https schemes, blocks private/link-local IPs.
+///
+/// **DNS-blind**: a hostname that resolves to a private IP at request time
+/// (DNS rebind) is NOT caught here — call
+/// [`validate_webhook_url_resolved`] at fire-time to plug that gap
+/// (issue #3701).
 pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url_str).map_err(|_| "url is not a valid URL".to_string())?;
 
@@ -183,14 +234,21 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
             v4.is_private() || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64
             // 100.64.0.0/10
         }
-        std::net::IpAddr::V6(_) => false, // Simplified; production should check IPv6 ULA
+        std::net::IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            // Unique local fc00::/7 (covers fd00::/8) and multicast ff00::/8.
+            (segs[0] & 0xfe00) == 0xfc00 || (segs[0] & 0xff00) == 0xff00
+        }
     }
 }
 
 fn is_link_local(ip: std::net::IpAddr) -> bool {
     match canonical_ip(ip) {
         std::net::IpAddr::V4(v4) => v4.is_link_local() || v4.octets()[0] == 169,
-        std::net::IpAddr::V6(_) => false,
+        std::net::IpAddr::V6(v6) => {
+            // Link-local fe80::/10
+            (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -502,6 +560,51 @@ mod tests {
         let wh = store.create(valid_create_req()).unwrap();
         assert_eq!(wh.name, "test-hook");
         assert_eq!(store.list().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn validate_webhook_url_resolved_blocks_literal_loopback() {
+        // IP literals are caught by the cheap pre-check; resolver is never
+        // queried, so this also verifies we don't regress on hosts the OS
+        // can't look up.
+        let err = validate_webhook_url_resolved("http://127.0.0.1/hook")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("loopback") || err.contains("private") || err.contains("link-local"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_webhook_url_resolved_blocks_metadata_literal() {
+        // Cloud metadata IMDS literal — must be rejected pre-DNS so the
+        // attacker can't even cause an outbound resolver query.
+        assert!(
+            validate_webhook_url_resolved("http://169.254.169.254/latest/meta-data/")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_webhook_url_resolved_blocks_localhost_hostname() {
+        // Hostname caught by hostname-pattern check; resolver not invoked.
+        assert!(
+            validate_webhook_url_resolved("http://localhost:8080/hook")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_webhook_url_resolved_rejects_ipv6_ula_literal() {
+        // ULA fc00::/7 literal must trip the IPv6 private check.
+        assert!(
+            validate_webhook_url_resolved("http://[fd00::1]/hook")
+                .await
+                .is_err()
+        );
     }
 
     #[test]

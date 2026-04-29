@@ -4507,8 +4507,11 @@ pub async fn test_webhook(
         }
     };
 
-    // Re-validate the URL against SSRF rules before sending
-    if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
+    // Re-validate the URL against SSRF rules before sending. Use the
+    // DNS-resolving variant so a hostname that flips to a private IP after
+    // registration (DNS rebind, metadata IMDS, ec2 internal records) is
+    // caught at fire-time, not just at registration (issue #3701).
+    if let Err(e) = crate::webhook_store::validate_webhook_url_resolved(&webhook.url).await {
         let err_msg = {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])

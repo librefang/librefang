@@ -280,25 +280,36 @@ impl MessageJournal {
 
     /// Compact the journal file: rewrite only non-completed entries.
     /// Call periodically or on shutdown.
+    ///
+    /// Sync filesystem ops (`File::create`, `flush`, `sync_all`, `rename`) run
+    /// inside `spawn_blocking` so they cannot stall the async runtime while
+    /// we still hold the inner mutex (issue #3646 — every channel intake
+    /// awaits this same `tokio::Mutex`, so a slow `sync_all` would serialize
+    /// all incoming messages behind the compactor).
     pub async fn compact(&self) {
         let inner = self.inner.lock().await;
-        let tmp_path = inner
-            .path
-            .with_extension(format!("jsonl.tmp.{}", std::process::id()));
-        let result = (|| -> std::io::Result<()> {
+        let path = inner.path.clone();
+        let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
+        let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
+        let remaining = entries.len();
+
+        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let mut file = std::fs::File::create(&tmp_path)?;
-            for entry in inner.pending.values() {
+            for entry in &entries {
                 let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
                 writeln!(file, "{line}")?;
             }
             file.flush()?;
             file.sync_all()?;
-            std::fs::rename(&tmp_path, &inner.path)?;
+            std::fs::rename(&tmp_path, &path)?;
             Ok(())
-        })();
-        match result {
-            Ok(()) => debug!(remaining = inner.pending.len(), "Journal compacted"),
-            Err(e) => error!(error = %e, "Journal compaction failed"),
+        })
+        .await;
+
+        match join {
+            Ok(Ok(())) => debug!(remaining, "Journal compacted"),
+            Ok(Err(e)) => error!(error = %e, "Journal compaction failed"),
+            Err(e) => error!(error = %e, "spawn_blocking panicked compacting journal"),
         }
     }
 
