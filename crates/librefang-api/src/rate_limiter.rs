@@ -439,7 +439,7 @@ mod tests {
         // Materialize an entry for `ip`.
         let _ = limiter.check_key_n(&ip, cost);
         assert!(
-            limiter.len() >= 1,
+            !limiter.is_empty(),
             "check_key_n must register an entry, got len={}",
             limiter.len()
         );
