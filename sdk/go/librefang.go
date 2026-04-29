@@ -466,8 +466,8 @@ func (r *AgentsResource) ServeUpload(file_id string) (interface{}, error) {
 
 type ApprovalsResource struct{ client *Client }
 
-func (r *ApprovalsResource) ListApprovals() (interface{}, error) {
-	return r.client.request("GET", "/api/approvals", nil, nil)
+func (r *ApprovalsResource) ListApprovals(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/approvals", nil, query)
 }
 
 func (r *ApprovalsResource) CreateApproval(data map[string]interface{}) (interface{}, error) {
@@ -1006,8 +1006,8 @@ func (r *SessionsResource) FindSessionByLabel(id string, label string) (interfac
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/sessions/by-label/%s", id, label), nil, nil)
 }
 
-func (r *SessionsResource) ListSessions() (interface{}, error) {
-	return r.client.request("GET", "/api/sessions", nil, nil)
+func (r *SessionsResource) ListSessions(query map[string]string) (interface{}, error) {
+	return r.client.request("GET", "/api/sessions", nil, query)
 }
 
 func (r *SessionsResource) SessionCleanup() (interface{}, error) {

@@ -6593,10 +6593,20 @@ system_prompt = "You are a helpful assistant."
         // (auto_memorize, dream) which has its own join handle and doesn't
         // need external cancellation via the registry.
         if !is_fork {
-            // #3739: abort any previous task before replacing it so we don't
-            // orphan an in-flight LLM call by dropping its abort handle.
-            if let Some((_, old_task)) =
-                self.running_tasks.remove(&(agent_id, effective_session_id))
+            // #3739: atomically swap in the new task and abort the previous
+            // one if any.  `DashMap::insert` returns the displaced value
+            // under the same shard write-lock, so two concurrent
+            // `send_message_full` calls for the same (agent, session)
+            // can never both observe an empty slot and lose one of the
+            // abort handles.  The earlier `remove(...) → insert(...)`
+            // sequence had exactly that race window.
+            let new_task = RunningTask {
+                abort: handle.abort_handle(),
+                started_at: chrono::Utc::now(),
+            };
+            if let Some(old_task) = self
+                .running_tasks
+                .insert((agent_id, effective_session_id), new_task)
             {
                 tracing::debug!(
                     agent_id = %agent_id,
@@ -6605,13 +6615,6 @@ system_prompt = "You are a helpful assistant."
                 );
                 old_task.abort.abort();
             }
-            self.running_tasks.insert(
-                (agent_id, effective_session_id),
-                RunningTask {
-                    abort: handle.abort_handle(),
-                    started_at: chrono::Utc::now(),
-                },
-            );
         }
 
         Ok((rx, handle))

@@ -335,8 +335,8 @@ class AgentsResource {
 class ApprovalsResource {
   constructor(client) { this._c = client; }
 
-  async listApprovals() {
-    return this._c._request("GET", "/api/approvals");
+  async listApprovals(query) {
+    return this._c._request("GET", "/api/approvals", undefined, query);
   }
 
   async createApproval(data) {
@@ -901,8 +901,8 @@ class SessionsResource {
     return this._c._request("GET", `/api/agents/${id}/sessions/by-label/${label}`);
   }
 
-  async listSessions() {
-    return this._c._request("GET", "/api/sessions");
+  async listSessions(query) {
+    return this._c._request("GET", "/api/sessions", undefined, query);
   }
 
   async sessionCleanup() {

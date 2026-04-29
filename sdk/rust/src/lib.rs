@@ -452,8 +452,8 @@ impl ApprovalsResource {
         Self { base_url, client }
     }
 
-    pub async fn list_approvals(&self) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/approvals".to_string(), None, &[]).await
+    pub async fn list_approvals(&self, limit: Option<&str>, offset: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/approvals".to_string(), None, &[("limit", limit), ("offset", offset)]).await
     }
 
     pub async fn create_approval(&self, data: Value) -> Result<Value> {
@@ -1122,8 +1122,8 @@ impl SessionsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/sessions/by-label/{}", id, label), None, &[]).await
     }
 
-    pub async fn list_sessions(&self) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/sessions".to_string(), None, &[]).await
+    pub async fn list_sessions(&self, limit: Option<&str>, offset: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/sessions".to_string(), None, &[("limit", limit), ("offset", offset)]).await
     }
 
     pub async fn session_cleanup(&self) -> Result<Value> {
