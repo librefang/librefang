@@ -288,11 +288,26 @@ impl ChannelAdapter for WebhookAdapter {
                         // backwards compatibility — clients that
                         // don't send X-Webhook-Timestamp keep working
                         // with sig-only verification.
-                        let ts_secs: Option<i64> = headers
-                            .get("X-Webhook-Timestamp")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|s| s.parse::<i64>().ok())
-                            .map(|ts_ms| ts_ms / 1000);
+                        // Contract: X-Webhook-Timestamp is the message creation time in
+                        // MILLISECONDS since the Unix epoch (matches the original handler's
+                        // behaviour pre-#4068; see /docs/architecture/webhook-signatures.md).
+                        // We divide by 1000 here because verify_request takes seconds.
+                        // Distinguish "header absent" (legitimate sig-only fallback) from
+                        // "header present but malformed" (attacker probing for the bypass).
+                        let ts_header = headers.get("X-Webhook-Timestamp");
+                        let ts_secs: Option<i64> = match ts_header {
+                            Some(v) => match v.to_str().ok().and_then(|s| s.parse::<i64>().ok()) {
+                                Some(ts_ms) => Some(ts_ms / 1000),
+                                None => {
+                                    warn!("Webhook: X-Webhook-Timestamp present but not a valid integer; rejecting");
+                                    return (
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        "Bad Request: invalid timestamp",
+                                    );
+                                }
+                            },
+                            None => None,
+                        };
                         let now_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -311,16 +326,10 @@ impl ChannelAdapter for WebhookAdapter {
                         };
                         if let Err(reason) = verify_outcome {
                             warn!("Webhook: rejected — {reason}");
-                            // Collapse failure modes to a small public
-                            // surface so the caller can't distinguish
-                            // sig-vs-timestamp by response body.
-                            let public = match reason {
-                                "timestamp too old" | "timestamp in the future" => {
-                                    "Forbidden: timestamp too old"
-                                }
-                                _ => "Forbidden: invalid signature",
-                            };
-                            return (axum::http::StatusCode::FORBIDDEN, public);
+                            // Collapse all auth failures to one public string — sig-vs-ts
+                            // distinction would let an attacker probe which check failed
+                            // and craft replay/forgery attacks accordingly.
+                            return (axum::http::StatusCode::FORBIDDEN, "Forbidden");
                         }
 
                         let json_body: serde_json::Value = match serde_json::from_slice(&body) {
