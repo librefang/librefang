@@ -26,7 +26,7 @@ const DEFAULT_MAX_TRIGGERS_PER_EVENT: usize = 10;
 // from TriggersConfig via `TriggerEngine::with_config`.
 
 /// Unique identifier for a trigger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TriggerId(pub Uuid);
 
 impl TriggerId {
