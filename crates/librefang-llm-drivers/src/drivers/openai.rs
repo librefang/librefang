@@ -1422,6 +1422,10 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping temperature for this model (stream)");
                     oai_request.temperature = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1466,6 +1470,10 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping stream_options (unsupported by provider)");
                     oai_request.stream_options = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1487,6 +1495,10 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.tools.clear();
                     oai_request.tool_choice = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
