@@ -643,6 +643,17 @@ pub struct ApprovalPolicy {
     /// Example: `["shell_exec", "file_delete"]` — only these tools need TOTP.
     #[serde(default)]
     pub totp_tools: Vec<String>,
+    /// How many days to retain `approval_audit` rows before the periodic
+    /// retention sweep hard-deletes them. Independent of `audit_entries`
+    /// Merkle retention (see #3383); the approval log is a flat audit
+    /// table that would otherwise grow forever (#3468).
+    /// Default: 90. Set to 0 to disable pruning.
+    #[serde(default = "default_approval_audit_retention_days")]
+    pub audit_retention_days: u64,
+}
+
+fn default_approval_audit_retention_days() -> u64 {
+    90
 }
 
 impl Default for ApprovalPolicy {
@@ -675,6 +686,7 @@ impl Default for ApprovalPolicy {
             totp_issuer: default_totp_issuer(),
             totp_grace_period_secs: default_totp_grace_period(),
             totp_tools: Vec::new(),
+            audit_retention_days: default_approval_audit_retention_days(),
         }
     }
 }
@@ -1343,6 +1355,7 @@ mod tests {
             totp_issuer: "LibreFang".into(),
             totp_grace_period_secs: 300,
             totp_tools: Vec::new(),
+            audit_retention_days: 90,
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: ApprovalPolicy = serde_json::from_str(&json).unwrap();
