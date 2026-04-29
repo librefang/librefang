@@ -348,7 +348,6 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
             }
             fs::write(&pkg_path, serde_json::to_string_pretty(&pkg)? + "\n")?;
 
-            // --ignore-scripts: see comment in per-target publish above.
             let mut cmd = Command::new("npm");
             cmd.args(["publish", "--access", "public", "--ignore-scripts"])
                 .current_dir(&wrapper_dir);

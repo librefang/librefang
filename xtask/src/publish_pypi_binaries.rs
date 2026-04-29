@@ -109,12 +109,6 @@ fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Erro
     Err(format!("Failed to download {}", url).into())
 }
 
-/// Download and verify the .sha256 sidecar for an asset.
-///
-/// Mirrors `publish_npm_binaries::verify_asset_sha256`. Fails fast if the
-/// sidecar is missing or the hash mismatches — we refuse to repackage a
-/// binary into a wheel without confirming what the GitHub Release
-/// actually served us.
 fn verify_asset_sha256(
     repo: &str,
     tag: &str,
@@ -188,8 +182,6 @@ fn build_wheel(
         let asset_path = wheel_dir.join(&asset);
         download_asset(&url, &asset_path)?;
 
-        // Verify SHA256 against the .sha256 sidecar uploaded alongside the
-        // release asset. Refuse to repackage on mismatch.
         verify_asset_sha256(repo, tag, &asset, &asset_path)?;
 
         let scripts_dir = wheel_dir.join(&data_dir);
@@ -365,9 +357,6 @@ pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Erro
     }
 
     if !args.dry_run && !args.build_only {
-        // Legacy path: twine + long-lived API token. Prefer `--build-only`
-        // and let the workflow upload via OIDC trusted publishing
-        // (`pypa/gh-action-pypi-publish`) — see `cli_pypi` in release.yml.
         println!("\n=== Uploading to PyPI (twine, legacy) ===");
         let _ = Command::new("pip")
             .args(["install", "--quiet", "twine"])
@@ -393,8 +382,7 @@ pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Erro
     }
 
     println!("\nDone.");
-    // Always clean up the temp working dir. When --dist-dir is explicit,
-    // wheels live outside `work` so they survive this cleanup.
+    // --dist-dir wheels live outside `work` and survive this cleanup.
     fs::remove_dir_all(&work).ok();
     Ok(())
 }
