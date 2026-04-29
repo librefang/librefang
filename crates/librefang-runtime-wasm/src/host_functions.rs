@@ -795,15 +795,41 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
     }
 }
 
+/// Maximum key length accepted by `host_kv_set` (Bug #3866).
+///
+/// Keys are namespaced and stored verbatim in SQLite; an unbounded key
+/// lets a guest pump megabytes of bytes into the index per call.
+const MAX_KV_KEY_BYTES: usize = 1024;
+
+/// Maximum serialized value size accepted by `host_kv_set` (Bug #3866).
+///
+/// The value is cloned and persisted in SQLite; without a cap a guest
+/// can grow the memory store unboundedly with a single call.
+const MAX_KV_VALUE_BYTES: usize = 1024 * 1024;
+
 fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let key = match params.get("key").and_then(|k| k.as_str()) {
         Some(k) => k,
         None => return json!({"error": "Missing 'key' parameter"}),
     };
+    // SECURITY (#3866): cap key length before storing.
+    if key.len() > MAX_KV_KEY_BYTES {
+        return json!({"error": format!(
+            "Key too large: {} bytes (max {MAX_KV_KEY_BYTES})",
+            key.len()
+        )});
+    }
     let value = match params.get("value") {
         Some(v) => v.clone(),
         None => return json!({"error": "Missing 'value' parameter"}),
     };
+    // SECURITY (#3866): cap serialized value size to bound SQLite growth.
+    let value_bytes = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
+    if value_bytes > MAX_KV_VALUE_BYTES {
+        return json!({"error": format!(
+            "Value too large: {value_bytes} bytes (max {MAX_KV_VALUE_BYTES})"
+        )});
+    }
     if let Err(e) = check_capability(
         &state.capabilities,
         &Capability::MemoryWrite(key.to_string()),
@@ -1325,6 +1351,54 @@ mod tests {
             stored[0].0, "agent-bob:counter",
             "kv_set must prefix the key with agent_id to isolate namespaces"
         );
+    }
+
+    /// Regression test for Bug #3866: host_kv_set must reject value
+    /// payloads larger than `MAX_KV_VALUE_BYTES` (1 MiB) before persisting.
+    #[tokio::test]
+    async fn test_kv_set_rejects_oversized_value() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        // Build a value whose JSON serialization exceeds the 1 MiB cap.
+        let huge = "x".repeat(MAX_KV_VALUE_BYTES + 16);
+        let result = host_kv_set(&state, &json!({"key": "k", "value": huge}));
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("too large"),
+            "Expected 'too large' rejection, got: {err}"
+        );
+        // Crucially, the kernel must NOT have stored anything.
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            0,
+            "Oversized value must not reach memory_store"
+        );
+    }
+
+    /// Regression test for Bug #3866: host_kv_set must reject keys longer
+    /// than `MAX_KV_KEY_BYTES` (1024 bytes) before persisting.
+    #[tokio::test]
+    async fn test_kv_set_rejects_oversized_key() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        let long_key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        let result = host_kv_set(&state, &json!({"key": long_key, "value": 1}));
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("Key too large"),
+            "Expected 'Key too large' rejection, got: {err}"
+        );
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(stored.len(), 0, "Oversized key must not reach memory_store");
     }
 
     /// Two agents using the same guest key must produce different namespaced
