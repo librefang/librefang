@@ -4,6 +4,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { OverviewPage } from "./OverviewPage";
 import { useDashboardSnapshot, useVersionInfo } from "../lib/queries/overview";
 import { useQuickInit } from "../lib/mutations/overview";
+import { useApprovalCount } from "../lib/queries/approvals";
+import { useMcpServers } from "../lib/queries/mcp";
+import { usePeers } from "../lib/queries/network";
+import { useSchedules } from "../lib/queries/schedules";
+import { useSessions } from "../lib/queries/sessions";
 
 vi.mock("../lib/queries/overview", () => ({
   useDashboardSnapshot: vi.fn(),
@@ -12,6 +17,26 @@ vi.mock("../lib/queries/overview", () => ({
 
 vi.mock("../lib/mutations/overview", () => ({
   useQuickInit: vi.fn(),
+}));
+
+vi.mock("../lib/queries/approvals", () => ({
+  useApprovalCount: vi.fn(),
+}));
+
+vi.mock("../lib/queries/mcp", () => ({
+  useMcpServers: vi.fn(),
+}));
+
+vi.mock("../lib/queries/network", () => ({
+  usePeers: vi.fn(),
+}));
+
+vi.mock("../lib/queries/schedules", () => ({
+  useSchedules: vi.fn(),
+}));
+
+vi.mock("../lib/queries/sessions", () => ({
+  useSessions: vi.fn(),
 }));
 
 vi.mock("react-i18next", async () => {
@@ -33,12 +58,27 @@ const useDashboardSnapshotMock = useDashboardSnapshot as unknown as ReturnType<
 >;
 const useVersionInfoMock = useVersionInfo as unknown as ReturnType<typeof vi.fn>;
 const useQuickInitMock = useQuickInit as unknown as ReturnType<typeof vi.fn>;
+const useApprovalCountMock = useApprovalCount as unknown as ReturnType<typeof vi.fn>;
+const useMcpServersMock = useMcpServers as unknown as ReturnType<typeof vi.fn>;
+const usePeersMock = usePeers as unknown as ReturnType<typeof vi.fn>;
+const useSchedulesMock = useSchedules as unknown as ReturnType<typeof vi.fn>;
+const useSessionsMock = useSessions as unknown as ReturnType<typeof vi.fn>;
 
 function setQuickInitDefault(): void {
   useQuickInitMock.mockReturnValue({
     mutateAsync: vi.fn().mockResolvedValue(undefined),
     isPending: false,
   });
+}
+
+function setSidecarHooksDefault(): void {
+  useApprovalCountMock.mockReturnValue({ data: 0 });
+  useMcpServersMock.mockReturnValue({
+    data: { configured: [], connected: [], total_configured: 0, total_connected: 0 },
+  });
+  usePeersMock.mockReturnValue({ data: [] });
+  useSchedulesMock.mockReturnValue({ data: [] });
+  useSessionsMock.mockReturnValue({ data: [] });
 }
 
 function renderPage(): void {
@@ -56,6 +96,7 @@ describe("OverviewPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setQuickInitDefault();
+    setSidecarHooksDefault();
   });
 
   it("shows the loading-runtime hero state while snapshot is loading", () => {
@@ -121,8 +162,9 @@ describe("OverviewPage", () => {
     // KPI tile labels render using i18n keys.
     expect(screen.getByText("overview.kpi.active_agents")).toBeInTheDocument();
     expect(screen.getByText("overview.kpi.p95_latency")).toBeInTheDocument();
-    // Recent-agents table surfaces an agent name from snapshot.agents.
-    expect(screen.getByText("alpha")).toBeInTheDocument();
+    // Recent-agents fallback table (and tokens-by-agent breakdown)
+    // surface the agent name from snapshot.agents.
+    expect(screen.getAllByText("alpha").length).toBeGreaterThan(0);
   });
 
   it("renders the setup banner when config does not exist", () => {
