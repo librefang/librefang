@@ -505,7 +505,22 @@ impl WasmSandbox {
 
                     match Self::read_guest_bytes(&mut caller, msg_ptr, clamped_len, "host_log") {
                         Ok(bytes) => {
-                            let raw = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            // Use lossy decode rather than `from_utf8 +
+                            // unwrap_or("<invalid utf8>")`: when the
+                            // MAX_LOG_BYTES boundary lands inside a
+                            // multi-byte UTF-8 sequence (likely on any
+                            // 4 KiB cap with non-ASCII text — Chinese,
+                            // Japanese, emoji), strict from_utf8 fails
+                            // and the entire 4 KiB payload is replaced
+                            // by the literal "<invalid utf8>" sentinel,
+                            // discarding all content.  Cow<str> from
+                            // from_utf8_lossy preserves valid prefixes
+                            // and replaces only the broken trailing
+                            // bytes with U+FFFD — what the original
+                            // pre-#3923 implementation did and what
+                            // operators expect from a "log truncated"
+                            // path.
+                            let raw = String::from_utf8_lossy(&bytes);
 
                             // Sanitize newlines to prevent log injection of
                             // fake structured log lines.
@@ -910,6 +925,36 @@ mod tests {
         let annotated = format!("{}... [truncated {} bytes]", clamped, 100);
         assert!(annotated.contains("[truncated 100 bytes]"));
         assert!(annotated.len() > MAX_LOG_BYTES);
+    }
+
+    /// Regression: the truncation cap can land mid-codepoint for non-ASCII
+    /// text.  Strict `str::from_utf8 + unwrap_or("<invalid utf8>")` would
+    /// then replace the entire 4 KiB payload with the literal sentinel,
+    /// dropping the user's whole log line.  `String::from_utf8_lossy`
+    /// preserves the valid prefix and substitutes U+FFFD only for the
+    /// broken trailing bytes.
+    ///
+    /// `'中'` is 3 bytes in UTF-8 and `MAX_LOG_BYTES = 4096` is not
+    /// divisible by 3, so slicing at the byte cap is guaranteed to split a
+    /// codepoint.
+    #[test]
+    fn test_host_log_lossy_decode_preserves_valid_prefix_at_boundary() {
+        let s = "中".repeat(MAX_LOG_BYTES);
+        // Take the first MAX_LOG_BYTES bytes — landing inside a codepoint.
+        let bytes = &s.as_bytes()[..MAX_LOG_BYTES];
+        // The invariant under test: lossy decode does NOT collapse the
+        // whole payload to the strict sentinel.
+        let lossy = String::from_utf8_lossy(bytes);
+        assert!(
+            !lossy.contains("<invalid utf8>"),
+            "lossy decode must keep the valid prefix instead of falling \
+             back to the strict sentinel"
+        );
+        assert!(lossy.contains('中'), "valid prefix codepoints must survive");
+        assert!(
+            lossy.contains('\u{FFFD}'),
+            "the partial trailing codepoint must surface as U+FFFD"
+        );
     }
     /// Module that returns a packed result whose `result_len` field is set to
     /// MAX_RESULT_BYTES + 1 (0x1000001 = 16 MiB + 1) with a ptr of 0, to
