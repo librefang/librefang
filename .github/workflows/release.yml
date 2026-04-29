@@ -791,22 +791,34 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
     needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # OIDC trusted publishing to PyPI
+      contents: read   # actions/checkout (job-level permissions block fully overrides top-level)
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
 
-      - name: Publish CLI binaries to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Build CLI wheels (no upload)
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
+          mkdir -p "${{ runner.temp }}/cli-pypi-dist"
           cargo xtask publish-pypi-binaries \
             --version "$VERSION" \
             --repo "${{ github.repository }}" \
-            --tag "${{ github.ref_name }}"
+            --tag "${{ github.ref_name }}" \
+            --build-only \
+            --dist-dir "${{ runner.temp }}/cli-pypi-dist"
+
+      - name: Publish CLI wheels to PyPI (OIDC)
+        # OIDC trusted publishing — configure at:
+        # pypi.org/manage/project/librefang/settings/publishing
+        # workflow filename: release.yml, environment: (none)
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: ${{ runner.temp }}/cli-pypi-dist
+          skip-existing: true
 
   sync_homebrew:
     name: Sync to Homebrew Tap
