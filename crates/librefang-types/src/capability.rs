@@ -541,15 +541,9 @@ mod tests {
             "C:\\data\\..\\..\\Windows\\evil"
         ));
         // Backslash grant, forward-slash-encoded traversal in the value.
-        assert!(!glob_matches(
-            "C:\\data\\*",
-            "C:/data/../../Windows/evil"
-        ));
+        assert!(!glob_matches("C:\\data\\*", "C:/data/../../Windows/evil"));
         // And the trivially-mixed form an attacker might try.
-        assert!(!glob_matches(
-            "C:/data/*",
-            "C:/data/..\\..\\Windows\\evil"
-        ));
+        assert!(!glob_matches("C:/data/*", "C:/data/..\\..\\Windows\\evil"));
     }
 
     // Verifies the resolution strategy used in tool_timeout_secs_for:
