@@ -533,7 +533,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, agent_id, messages, created_at, label FROM sessions ORDER BY created_at DESC",
+                "SELECT id, agent_id, messages, context_window_tokens, created_at, label FROM sessions ORDER BY created_at DESC",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -542,8 +542,9 @@ impl SessionStore {
                 let session_id: String = row.get(0)?;
                 let agent_id: String = row.get(1)?;
                 let messages_blob: Vec<u8> = row.get(2)?;
-                let created_at: String = row.get(3)?;
-                let label: Option<String> = row.get(4)?;
+                let context_window_tokens: i64 = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let label: Option<String> = row.get(5)?;
                 let messages: Vec<Message> =
                     rmp_serde::from_slice(&messages_blob).unwrap_or_default();
                 let msg_count = messages.len();
@@ -552,6 +553,7 @@ impl SessionStore {
                     "session_id": session_id,
                     "agent_id": agent_id,
                     "message_count": msg_count,
+                    "context_window_tokens": context_window_tokens.max(0),
                     "created_at": created_at,
                     "label": resolved_label,
                 }))
