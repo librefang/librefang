@@ -717,22 +717,26 @@ pub async fn auth_revoke(
         }
     };
 
-    // Clear tokens via provider (keyed by server URL, not name)
-    let provider = state.kernel.oauth_provider_ref();
-    if let Err(e) = provider.clear_tokens(&server_url).await {
-        tracing::warn!(server = %name, error = %e, "Failed to clear OAuth tokens");
-    }
-
-    // Set auth state to NeedsAuth so the dashboard shows the Authorize button
+    // #3369: clear in-memory state first so the current process can no longer
+    // use the cached tokens, even if the persistent vault wipe fails. Then
+    // attempt the vault wipe; if that fails, surface the error so the UI can
+    // tell the user the sign-out is incomplete on disk and prompt a retry.
     {
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(name.clone(), McpAuthState::NeedsAuth);
     }
-
-    // Remove from MCP connections so next reconnect is clean
     {
         let mut conns = state.kernel.mcp_connections_ref().lock().await;
         conns.retain(|c| c.name() != name);
+    }
+
+    let provider = state.kernel.oauth_provider_ref();
+    if let Err(e) = provider.clear_tokens(&server_url).await {
+        tracing::error!(server = %name, error = %e, "auth_revoke: vault clear failed");
+        return ApiErrorResponse::internal(format!(
+            "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {e}"
+        ))
+        .into_json_tuple();
     }
 
     (

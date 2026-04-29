@@ -2797,16 +2797,43 @@ pub async fn totp_revoke(
         .into_json_tuple();
     }
 
-    // Remove TOTP data from vault
-    // vault_set to empty/false markers (vault doesn't expose remove via kernel helper)
-    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
-        tracing::warn!("Failed to clear totp_confirmed in vault during TOTP revocation: {e}");
-    }
+    // #3633: clearing must not be best-effort and must avoid creating a
+    // partial state that BYPASSES 2FA on login. The login gate
+    // (server.rs ~334) reads `if totp_enrolled && totp_confirmed` to decide
+    // whether to prompt for a TOTP code, so:
+    //   * `totp_confirmed=false` alone is enough to disable 2FA on login,
+    //     even if `totp_secret` is still present.
+    // An earlier fail-fast version cleared `totp_confirmed` first and
+    // returned 500 if `totp_secret` then failed to wipe — that
+    // simultaneously told the user "TOTP is still active, retry" while
+    // actually disabling 2FA. To prevent that, we:
+    //   1. Wipe `totp_secret` and `totp_recovery_codes` FIRST so the
+    //      verify path is dead before we ever flip the `totp_confirmed`
+    //      flag. Even if writing the flag later fails, secret/recovery are
+    //      already gone, so a retry is purely a state-flag fix and 2FA is
+    //      effectively disabled either way.
+    //   2. Attempt every write (collect-all, not fail-fast) so a transient
+    //      failure on field N doesn't leave fields >N untouched on retry.
+    //   3. Aggregate failures into a single 500 with all field errors.
+    let mut failures: Vec<String> = Vec::new();
     if let Err(e) = state.kernel.vault_set("totp_secret", "") {
-        tracing::warn!("Failed to clear totp_secret in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_secret: {e}");
+        failures.push(format!("totp_secret: {e}"));
     }
     if let Err(e) = state.kernel.vault_set("totp_recovery_codes", "[]") {
-        tracing::warn!("Failed to clear totp_recovery_codes in vault during TOTP revocation: {e}");
+        tracing::error!("totp_revoke: failed to clear totp_recovery_codes: {e}");
+        failures.push(format!("totp_recovery_codes: {e}"));
+    }
+    if let Err(e) = state.kernel.vault_set("totp_confirmed", "false") {
+        tracing::error!("totp_revoke: failed to clear totp_confirmed: {e}");
+        failures.push(format!("totp_confirmed: {e}"));
+    }
+    if !failures.is_empty() {
+        return ApiErrorResponse::internal(format!(
+            "TOTP revocation partially failed; the secret and recovery codes have been wiped first so 2FA is no longer verifiable, but vault state is inconsistent. Retry. Details: {}",
+            failures.join("; ")
+        ))
+        .into_json_tuple();
     }
 
     (
