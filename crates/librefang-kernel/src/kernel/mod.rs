@@ -461,8 +461,7 @@ pub struct LibreFangKernel {
     /// MCP tool definitions cache (populated after connections are established).
     pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
     /// Rendered MCP summary cache keyed by allowlist + mcp_generation; skips Mutex + re-render on hit.
-    pub(crate) mcp_summary_cache:
-        dashmap::DashMap<String, (u64, std::sync::Arc<String>)>,
+    pub(crate) mcp_summary_cache: dashmap::DashMap<String, (u64, std::sync::Arc<String>)>,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
@@ -4600,8 +4599,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> =
-                self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             let ws_meta = manifest
                 .workspace
@@ -5925,8 +5923,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> =
-                self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
@@ -7474,8 +7471,7 @@ system_prompt = "You are a helpful assistant."
                 .flatten()
                 .and_then(|v| v.as_str().map(String::from));
 
-            let peer_agents: Vec<(String, String, String)> =
-                self.registry.peer_agents_summary();
+            let peer_agents: Vec<(String, String, String)> = self.registry.peer_agents_summary();
 
             // Use cached workspace metadata (identity files + workspace context)
             let ws_meta = manifest
