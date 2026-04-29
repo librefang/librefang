@@ -107,7 +107,7 @@ Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https
 
 ## Architecture
 
-14 Rust crates + xtask, modular kernel design.
+24 Rust crates + xtask, modular kernel design.
 
 ```
 librefang-kernel            Orchestration, workflows, metering, RBAC, scheduler, budget
@@ -145,7 +145,7 @@ xtask                       Build automation
 
 ## Key Features
 
-**57 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 44 more. [Full list](https://docs.librefang.ai/integrations/channels)
+**45 Channel Adapters** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky, and 32 more. [Full list](https://docs.librefang.ai/integrations/channels)
 
 **28 LLM Providers** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama, Alibaba Coding Plan, and 20 more. Intelligent routing, automatic fallback, cost tracking. [Details](https://docs.librefang.ai/configuration/providers)
 

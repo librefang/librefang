@@ -144,7 +144,7 @@ xtask                       ビルド自動化
 
 ## 主な機能
 
-**57 チャネルアダプター** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、Feishu、LINE、Mastodon、Bluesky 他。[完全リスト](https://docs.librefang.ai/integrations/channels)
+**45 チャネルアダプター** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、Feishu、LINE、Mastodon、Bluesky 他。[完全リスト](https://docs.librefang.ai/integrations/channels)
 
 **28 LLM プロバイダー** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 他。インテリジェントルーティング、自動フォールバック、コスト追跡。[詳細](https://docs.librefang.ai/configuration/providers)
 

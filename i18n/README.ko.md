@@ -144,7 +144,7 @@ xtask                       빌드 자동화
 
 ## 주요 기능
 
-**57 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](https://docs.librefang.ai/integrations/channels)
+**45 채널 어댑터** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 등. [전체 목록](https://docs.librefang.ai/integrations/channels)
 
 **28 LLM 프로바이더** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama 등. 지능형 라우팅, 자동 폴백, 비용 추적. [상세](https://docs.librefang.ai/configuration/providers)
 

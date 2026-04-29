@@ -144,7 +144,7 @@ xtask                       Automatización de build
 
 ## Características Principales
 
-**57 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 44 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
+**45 Adaptadores de Canal** — Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Google Chat, Feishu, LINE, Mastodon, Bluesky 32 más. [Lista completa](https://docs.librefang.ai/integrations/channels)
 
 **28 Proveedores LLM** — Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Ollama y 20 más. Enrutamiento inteligente, fallback automático, seguimiento de costos. [Detalles](https://docs.librefang.ai/configuration/providers)
 
