@@ -13,24 +13,16 @@ pub struct RosterStore {
 }
 
 impl RosterStore {
-    /// Create a new roster store, initialising the table if needed.
+    /// Wrap an existing SQLite connection.
+    ///
+    /// The `group_roster` table is created by `migration::migrate_v28`,
+    /// which `MemorySubstrate::open` runs before constructing the store.
+    /// We deliberately don't run schema DDL here so a) every memory
+    /// table goes through the single migration ladder and b)
+    /// constructing a `RosterStore` can never panic on a locked /
+    /// read-only DB — the failure surfaces from `MemorySubstrate::open`
+    /// at boot instead.
     pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
-        {
-            let c = conn.lock().unwrap();
-            c.execute_batch(
-                "CREATE TABLE IF NOT EXISTS group_roster (
-                    channel_type TEXT NOT NULL,
-                    chat_id      TEXT NOT NULL,
-                    user_id      TEXT NOT NULL,
-                    display_name TEXT NOT NULL,
-                    username     TEXT,
-                    first_seen   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-                    last_seen    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-                    PRIMARY KEY (channel_type, chat_id, user_id)
-                );",
-            )
-            .expect("Failed to create group_roster table");
-        }
         Self { conn }
     }
 
@@ -107,6 +99,7 @@ mod tests {
 
     fn in_memory_store() -> RosterStore {
         let conn = Connection::open_in_memory().unwrap();
+        crate::migration::run_migrations(&conn).expect("migrations must apply");
         RosterStore::new(Arc::new(Mutex::new(conn)))
     }
 

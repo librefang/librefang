@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 27;
+const SCHEMA_VERSION: u32 = 28;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -66,6 +66,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     run_step!(26, migrate_v26);
     run_step!(27, migrate_v27);
+    run_step!(28, migrate_v28);
 
     Ok(())
 }
@@ -825,6 +826,33 @@ fn migrate_v27(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (27, datetime('now'), 'Add oauth_used_nonces table for OIDC nonce single-use enforcement')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 28: Add `group_roster` table for cross-channel group membership tracking.
+///
+/// Tracks which users have been seen in each group chat (channel + chat_id),
+/// persisting across daemon restarts. Agents query this to give names to
+/// `@mention`s and to render structured "who's in this room" context.
+/// Owned by `RosterStore` in `librefang-memory`.
+fn migrate_v28(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS group_roster (
+            channel_type TEXT    NOT NULL,
+            chat_id      TEXT    NOT NULL,
+            user_id      TEXT    NOT NULL,
+            display_name TEXT    NOT NULL,
+            username     TEXT,
+            first_seen   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            last_seen    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (channel_type, chat_id, user_id)
+        );",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (28, datetime('now'), 'Add group_roster table for cross-channel group membership tracking')",
         [],
     )?;
     Ok(())
