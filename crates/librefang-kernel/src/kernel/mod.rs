@@ -8305,8 +8305,14 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.memory.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate the error so callers see a half-failed reset instead
+        // of silently leaving orphan rows in `sessions` / `sessions_fts`
+        // (#3470). The deletion itself is transactional inside
+        // `delete_agent_sessions`.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -8367,8 +8373,12 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete ALL sessions for this agent (default + per-channel)
-        let _ = self.memory.delete_agent_sessions(agent_id);
+        // Delete ALL sessions for this agent (default + per-channel).
+        // Propagate so a failed reboot is visible instead of silently
+        // leaving the old history in place (#3470).
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session
         let new_session = self
@@ -8428,11 +8438,16 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Delete all regular sessions
-        let _ = self.memory.delete_agent_sessions(agent_id);
-
-        // Delete canonical (cross-channel) session
-        let _ = self.memory.delete_canonical_session(agent_id);
+        // Delete all regular sessions then the canonical (cross-channel)
+        // session. Propagate either failure: a half-cleared agent leaves
+        // orphan rows in `sessions` / `sessions_fts` / `canonical_sessions`
+        // and is the silent-data-loss vector behind #3470.
+        self.memory
+            .delete_agent_sessions(agent_id)
+            .map_err(KernelError::LibreFang)?;
+        self.memory
+            .delete_canonical_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         // Create a fresh session and inject reset prompt if configured
         let mut new_session = self
@@ -12172,6 +12187,67 @@ system_prompt = "You are a helpful assistant."
                     }
                 }
             });
+        }
+
+        // Periodic DB retention sweep — hard-deletes soft-deleted memories
+        // (#3467), finished task_queue rows (#3466), and approval_audit
+        // rows (#3468). Runs once a day on the same cadence as the audit
+        // prune below; each sub-step is independent so a config of `0` for
+        // any one of them only disables that step. Failures only log; the
+        // sweep is best-effort and re-runs at the next interval.
+        {
+            let memory_retention = cfg.memory.soft_delete_retention_days;
+            let queue_retention = cfg.queue.task_queue_retention_days;
+            let approval_retention = cfg.approval.audit_retention_days;
+            let any_enabled = memory_retention > 0 || queue_retention > 0 || approval_retention > 0;
+            if any_enabled {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        if memory_retention > 0 {
+                            match kernel.memory.prune_soft_deleted_memories(memory_retention) {
+                                Ok(n) if n > 0 => info!(
+                                    "Memory retention: hard-deleted {n} soft-deleted memories \
+                                     (older than {memory_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Memory retention sweep failed: {e}"),
+                            }
+                        }
+                        if queue_retention > 0 {
+                            match kernel.memory.task_prune_finished(queue_retention).await {
+                                Ok(n) if n > 0 => info!(
+                                    "Task queue retention: pruned {n} finished tasks \
+                                     (older than {queue_retention} days)"
+                                ),
+                                Ok(_) => {}
+                                Err(e) => warn!("Task queue retention sweep failed: {e}"),
+                            }
+                        }
+                        if approval_retention > 0 {
+                            let n = kernel.approval_manager.prune_audit(approval_retention);
+                            if n > 0 {
+                                info!(
+                                    "Approval audit retention: pruned {n} rows \
+                                     (older than {approval_retention} days)"
+                                );
+                            }
+                        }
+                    }
+                });
+                info!(
+                    "DB retention sweep scheduled daily \
+                     (memory={memory_retention}d, task_queue={queue_retention}d, \
+                     approval_audit={approval_retention}d)"
+                );
+            }
         }
 
         // Periodic audit log pruning (daily, respects audit.retention_days)
