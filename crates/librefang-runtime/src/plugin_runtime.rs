@@ -1311,52 +1311,50 @@ pub async fn run_hook_json(
         let mut stdout_reader = BufReader::new(stdout);
         let mut stderr_reader = BufReader::new(stderr);
 
-        // Read stdout and stderr concurrently to prevent deadlock:
-        // a hook that writes >64KB to stderr before closing stdout would otherwise
-        // block the daemon waiting on stdout while the hook is blocked on stderr.
-        let stdout_fut = async {
-            let mut lines: Vec<String> = Vec::new();
-            let mut total: usize = 0;
-            let mut line = String::new();
-            let mut overflowed = false;
-            loop {
-                line.clear();
-                match stdout_reader.read_line(&mut line).await {
-                    Ok(0) => break,
+        // Read stdout and stderr concurrently with a single select! loop so
+        // that hitting the cap on one stream lets us break out *immediately*
+        // and kill the child — otherwise the other stream's reader keeps
+        // waiting for EOF that never arrives because the child is still
+        // blocked writing to the now-undrained pipe (deadlock until the outer
+        // timeout fires). Mirrors the #3529 host_shell_exec pattern.
+        let mut stdout_lines: Vec<String> = Vec::new();
+        let mut stdout_total: usize = 0;
+        let mut stderr_text = String::new();
+        let mut stderr_total: usize = 0;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let mut overflowed = false;
+        let mut out_line = String::new();
+        let mut err_line = String::new();
+        while !(stdout_done && stderr_done) {
+            tokio::select! {
+                res = stdout_reader.read_line(&mut out_line), if !stdout_done => match res {
+                    Ok(0) => stdout_done = true,
                     Ok(n) => {
-                        total = total.saturating_add(n);
-                        if total > HOOK_STREAM_BYTE_CAP {
+                        stdout_total = stdout_total.saturating_add(n);
+                        if stdout_total > HOOK_STREAM_BYTE_CAP {
                             overflowed = true;
                             break;
                         }
-                        lines.push(line.trim_end().to_string());
+                        stdout_lines.push(out_line.trim_end().to_string());
+                        out_line.clear();
                     }
                     Err(e) => {
                         warn!("hook stdout read error: {e}");
-                        break;
+                        stdout_done = true;
                     }
-                }
-            }
-            (lines, overflowed)
-        };
-        let stderr_fut = async {
-            let mut text = String::new();
-            let mut total: usize = 0;
-            let mut err_line = String::new();
-            let mut overflowed = false;
-            loop {
-                err_line.clear();
-                match stderr_reader.read_line(&mut err_line).await {
-                    Ok(0) => break,
+                },
+                res = stderr_reader.read_line(&mut err_line), if !stderr_done => match res {
+                    Ok(0) => stderr_done = true,
                     Ok(n) => {
-                        total = total.saturating_add(n);
-                        if total > HOOK_STREAM_BYTE_CAP {
+                        stderr_total = stderr_total.saturating_add(n);
+                        if stderr_total > HOOK_STREAM_BYTE_CAP {
                             overflowed = true;
                             break;
                         }
                         // Stream each non-empty line to tracing as it arrives so
                         // operators can monitor long-running hooks live (#3256).
-                        // The full line stays in `text` either way — the
+                        // The full line stays in `stderr_text` either way — the
                         // post-exit `debug!` summary below is independent.
                         if let Some(trimmed) = trim_for_log(&err_line) {
                             tracing::info!(
@@ -1366,19 +1364,18 @@ pub async fn run_hook_json(
                                 "{trimmed}"
                             );
                         }
-                        text.push_str(&err_line);
+                        stderr_text.push_str(&err_line);
+                        err_line.clear();
                     }
-                    Err(_) => break,
-                }
+                    Err(_) => stderr_done = true,
+                },
             }
-            (text, overflowed)
-        };
-        let ((stdout_lines, stdout_over), (stderr_text, stderr_over)) =
-            tokio::join!(stdout_fut, stderr_fut);
+        }
 
-        // Either stream blew the cap → kill the child so wait() returns
-        // promptly and we surface a clear error instead of OOMing.
-        if stdout_over || stderr_over {
+        // A stream blew the cap → kill the child and bail. We must do this
+        // before any further reads or wait() so the still-writing child
+        // stops immediately rather than after the hook timeout.
+        if overflowed {
             let _ = child.start_kill();
             let _ = child.wait().await;
             return Err(PluginRuntimeError::InvalidOutput(format!(
@@ -2211,6 +2208,59 @@ mod tests {
         .await
         .expect_err("should time out");
         assert!(matches!(err, PluginRuntimeError::Timeout(1)));
+    }
+
+    /// #3534 follow-up: when one stream blows the cap we must kill the child
+    /// immediately, not wait for the *other* stream's reader to also drain.
+    /// The original `tokio::join!` implementation deadlocked here — the
+    /// over-cap stream's future broke out, but the surviving future kept
+    /// waiting for EOF that never came (the child was blocked writing into
+    /// the now-undrained pipe), so the kill only happened after the outer
+    /// hook timeout fired. Regression test asserts the error fires well
+    /// before the configured 30 s timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overflow_kills_child_without_waiting_for_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hook = tmp.path().join("flood.sh");
+        // Spew >1 MiB to stdout (the cap), then keep dribbling stderr forever.
+        // If the kill is delayed (old `join!` bug) this script keeps the
+        // process alive until the hook timeout fires.
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\n\
+             yes 'x' | head -c 2000000\n\
+             while true; do echo err 1>&2; sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = HookConfig {
+            timeout_secs: 30,
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let err = run_hook_json(
+            "ingest",
+            hook.to_str().unwrap(),
+            PluginRuntime::Native,
+            &serde_json::json!({"type": "ingest"}),
+            &config,
+        )
+        .await
+        .expect_err("should report stream cap exceeded");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, PluginRuntimeError::InvalidOutput(ref m) if m.contains("exceeded")),
+            "expected InvalidOutput, got {err:?}"
+        );
+        // 5 s leaves headroom for slow CI but is far below the 30 s timeout
+        // that the buggy join! implementation would have hit.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "kill took {elapsed:?}, expected <5s (timeout was 30s) — child likely deadlocked"
+        );
     }
 
     /// Missing script surfaces ScriptNotFound (the launcher-not-found path is
