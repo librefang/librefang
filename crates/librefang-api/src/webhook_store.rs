@@ -119,8 +119,7 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<(), String> 
     // the resolver wouldn't see.
     validate_webhook_url(url_str)?;
 
-    let parsed =
-        url::Url::parse(url_str).map_err(|_| "url is not a valid URL".to_string())?;
+    let parsed = url::Url::parse(url_str).map_err(|_| "url is not a valid URL".to_string())?;
     let host = match parsed.host() {
         Some(url::Host::Domain(d)) => d.to_string(),
         // IP literals already handled by validate_webhook_url.
@@ -590,21 +589,17 @@ mod tests {
     #[tokio::test]
     async fn validate_webhook_url_resolved_blocks_localhost_hostname() {
         // Hostname caught by hostname-pattern check; resolver not invoked.
-        assert!(
-            validate_webhook_url_resolved("http://localhost:8080/hook")
-                .await
-                .is_err()
-        );
+        assert!(validate_webhook_url_resolved("http://localhost:8080/hook")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn validate_webhook_url_resolved_rejects_ipv6_ula_literal() {
         // ULA fc00::/7 literal must trip the IPv6 private check.
-        assert!(
-            validate_webhook_url_resolved("http://[fd00::1]/hook")
-                .await
-                .is_err()
-        );
+        assert!(validate_webhook_url_resolved("http://[fd00::1]/hook")
+            .await
+            .is_err());
     }
 
     #[test]

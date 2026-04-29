@@ -432,7 +432,10 @@ impl TelegramAdapter {
             // can correlate the failure with the partial delivery.
             let resp = self.client.post(&url).json(&body).send().await.map_err(
                 |e| -> Box<dyn std::error::Error + Send + Sync> {
-                    warn!("Telegram sendMessage chunk {}/{total} network error: {e}", idx + 1);
+                    warn!(
+                        "Telegram sendMessage chunk {}/{total} network error: {e}",
+                        idx + 1
+                    );
                     Box::new(e)
                 },
             )?;
