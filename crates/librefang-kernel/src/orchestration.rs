@@ -238,7 +238,10 @@ fn matches_quality_regex(pattern: &str, output: &str) -> bool {
     let entry = map.entry(pattern.to_string()).or_insert_with(|| {
         regex_lite::Regex::new(pattern).unwrap_or_else(|_| {
             // Never-match sentinel: an invalid pattern fails the gate forever.
-            regex_lite::Regex::new("(?!x)x").expect("static never-match regex compiles")
+            // `regex_lite` rejects look-around (`(?!x)x`), so use the negated
+            // class containing both \s and \S — that's the universe of chars,
+            // negated to the empty set — supported by regex_lite syntax.
+            regex_lite::Regex::new(r"[^\s\S]").expect("static never-match regex compiles")
         })
     });
     entry.is_match(output)
