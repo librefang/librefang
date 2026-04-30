@@ -489,16 +489,20 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&skill_md_path) {
-                if let Some((name, description)) = parse_skill_md_frontmatter(&content) {
-                    let skill_name = if name.is_empty() { &dir_name } else { &name };
+                if let Some(fm) = parse_skill_md_frontmatter(&content) {
+                    let skill_name = if fm.name.is_empty() {
+                        &dir_name
+                    } else {
+                        &fm.name
+                    };
                     let installed_dir = state.kernel.home_dir().join("skills").join(skill_name);
                     let is_installed = installed_dir.exists();
                     skills.push(serde_json::json!({
                         "name": skill_name,
-                        "description": description,
-                        "version": null,
-                        "author": null,
-                        "tags": [],
+                        "description": fm.description,
+                        "version": fm.version,
+                        "author": fm.author,
+                        "tags": fm.tags,
                         "is_installed": is_installed,
                     }));
                 }
@@ -511,7 +515,58 @@ pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns `(name, description)`.
-fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
+/// Parsed YAML frontmatter from a SKILL.md.
+///
+/// Only `name` and `description` were ever required by the LibreFang
+/// registry; `version` / `author` / `tags` are optional add-ons that
+/// the dashboard's federated catalog UI surfaces when present. Missing
+/// fields parse to `None` / `[]` rather than failing — old SKILL.md
+/// files that pre-date the schema extension keep working.
+#[derive(Debug, Default)]
+struct SkillMdFrontmatter {
+    name: String,
+    description: String,
+    version: Option<String>,
+    author: Option<String>,
+    tags: Vec<String>,
+}
+
+fn strip_yaml_value(raw: &str) -> String {
+    // YAML scalar values can be wrapped in single or double quotes; strip
+    // either form and trim whitespace.
+    let trimmed = raw.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    unquoted.to_string()
+}
+
+fn parse_yaml_inline_list(raw: &str) -> Vec<String> {
+    // Accept the two shapes that show up in the wild:
+    //   tags: ["a", "b"]
+    //   tags: [a, b]
+    // Anything else (block-list `- item` form, multi-line) is left for
+    // a future iteration; SKILL.md frontmatters in the registry only
+    // ever use the inline form today.
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    inner
+        .split(',')
+        .map(|s| strip_yaml_value(s))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn parse_skill_md_frontmatter(content: &str) -> Option<SkillMdFrontmatter> {
     let trimmed = content.trim();
     if !trimmed.starts_with("---") {
         return None;
@@ -519,20 +574,31 @@ fn parse_skill_md_frontmatter(content: &str) -> Option<(String, String)> {
     let after_open = &trimmed[3..];
     let close = after_open.find("---")?;
     let frontmatter = &after_open[..close];
-    let mut name = String::new();
-    let mut description = String::new();
+    let mut fm = SkillMdFrontmatter::default();
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(val) = line.strip_prefix("name:") {
-            name = val.trim().to_string();
+            fm.name = strip_yaml_value(val);
         } else if let Some(val) = line.strip_prefix("description:") {
-            description = val.trim().to_string();
+            fm.description = strip_yaml_value(val);
+        } else if let Some(val) = line.strip_prefix("version:") {
+            let v = strip_yaml_value(val);
+            if !v.is_empty() {
+                fm.version = Some(v);
+            }
+        } else if let Some(val) = line.strip_prefix("author:") {
+            let a = strip_yaml_value(val);
+            if !a.is_empty() {
+                fm.author = Some(a);
+            }
+        } else if let Some(val) = line.strip_prefix("tags:") {
+            fm.tags = parse_yaml_inline_list(val);
         }
     }
-    if name.is_empty() && description.is_empty() {
+    if fm.name.is_empty() && fm.description.is_empty() {
         return None;
     }
-    Some((name, description))
+    Some(fm)
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.
