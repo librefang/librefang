@@ -46,6 +46,7 @@ import {
   Plug,
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
+import { toastErr } from "./lib/errors";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
