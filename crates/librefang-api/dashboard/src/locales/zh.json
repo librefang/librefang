@@ -48,7 +48,9 @@
     "expand_sidebar": "展开侧边栏",
     "collapse_sidebar": "折叠侧边栏",
     "open_menu": "打开导航菜单",
-    "skip_to_content": "跳转到内容"
+    "skip_to_content": "跳转到内容",
+    "more": "更多",
+    "mobile_tabs": "底部导航"
   },
   "common": {
     "copied": "已复制",
