@@ -13,4 +13,4 @@ GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
 
 # Weekly stats aggregation
 [triggers]
-crons = ["0 0 * * 0"]
+crons = ["0 1 * * SUN"]
