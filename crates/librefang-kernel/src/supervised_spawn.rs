@@ -7,7 +7,7 @@
 //! producing without an error.
 //!
 //! `spawn_supervised(name, future)` wraps the future in `AssertUnwindSafe`
-//! + `catch_unwind` so a panic is logged at `error!` level with the task
+//! plus `catch_unwind` so a panic is logged at `error!` level with the task
 //! name and (when available) panic payload, instead of being lost. The
 //! returned `JoinHandle` is the same shape `tokio::spawn` returns, so call
 //! sites can be migrated mechanically.
