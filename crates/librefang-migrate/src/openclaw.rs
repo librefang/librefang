@@ -1334,7 +1334,7 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
     let _ = std::fs::write(staging.join("migration_report.md"), &report_md);
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
     let marker_body = format!(
-        "OpenClaw migration completed at {stamp}.\nDelete this file to force a re-import; existing files will be moved to .bak.<timestamp> siblings rather than overwritten.\n"
+        "OpenClaw migration completed at {stamp}.\nDelete this file to force a re-import; existing files in the target will not be overwritten.\n"
     );
     if let Err(e) = std::fs::write(staging.join(MIGRATION_MARKER_FILENAME), marker_body) {
         warn!(
