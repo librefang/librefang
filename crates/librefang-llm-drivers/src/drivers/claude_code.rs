@@ -1028,7 +1028,10 @@ impl LlmDriver for ClaudeCodeDriver {
                             warn!(line = %line, error = %e, "Non-JSON line from Claude CLI");
                             full_text.push_str(&line);
                             if !should_suppress(&line)
-                                && tx.send(StreamEvent::TextDelta { text: line }).await.is_err()
+                                && tx
+                                    .send(StreamEvent::TextDelta { text: line })
+                                    .await
+                                    .is_err()
                             {
                                 break None;
                             }
