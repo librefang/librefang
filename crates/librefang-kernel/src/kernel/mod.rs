@@ -970,15 +970,12 @@ impl LibreFangKernel {
     /// All writes are serialised through an `RwLock` write-guard, which
     /// eliminates the data-race hazard of the old raw-pointer approach.
     pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut guard = self
-            .budget_config
-            .write()
-            .unwrap_or_else(|p| {
-                tracing::warn!(
-                    "budget_config write lock was poisoned, recovering with last-known state"
-                );
-                p.into_inner()
-            });
+        let mut guard = self.budget_config.write().unwrap_or_else(|p| {
+            tracing::warn!(
+                "budget_config write lock was poisoned, recovering with last-known state"
+            );
+            p.into_inner()
+        });
         f(&mut guard);
     }
 
