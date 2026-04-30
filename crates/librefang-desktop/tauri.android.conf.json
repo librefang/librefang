@@ -2,6 +2,13 @@
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "ai.librefang.app",
   "app": {
+    "windows": [
+      {
+        "label": "main",
+        "url": "lfconnect://localhost/",
+        "visible": true
+      }
+    ],
     "security": {
       "csp": null
     }

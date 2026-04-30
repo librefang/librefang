@@ -13,6 +13,9 @@ import {
   useNodesState,
   useEdgesState,
   type Node,
+  type NodeChange,
+  type EdgeChange,
+  type NodeProps,
   type Edge,
   type Connection,
   MarkerType,
@@ -25,7 +28,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
+import { type AgentItem, type WorkflowItem, type WorkflowStep, type WorkflowTemplate as ApiWorkflowTemplate, type DryRunResult, type WorkflowStepResult } from "../api";
 import { Card } from "../components/ui/Card";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
@@ -33,6 +36,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { InlineEmpty } from "../components/ui/InlineEmpty";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
@@ -54,6 +58,89 @@ import { useCreateSchedule } from "../lib/mutations/schedules";
 import { useWorkflows, useWorkflowTemplates, workflowQueries } from "../lib/queries/workflows";
 import { useAgents } from "../lib/queries/agents";
 import { useQueryClient } from "@tanstack/react-query";
+
+/**
+ * Shape we attach to every ReactFlow node — both regular workflow steps
+ * (custom node) and group-folder nodes. Open-ended (`unknown` index)
+ * because spreads like `{ ...n.data, _runState: undefined }` need to
+ * tolerate extra runtime fields without forcing every callsite to widen.
+ */
+type CanvasNodeData = {
+  // Visual / identity
+  nodeType?: string;
+  label?: string;
+  name?: string;
+  description?: string;
+  // Workflow step config
+  agentId?: string;
+  agentName?: string;
+  prompt?: string;
+  timeoutSecs?: number;
+  maxRetries?: number;
+  errorMode?: string;
+  outputVar?: string;
+  stepMode?: string;
+  condition?: string;
+  maxIterations?: number;
+  until?: string;
+  dependsOn?: string[];
+  // Runtime / UI overlays
+  _runState?: string;
+  // Group folder fields
+  _expanded?: boolean;
+  _childCount?: number;
+  _childIds?: string[];
+  _origWidth?: number;
+  _origHeight?: number;
+  _groupId?: string;
+  _onToggle?: (id: string) => void;
+  _onUngroup?: (id: string) => void;
+  _onDeleteGroup?: (id: string) => void;
+  // Imported from backend (group inner content)
+  nodes?: Node[];
+  edges?: Edge[];
+  // Edge data overlays for collapse/expand redirection
+  _origSource?: string;
+  _origTarget?: string;
+  [key: string]: unknown;
+};
+
+/** Shape of a node entry persisted into sessionStorage by the templates flow. */
+type StoredCanvasNode = {
+  id?: string;
+  type?: string;
+  position?: { x: number; y: number };
+  data?: CanvasNodeData;
+};
+
+/** Backend workflow step + the optional `agent` ref the workflow detail endpoint
+ *  attaches when rendering. Not on the canonical `WorkflowStep` because not
+ *  every list endpoint hydrates it. */
+type LoadedWorkflowStep = WorkflowStep & {
+  agent?: { id?: string; name?: string };
+};
+
+/**
+ * Backend workflow step DTO we hand to the create/update mutations.
+ * Open extension keeps the door open for fields the kernel-side schema
+ * adds without requiring a dashboard rev.
+ */
+type WorkflowStepBuild = {
+  name: string;
+  agent_id?: string;
+  agent_name?: string;
+  prompt: string;
+  timeout_secs: number;
+  mode?:
+    | string
+    | { conditional: { condition: string } }
+    | { loop: { max_iterations: number; until: string } };
+  depends_on?: string[];
+  max_retries?: number;
+  error_mode?: string | { retry: { max_retries: number } };
+  output_var?: string;
+  [key: string]: unknown;
+};
 
 type CanvasDraft = {
   nodes: Node[];
@@ -110,12 +197,12 @@ const NODE_TYPES = [
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
 
 // Custom node component — n8n style
-function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t: (key: string) => string }) {
+function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type: string; t: (key: string) => string }) {
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
   const isEnd = data.nodeType === "end";
   const runState = data._runState as string | undefined;
-  const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType);
+  const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
   const missingAgent = needsAgent && !data.agentId;
 
   const borderColor = runState === "done" ? "#10b981"
@@ -188,36 +275,36 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 }
 
 // Group node component
-function GroupNodeComponent({ data, id }: { data: any; id: string }) {
+function GroupNodeComponent({ data, id }: { data: CanvasNodeData; id: string }) {
   const { t } = useTranslation();
   const expanded = data._expanded !== false;
   return (
     <div
-      className={`rounded-2xl border-2 border-dashed transition-colors ${expanded ? "border-primary/30 bg-primary/5" : "border-primary bg-surface shadow-lg"
+      className={`rounded-2xl border-2 border-dashed transition-colors ${expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
         }`}
       style={expanded
         ? { width: "100%", height: "100%", pointerEvents: "none" }
         : { width: 180 }}
     >
-      <Handle type="target" position={Position.Top} className="w-3! h-3! rounded-full! bg-primary! border-2! border-surface!" />
+      <Handle type="target" position={Position.Top} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
       <div
-        className="flex items-center gap-2 px-3 py-2 bg-primary/10 rounded-t-xl cursor-pointer relative z-10"
+        className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
       >
         <div className="flex items-center gap-2 flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}>
           {expanded
-            ? <ChevronDown className="w-3.5 h-3.5 text-primary shrink-0" />
-            : <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0" />}
-          <Group className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span className="text-xs font-bold text-primary truncate">{data.label || t("canvas.group")}</span>
-          {!expanded && data._childCount > 0 && (
-            <span className="text-[9px] text-primary/50">{data._childCount}</span>
+            ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
+            : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
+          <Group className="w-3.5 h-3.5 text-brand shrink-0" />
+          <span className="text-xs font-bold text-brand truncate">{data.label || t("canvas.group")}</span>
+          {!expanded && (data._childCount ?? 0) > 0 && (
+            <span className="text-[9px] text-brand/50">{data._childCount}</span>
           )}
         </div>
         {/* Ungroup (keep child nodes) */}
         <button onClick={(e) => { e.stopPropagation(); data._onUngroup?.(id); }}
           title={t("canvas.ungroup")}
-          className="p-0.5 rounded hover:bg-primary/20 text-primary/50 hover:text-primary shrink-0">
+          className="p-0.5 rounded hover:bg-brand/20 text-brand/50 hover:text-brand shrink-0">
           <X className="w-3 h-3" />
         </button>
         {/* Delete group + child nodes */}
@@ -232,7 +319,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
           <p className="text-[9px] text-text-dim">Click to expand</p>
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-primary! border-2! border-surface!" />
+      <Handle type="source" position={Position.Bottom} className="w-3! h-3! rounded-full! bg-brand! border-2! border-surface!" />
     </div>
   );
 }
@@ -258,7 +345,7 @@ function WorkflowList({
         ) : (
           workflows.map(w => (
             <div key={w.id} onClick={() => onSelect(w)}
-              className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-primary bg-primary/5" : "border-border-subtle hover:border-primary/50 bg-surface"
+              className={`p-3 rounded-xl border cursor-pointer transition-colors ${selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
                 }`}>
               {confirmId === w.id ? (
                 <div className="flex items-center justify-between gap-2">
@@ -329,10 +416,11 @@ function TemplateBrowser({
     setError(null);
     try {
       const resp = await instantiateTemplateMutation.mutateAsync({ id: selectedTemplate.id, params: paramValues });
-      const workflowId = (resp as any).workflow_id || (resp as any).id || "";
+      const r = resp as { workflow_id?: string; id?: string };
+      const workflowId = r.workflow_id || r.id || "";
       onInstantiate(workflowId);
-    } catch (e: any) {
-      setError(e?.message || t("canvas.template_instantiate_error"));
+    } catch (e) {
+      setError(toastErr(e, t("canvas.template_instantiate_error")));
     }
   };
 
@@ -341,16 +429,16 @@ function TemplateBrowser({
         {/* Header — matches the existing inline icon + custom X. */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface z-10">
           <div className="flex items-center gap-2">
-            <LayoutTemplate className="w-4 h-4 text-primary" />
+            <LayoutTemplate className="w-4 h-4 text-brand" />
             <h3 className="text-sm font-bold">{t("canvas.browse_templates")}</h3>
           </div>
           <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
         </div>
 
         {selectedTemplate ? (
-          /* Template detail + params form */
-          <div className="flex-1 overflow-y-auto p-5 space-y-4">
-            <button onClick={() => setSelectedTemplate(null)} className="text-xs text-primary hover:underline flex items-center gap-1">
+          /* Template detail + params form — Modal handles outer scroll */
+          <div className="p-5 space-y-4">
+            <button onClick={() => setSelectedTemplate(null)} className="text-xs text-brand hover:underline flex items-center gap-1">
               <ArrowLeft className="w-3 h-3" /> {t("common.back")}
             </button>
             <div>
@@ -378,7 +466,7 @@ function TemplateBrowser({
                       type={p.param_type === "number" ? "number" : "text"}
                       value={String(paramValues[p.name] ?? "")}
                       onChange={e => setParamValues(prev => ({ ...prev, [p.name]: p.param_type === "number" ? Number(e.target.value) : e.target.value }))}
-                      className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-primary"
+                      className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand"
                       placeholder={p.description || p.name}
                     />
                   </div>
@@ -406,14 +494,14 @@ function TemplateBrowser({
                   type="text" value={searchQuery}
                   onChange={e => setSearchQuery(e.target.value)}
                   placeholder={t("canvas.template_search")}
-                  className="w-full rounded-xl border border-border-subtle bg-main pl-8 pr-3 py-2 text-xs outline-none focus:border-primary"
+                  className="w-full rounded-xl border border-border-subtle bg-main pl-8 pr-3 py-2 text-xs outline-none focus:border-brand"
                 />
               </div>
             </div>
 
             {loading ? (
               <div className="flex items-center justify-center py-12">
-                <Loader2 className="w-5 h-5 animate-spin text-primary" />
+                <Loader2 className="w-5 h-5 animate-spin text-brand" />
               </div>
             ) : templates.length === 0 ? (
               <InlineEmpty
@@ -426,13 +514,13 @@ function TemplateBrowser({
                   <button
                     key={tmpl.id}
                     onClick={() => handleSelect(tmpl)}
-                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-primary/50 hover:shadow-sm transition-colors text-left"
+                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-sm transition-colors text-left"
                   >
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-bold truncate">{tmpl.name}</span>
                       <div className="flex gap-1 shrink-0">
                         {tmpl.category && (
-                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">{tmpl.category}</span>
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{tmpl.category}</span>
                         )}
                       </div>
                     </div>
@@ -457,16 +545,20 @@ function TemplateBrowser({
 }
 
 // Node configuration panel
-const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-primary";
+const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
 const labelClass = "text-[10px] font-bold text-text-dim uppercase";
 
 function NodeConfigPanel({
-  node, agents, onUpdate, onClose, onDelete, t
+  node, agents, onUpdate, onClose, onDelete, siblingNodes, t
 }: {
-  node: Node; agents: AgentItem[]; onUpdate: (id: string, data: any) => void;
+  node: Node; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
+  /** Sibling step nodes available as `depends_on` candidates. Passed in
+   *  alongside `node` so we don't have to stuff this onto the ReactFlow
+   *  Node type (which doesn't allow arbitrary fields). */
+  siblingNodes?: Array<{ id: string; label: string }>;
   onClose: () => void; onDelete: (id: string) => void; t: (key: string) => string;
 }) {
-  const d = node.data as any;
+  const d = node.data as CanvasNodeData;
   const [label, setLabel] = useState(d.label || "");
   const [description, setDescription] = useState(d.description || "");
   const [agentId, setAgentId] = useState(d.agentId || "");
@@ -626,7 +718,7 @@ function NodeConfigPanel({
             {/* Depends On — multi-select other step nodes */}
             {(() => {
               // Collect sibling nodes that have an agent (i.e. are steps), excluding self
-              const siblingSteps = (node as any)._siblingNodes as Array<{ id: string; label: string }> | undefined;
+              const siblingSteps = siblingNodes;
               if (!siblingSteps || siblingSteps.length === 0) return null;
               return (
                 <div>
@@ -635,7 +727,7 @@ function NodeConfigPanel({
                   </label>
                   <div className="mt-1 space-y-1 max-h-28 overflow-y-auto rounded-lg border border-border-subtle bg-main p-1.5">
                     {siblingSteps.map(s => (
-                      <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-primary/5 cursor-pointer">
+                      <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-brand/5 cursor-pointer">
                         <input
                           type="checkbox"
                           checked={dependsOn.includes(s.label)}
@@ -748,16 +840,16 @@ function CanvasPageInner() {
   }, [setNodes, setEdges]);
 
   // Record snapshot before key operations
-  const onNodesChangeWithHistory = useCallback((changes: any) => {
+  const onNodesChangeWithHistory = useCallback((changes: NodeChange[]) => {
     // Record on drag end / delete
-    const hasEnd = changes.some((c: any) => c.type === "position" && c.dragging === false);
-    const hasRemove = changes.some((c: any) => c.type === "remove");
+    const hasEnd = changes.some((c) => c.type === "position" && c.dragging === false);
+    const hasRemove = changes.some((c) => c.type === "remove");
     if (hasEnd || hasRemove) pushHistory();
     onNodesChange(changes);
   }, [onNodesChange, pushHistory]);
 
-  const onEdgesChangeWithHistory = useCallback((changes: any) => {
-    const hasRemove = changes.some((c: any) => c.type === "remove");
+  const onEdgesChangeWithHistory = useCallback((changes: EdgeChange[]) => {
+    const hasRemove = changes.some((c) => c.type === "remove");
     if (hasRemove) pushHistory();
     onEdgesChange(changes);
   }, [onEdgesChange, pushHistory]);
@@ -778,7 +870,7 @@ function CanvasPageInner() {
     const offset = 40;
     const idMap = new Map<string, string>();
     const newNodes = clipboardRef.current.nodes.map(n => {
-      const newId = `${(n.data as any)?.nodeType || "node"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const newId = `${(n.data as CanvasNodeData)?.nodeType || "node"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       idMap.set(n.id, newId);
       return { ...n, id: newId, position: { x: n.position.x + offset, y: n.position.y + offset }, selected: true };
     });
@@ -846,8 +938,8 @@ function CanvasPageInner() {
   const GROUP_HEADER = 36;
   const recalcGroupBounds = useCallback((nds: Node[], groupId: string): Node[] => {
     const groupNode = nds.find(n => n.id === groupId);
-    if (!groupNode || (groupNode.data as any)._expanded === false) return nds;
-    const childIds = new Set<string>((groupNode.data as any)?._childIds || []);
+    if (!groupNode || (groupNode.data as CanvasNodeData)._expanded === false) return nds;
+    const childIds = new Set<string>((groupNode.data as CanvasNodeData)?._childIds || []);
     const children = nds.filter(n => childIds.has(n.id) && !n.hidden);
     if (children.length === 0) return nds;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -866,7 +958,7 @@ function CanvasPageInner() {
     return nds.map(n => n.id === groupId ? {
       ...n, position: { x: gx, y: gy },
       style: { ...n.style, width: gw, height: gh },
-      data: { ...(n.data as any), _origWidth: gw, _origHeight: gh },
+      data: { ...(n.data as CanvasNodeData), _origWidth: gw, _origHeight: gh },
     } : n);
   }, []);
 
@@ -1006,7 +1098,7 @@ function CanvasPageInner() {
     setNodes(nds => {
       const groupNode = nds.find(n => n.id === groupId);
       if (!groupNode) return nds;
-      const gd = groupNode.data as any;
+      const gd = groupNode.data as CanvasNodeData;
       const isExpanded = gd._expanded !== false;
       const willCollapse = isExpanded;
       const childIds = new Set<string>(gd._childIds || []);
@@ -1036,7 +1128,7 @@ function CanvasPageInner() {
     // Handle edges
     setEdges(eds => {
       const groupNode = nodes.find(n => n.id === groupId);
-      const gd = groupNode?.data as any;
+      const gd = groupNode?.data as CanvasNodeData;
       const isExpanded = gd?._expanded !== false;
       const willCollapse = isExpanded;
       const childIds = new Set<string>(gd?._childIds || []);
@@ -1055,7 +1147,7 @@ function CanvasPageInner() {
           if (tgtChild) return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
         } else {
           // Expand: restore original endpoints
-          const ed = e.data as any;
+          const ed = e.data as CanvasNodeData;
           if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
           if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
           // Restore internal edge visibility
@@ -1070,17 +1162,17 @@ function CanvasPageInner() {
   const ungroupNodes = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
       return nds
         .filter(n => n.id !== groupId)
         .map(n => childIds.has(n.id)
-          ? { ...n, data: { ...(n.data as any), _groupId: undefined } }
+          ? { ...n, data: { ...(n.data as CanvasNodeData), _groupId: undefined } }
           : n
         );
     });
     // Restore redirected edges
     setEdges(eds => eds.map(e => {
-      const ed = e.data as any;
+      const ed = e.data as CanvasNodeData;
       if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
       if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
       return { ...e, hidden: false };
@@ -1091,14 +1183,14 @@ function CanvasPageInner() {
   const deleteGroupAndChildren = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
       childIds.add(groupId);
       return nds.filter(n => !childIds.has(n.id));
     });
     // Delete edges involving child nodes
     setEdges(eds => {
       const group = nodes.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
       childIds.add(groupId);
       return eds.filter(e => !childIds.has(e.source) && !childIds.has(e.target));
     });
@@ -1108,8 +1200,8 @@ function CanvasPageInner() {
   // unmounting/remounting all nodes on every render, which breaks click handlers.
   // We use refs for all callbacks and the translation function so the deps are empty.
   const nodeTypes = useMemo(() => ({
-    custom: (props: any) => <CustomNode {...props} t={tRef.current} />,
-    groupNode: (props: any) => <GroupNodeComponent {...props} data={{
+    custom: (props: NodeProps) => <CustomNode {...props as unknown as { data: CanvasNodeData; type: string }} t={tRef.current} />,
+    groupNode: (props: NodeProps) => <GroupNodeComponent {...props as unknown as { data: CanvasNodeData; id: string }} data={{
       ...props.data,
       _onToggle: (id: string) => toggleGroupRef.current(id),
       _onUngroup: (id: string) => ungroupNodesRef.current(id),
@@ -1126,42 +1218,66 @@ function CanvasPageInner() {
     const templateData = sessionStorage.getItem("workflowTemplate");
     if (templateData) {
       try {
-        const { nodes: templateNodes, edges: templateEdges, name, description, workflowId } = JSON.parse(templateData);
+        const parsed = JSON.parse(templateData) as {
+          nodes?: StoredCanvasNode[];
+          edges?: Edge[];
+          name?: string;
+          description?: string;
+          workflowId?: string;
+        };
+        const { nodes: templateNodes = [], edges: templateEdges, name, description, workflowId } = parsed;
         // Find an available agent as default assignment
         const defaultAgent = availableAgents.find(a => a.state === "Running") || availableAgents[0];
         // Determine output language instruction based on UI language
         const lang = t("_lang", { defaultValue: "en" });
         const langSuffix = lang === "zh" ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)." : "";
-        const newNodes = templateNodes.map((n: any, idx: number) => {
-          const nodeType = n.data?.nodeType;
-          const needsAgent = AGENT_NODE_TYPES.has(nodeType);
-          const rawPrompt = n.data?.prompt || (n.data?.description ? t(n.data.description) : "");
+        const newNodes = templateNodes.map((n, idx) => {
+          const nd = n.data;
+          const nodeType = nd?.nodeType;
+          const needsAgent = AGENT_NODE_TYPES.has(nodeType ?? "");
+          const rawPrompt = nd?.prompt || (nd?.description ? t(nd.description) : "");
+          // Either keep the existing agent binding, or auto-assign the
+          // default agent for nodes that need one. Computing this as a
+          // local lets TS narrow `nd` once instead of fighting `?.` in
+          // every branch.
+          const agentBinding: {
+            agentId?: string;
+            agentName?: string;
+            prompt?: string;
+          } = (() => {
+            if (nd?.agentId) {
+              return {
+                agentId: nd.agentId,
+                agentName: nd.agentName || availableAgents.find(a => a.id === nd.agentId)?.name || nd.agentId,
+                prompt: nd.prompt || rawPrompt,
+              };
+            }
+            if (needsAgent && defaultAgent) {
+              return {
+                agentId: defaultAgent.id,
+                agentName: defaultAgent.name,
+                prompt: rawPrompt + langSuffix,
+              };
+            }
+            return {};
+          })();
           return {
             id: n.id || `${n.type || 'custom'}-${Date.now()}-${idx}`,
             type: "custom",
             position: n.position || { x: 50, y: idx * 80 },
             data: {
-              label: n.data?.label ? t(n.data.label) : t("canvas.node_types.start"),
-              description: n.data?.description ? t(n.data.description) : t("canvas.node_types.start_desc"),
+              label: nd?.label ? t(nd.label) : t("canvas.node_types.start"),
+              description: nd?.description ? t(nd.description) : t("canvas.node_types.start_desc"),
               nodeType,
-              labelKey: n.data?.label,
-              descKey: n.data?.description,
-              // Keep existing agent binding (look up name by ID), or auto-assign default agent
-              ...(n.data?.agentId ? {
-                agentId: n.data.agentId,
-                agentName: n.data.agentName || availableAgents.find(a => a.id === n.data.agentId)?.name || n.data.agentId,
-                prompt: n.data.prompt || rawPrompt,
-              } : needsAgent && defaultAgent ? {
-                agentId: defaultAgent.id,
-                agentName: defaultAgent.name,
-                prompt: rawPrompt + langSuffix,
-              } : {}),
+              labelKey: nd?.label,
+              descKey: nd?.description,
+              ...agentBinding,
             }
           };
         });
         setNodes(newNodes);
         if (Array.isArray(templateEdges) && templateEdges.length > 0) {
-          setEdges(templateEdges.map((e: any) => ({
+          setEdges(templateEdges.map((e) => ({
             ...e,
             markerEnd: { type: MarkerType.ArrowClosed },
           })));
@@ -1192,21 +1308,21 @@ function CanvasPageInner() {
       wfNodes = layout.nodes;
       wfEdges = layout.edges || [];
     } else {
-      const steps = Array.isArray(detail.steps) ? detail.steps : [];
-      wfNodes = steps.map((s: any, idx: number) => ({
+      const steps: LoadedWorkflowStep[] = Array.isArray(detail.steps) ? (detail.steps as LoadedWorkflowStep[]) : [];
+      wfNodes = steps.map((s, idx) => ({
         id: `node-${idx}`,
         type: "custom",
         position: { x: 50, y: idx * 80 },
         data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name },
       }));
-      const hasDag = steps.some((step: any) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
+      const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
       if (hasDag) {
         const nameToId: Record<string, string> = {};
-        steps.forEach((step: any, idx: number) => {
+        steps.forEach((step, idx) => {
           nameToId[step.name] = `node-${idx}`;
         });
         wfEdges = [];
-        steps.forEach((step: any, idx: number) => {
+        steps.forEach((step, idx) => {
           (step.depends_on || []).forEach((dep: string, depIdx: number) => {
             const sourceId = nameToId[dep];
             if (sourceId) {
@@ -1367,7 +1483,7 @@ function CanvasPageInner() {
   }, [setEdges, edgeColorActive]);
 
   // Node click -> open config panel
-  const onNodeClick = useCallback((_: any, node: Node) => {
+  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     setEditingNode(node);
   }, []);
 
@@ -1381,19 +1497,19 @@ function CanvasPageInner() {
   // Group drag moves child nodes along
   const groupDragStart = useRef<{ id: string; x: number; y: number } | null>(null);
 
-  const onNodeDragStart = useCallback((_: any, node: Node) => {
+  const onNodeDragStart = useCallback((_: React.MouseEvent, node: Node) => {
     if (node.type === "groupNode") {
       groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
     }
   }, []);
 
-  const onNodeDrag = useCallback((_: any, node: Node) => {
+  const onNodeDrag = useCallback((_: React.MouseEvent, node: Node) => {
     if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
       // Dragging group -> move child nodes along
       const dx = node.position.x - groupDragStart.current.x;
       const dy = node.position.y - groupDragStart.current.y;
       if (dx === 0 && dy === 0) return;
-      const childIds = new Set<string>((node.data as any)?._childIds || []);
+      const childIds = new Set<string>((node.data as CanvasNodeData)?._childIds || []);
       groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
       setNodes(nds => nds.map(n =>
         childIds.has(n.id) && !n.hidden
@@ -1402,7 +1518,7 @@ function CanvasPageInner() {
       ));
     } else {
       // Dragging child node -> expand parent group bounds
-      const groupId = (node.data as any)?._groupId;
+      const groupId = (node.data as CanvasNodeData)?._groupId;
       if (groupId) {
         setNodes(nds => recalcGroupBounds(nds, groupId));
       }
@@ -1461,7 +1577,7 @@ function CanvasPageInner() {
     setNodes(nds => [
       groupNode,
       ...nds.map(n => childIds.includes(n.id)
-        ? { ...n, data: { ...(n.data as any), _groupId: groupId } }
+        ? { ...n, data: { ...(n.data as CanvasNodeData), _groupId: groupId } }
         : n
       ),
     ]);
@@ -1479,7 +1595,7 @@ function CanvasPageInner() {
   tRef.current = t;
 
   // Update node data
-  const handleNodeUpdate = useCallback((id: string, newData: any) => {
+  const handleNodeUpdate = useCallback((id: string, newData: CanvasNodeData) => {
     setNodes(nds => nds.map(n => n.id === id ? { ...n, data: newData } : n));
   }, [setNodes]);
 
@@ -1487,12 +1603,12 @@ function CanvasPageInner() {
   const buildSteps = useCallback((nodeList: Node[]) => {
     return nodeList
       .filter(n => {
-        const d = n.data as any;
+        const d = n.data as CanvasNodeData;
         return d.agentId || d.agentName;
       })
       .map((n, idx) => {
-        const d = n.data as any;
-        const step: any = {
+        const d = n.data as CanvasNodeData;
+        const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
           agent_id: d.agentId,
           agent_name: d.agentName,
@@ -1668,26 +1784,33 @@ function CanvasPageInner() {
     setNodes(nds => nds.map(n => ({
       ...n,
       data: {
-        ...(n.data as any),
-        _runState: (n.data as any).agentId ? "running" : undefined,
+        ...(n.data as CanvasNodeData),
+        _runState: (n.data as CanvasNodeData).agentId ? "running" : undefined,
       }
     })));
 
     try {
       const resp = await runWorkflowMutation.mutateAsync({ workflowId, input: runInput });
+      const r = resp as {
+        output?: string;
+        message?: string;
+        status?: string;
+        run_id?: string;
+        step_results?: WorkflowStepResult[];
+      };
       setRunResult({
-        output: (resp as any).output || (resp as any).message || JSON.stringify(resp),
-        status: (resp as any).status || "completed",
-        run_id: (resp as any).run_id || "",
-        step_results: (resp as any).step_results ?? [],
+        output: r.output || r.message || JSON.stringify(resp),
+        status: r.status || "completed",
+        run_id: r.run_id || "",
+        step_results: r.step_results ?? [],
       });
-      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as CanvasNodeData), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
-    } catch (e: any) {
+    } catch (e) {
       // Error: clear all state and edge animation
-      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as CanvasNodeData), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
-      const detail = (e as any)?.message || String(e);
+      const detail = toErrorMessage(e);
       showError(detail);
     } finally {
       setRunningWorkflowId(null);
@@ -1709,8 +1832,8 @@ function CanvasPageInner() {
     try {
       const result = await dryRunWorkflowMutation.mutateAsync({ workflowId, input: runInput });
       setDryRunResult(result);
-    } catch (e: any) {
-      showError((e as any)?.message || String(e));
+    } catch (e) {
+      showError(toErrorMessage(e));
     } finally {
       setIsDryRunning(false);
     }
@@ -1945,20 +2068,20 @@ function CanvasPageInner() {
           <div className="absolute top-3 left-3 right-3 z-10 flex gap-2">
             <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
               placeholder={t("workflows.workflow_name")}
-              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none shadow-sm" />
+              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
             <input type="text" value={workflowDescription} onChange={(e) => setWorkflowDescription(e.target.value)}
               placeholder={t("workflows.description")}
-              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-dim focus:border-primary focus:ring-2 focus:ring-primary/20 outline-none shadow-sm" />
+              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
           </div>
 
           {/* Node configuration panel */}
           {editingNode && !showRunInput && (
-            <NodeConfigPanel node={{
-              ...editingNode,
-              _siblingNodes: nodes
-                .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has((n.data as any).nodeType))
-                .map(n => ({ id: n.id, label: (n.data as any).label || n.id })),
-            } as any} agents={agents}
+            <NodeConfigPanel
+              node={editingNode}
+              siblingNodes={nodes
+                .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has((n.data as CanvasNodeData).nodeType ?? ""))
+                .map(n => ({ id: n.id, label: (n.data as CanvasNodeData).label || n.id }))}
+              agents={agents}
               onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}
               onDelete={(id) => { setNodes(nds => nds.filter(n => n.id !== id)); setEditingNode(null); }}
               t={t} />
@@ -1967,12 +2090,12 @@ function CanvasPageInner() {
           {/* Run / Dry-run input dialog */}
           {showRunInput && (
             <div className="absolute top-3 right-3 z-20 w-80 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
-              <div className={`flex items-center justify-between px-3 py-2 border-b border-border-subtle ${showRunInput === "dry" ? "bg-primary/10" : "bg-success/10"}`}>
+              <div className={`flex items-center justify-between px-3 py-2 border-b border-border-subtle ${showRunInput === "dry" ? "bg-brand/10" : "bg-success/10"}`}>
                 <div className="flex items-center gap-2">
                   {showRunInput === "dry"
-                    ? <FlaskConical className="w-3.5 h-3.5 text-primary" />
+                    ? <FlaskConical className="w-3.5 h-3.5 text-brand" />
                     : <Play className="w-3.5 h-3.5 text-success" />}
-                  <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-primary" : "text-success"}`}>
+                  <span className={`text-xs font-bold ${showRunInput === "dry" ? "text-brand" : "text-success"}`}>
                     {showRunInput === "dry" ? "Dry Run" : t("canvas.run_input_title")}
                   </span>
                 </div>
@@ -1987,7 +2110,7 @@ function CanvasPageInner() {
                 <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
                   placeholder={t("canvas.run_input_placeholder")}
                   rows={4} autoFocus
-                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-primary resize-none"
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand resize-none"
                   onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) showRunInput === "dry" ? handleDryRun() : handleRunConfirm(); }}
                 />
                 <div className="flex gap-2">
@@ -2060,7 +2183,7 @@ function CanvasPageInner() {
             </div>
             <MiniMap className="bg-surface/80! border-border-subtle! rounded-xl! shadow-lg!"
               nodeColor={(n) => {
-                const cfg = NODE_TYPES.find(t => t.type === (n.data as any)?.nodeType);
+                const cfg = NODE_TYPES.find(t => t.type === (n.data as CanvasNodeData)?.nodeType);
                 return cfg?.color || "#3b82f6";
               }}
               maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />
@@ -2070,8 +2193,8 @@ function CanvasPageInner() {
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div className="text-center pointer-events-auto">
-                <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center mx-auto mb-3">
-                  <Plus className="w-6 h-6 text-primary" />
+                <div className="w-12 h-12 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-3">
+                  <Plus className="w-6 h-6 text-brand" />
                 </div>
                 <p className="text-sm font-bold text-text-dim">{t("canvas.empty_title")}</p>
                 <p className="text-xs text-text-dim/60 mt-1">{t("canvas.empty_hint")}</p>
@@ -2132,10 +2255,10 @@ function CanvasPageInner() {
           {/* Dry-run result panel */}
           {dryRunResult && !runResult && (
             <div className="absolute bottom-3 left-3 right-3 z-20 max-h-64 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
-              <div className="flex items-center justify-between px-3 py-2 bg-primary/10 border-b border-border-subtle shrink-0">
+              <div className="flex items-center justify-between px-3 py-2 bg-brand/10 border-b border-border-subtle shrink-0">
                 <div className="flex items-center gap-2">
-                  <FlaskConical className="w-3.5 h-3.5 text-primary" />
-                  <span className="text-xs font-bold text-primary">Dry Run</span>
+                  <FlaskConical className="w-3.5 h-3.5 text-brand" />
+                  <span className="text-xs font-bold text-brand">Dry Run</span>
                   {dryRunResult.valid
                     ? <Badge variant="success">valid</Badge>
                     : <Badge variant="error">issues found</Badge>}
@@ -2319,7 +2442,7 @@ function CanvasPageInner() {
               await createScheduleMutation.mutateAsync({ name: `${workflowName || "workflow"} schedule`, cron, tz, workflow_id: selectedWorkflow.id, enabled: true });
               setShowScheduleModal(false);
               showToast(t("canvas.scheduled", { defaultValue: "Schedule created" }));
-            } catch (e: any) { showError(e?.message || String(e)); }
+            } catch (e) { showError(toErrorMessage(e)); }
           }}
           onClose={() => setShowScheduleModal(false)}
         />

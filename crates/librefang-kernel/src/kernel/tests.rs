@@ -5620,3 +5620,101 @@ async fn injection_teardown_only_removes_target_session() {
     kernel.teardown_injection_channel(agent_id, session_b);
     kernel.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Session label generation — pure-function helpers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn extract_label_seed_returns_none_when_no_user_message() {
+    use librefang_types::message::Message;
+    let messages = vec![Message::assistant("Hi")];
+    assert!(extract_label_seed(&messages).is_none());
+}
+
+#[test]
+fn extract_label_seed_returns_none_when_no_assistant_reply_yet() {
+    use librefang_types::message::Message;
+    let messages = vec![Message::user("Hello")];
+    assert!(extract_label_seed(&messages).is_none());
+}
+
+#[test]
+fn extract_label_seed_returns_none_for_empty_text_blocks() {
+    use librefang_types::message::Message;
+    // Whitespace-only content is treated as empty so the seed is None.
+    let messages = vec![Message::user("   "), Message::assistant("\n\t")];
+    assert!(extract_label_seed(&messages).is_none());
+}
+
+#[test]
+fn extract_label_seed_picks_first_user_and_assistant_text() {
+    use librefang_types::message::Message;
+    let messages = vec![
+        Message::user("hello world"),
+        Message::assistant("hi back"),
+        Message::user("ignored second"),
+        Message::assistant("ignored too"),
+    ];
+    let (u, a) = extract_label_seed(&messages).expect("seed");
+    assert_eq!(u, "hello world");
+    assert_eq!(a, "hi back");
+}
+
+#[test]
+fn extract_label_seed_concatenates_text_blocks() {
+    use librefang_types::message::{ContentBlock, Message};
+    let user_msg = Message::user_with_blocks(vec![
+        ContentBlock::Text {
+            text: "hello".to_string(),
+            provider_metadata: None,
+        },
+        ContentBlock::Text {
+            text: "world".to_string(),
+            provider_metadata: None,
+        },
+    ]);
+    let messages = vec![user_msg, Message::assistant("ack")];
+    let (u, a) = extract_label_seed(&messages).expect("seed");
+    assert_eq!(u, "hello world");
+    assert_eq!(a, "ack");
+}
+
+#[test]
+fn sanitize_session_title_strips_quotes_and_prefix() {
+    assert_eq!(
+        sanitize_session_title("\"Refactor login flow\""),
+        "Refactor login flow"
+    );
+    assert_eq!(
+        sanitize_session_title("Title: Plan the rollout"),
+        "Plan the rollout"
+    );
+    assert_eq!(
+        sanitize_session_title("'Backup script audit'"),
+        "Backup script audit"
+    );
+}
+
+#[test]
+fn sanitize_session_title_keeps_only_first_line() {
+    let raw = "Quick fix\nExtra commentary the model added";
+    assert_eq!(sanitize_session_title(raw), "Quick fix");
+}
+
+#[test]
+fn sanitize_session_title_caps_at_60_chars() {
+    let long = "a".repeat(200);
+    let out = sanitize_session_title(&long);
+    assert!(
+        out.chars().count() <= 60,
+        "got {} chars",
+        out.chars().count()
+    );
+}
+
+#[test]
+fn sanitize_session_title_handles_empty() {
+    assert_eq!(sanitize_session_title(""), "");
+    assert_eq!(sanitize_session_title("   \n  "), "");
+}

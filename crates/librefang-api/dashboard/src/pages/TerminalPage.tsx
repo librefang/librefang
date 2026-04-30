@@ -409,8 +409,8 @@ export function TerminalPage() {
       cursorBlink: true,
       cursorStyle: "block",
       // Show a dimmed underline cursor when the terminal loses focus (xterm v5.5+).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ...({"cursorInactiveStyle": "underline"} as any),
+      // The option is augmented onto ITerminalOptions in vite-env.d.ts.
+      cursorInactiveStyle: "underline",
       scrollback: 5000,
     });
 

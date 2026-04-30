@@ -1,6 +1,7 @@
 import React, { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import {
@@ -502,7 +503,7 @@ function ServerCard({
   onDelete: () => void;
   onAuthSuccess?: () => void;
   onViewDetail: () => void;
-  t: (key: string, opts?: any) => string;
+  t: TFunction;
 }) {
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;

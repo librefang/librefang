@@ -1,45 +1,21 @@
 @import "tailwindcss";
 
 @theme {
-  /* ── Brand color tokens (mapped to CSS custom property channels) ── */
-  --color-primary:            rgb(var(--primary));
-  --color-primary-foreground: rgb(var(--primary-foreground));
-  --color-secondary:          rgb(var(--secondary));
-  --color-secondary-foreground: rgb(var(--secondary-foreground));
-  --color-accent:             rgb(var(--accent));
-  --color-accent-foreground:  rgb(var(--accent-foreground));
-  --color-background:         rgb(var(--background));
-  --color-foreground:         rgb(var(--foreground));
-  --color-card:               rgb(var(--card));
-  --color-card-foreground:    rgb(var(--card-foreground));
-  --color-popover:            rgb(var(--popover));
-  --color-popover-foreground: rgb(var(--popover-foreground));
-  --color-muted:              rgb(var(--muted));
-  --color-muted-foreground:   rgb(var(--muted-foreground));
-  --color-border:             rgb(var(--border));
-  --color-input:              rgb(var(--input));
-  --color-ring:               rgb(var(--ring));
-  --color-destructive:        rgb(var(--destructive));
-  --color-success:            rgb(var(--success));
-  --color-warning:            rgb(var(--warning));
-  --color-info:               rgb(var(--info));
-
-  /* Backward-compat alias so existing bg-primary/text-primary classes still work */
-  --color-brand:       rgb(var(--primary));
-  --color-brand-muted: rgb(var(--accent));
-
-  /* Backward-compat layout aliases (existing components use these names) */
-  --color-main:          rgb(var(--background));
-  --color-surface:       rgb(var(--card));
-  --color-surface-hover: rgb(var(--muted));
-  --color-border-subtle: rgb(var(--border));
-  --color-text-dim:      rgb(var(--muted-foreground));
-
-  /* ── Font families ── */
-  --font-display: 'Space Grotesk', sans-serif;
-  --font-ui:      'Inter', sans-serif;
-  --font-body:    'Roboto', system-ui, sans-serif;
-  --font-mono:    'JetBrains Mono', monospace;
+  /* Dynamic Semantic Palette */
+  --color-brand: var(--brand-color);
+  --color-brand-muted: var(--brand-muted);
+  
+  --color-success: var(--success-color);
+  --color-warning: var(--warning-color);
+  --color-error: var(--error-color);
+  --color-accent: var(--accent-color);
+  
+  /* Layout Colors */
+  --color-main: var(--bg-main);
+  --color-surface: var(--bg-surface);
+  --color-surface-hover: var(--bg-surface-hover);
+  --color-border-subtle: var(--border-color);
+  --color-text-dim: var(--text-muted);
 
   /* Custom breakpoints for wide displays.
      Tailwind v4 defaults stop at 2xl (1536px), which leaves 2K / 4K monitors
@@ -49,82 +25,42 @@
   --breakpoint-4xl: 2560px;
 }
 
-/* ═══════════════════════════════════════════════════
-   Light Mode — travisjames.ai brand tokens
-   Ember/Charcoal palette, shadcn/ui RGB channel format
-   ═══════════════════════════════════════════════════ */
 :root {
   color-scheme: light;
-
-  /* Neutrals */
-  --background:         247 247 248;  /* #F7F7F8 */
-  --foreground:         11 15 20;     /* #0B0F14 */
-  --card:               255 255 255;
-  --card-foreground:    11 15 20;
-  --popover:            255 255 255;
-  --popover-foreground: 11 15 20;
-  --muted:              238 240 243;  /* #EEF0F3 */
-  --muted-foreground:   75 85 99;     /* #4B5563 */
-  --border:             216 222 230;  /* #D8DEE6 */
-  --input:              216 222 230;
-  --ring:               224 78 40;   /* #E04E28 */
-
-  /* Brand */
-  --primary:             224 78 40;  /* #E04E28 Muted Ember */
-  --primary-foreground:  255 255 255;
-  --secondary:           17 24 39;   /* #111827 */
-  --secondary-foreground: 255 255 255;
-  --accent:              242 214 207; /* #F2D6CF */
-  --accent-foreground:   59 20 16;   /* #3B1410 */
-
-  /* Semantic states */
-  --destructive:            220 38 38;  /* #DC2626 */
-  --destructive-foreground: 255 255 255;
-  --success:                22 163 74;  /* #16A34A */
-  --success-foreground:     255 255 255;
-  --warning:                217 119 6;  /* #D97706 */
-  --warning-foreground:     255 255 255;
-  --info:                   37 99 235;  /* #2563EB */
-  --info-foreground:        255 255 255;
+  
+  /* Light Mode Palette (Subtle & High Contrast) */
+  --brand-color: #0284c7;   /* Sky 600 */
+  --brand-muted: #f0f9ff;   /* Sky 50 */
+  
+  --success-color: #16a34a; /* Emerald 600 */
+  --warning-color: #d97706; /* Amber 600 */
+  --error-color: #dc2626;   /* Rose 600 */
+  --accent-color: #7c3aed;  /* Violet 600 */
+  
+  --bg-main: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-hover: #f1f5f9;
+  --border-color: #e2e8f0;
+  --text-muted: #64748b;
 }
 
-/* ═══════════════════════════════════════════════════
-   Dark Mode — travisjames.ai brand tokens
-   Deep Charcoal canvas, brighter Ember primary
-   ═══════════════════════════════════════════════════ */
 :root.dark {
   color-scheme: dark;
-
-  /* Neutrals */
-  --background:         11 15 20;    /* #0B0F14 Deep Charcoal */
-  --foreground:         232 237 243; /* #E8EDF3 */
-  --card:               15 22 32;    /* #0F1620 */
-  --card-foreground:    232 237 243;
-  --popover:            15 22 32;
-  --popover-foreground: 232 237 243;
-  --muted:              20 28 38;    /* #141C26 */
-  --muted-foreground:   167 176 188; /* #A7B0BC */
-  --border:             35 48 65;   /* #233041 */
-  --input:              35 48 65;
-  --ring:               255 106 61; /* #FF6A3D */
-
-  /* Brand */
-  --primary:             255 106 61; /* #FF6A3D Bright Ember (dark) */
-  --primary-foreground:  11 15 20;
-  --secondary:           26 36 50;   /* #1A2432 */
-  --secondary-foreground: 232 237 243;
-  --accent:              42 27 23;   /* #2A1B17 */
-  --accent-foreground:   255 177 153; /* #FFB199 */
-
-  /* Semantic states */
-  --destructive:            239 68 68;  /* #EF4444 */
-  --destructive-foreground: 11 15 20;
-  --success:                34 197 94;  /* #22C55E */
-  --success-foreground:     11 15 20;
-  --warning:                245 158 11; /* #F59E0B */
-  --warning-foreground:     11 15 20;
-  --info:                   96 165 250; /* #60A5FA */
-  --info-foreground:        11 15 20;
+  
+  /* Dark Mode Palette (Glowing & Soft Contrast) */
+  --brand-color: #38bdf8;   /* Sky 400 */
+  --brand-muted: rgba(14, 165, 233, 0.15);
+  
+  --success-color: #34d399; /* Emerald 400 */
+  --warning-color: #fbbf24; /* Amber 400 */
+  --error-color: #fb7185;   /* Rose 400 */
+  --accent-color: #a78bfa;  /* Violet 400 */
+  
+  --bg-main: #020617;
+  --bg-surface: rgba(15, 23, 42, 0.92);
+  --bg-surface-hover: rgba(30, 41, 59, 0.75);
+  --border-color: rgba(51, 65, 85, 0.8);
+  --text-muted: #94a3b8;
 }
 
 html,
@@ -132,20 +68,12 @@ body,
 #root {
   margin: 0;
   min-height: 100%;
-  background-color: rgb(var(--background));
+  background-color: var(--bg-main);
 }
 
 body {
-  font-family: 'Roboto', system-ui, sans-serif;
-  @apply text-foreground transition-colors duration-300;
-}
-
-h1, h2, h3, h4 {
-  font-family: 'Space Grotesk', sans-serif;
-}
-
-code, pre, kbd, samp {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "Inter", system-ui, sans-serif;
+  @apply text-slate-900 dark:text-slate-100 transition-colors duration-300;
 }
 
 .katex-display {
@@ -161,65 +89,22 @@ code, pre, kbd, samp {
 
 .dark body {
   background:
-    radial-gradient(ellipse 80% 60% at 20% 40%, rgba(224, 78, 40, 0.06) 0%, transparent 60%),
-    radial-gradient(ellipse 60% 50% at 80% 60%, rgba(255, 106, 61, 0.04) 0%, transparent 50%),
-    rgb(11, 15, 20);
+    radial-gradient(circle at top, rgba(30, 64, 175, 0.15) 0%, rgba(2, 6, 23, 1) 80%),
+    #020617;
 }
+
 
 @custom-variant dark (&:where(.dark, .dark *));
-
-/* ══════════════════════════════════════════════════
-   Global cursor rules
-   Applied via @layer base so Tailwind utility classes
-   (cursor-default, cursor-not-allowed, etc.) can still
-   override on a per-element basis.
-   ══════════════════════════════════════════════════ */
-@layer base {
-  /* Everything a user can click/activate gets a pointer */
-  a[href],
-  button,
-  [role="button"],
-  [role="tab"],
-  [role="option"],
-  [role="menuitem"],
-  [role="menuitemcheckbox"],
-  [role="menuitemradio"],
-  [role="checkbox"],
-  [role="radio"],
-  [role="switch"],
-  [role="combobox"],
-  [role="listbox"],
-  select,
-  input[type="checkbox"],
-  input[type="radio"],
-  input[type="submit"],
-  input[type="button"],
-  input[type="reset"],
-  input[type="file"],
-  label[for],
-  summary {
-    cursor: pointer;
-  }
-
-  /* Disabled elements get a not-allowed cursor regardless of role */
-  [disabled],
-  [aria-disabled="true"],
-  button[disabled],
-  input[disabled],
-  select[disabled],
-  textarea[disabled] {
-    cursor: not-allowed;
-  }
-}
 
 /* ═══════════════════════════════════════════════════
    Apple-style Animation System
    Spring physics · Blur transitions · GPU accelerated
    ═══════════════════════════════════════════════════ */
 
+/* Apple spring curve — slight overshoot like UIKit */
 :root {
   --apple-spring: cubic-bezier(0.22, 1, 0.36, 1);
-  --apple-ease:   cubic-bezier(0.25, 0.1, 0.25, 1);
+  --apple-ease: cubic-bezier(0.25, 0.1, 0.25, 1);
   --apple-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -227,38 +112,104 @@ code, pre, kbd, samp {
    variants). Only static (non-animated) helpers remain in this file — keep
    the easing CSS variables above so any inline transitions can reference them. */
 
-/* ── Card hover — ember glow ──────── */
+/* ── Card hover — depth + sky-blue glow signature ──────── */
 .card-glow {
-  transition: transform 0.4s var(--apple-spring),
-              box-shadow 0.4s var(--apple-ease),
-              border-color 0.3s ease;
+  transition: transform 0.24s var(--apple-spring),
+              box-shadow 0.24s var(--apple-ease),
+              border-color 0.24s var(--apple-ease);
 }
 
 .card-glow:hover {
+  transform: translateY(-1px);
+  border-color: rgba(2, 132, 199, 0.4);
   box-shadow:
-    0 0 0 1px rgba(224, 78, 40, 0.08),
-    0 8px 32px -8px rgba(224, 78, 40, 0.15),
-    0 2px 8px -2px rgba(0, 0, 0, 0.06);
+    0 0 0 1px rgba(2, 132, 199, 0.18),
+    0 8px 28px -12px rgba(2, 132, 199, 0.25),
+    0 0 36px -10px rgba(2, 132, 199, 0.18);
 }
 
 .dark .card-glow:hover {
+  border-color: rgba(56, 189, 248, 0.4);
   box-shadow:
-    0 0 0 1px rgba(255, 106, 61, 0.12),
-    0 8px 32px -8px rgba(255, 106, 61, 0.18),
-    0 2px 8px -2px rgba(0, 0, 0, 0.3);
+    0 0 0 1px rgba(56, 189, 248, 0.18),
+    0 8px 28px -12px rgba(56, 189, 248, 0.25),
+    0 0 36px -10px rgba(56, 189, 248, 0.18);
+}
+
+/* ── Surface "lit" highlight — subtle inner top-light ─── */
+.surface-lit { position: relative; }
+.surface-lit::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 1px; right: 1px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(148, 163, 184, 0.18), transparent);
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* ── Glow text (KPI accent values) ─────────────────── */
+.glow-text { text-shadow: 0 0 24px rgba(56, 189, 248, 0.35); }
+
+/* ── Status dot pulse — scale-based, tighter than animate-pulse ── */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.9); }
+}
+@utility animate-pulse-soft {
+  animation: pulse-soft 2s ease-in-out infinite;
+}
+
+/* ── Shimmer for skeletons / placeholder ─────────── */
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+@utility animate-shimmer {
+  background: linear-gradient(90deg,
+    rgba(51, 65, 85, 0.15) 0%,
+    rgba(51, 65, 85, 0.35) 50%,
+    rgba(51, 65, 85, 0.15) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+/* ── Rise (toast / modal entry) ─────────────────── */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@utility animate-rise {
+  animation: rise 0.5s var(--apple-spring) both;
+}
+
+/* ── Approval glow ring ─────────────────────────── */
+@keyframes glow-ring {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.3); }
+  50% { box-shadow: 0 0 0 4px rgba(251, 191, 36, 0); }
+}
+@utility animate-glow-ring {
+  animation: glow-ring 2.4s ease-in-out infinite;
+}
+
+/* ── Grid bg (canvas / scratchpad) ─────────────── */
+@utility bg-grid {
+  background-image:
+    linear-gradient(rgba(51, 65, 85, 0.18) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(51, 65, 85, 0.18) 1px, transparent 1px);
+  background-size: 24px 24px;
 }
 
 /* ── Smooth scrollbar ───────────────────────────── */
 .scrollbar-thin::-webkit-scrollbar { width: 5px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
+  background: rgba(0,0,0,0.12);
   border-radius: 10px;
   transition: background 0.2s;
 }
-.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.25); }
-.dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); }
-.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+.scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.25); }
+.dark .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); }
+.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
 
 /* prefers-reduced-motion is handled by motion (`useReducedMotion`) on a
    per-variant basis; no global override is needed here. */

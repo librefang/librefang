@@ -1,8 +1,24 @@
 import { formatCompact, formatCost } from "../lib/format";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import type { UsageByAgentItem, UsageByModelItem, UsageDailyItem } from "../api";
 import { useUsageSummary, useUsageByAgent, useUsageByModel, useUsageDaily, useModelPerformance, useBudgetStatus } from "../lib/queries/analytics";
 import { useUpdateBudget } from "../lib/mutations/analytics";
+
+// The kernel ships extra columns on these rows (is_hand, total_cost_usd,
+// call_count / calls) that haven't been promoted into the canonical
+// `api.ts` types yet. Extend locally — widening the public types would
+// affect every other consumer for a UI-only sort/filter.
+type AnalyticsAgentRow = UsageByAgentItem & {
+  is_hand?: boolean;
+  total_cost_usd?: number;
+  call_count?: number;
+  calls?: number;
+};
+type AnalyticsModelRow = UsageByModelItem & {
+  provider?: string;
+  total_tokens?: number;
+};
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -32,14 +48,19 @@ export function AnalyticsPage() {
   const budgetMutation = useUpdateBudget();
 
   const usage = usageQuery.data ?? null;
-  const usageByAgent = useMemo(() => [...(usageByAgentQuery.data ?? [])].filter((a: any) => !a.is_hand).sort((a: any, b: any) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)), [usageByAgentQuery.data]);
-  const usageByModel = usageByModelQuery.data ?? [];
+  const usageByAgent = useMemo<AnalyticsAgentRow[]>(
+    () => [...((usageByAgentQuery.data ?? []) as AnalyticsAgentRow[])]
+      .filter(a => !a.is_hand)
+      .sort((a, b) => (b.total_cost_usd ?? 0) - (a.total_cost_usd ?? 0)),
+    [usageByAgentQuery.data],
+  );
+  const usageByModel = (usageByModelQuery.data ?? []) as AnalyticsModelRow[];
   const daily = dailyQuery.data ?? null;
   const modelPerformance = modelPerformanceQuery.data ?? [];
 
   const agentChartData = useMemo(() => usageByAgent.map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 })), [usageByAgent]);
-  const modelChartData = useMemo(() => (usageByModel as any[]).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
-  const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: any) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
+  const modelChartData = useMemo(() => usageByModel.map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 })), [usageByModel]);
+  const dailyChartData = useMemo(() => (daily?.days || []).slice(-30).map((d: UsageDailyItem) => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 })), [daily]);
 
   const [budgetForm, setBudgetForm] = useState<Partial<BudgetForm>>({});
 
@@ -60,7 +81,7 @@ export function AnalyticsPage() {
     };
     const lines: string[] = [];
     lines.push("scope,name,identifier,total_cost_usd,total_tokens,calls");
-    for (const a of usageByAgent as any[]) {
+    for (const a of usageByAgent) {
       lines.push(
         [
           "agent",
@@ -72,7 +93,7 @@ export function AnalyticsPage() {
         ].join(","),
       );
     }
-    for (const m of usageByModel as any[]) {
+    for (const m of usageByModel) {
       lines.push(
         [
           "model",
@@ -151,7 +172,7 @@ export function AnalyticsPage() {
         onRefresh={handleRefresh}
         helpText={t("analytics.help")}
         actions={
-          (usageByAgent.length > 0 || (usageByModel as any[]).length > 0) ? (
+          (usageByAgent.length > 0 || usageByModel.length > 0) ? (
             <button
               onClick={handleExportCsv}
               title={t("analytics.export_csv", { defaultValue: "Export CSV" })}
@@ -197,7 +218,7 @@ export function AnalyticsPage() {
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), t("analytics.cost")]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -216,7 +237,7 @@ export function AnalyticsPage() {
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [formatCost(v), t("analytics.cost")]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.cost")]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -245,7 +266,7 @@ export function AnalyticsPage() {
                   <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={50} />
                   <Tooltip
                     contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
-                    formatter={(v: any) => [formatCost(v), t("analytics.total_cost")]}
+                    formatter={(v) => [formatCost(typeof v === "number" ? v : Number(v ?? 0)), t("analytics.total_cost")]}
                     labelFormatter={l => `${t("analytics.daily_trend")}: ${l}`}
                   />
                   <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={{ r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" }} activeDot={{ r: 5 }} />
@@ -286,7 +307,7 @@ export function AnalyticsPage() {
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `${v}ms`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any, name: any) => [`${v}ms`, name]} />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v, name) => [`${v}ms`, name ?? ""]} />
                       <Legend />
                       <Bar dataKey="avg" name={t("analytics.avg")} radius={[0, 4, 4, 0]} fill="#3b82f6" />
                       <Bar dataKey="min" name={t("analytics.min")} radius={[0, 4, 4, 0]} fill="#22c55e" />
@@ -307,7 +328,7 @@ export function AnalyticsPage() {
                       <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                       <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v.toFixed(4)}`} axisLine={false} tickLine={false} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, t("analytics.cost_per_call_label")]} />
+                      <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v) => [`$${(typeof v === "number" ? v : Number(v ?? 0)).toFixed(4)}`, t("analytics.cost_per_call_label")]} />
                       <Bar dataKey="costPerCall" name={t("analytics.cost_per_call_label")} radius={[0, 4, 4, 0]} fill="#a855f7" />
                     </BarChart>
                   </ResponsiveContainer>

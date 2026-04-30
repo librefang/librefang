@@ -9,6 +9,7 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import { Shield, Trash2, Edit2, Plus, Target, Rocket, Bot, Database, Users, AlertTriangle, Loader2, CheckCircle2, Clock, Play, ChevronDown, ChevronRight } from "lucide-react";
 import { StaggerList } from "../components/ui/StaggerList";
 
@@ -65,8 +66,8 @@ export function GoalsPage() {
       await createMutation.mutateAsync(createDraft);
       addToast(t("common.success"), "success");
       setCreateDraft({ title: "", description: "", status: "pending", progress: 0, parent_id: "", agent_id: "" });
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
     }
   };
 
@@ -107,8 +108,8 @@ export function GoalsPage() {
       await updateMutation.mutateAsync({ id: editingId, data: editDraft });
       addToast(t("common.success"), "success");
       setEditingId(null);
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
     }
   };
 
@@ -117,8 +118,8 @@ export function GoalsPage() {
       await deleteMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
       setConfirmDeleteId(null);
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
     }
   };
 
@@ -132,8 +133,8 @@ export function GoalsPage() {
     const status = nextStatus(current);
     try {
       await updateMutation.mutateAsync({ id, data: { status, progress: status === "completed" ? 100 : status === "in_progress" ? 50 : 0 } });
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
     }
   };
 
@@ -153,8 +154,8 @@ export function GoalsPage() {
           result.succeeded > 0 ? "info" : "error",
         );
       }
-    } catch (err: any) {
-      addToast(err.message || t("common.error"), "error");
+    } catch (err) {
+      addToast(toastErr(err, t("common.error")), "error");
     }
   };
 

@@ -77,10 +77,14 @@ export function NotificationCenter() {
       {open && (
         <>
           <div
-            className="fixed inset-0 z-40"
+            className="fixed inset-0 z-[90]"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 top-full mt-1 z-50 w-96 rounded-xl border border-border-subtle bg-surface shadow-xl" role="menu">
+          {/* position:fixed — the topbar's parent flex column has
+              overflow-hidden, which would otherwise clip an absolute panel
+              that extends below the topbar. Anchor to the topbar bottom
+              (h-12 = 48px) + a 6px gap, right-aligned to the topbar padding. */}
+          <div className="fixed top-[54px] right-3 sm:right-4 z-[100] w-[min(calc(100vw-1.5rem),24rem)] rounded-xl border border-border-subtle bg-surface shadow-xl" role="menu">
             <div className="px-4 py-3 border-b border-border-subtle flex items-center justify-between">
               <h3 className="text-sm font-bold text-text-main">
                 {t("approvals.pending_review", "Pending Approvals")}

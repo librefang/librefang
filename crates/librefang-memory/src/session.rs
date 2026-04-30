@@ -4,6 +4,47 @@ use chrono::Utc;
 use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+/// Derive a short display label for a session from its first user message.
+///
+/// Used as a fallback when a session has no explicit `label` set (the common
+/// case — labels are only set when a user/agent explicitly names a session).
+/// Returns `None` if the session has no user message yet, so callers can
+/// keep the field nullable for fully empty sessions.
+fn derive_session_label(messages: &[Message]) -> Option<String> {
+    const MAX_LEN: usize = 60;
+    let first_user = messages.iter().find(|m| m.role == Role::User)?;
+    let text = match &first_user.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Blocks(blocks) => {
+            let mut buf = String::new();
+            for block in blocks {
+                if let ContentBlock::Text { text, .. } = block {
+                    if !buf.is_empty() {
+                        buf.push(' ');
+                    }
+                    buf.push_str(text);
+                    if buf.len() >= MAX_LEN {
+                        break;
+                    }
+                }
+            }
+            buf
+        }
+    };
+    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let truncated = if normalized.chars().count() > MAX_LEN {
+        let mut t: String = normalized.chars().take(MAX_LEN).collect();
+        t.push('…');
+        t
+    } else {
+        normalized
+    };
+    Some(truncated)
+}
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -477,7 +518,24 @@ impl SessionStore {
         Ok(())
     }
 
-    /// List all sessions with metadata (session_id, agent_id, message_count, created_at).
+    /// List all sessions with metadata (session_id, agent_id, message_count,
+    /// created_at, label, duration_ms, cost_usd, total_tokens).
+    ///
+    /// `label` resolution: an explicit user-set label wins; otherwise a
+    /// snippet of the first user message's text is returned so list views
+    /// (Overview "Recent sessions", Sessions page, etc.) have something
+    /// readable instead of "(no label)" on every row.
+    ///
+    /// `duration_ms` is the wall-clock span between the first and last
+    /// message timestamps — `None` for empty sessions or sessions whose
+    /// messages all pre-date the timestamp field. The Messages blob is
+    /// already being deserialized for `message_count`, so this adds no
+    /// extra round-trip per row.
+    ///
+    /// `cost_usd` and `total_tokens` are aggregated from `usage_events`
+    /// joined on `session_id` (added in schema v30). Pre-v30 events have
+    /// `session_id IS NULL` and contribute nothing — list views will show
+    /// `null` for those rows, not stale data.
     pub fn list_sessions(&self) -> LibreFangResult<Vec<serde_json::Value>> {
         let conn = self
             .conn
@@ -485,7 +543,19 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, agent_id, messages, created_at, label FROM sessions ORDER BY created_at DESC",
+                "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
+                        COALESCE(u.total_cost_usd, 0.0) AS total_cost_usd,
+                        COALESCE(u.total_tokens, 0)    AS total_tokens
+                 FROM sessions s
+                 LEFT JOIN (
+                     SELECT session_id,
+                            SUM(cost_usd)                       AS total_cost_usd,
+                            SUM(input_tokens + output_tokens)   AS total_tokens
+                     FROM usage_events
+                     WHERE session_id IS NOT NULL
+                     GROUP BY session_id
+                 ) u ON u.session_id = s.id
+                 ORDER BY s.created_at DESC",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -494,18 +564,48 @@ impl SessionStore {
                 let session_id: String = row.get(0)?;
                 let agent_id: String = row.get(1)?;
                 let messages_blob: Vec<u8> = row.get(2)?;
-                let created_at: String = row.get(3)?;
-                let label: Option<String> = row.get(4)?;
-                // Deserialize just to count messages
-                let msg_count = rmp_serde::from_slice::<Vec<Message>>(&messages_blob)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let context_window_tokens: i64 = row.get(3)?;
+                let created_at: String = row.get(4)?;
+                let label: Option<String> = row.get(5)?;
+                let total_cost_usd: f64 = row.get(6)?;
+                let total_tokens: i64 = row.get(7)?;
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).unwrap_or_default();
+                let msg_count = messages.len();
+                let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
+                // Duration spans the first to the last message that carries
+                // a timestamp. Skip messages with no timestamp so
+                // pre-`Message::timestamp` sessions don't anchor the span
+                // to "now-vs-now". `None` if fewer than two stamped
+                // messages exist.
+                let duration_ms: Option<i64> = {
+                    let mut stamps = messages.iter().filter_map(|m| m.timestamp);
+                    let first = stamps.next();
+                    // next_back() on the same iterator instead of last(): the
+                    // adapter is DoubleEndedIterator (Vec::iter + filter_map),
+                    // so walking from the tail finds the latest stamped
+                    // message in O(k) rather than scanning every remaining
+                    // element. clippy::double_ended_iterator_last enforces.
+                    let last = stamps.next_back().or(first);
+                    match (first, last) {
+                        (Some(a), Some(b)) if b > a => Some((b - a).num_milliseconds()),
+                        _ => None,
+                    }
+                };
+                // Cost / tokens default to 0 via COALESCE. Surface them as
+                // numeric (not null) so the dashboard formatter can
+                // distinguish "session existed but cost zero" from
+                // "no metering data" using the message_count.
                 Ok(serde_json::json!({
                     "session_id": session_id,
                     "agent_id": agent_id,
                     "message_count": msg_count,
+                    "context_window_tokens": context_window_tokens.max(0),
                     "created_at": created_at,
-                    "label": label,
+                    "label": resolved_label,
+                    "duration_ms": duration_ms,
+                    "cost_usd": total_cost_usd,
+                    "total_tokens": total_tokens.max(0),
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -616,14 +716,15 @@ impl SessionStore {
                 let messages_blob: Vec<u8> = row.get(1)?;
                 let created_at: String = row.get(2)?;
                 let label: Option<String> = row.get(3)?;
-                let msg_count = rmp_serde::from_slice::<Vec<Message>>(&messages_blob)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).unwrap_or_default();
+                let msg_count = messages.len();
+                let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
                 Ok(serde_json::json!({
                     "session_id": session_id,
                     "message_count": msg_count,
                     "created_at": created_at,
-                    "label": label,
+                    "label": resolved_label,
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -1594,5 +1695,94 @@ mod tests {
 
         let results = store.search_sessions("searchable", None).unwrap();
         assert!(results.is_empty());
+    }
+
+    /// list_sessions surfaces per-session aggregates (cost_usd, total_tokens,
+    /// duration_ms) so the Overview "Recent sessions" table can render them
+    /// without a follow-up round-trip per row. Cost/tokens come from a
+    /// LEFT JOIN on usage_events keyed by session_id (schema v30); duration
+    /// is computed from the message timestamps already in the messages blob.
+    #[test]
+    fn list_sessions_includes_cost_tokens_duration_aggregates() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
+
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+
+        // Two messages 5s apart so duration_ms = 5000. We override the
+        // timestamps Message::* would otherwise stamp at "now".
+        let t0 = chrono::Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(5);
+        let mut user = Message::user("hi");
+        user.timestamp = Some(t0);
+        let mut asst = Message::assistant("ack");
+        asst.timestamp = Some(t1);
+        session.messages.push(user);
+        session.messages.push(asst);
+        store.save_session(&session).unwrap();
+
+        // Two usage_events tagged to this session: one tagged, one NULL.
+        // The aggregate must include only the tagged one.
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, session_id)
+                 VALUES (?1, ?2, datetime('now'), 'm', 'p', 100, 50, 0.012, 0, 0, ?3)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent_id.0.to_string(),
+                    session.id.0.to_string(),
+                ],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, session_id)
+                 VALUES (?1, ?2, datetime('now'), 'm', 'p', 999, 999, 9.99, 0, 0, NULL)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent_id.0.to_string(),
+                ],
+            )
+            .unwrap();
+        }
+
+        let listed = store.list_sessions().unwrap();
+        let row = listed
+            .iter()
+            .find(|v| v["session_id"].as_str() == Some(&session.id.0.to_string()))
+            .expect("created session must be listed");
+
+        assert_eq!(row["message_count"].as_u64(), Some(2));
+        // 5s span between the two stamped messages — within ~50ms tolerance.
+        let duration_ms = row["duration_ms"].as_i64().expect("duration present");
+        assert!(
+            (4900..=5100).contains(&duration_ms),
+            "duration_ms = {} not within tolerance",
+            duration_ms,
+        );
+        assert!((row["cost_usd"].as_f64().unwrap() - 0.012).abs() < 1e-9);
+        assert_eq!(row["total_tokens"].as_u64(), Some(150));
+    }
+
+    /// Sessions with no usage_events still list with cost_usd=0 and
+    /// total_tokens=0 (NOT null). duration_ms is null when fewer than two
+    /// timestamped messages exist.
+    #[test]
+    fn list_sessions_zero_aggregates_for_unmetered_session() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let session = store.create_session(agent_id).unwrap();
+
+        let listed = store.list_sessions().unwrap();
+        let row = listed
+            .iter()
+            .find(|v| v["session_id"].as_str() == Some(&session.id.0.to_string()))
+            .expect("created session must be listed");
+
+        assert_eq!(row["cost_usd"].as_f64(), Some(0.0));
+        assert_eq!(row["total_tokens"].as_u64(), Some(0));
+        assert!(row["duration_ms"].is_null());
     }
 }

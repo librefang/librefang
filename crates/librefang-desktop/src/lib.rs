@@ -1,10 +1,10 @@
-//! BossFang Desktop — Native Tauri 2.0 wrapper for the BossFang Agent OS.
+//! LibreFang Desktop — Native Tauri 2.0 wrapper for the LibreFang Agent OS.
 //!
 //! Boots the kernel + embedded API server, then opens a native window pointing
 //! at the WebUI. Includes system tray, single-instance enforcement, native OS
 //! notifications, global shortcuts, auto-start, and update checking.
 //!
-//! Supports remote server mode: connect to a running BossFang instance instead
+//! Supports remote server mode: connect to a running LibreFang instance instead
 //! of always starting a local one. Priority: CLI arg > env var > saved pref > connection screen.
 
 mod commands;
@@ -19,6 +19,7 @@ mod tray;
 mod updater;
 
 use librefang_extensions::dotenv;
+use librefang_kernel::event_bus::recv_event_skipping_lag;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
 use std::net::IpAddr;
@@ -119,52 +120,49 @@ pub struct ServerHandleHolder(pub std::sync::Mutex<Option<server::ServerHandle>>
 /// Forward critical kernel events as native OS notifications.
 ///
 /// Only truly critical events — crashes, hard quota limits, and kernel shutdown.
+///
+/// Lag handling routes through [`recv_event_skipping_lag`] so consumer-side
+/// drops are counted in `EventBus::dropped_count()` and surfaced as `error!`
+/// logs rather than a silent `warn!` on a per-listener counter (issue #3630).
 pub async fn forward_kernel_events(
     app_handle: tauri::AppHandle,
     event_rx: &mut tokio::sync::broadcast::Receiver<librefang_types::event::Event>,
+    kernel: &Arc<LibreFangKernel>,
 ) {
-    loop {
-        match event_rx.recv().await {
-            Ok(event) => {
-                let (title, body) = match &event.payload {
-                    EventPayload::Lifecycle(LifecycleEvent::Crashed { agent_id, error }) => (
-                        "Agent Crashed".to_string(),
-                        format!("Agent {agent_id} crashed: {error}"),
-                    ),
-                    EventPayload::System(SystemEvent::KernelStopping) => (
-                        "Kernel Stopping".to_string(),
-                        "BossFang kernel is shutting down".to_string(),
-                    ),
-                    EventPayload::System(SystemEvent::QuotaEnforced {
-                        agent_id,
-                        spent,
-                        limit,
-                    }) => (
-                        "Quota Enforced".to_string(),
-                        format!("Agent {agent_id} quota hit: ${spent:.4} / ${limit:.4}"),
-                    ),
-                    _ => continue,
-                };
+    while let Some(event) =
+        recv_event_skipping_lag(event_rx, kernel.event_bus_ref(), "desktop_notifications").await
+    {
+        let (title, body) = match &event.payload {
+            EventPayload::Lifecycle(LifecycleEvent::Crashed { agent_id, error }) => (
+                "Agent Crashed".to_string(),
+                format!("Agent {agent_id} crashed: {error}"),
+            ),
+            EventPayload::System(SystemEvent::KernelStopping) => (
+                "Kernel Stopping".to_string(),
+                "LibreFang kernel is shutting down".to_string(),
+            ),
+            EventPayload::System(SystemEvent::QuotaEnforced {
+                agent_id,
+                spent,
+                limit,
+            }) => (
+                "Quota Enforced".to_string(),
+                format!("Agent {agent_id} quota hit: ${spent:.4} / ${limit:.4}"),
+            ),
+            _ => continue,
+        };
 
-                if let Err(e) = app_handle
-                    .notification()
-                    .builder()
-                    .title(&title)
-                    .body(&body)
-                    .show()
-                {
-                    warn!("Failed to send desktop notification: {e}");
-                }
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!("Notification listener lagged, skipped {n} events");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                info!("Event bus closed, stopping notification listener");
-                break;
-            }
+        if let Err(e) = app_handle
+            .notification()
+            .builder()
+            .title(&title)
+            .body(&body)
+            .show()
+        {
+            warn!("Failed to send desktop notification: {e}");
         }
     }
+    info!("Event bus closed, stopping notification listener");
 }
 
 /// Resolved startup mode.
@@ -201,7 +199,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
         )
         .init();
 
-    info!("Starting BossFang Desktop...");
+    info!("Starting LibreFang Desktop...");
 
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
@@ -249,9 +247,9 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             (url.clone(), None, true)
         }
         StartupMode::Local => {
-            let handle = server::start_server().expect("Failed to start BossFang server");
+            let handle = server::start_server().expect("Failed to start LibreFang server");
             let port = handle.port;
-            info!("BossFang server running on port {port}");
+            info!("LibreFang server running on port {port}");
             (format!("http://127.0.0.1:{port}"), Some(handle), false)
         }
         StartupMode::ConnectionScreen => {
@@ -455,25 +453,26 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 }
             }
 
-            // Mobile window. Without this, iOS/Android launches into a
-            // black WebView because tauri.conf.json's `app.windows` is
-            // empty and Tauri 2 does not auto-create a mobile window.
-            // The OS manages size/orientation, so we only set the URL
-            // and visibility.
+            // Mobile window is declared in tauri.{ios,android}.conf.json
+            // (url=lfconnect://localhost/, label=main). Tauri 2 mobile does
+            // not honor `WebviewWindowBuilder::new` for the *first* window
+            // in setup() — iOS/Android wire the rootViewController / main
+            // Activity to a window declared in the conf, and a programmatic
+            // builder call here ends up creating no visible surface (black
+            // screen). If the resolved URL is already known (Remote mode
+            // via saved pref or env), navigate away from the connection
+            // screen now; otherwise leave the conf-declared lfconnect://
+            // page up so the user can pick.
             #[cfg(mobile)]
             {
-                let url = if show_connection_screen {
-                    WebviewUrl::CustomProtocol(
-                        "lfconnect://localhost/"
-                            .parse()
-                            .expect("lfconnect URL must parse"),
-                    )
-                } else {
-                    WebviewUrl::External(initial_url.parse().expect("Invalid server URL"))
-                };
-                let _window = WebviewWindowBuilder::new(app, "main", url)
-                    .visible(true)
-                    .build()?;
+                if !show_connection_screen && !initial_url.is_empty() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let url: tauri::Url = initial_url.parse().expect("Invalid server URL");
+                        window.navigate(url)?;
+                    } else {
+                        warn!("Mobile main window not found at setup time");
+                    }
+                }
             }
 
             // Set up system tray (desktop only)
@@ -486,10 +485,11 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
                     if let Some(ref inner) = *guard {
                         let app_handle = app.handle().clone();
-                        let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+                        let kernel = inner.kernel.clone();
+                        let mut event_rx = kernel.event_bus_ref().subscribe_all();
                         drop(guard);
                         tauri::async_runtime::spawn(async move {
-                            forward_kernel_events(app_handle, &mut event_rx).await;
+                            forward_kernel_events(app_handle, &mut event_rx, &kernel).await;
                         });
                     }
                 }
@@ -499,7 +499,7 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             #[cfg(desktop)]
             updater::spawn_startup_check(app.handle().clone());
 
-            info!("BossFang Desktop window created");
+            info!("LibreFang Desktop window created");
             Ok(())
         })
         .on_window_event(|window, event| {
