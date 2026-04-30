@@ -819,22 +819,29 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
             key.len()
         )});
     }
-    let value = match params.get("value") {
-        Some(v) => v.clone(),
-        None => return json!({"error": "Missing 'value' parameter"}),
-    };
-    // SECURITY (#3866): cap serialized value size to bound SQLite growth.
-    let value_bytes = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
-    if value_bytes > MAX_KV_VALUE_BYTES {
-        return json!({"error": format!(
-            "Value too large: {value_bytes} bytes (max {MAX_KV_VALUE_BYTES})"
-        )});
-    }
+    // Capability check before deserialising/cloning the value so a guest
+    // without MemoryWrite cannot force the host to serialize a 1 MiB blob.
     if let Err(e) = check_capability(
         &state.capabilities,
         &Capability::MemoryWrite(key.to_string()),
     ) {
         return e;
+    }
+    let value = match params.get("value") {
+        Some(v) => v.clone(),
+        None => return json!({"error": "Missing 'value' parameter"}),
+    };
+    // SECURITY (#3866): cap serialized value size to bound SQLite growth.
+    // Fail-closed: a serialization error must reject the call, not silently
+    // skip the size guard.
+    let value_bytes = match serde_json::to_vec(&value) {
+        Ok(v) => v.len(),
+        Err(e) => return json!({"error": format!("Failed to serialize value: {e}")}),
+    };
+    if value_bytes > MAX_KV_VALUE_BYTES {
+        return json!({"error": format!(
+            "Value too large: {value_bytes} bytes (max {MAX_KV_VALUE_BYTES})"
+        )});
     }
     let kernel = match &state.kernel {
         Some(k) => k,

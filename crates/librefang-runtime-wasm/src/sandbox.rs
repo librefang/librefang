@@ -41,6 +41,38 @@ use wasmtime::*;
 /// original was clipped.
 const MAX_LOG_BYTES: usize = 4096;
 
+/// Maximum bytes accepted in a single `host_call` request payload (#3866).
+///
+/// Aligned with the shell_exec cap (#3529). Lifted to module scope so the
+/// regression test in this file pins the same constant the host reads at
+/// runtime — no risk of the test passing while the call site silently
+/// raises the cap.
+pub(crate) const MAX_HOST_CALL_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// Maximum bytes accepted in a guest `execute` result payload (#3866).
+pub(crate) const MAX_GUEST_RESULT_BYTES: usize = 1024 * 1024;
+
+/// Marker error returned by the per-store `epoch_deadline_callback` when
+/// THIS guest has overrun its wall-clock budget (#3864). Detected via
+/// `downcast_ref` so the timeout-trap path doesn't depend on string
+/// matching against wasmtime's wrapped error message.
+#[derive(Debug)]
+struct WallClockTimeout {
+    budget: std::time::Duration,
+}
+
+impl std::fmt::Display for WallClockTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "WASM guest exceeded wall-clock timeout of {}s",
+            self.budget.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for WallClockTimeout {}
+
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -284,15 +316,12 @@ impl WasmSandbox {
         store.epoch_deadline_callback(|ctx| {
             let data = ctx.data();
             if data.start.elapsed() >= data.timeout {
-                // Real timeout — propagate as a trap.  Use wasmtime::Error
-                // (not anyhow) so the closure signature matches what
-                // epoch_deadline_callback expects: anyhow::Error and
-                // wasmtime::Error are re-exports from different paths and
-                // the compiler treats them as distinct.
-                return Err(wasmtime::Error::msg(format!(
-                    "WASM guest exceeded wall-clock timeout of {}s",
-                    data.timeout.as_secs()
-                )));
+                // Real timeout — propagate as a typed trap so the trap-
+                // handler can detect it via `downcast_ref::<WallClockTimeout>`
+                // instead of pattern-matching against a stringified message.
+                return Err(wasmtime::Error::new(WallClockTimeout {
+                    budget: data.timeout,
+                }));
             }
             // False positive (some other guest's watchdog tripped this
             // engine's epoch). Resume with a fresh 1-tick deadline.
@@ -441,20 +470,20 @@ impl WasmSandbox {
                     return Err(SandboxError::FuelExhausted);
                 }
                 // Check for epoch deadline (wall-clock timeout). The
-                // per-store callback returns an `anyhow::Error` whose
-                // message contains "wall-clock timeout"; wasmtime may wrap
-                // it as `Trap::Interrupt` if the runtime translated the
-                // error. Treat both shapes as a timeout.
-                let msg = e.to_string();
-                if matches!(e.downcast_ref::<Trap>(), Some(Trap::Interrupt))
-                    || msg.contains("wall-clock timeout")
+                // per-store callback returns a typed `WallClockTimeout`;
+                // wasmtime may also surface a bare `Trap::Interrupt` if a
+                // future engine-shared regression bypasses our callback.
+                // Detect both shapes — typed downcast is the primary path,
+                // `Trap::Interrupt` is the fallback.
+                if e.downcast_ref::<WallClockTimeout>().is_some()
+                    || matches!(e.downcast_ref::<Trap>(), Some(Trap::Interrupt))
                 {
                     return Err(SandboxError::Execution(format!(
                         "WASM execution timed out after {}s (epoch interrupt)",
                         timeout
                     )));
                 }
-                return Err(SandboxError::Execution(msg));
+                return Err(SandboxError::Execution(e.to_string()));
             }
         };
 
@@ -471,10 +500,9 @@ impl WasmSandbox {
         // default RECURSION_LIMIT of 128 — we never call
         // `disable_recursion_limit`, so guest input cannot stack-overflow the
         // recursive descent parser.
-        const MAX_RESULT_BYTES: usize = 1024 * 1024; // 1 MiB
-        if result_len > MAX_RESULT_BYTES {
+        if result_len > MAX_GUEST_RESULT_BYTES {
             return Err(SandboxError::AbiError(format!(
-                "Guest result too large: {result_len} bytes (max {MAX_RESULT_BYTES})"
+                "Guest result too large: {result_len} bytes (max {MAX_GUEST_RESULT_BYTES})"
             )));
         }
 
@@ -626,10 +654,9 @@ impl WasmSandbox {
         // 1 MiB cap matches the shell_exec cap (#3529); guest-controlled JSON
         // depth is bounded by serde_json's default RECURSION_LIMIT of 128
         // since we never call `disable_recursion_limit`.
-        const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1 MiB
-        if request_len < 0 || request_len as usize > MAX_REQUEST_BYTES {
+        if request_len < 0 || request_len as usize > MAX_HOST_CALL_REQUEST_BYTES {
             anyhow::bail!(
-                "host_call request length invalid: {} (max {MAX_REQUEST_BYTES})",
+                "host_call request length invalid: {} (max {MAX_HOST_CALL_REQUEST_BYTES})",
                 request_len
             );
         }
@@ -1178,16 +1205,14 @@ mod tests {
         );
     }
 
-    /// Regression test for Bug #3866 (size): host_call request payloads
-    /// larger than MAX_REQUEST_BYTES (1 MiB) must be rejected before any
-    /// serde_json parse so the host can't be DoSed by a runaway guest.
+    /// Regression test for Bug #3866 (size): host_call request and guest
+    /// result caps must stay aligned at 1 MiB (matches shell_exec / kv_set
+    /// caps from #3529 / #3866). Pins the actual module-level constants so
+    /// a refactor that raises either cap fails this test.
     #[test]
-    fn test_max_request_bytes_constant_is_one_mib() {
-        // The constant lives inside the `host_call` function body; this test
-        // pins the public-facing contract by asserting the cap is 1 MiB
-        // (matches shell_exec / kv_set caps from #3529 / #3866).
-        const EXPECTED: usize = 1024 * 1024;
-        assert_eq!(EXPECTED, 1024 * 1024);
+    fn test_size_caps_are_one_mib() {
+        assert_eq!(MAX_HOST_CALL_REQUEST_BYTES, 1024 * 1024);
+        assert_eq!(MAX_GUEST_RESULT_BYTES, 1024 * 1024);
     }
 
     /// Per-store interrupt semantics (Bug #3864): the
@@ -1217,16 +1242,13 @@ mod tests {
             .await
             .unwrap_err();
 
-        // The exact wasmtime trap message varies by version and platform —
-        // in CI it surfaces as just "error while executing at wasm
-        // backtrace:" with the "interrupt" / "epoch" cause buried in the
-        // chain (we stringify the top-level error only). Accept any
-        // FuelExhausted or Execution variant — both prove the guest
-        // actually trapped on its 1 s budget rather than running to
-        // completion.
+        // The trap-handler builds the timeout message from a fixed format;
+        // assert against that (not raw wasmtime output) so the test fails
+        // if the per-store callback wiring regresses and execution exits
+        // through an unrelated error path.
         match &err {
-            SandboxError::FuelExhausted | SandboxError::Execution(_) => {}
-            other => panic!("Unexpected error variant: {other}"),
+            SandboxError::Execution(msg) if msg.contains("timed out") => {}
+            other => panic!("Expected wall-clock timeout error, got: {other}"),
         }
     }
 }
