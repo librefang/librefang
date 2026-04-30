@@ -219,8 +219,16 @@ pub async fn start_local(
 }
 
 /// Returns self-contained HTML/CSS/JS for the connection screen.
+///
+/// On mobile, the "Start Local Server" path is removed: there's no
+/// embedded server on iOS / Android (the runtime branch is `cfg`-gated
+/// out), so the divider, the button, and the JS line that tries to
+/// `disabled = ...` it would all be dead code or worse — referencing
+/// `btn-local` from `setAllDisabled` after the button was removed
+/// would throw a TypeError on first click.
 pub fn connection_html() -> String {
-    r##"<!DOCTYPE html>
+    #[allow(unused_mut)]
+    let mut html = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -513,5 +521,24 @@ pub fn connection_html() -> String {
 </script>
 </body>
 </html>"##
-        .to_string()
+        .to_string();
+
+    #[cfg(mobile)]
+    {
+        // Mobile has no embedded server — strip the divider, the
+        // "Start Local Server" button, and the JS line in
+        // setAllDisabled that targets it (would throw a TypeError on
+        // first click otherwise). debug_assert verifies the sentinels
+        // still match the literal above so this fails loud if the
+        // HTML/JS is reformatted.
+        const LOCAL_HTML: &str = "\n  <div class=\"divider\">or</div>\n\n  <button class=\"btn-local\" id=\"btn-local\" onclick=\"startLocal()\">Start Local Server</button>\n";
+        const LOCAL_JS: &str = "    document.getElementById('btn-local').disabled = disabled;\n";
+        let after_html = html.replace(LOCAL_HTML, "");
+        debug_assert_ne!(after_html, html, "LOCAL_HTML sentinel not found");
+        let after_js = after_html.replace(LOCAL_JS, "");
+        debug_assert_ne!(after_js, after_html, "LOCAL_JS sentinel not found");
+        html = after_js;
+    }
+
+    html
 }
