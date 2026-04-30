@@ -260,11 +260,16 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 /// * Non-`http`/`https` schemes — `file://`, `ftp://`, etc. would otherwise
 ///   reach `reqwest` and be served from the local filesystem or a bare-TCP
 ///   gateway.
-/// * URLs with a userinfo component (`user[:pass]@host`). `host_str()`
-///   returns the part after `@`, so `http://allowed.com@169.254.169.254/`
-///   would pass the host check and then `reqwest` would actually connect to
-///   the IMDS literal — the same bypass closed for the wasm host fetch in
-///   #3527 / PR #4099.
+/// * URLs with a userinfo component (`user[:pass]@host`). The `url` crate's
+///   `host_str()` correctly returns the part after `@`, so the IMDS-literal
+///   form `http://allowed.com@169.254.169.254/` is already caught by the
+///   host check below. Userinfo is rejected separately because RFC 6749
+///   never sanctions it on OAuth endpoints, and a metadata document that
+///   contains it is anomalous input — likely phishing-shape
+///   (`http://user@public.example.com/`, where the host check passes), a
+///   credential-smuggling attempt, or accidental pollution that would leak
+///   into logs and reqwest's connection-pool key. (PR #4099 / #3527 closed
+///   a related but distinct host-extraction bug on the wasm fetch path.)
 ///
 /// Public so callers outside this module (e.g. the kernel OAuth provider's
 /// `try_refresh`, the API-layer token exchange) can re-validate stored
@@ -276,7 +281,7 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
         "http" | "https" => {}
         scheme => return Err(format!("scheme '{scheme}' is not allowed")),
     }
-    // Userinfo bypass — see #3527.
+    // Reject userinfo on OAuth endpoints — see doc comment.
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("URLs with userinfo are not permitted".to_string());
     }
@@ -1122,11 +1127,15 @@ mod tests {
 
     #[test]
     fn is_ssrf_blocked_url_rejects_userinfo() {
-        // The bypass: host_str() returns "allowed.com", but reqwest connects
-        // to 169.254.169.254 (the IMDS literal after the @).
+        // The first two URLs are also caught by the host check (host_str()
+        // returns the IMDS literal / loopback after the @, per RFC 3986),
+        // so they exercise belt-and-suspenders defense.  The third case is
+        // the unique regression point for this guard: host_str() is
+        // "example.com" (public), the host check passes, and *only* the
+        // userinfo guard rejects.  If anyone removes the guard in a future
+        // refactor, this assertion is what fails.
         assert!(is_ssrf_blocked_url("http://allowed.com@169.254.169.254/").is_err());
         assert!(is_ssrf_blocked_url("http://user:pass@127.0.0.1/x").is_err());
-        // Even if both halves are public, userinfo is still rejected.
         assert!(is_ssrf_blocked_url("http://user@example.com/").is_err());
     }
 
