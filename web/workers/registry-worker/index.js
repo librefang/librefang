@@ -1,7 +1,7 @@
 // Registry Worker
-// Proxies librefang-registry (GitHub) with KV caching.
-// Also handles click tracking, trending, metrics, and UI error reports.
-// Cron: daily at 02:00 UTC — refreshes registry cache.
+// Proxies librefang-registry (GitHub) with Cache API for HTTP responses.
+// KV is used only for mutable counters (clicks, errors) and registry_data
+// written by cron — everything else is Cache API (free, no quota).
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -12,8 +12,11 @@ const CORS = {
 const REGISTRY_API = 'https://api.github.com/repos/librefang/librefang-registry/contents'
 const REGISTRY_RAW = 'https://raw.githubusercontent.com/librefang/librefang-registry/main'
 
-const FRESH_TTL  = 1000 * 60 * 60       // 1 hour — serve directly from KV
-const MAX_STALE  = 1000 * 60 * 60 * 24  // 24 hours — beyond this, don't serve stale
+// registry_data is written by cron and must survive cache eviction, so it
+// stays in KV. Serve it through Cache API on reads so KV is only hit when
+// the cache is cold or stale.
+const REGISTRY_CACHE_TTL = 3600        // 1 hour — Cache API max-age
+const REGISTRY_STALE_KV_TTL = 86400   // 24 hours — fall back to KV if cache miss
 
 const CATEGORIES = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
 const CATEGORY_RE = /^(hands|channels|providers|workflows|agents|plugins|skills|mcp)\//
@@ -31,19 +34,19 @@ export default {
     const path = url.pathname
 
     if (path === '/api/registry' && request.method === 'GET')
-      return handleRegistry(env, ctx, url.searchParams.has('refresh'))
+      return handleRegistry(request, env, ctx, url.searchParams.has('refresh'))
 
     if (path === '/api/registry/raw' && request.method === 'GET')
-      return handleRegistryRaw(env, url.searchParams.get('path') || '')
+      return handleRegistryRaw(request, env, ctx, url.searchParams.get('path') || '')
 
     if (path === '/api/registry/commit' && request.method === 'GET')
-      return handleRegistryCommit(env, url.searchParams.get('path') || '')
+      return handleRegistryCommit(request, env, ctx, url.searchParams.get('path') || '')
 
     if (path === '/api/registry/click' && request.method === 'POST')
       return handleClick(request, env, ctx)
 
     if (path === '/api/registry/trending' && request.method === 'GET')
-      return handleTrending(env, url.searchParams.get('category') || '')
+      return handleTrending(request, env, ctx, url.searchParams.get('category') || '')
 
     if (path === '/api/registry/metrics' && request.method === 'GET')
       return handleMetrics(env)
@@ -63,27 +66,40 @@ export default {
 }
 
 // ---------------------------------------------------------------------------
-// Registry proxy (stale-while-revalidate)
+// Registry (stale-while-revalidate via Cache API, fallback to KV)
 // ---------------------------------------------------------------------------
 
-async function handleRegistry(env, ctx, forceRefresh) {
-  const [cached, timeRaw] = await Promise.all([
-    env.KV.get('registry_data'),
-    env.KV.get('registry_data_time'),
-  ])
-  const age = timeRaw ? Date.now() - parseInt(timeRaw, 10) : Infinity
+async function handleRegistry(request, env, ctx, forceRefresh) {
+  const cacheKey = new Request('https://internal/registry_data', request)
 
-  if (cached && !forceRefresh && age < FRESH_TTL)
-    return jsonResponse(cached, 600)
-
-  if (cached && !forceRefresh && age < MAX_STALE) {
-    ctx?.waitUntil(refreshRegistryCache(env))
-    return jsonResponse(cached, 60)
+  if (!forceRefresh) {
+    const cached = await caches.default.match(cacheKey)
+    if (cached) {
+      // Trigger background refresh if the KV copy is newer than cache
+      ctx.waitUntil(maybeRevalidate(env, ctx, cacheKey))
+      return addCors(cached)
+    }
   }
 
+  // Cache miss — pull from KV (written by cron or inline refresh)
+  const kvData = await env.KV.get('registry_data')
+  const kvTime = await env.KV.get('registry_data_time')
+  const age = kvTime ? (Date.now() - parseInt(kvTime, 10)) / 1000 : Infinity
+
+  if (kvData && age < REGISTRY_STALE_KV_TTL) {
+    const response = jsonResponse(kvData, REGISTRY_CACHE_TTL)
+    ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+    return response
+  }
+
+  // KV also stale — refresh inline
   await refreshRegistryCache(env)
   const fresh = await env.KV.get('registry_data')
-  if (fresh) return jsonResponse(fresh, 600)
+  if (fresh) {
+    const response = jsonResponse(fresh, REGISTRY_CACHE_TTL)
+    ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+    return response
+  }
 
   return new Response(
     JSON.stringify({ error: 'registry unavailable', fetchedAt: new Date().toISOString() }),
@@ -91,45 +107,50 @@ async function handleRegistry(env, ctx, forceRefresh) {
   )
 }
 
-async function handleRegistryRaw(env, rawPath) {
+async function maybeRevalidate(env, ctx, cacheKey) {
+  const kvTime = await env.KV.get('registry_data_time')
+  if (!kvTime) return
+  // If KV was updated more recently than 5 min ago, refresh the cache entry
+  if (Date.now() - parseInt(kvTime, 10) < 5 * 60 * 1000) {
+    const kvData = await env.KV.get('registry_data')
+    if (kvData) await caches.default.put(cacheKey, jsonResponse(kvData, REGISTRY_CACHE_TTL))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Registry raw files (Cache API, 1h TTL)
+// ---------------------------------------------------------------------------
+
+async function handleRegistryRaw(request, env, ctx, rawPath) {
   if (!rawPath || !CATEGORY_RE.test(rawPath) || rawPath.includes('..') || rawPath.includes('\\'))
     return errorResponse('invalid path', 400)
 
-  const cacheKey = `registry_raw:${rawPath}`
-  const timeKey = `${cacheKey}:time`
-  const FRESH = 1000 * 60 * 60
-  const STALE = 1000 * 60 * 60 * 24
-
-  const [cached, timeRaw] = await Promise.all([env.KV.get(cacheKey), env.KV.get(timeKey)])
-  const age = timeRaw ? Date.now() - parseInt(timeRaw, 10) : Infinity
-
-  if (cached && age < FRESH) return textResponse(cached)
+  const cacheKey = new Request(`https://internal/registry_raw/${rawPath}`, request)
+  const cached = await caches.default.match(cacheKey)
+  if (cached) return addCors(cached)
 
   const upstream = await fetch(`${REGISTRY_RAW}/${rawPath}`)
-  if (!upstream.ok) {
-    if (cached && age < STALE) return textResponse(cached, 60)
-    return errorResponse(`upstream ${upstream.status}`, upstream.status)
-  }
+  if (!upstream.ok) return errorResponse(`upstream ${upstream.status}`, upstream.status)
 
   const body = await upstream.text()
-  if (body.length < 1024 * 1024) {
-    const ttl = { expirationTtl: 60 * 60 * 24 * 7 }
-    await Promise.all([env.KV.put(cacheKey, body, ttl), env.KV.put(timeKey, String(Date.now()), ttl)])
-  }
-  return textResponse(body)
+  const response = new Response(body, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600', ...CORS },
+  })
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+  return response
 }
 
-async function handleRegistryCommit(env, rawPath) {
+// ---------------------------------------------------------------------------
+// Registry commit metadata (Cache API, 6h TTL)
+// ---------------------------------------------------------------------------
+
+async function handleRegistryCommit(request, env, ctx, rawPath) {
   if (!rawPath || !CATEGORY_RE.test(rawPath) || rawPath.includes('..'))
     return errorResponse('invalid path', 400)
 
-  const cacheKey = `registry_commit:${rawPath}`
-  const timeKey = `${cacheKey}:time`
-  const FRESH = 1000 * 60 * 60 * 6
-
-  const [cached, timeRaw] = await Promise.all([env.KV.get(cacheKey), env.KV.get(timeKey)])
-  if (cached && Date.now() - parseInt(timeRaw || '0', 10) < FRESH)
-    return jsonResponse(cached, 3600)
+  const cacheKey = new Request(`https://internal/registry_commit/${rawPath}`, request)
+  const cached = await caches.default.match(cacheKey)
+  if (cached) return addCors(cached)
 
   const headers = ghHeaders(env)
   const upstream = await fetch(
@@ -137,10 +158,7 @@ async function handleRegistryCommit(env, rawPath) {
     { headers },
   )
 
-  if (!upstream.ok) {
-    if (cached) return jsonResponse(cached, 60)
-    return errorResponse(`upstream ${upstream.status}`, upstream.status)
-  }
+  if (!upstream.ok) return errorResponse(`upstream ${upstream.status}`, upstream.status)
 
   const commits = await upstream.json()
   const first = Array.isArray(commits) && commits.length > 0 ? commits[0] : null
@@ -152,14 +170,13 @@ async function handleRegistryCommit(env, rawPath) {
       }
     : { sha: null, date: null, message: null }
 
-  const body = JSON.stringify(result)
-  const ttl = { expirationTtl: 60 * 60 * 24 * 7 }
-  await Promise.all([env.KV.put(cacheKey, body, ttl), env.KV.put(timeKey, String(Date.now()), ttl)])
-  return jsonResponse(body, 3600)
+  const response = jsonResponse(JSON.stringify(result), 21600) // 6h
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+  return response
 }
 
 // ---------------------------------------------------------------------------
-// Click tracking
+// Click tracking (KV — mutable counters, must persist)
 // ---------------------------------------------------------------------------
 
 async function handleClick(request, env, ctx) {
@@ -173,7 +190,7 @@ async function handleClick(request, env, ctx) {
   const shard = Math.floor(Math.random() * CLICK_SHARDS)
   const key = `registry_clicks:${category}:${shard}`
 
-  const doUpdate = async () => {
+  ctx.waitUntil((async () => {
     let counts = {}
     try {
       const raw = await env.KV.get(key)
@@ -188,14 +205,18 @@ async function handleClick(request, env, ctx) {
       counts = Object.fromEntries(entries.slice(0, 500))
     }
     await env.KV.put(key, JSON.stringify(counts))
-  }
+  })())
 
-  ctx?.waitUntil(doUpdate()) ?? await doUpdate()
   return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json', ...CORS } })
 }
 
-async function handleTrending(env, category) {
+// Trending uses Cache API with short TTL to avoid 8 KV reads per request.
+async function handleTrending(request, env, ctx, category) {
   if (!CATEGORIES.includes(category)) return errorResponse('invalid category', 400)
+
+  const cacheKey = new Request(`https://internal/trending/${category}`, request)
+  const cached = await caches.default.match(cacheKey)
+  if (cached) return addCors(cached)
 
   const counts = await loadClickTotals(env, category)
   const top = Object.entries(counts)
@@ -203,7 +224,9 @@ async function handleTrending(env, category) {
     .slice(0, 10)
     .map(([id, clicks]) => ({ id, clicks }))
 
-  return jsonResponse(JSON.stringify({ category, top }), 600)
+  const response = jsonResponse(JSON.stringify({ category, top }), 600) // 10 min
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+  return response
 }
 
 async function handleMetrics(env) {
@@ -249,7 +272,7 @@ async function loadClickTotals(env, category) {
 }
 
 // ---------------------------------------------------------------------------
-// UI error reports
+// UI error reports (KV — mutable log)
 // ---------------------------------------------------------------------------
 
 async function handleErrorReport(request, env, ctx) {
@@ -272,7 +295,7 @@ async function handleErrorReport(request, env, ctx) {
   const shard = Math.floor(Math.random() * ERROR_SHARDS)
   const key = `ui_errors:${shard}`
 
-  const doUpdate = async () => {
+  ctx.waitUntil((async () => {
     let errors = []
     try {
       const raw = await env.KV.get(key)
@@ -281,9 +304,8 @@ async function handleErrorReport(request, env, ctx) {
     errors.unshift(entry)
     if (errors.length > ERRORS_MAX_PER_SHARD) errors.length = ERRORS_MAX_PER_SHARD
     await env.KV.put(key, JSON.stringify(errors))
-  }
+  })())
 
-  ctx?.waitUntil(doUpdate()) ?? await doUpdate()
   return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json', ...CORS } })
 }
 
@@ -369,23 +391,21 @@ async function refreshRegistryCache(env) {
   }
 
   try {
-    const [handDirs, channelFiles, providerFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles] = await Promise.all(
+    const dirs = await Promise.all(
       ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp'].map(fetchDir),
     )
-
-    const filter = items => items.filter(f => f.name !== 'README.md')
     const [hands, channels, providers, workflows, agents, plugins, skills, mcp] =
-      [handDirs, channelFiles, providerFiles, workflowFiles, agentDirs, pluginFiles, skillDirs, mcpFiles].map(filter)
+      dirs.map(items => items.filter(f => f.name !== 'README.md'))
 
     const sigOf = items => items.map(i => `${i.name}@${i.sha || ''}`).sort().join(',')
     const signature = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
-      .map((cat, i) => `${cat}=${sigOf([hands, channels, providers, workflows, agents, plugins, skills, mcp][i])}`)
+      .map((cat, i) => `${cat}=${sigOf(dirs[i].filter(f => f.name !== 'README.md'))}`)
       .join('|')
 
-    const cached = await env.KV.get('registry_data')
-    if (cached) {
+    const existing = await env.KV.get('registry_data')
+    if (existing) {
       try {
-        if (JSON.parse(cached).signature === signature) {
+        if (JSON.parse(existing).signature === signature) {
           await env.KV.put('registry_data_time', String(Date.now()))
           console.log('Registry unchanged, skipping manifest fetch')
           return
@@ -394,14 +414,14 @@ async function refreshRegistryCache(env) {
     }
 
     const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
-      fetchBatch(hands, h => `hands/${h.name}/HAND.toml`),
-      fetchBatch(agents, a => `agents/${a.name}/agent.toml`),
-      fetchBatch(skills, s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
-      fetchBatch(channels, c => `channels/${c.name}`),
+      fetchBatch(hands,     h => `hands/${h.name}/HAND.toml`),
+      fetchBatch(agents,    a => `agents/${a.name}/agent.toml`),
+      fetchBatch(skills,    s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
+      fetchBatch(channels,  c => `channels/${c.name}`),
       fetchBatch(providers, p => `providers/${p.name}`),
       fetchBatch(workflows, w => `workflows/${w.name}`),
-      fetchBatch(plugins, p => `plugins/${p.name}/plugin.toml`),
-      fetchBatch(mcp, m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
+      fetchBatch(plugins,   p => `plugins/${p.name}/plugin.toml`),
+      fetchBatch(mcp,       m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
     ])
 
     const result = {
@@ -442,10 +462,10 @@ function jsonResponse(body, maxAge = 300) {
   })
 }
 
-function textResponse(body, maxAge = 3600) {
-  return new Response(body, {
-    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': `public, max-age=${maxAge}`, ...CORS },
-  })
+function addCors(response) {
+  const r = new Response(response.body, response)
+  Object.entries(CORS).forEach(([k, v]) => r.headers.set(k, v))
+  return r
 }
 
 function errorResponse(message, status = 500) {

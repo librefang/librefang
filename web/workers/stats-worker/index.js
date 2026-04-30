@@ -1,7 +1,8 @@
 // GitHub Stats Worker
 // Tracks GitHub repo metrics (stars, forks, issues, PRs, releases).
-// Stores a 90-day history blob in KV to minimize read ops.
-// Cron: daily at 00:00 UTC.
+// HTTP Cache API handles response caching — KV is only used for the 90-day
+// history blob and the one-time migration flag (both require persistence
+// across cache evictions and cron writes).
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -14,21 +15,17 @@ const GH_HEADERS = {
   'User-Agent': 'LibrefangStats/1.0',
 }
 
-const CACHE_TTL = 1000 * 60 * 30 // 30 minutes
-
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return new Response(null, { headers: CORS })
 
     const url = new URL(request.url)
 
-    if (url.pathname === '/api/github' && request.method === 'GET') {
-      return handleGitHubStats(env, url.searchParams.has('refresh'))
-    }
+    if (url.pathname === '/api/github' && request.method === 'GET')
+      return handleGitHubStats(request, env, ctx, url.searchParams.has('refresh'))
 
-    if (url.pathname === '/api/releases' && request.method === 'GET') {
-      return handleReleases(env)
-    }
+    if (url.pathname === '/api/releases' && request.method === 'GET')
+      return handleReleases(request, env, ctx)
 
     return new Response('Not Found', { status: 404 })
   },
@@ -42,10 +39,12 @@ export default {
 // Endpoints
 // ---------------------------------------------------------------------------
 
-async function handleGitHubStats(env, forceRefresh) {
+async function handleGitHubStats(request, env, ctx, forceRefresh) {
+  const cacheKey = new Request('https://internal/github_stats', request)
+
   if (!forceRefresh) {
-    const cached = await getCached(env, 'github_stats', 'github_stats_time', CACHE_TTL)
-    if (cached) return jsonResponse(cached)
+    const cached = await caches.default.match(cacheKey)
+    if (cached) return addCors(cached)
   }
 
   const headers = ghHeaders(env)
@@ -71,7 +70,7 @@ async function handleGitHubStats(env, forceRefresh) {
     prs: prCount,
   })
 
-  const result = {
+  const body = JSON.stringify({
     stars: repo.stargazers_count || 0,
     forks: repo.forks_count || 0,
     issues: repo.open_issues_count || 0,
@@ -80,30 +79,29 @@ async function handleGitHubStats(env, forceRefresh) {
     createdAt: repo.created_at || '',
     downloads,
     starHistory: history.slice(-30),
-  }
+  })
 
-  const body = JSON.stringify(result)
-  await putCached(env, 'github_stats', 'github_stats_time', body)
-  return jsonResponse(body)
+  const response = jsonResponse(body, 1800) // 30 min
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+  return response
 }
 
-async function handleReleases(env) {
-  const cached = await getCached(env, 'releases_data', 'releases_data_time', CACHE_TTL)
-  if (cached) return jsonResponse(cached)
+async function handleReleases(request, env, ctx) {
+  const cacheKey = new Request('https://internal/releases', request)
+  const cached = await caches.default.match(cacheKey)
+  if (cached) return addCors(cached)
 
   const res = await fetch(
     'https://api.github.com/repos/librefang/librefang/releases?per_page=20',
     { headers: ghHeaders(env) },
   )
-  if (!res.ok) {
-    const stale = await env.KV.get('releases_data')
-    if (stale) return jsonResponse(stale, 60)
-    return errorResponse(`GitHub API returned ${res.status}`, 502)
-  }
+
+  if (!res.ok) return errorResponse(`GitHub API returned ${res.status}`, 502)
 
   const body = await res.text()
-  await putCached(env, 'releases_data', 'releases_data_time', body)
-  return jsonResponse(body)
+  const response = jsonResponse(body, 1800)
+  ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
+  return response
 }
 
 // ---------------------------------------------------------------------------
@@ -123,8 +121,6 @@ async function recordDailyStats(env) {
   }
 
   const repo = await repoRes.json()
-  const today = new Date().toISOString().split('T')[0]
-
   await appendTodayToHistory(env, {
     stars: repo.stargazers_count || 0,
     forks: repo.forks_count || 0,
@@ -132,11 +128,11 @@ async function recordDailyStats(env) {
     prs: parseLinkHeaderCount(pullsRes.headers.get('link')),
   })
 
-  console.log('Recorded daily stats:', today, 'stars:', repo.stargazers_count)
+  console.log('Recorded daily stats:', new Date().toISOString().split('T')[0], 'stars:', repo.stargazers_count)
 }
 
 // ---------------------------------------------------------------------------
-// History management
+// History (KV — must survive cache eviction and be written by cron)
 // ---------------------------------------------------------------------------
 
 async function appendTodayToHistory(env, todayStats) {
@@ -154,14 +150,10 @@ async function appendTodayToHistory(env, todayStats) {
 
   const entry = { date: today, ...todayStats }
   const idx = history.findIndex(h => h.date === today)
-  if (idx >= 0) {
-    history[idx] = entry
-  } else {
-    history.push(entry)
-  }
+  if (idx >= 0) history[idx] = entry
+  else history.push(entry)
 
   if (history.length > 90) history = history.slice(-90)
-
   await env.KV.put('stats_history', JSON.stringify(history))
   return history
 }
@@ -226,20 +218,20 @@ function parseLinkHeaderCount(link) {
   return m ? parseInt(m[1], 10) : 0
 }
 
-async function getCached(env, key, timeKey, ttl) {
-  const [cached, timeRaw] = await Promise.all([env.KV.get(key), env.KV.get(timeKey)])
-  if (cached && timeRaw && Date.now() - parseInt(timeRaw, 10) < ttl) return cached
-  return null
-}
-
-async function putCached(env, key, timeKey, body) {
-  await Promise.all([env.KV.put(key, body), env.KV.put(timeKey, String(Date.now()))])
-}
-
 function jsonResponse(body, maxAge = 300) {
   return new Response(body, {
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${maxAge}`, ...CORS },
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${maxAge}`,
+      ...CORS,
+    },
   })
+}
+
+function addCors(response) {
+  const r = new Response(response.body, response)
+  Object.entries(CORS).forEach(([k, v]) => r.headers.set(k, v))
+  return r
 }
 
 function errorResponse(message, status = 500) {
