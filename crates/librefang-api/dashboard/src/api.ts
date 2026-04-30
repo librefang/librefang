@@ -200,7 +200,10 @@ export interface SkillDetail {
   has_prompt_context: boolean;
   prompt_context_length: number;
   prompt_context?: string | null;
-  source: any;
+  /** Backend-supplied skill source descriptor. Treated as opaque on the
+   *  dashboard — no UI introspects it today, so leave the shape unconstrained
+   *  rather than freezing a partial picture into the type. */
+  source: unknown;
   enabled: boolean;
   path: string;
   linked_files: Record<string, string[]>;
