@@ -1,3 +1,11 @@
+import { setupBundleMode } from "./lib/bundleMode";
+// Patch `window.fetch` and `window.WebSocket` BEFORE any module that
+// might issue a request — React Query, Router, i18n loaders all run
+// during their own imports below. No-op on non-Tauri origins and on
+// debug builds, where the dashboard is served same-origin from the
+// daemon.
+setupBundleMode();
+
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
