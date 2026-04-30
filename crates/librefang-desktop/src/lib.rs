@@ -25,6 +25,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
+#[cfg(desktop)]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
@@ -454,25 +455,26 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 }
             }
 
-            // Mobile window. Without this, iOS/Android launches into a
-            // black WebView because tauri.conf.json's `app.windows` is
-            // empty and Tauri 2 does not auto-create a mobile window.
-            // The OS manages size/orientation, so we only set the URL
-            // and visibility.
+            // Mobile window is declared in tauri.{ios,android}.conf.json
+            // (url=lfconnect://localhost/, label=main). Tauri 2 mobile does
+            // not honor `WebviewWindowBuilder::new` for the *first* window
+            // in setup() — iOS/Android wire the rootViewController / main
+            // Activity to a window declared in the conf, and a programmatic
+            // builder call here ends up creating no visible surface (black
+            // screen). If the resolved URL is already known (Remote mode
+            // via saved pref or env), navigate away from the connection
+            // screen now; otherwise leave the conf-declared lfconnect://
+            // page up so the user can pick.
             #[cfg(mobile)]
             {
-                let url = if show_connection_screen {
-                    WebviewUrl::CustomProtocol(
-                        "lfconnect://localhost/"
-                            .parse()
-                            .expect("lfconnect URL must parse"),
-                    )
-                } else {
-                    WebviewUrl::External(initial_url.parse().expect("Invalid server URL"))
-                };
-                let _window = WebviewWindowBuilder::new(app, "main", url)
-                    .visible(true)
-                    .build()?;
+                if !show_connection_screen && !initial_url.is_empty() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let url: tauri::Url = initial_url.parse().expect("Invalid server URL");
+                        window.navigate(url)?;
+                    } else {
+                        warn!("Mobile main window not found at setup time");
+                    }
+                }
             }
 
             // Set up system tray (desktop only)
