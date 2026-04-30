@@ -1,6 +1,7 @@
-import { type ComponentType, type ReactNode, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { RefreshCw, HelpCircle } from "lucide-react";
+import type { Components } from "react-markdown";
 import { Modal } from "./Modal";
 import { MarkdownContent } from "./MarkdownContent";
 
@@ -33,37 +34,40 @@ function toHelpMarkdown(s: string): string {
   );
 }
 
-const HELP_MARKDOWN_COMPONENTS: Record<string, ComponentType<any>> = {
-  p: ({ children }: { children: ReactNode }) => (
+// See MarkdownContent.tsx for why explicit `{ children: ReactNode }`
+// annotations are dropped — `Components` provides contextual typing
+// where `children` is optional, matching react-markdown's contract.
+const HELP_MARKDOWN_COMPONENTS: Components = {
+  p: ({ children }) => (
     <p className="text-sm text-text-dim leading-relaxed mb-4 last:mb-0">{children}</p>
   ),
-  h1: ({ children }: { children: ReactNode }) => (
+  h1: ({ children }) => (
     <h1 className="text-base font-black tracking-tight text-text-main mb-3 mt-6 first:mt-0">
       {children}
     </h1>
   ),
-  h2: ({ children }: { children: ReactNode }) => (
+  h2: ({ children }) => (
     <h2 className="text-[11px] font-black uppercase tracking-widest text-brand mb-3 mt-6 first:mt-0">
       {children}
     </h2>
   ),
-  h3: ({ children }: { children: ReactNode }) => (
+  h3: ({ children }) => (
     <h3 className="text-sm font-bold text-text-main mb-2 mt-4">{children}</h3>
   ),
-  ul: ({ children }: { children: ReactNode }) => (
+  ul: ({ children }) => (
     <ul className="list-disc pl-5 marker:text-brand/60 space-y-1.5 mb-4 text-sm text-text-dim leading-relaxed">
       {children}
     </ul>
   ),
-  ol: ({ children }: { children: ReactNode }) => (
+  ol: ({ children }) => (
     <ol className="list-decimal pl-5 marker:text-brand marker:font-bold space-y-2 mb-4 text-sm text-text-dim leading-relaxed">
       {children}
     </ol>
   ),
-  li: ({ children }: { children: ReactNode }) => (
+  li: ({ children }) => (
     <li className="pl-1">{children}</li>
   ),
-  code: ({ node, children, ...props }: any) => {
+  code: ({ node, children, ...props }) => {
     const isBlock =
       node?.position?.start?.line !== node?.position?.end?.line ||
       String(children).includes("\n");
@@ -80,10 +84,10 @@ const HELP_MARKDOWN_COMPONENTS: Record<string, ComponentType<any>> = {
       </code>
     );
   },
-  strong: ({ children }: { children: ReactNode }) => (
+  strong: ({ children }) => (
     <strong className="font-bold text-text-main">{children}</strong>
   ),
-  a: ({ href, children }: { href?: string; children: ReactNode }) => (
+  a: ({ href, children }) => (
     <a
       href={href}
       className="text-brand underline decoration-brand/40 hover:decoration-brand transition-colors"
