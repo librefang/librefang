@@ -53,10 +53,7 @@ fn looks_like_tool_call(text: &str) -> bool {
     let t = text.trim();
     // Start-of-text patterns: safe regardless of length — a response that
     // literally begins with a JSON tool call array is always a leak.
-    if t.starts_with("[{")
-        || t.starts_with("functions.")
-        || t.starts_with("{\"type\":\"function\"")
-        || (t.starts_with('[') && t.contains("'type': 'text'"))
+    if t.starts_with("[{") || t.starts_with("functions.") || t.starts_with("{\"type\":\"function\"")
     {
         return true;
     }
@@ -67,6 +64,8 @@ fn looks_like_tool_call(text: &str) -> bool {
     const MAX_HEURISTIC_LEN: usize = 2000;
     t.len() <= MAX_HEURISTIC_LEN
         && (contains_bare_json_tool_call(t)
+            // starts_with('[') + contains() — both need the length guard.
+            || (t.starts_with('[') && t.contains("'type': 'text'"))
             // Tag-based patterns — use contains() because tool call tags may
             // appear after natural language preamble
             || t.contains("<function=")
