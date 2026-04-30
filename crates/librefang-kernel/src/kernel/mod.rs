@@ -11664,7 +11664,9 @@ system_prompt = "You are a helpful assistant."
 
             let req = CompletionRequest {
                 model,
-                messages: vec![librefang_types::message::Message::user(prompt)],
+                messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
+                    prompt,
+                )]),
                 tools: vec![],
                 max_tokens: 32,
                 temperature: 0.2,
