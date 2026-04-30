@@ -67,6 +67,40 @@ pub(crate) const SYSTEM_CHANNEL_AUTONOMOUS: &str = "autonomous";
 /// referencing.  `0` is treated as "disable" before this clamp is applied.
 const MIN_CRON_HISTORY_MESSAGES: usize = 4;
 
+/// Resolve `cron_session_max_messages` from config into an effective cap.
+///
+/// - `None`    → no cap (pass through)
+/// - `Some(0)` → caller set "disable"; treat as no cap
+/// - `Some(n)` where `n < MIN_CRON_HISTORY_MESSAGES` → clamp up, emit warning
+/// - `Some(n)` otherwise → use as-is
+pub(crate) fn resolve_cron_max_messages(raw: Option<usize>) -> Option<usize> {
+    match raw {
+        None => None,
+        Some(0) => None,
+        Some(n) if n < MIN_CRON_HISTORY_MESSAGES => {
+            tracing::warn!(
+                requested = n,
+                applied = MIN_CRON_HISTORY_MESSAGES,
+                "cron_session_max_messages too small; clamped"
+            );
+            Some(MIN_CRON_HISTORY_MESSAGES)
+        }
+        other => other,
+    }
+}
+
+/// Resolve `cron_session_max_tokens` from config into an effective cap.
+///
+/// - `None`    → no cap
+/// - `Some(0)` → disable (treat as no cap)
+/// - `Some(n)` otherwise → use as-is
+pub(crate) fn resolve_cron_max_tokens(raw: Option<u32>) -> Option<u32> {
+    match raw {
+        Some(0) => None,
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-task trigger recursion depth (bug #3780)
 // ---------------------------------------------------------------------------
@@ -13083,34 +13117,8 @@ system_prompt = "You are a helpful assistant."
                                         let max_tokens = cfg_snap.cron_session_max_tokens;
                                         let max_messages = cfg_snap.cron_session_max_messages;
                                         drop(cfg_snap);
-                                        // #3459: treat `cron_session_max_messages = 0`
-                                        // as "disable" rather than "trim to 0",
-                                        // and clamp dangerously-small values up
-                                        // to MIN_CRON_HISTORY_MESSAGES so a fire
-                                        // never drops the prompt cache to a
-                                        // useless 1-2 message window.  Same
-                                        // policy as `max_history_messages`
-                                        // (MIN_HISTORY_MESSAGES = 4).
-                                        let max_messages = match max_messages {
-                                            Some(0) => None,
-                                            Some(n) if n < MIN_CRON_HISTORY_MESSAGES => {
-                                                tracing::warn!(
-                                                    requested = n,
-                                                    applied = MIN_CRON_HISTORY_MESSAGES,
-                                                    "cron_session_max_messages too small; clamped"
-                                                );
-                                                Some(MIN_CRON_HISTORY_MESSAGES)
-                                            }
-                                            other => other,
-                                        };
-                                        // #3459: same policy for the token cap —
-                                        // value=0 disables the cap rather than
-                                        // forcing every fire to start with an
-                                        // empty session.
-                                        let max_tokens = match max_tokens {
-                                            Some(0) => None,
-                                            other => other,
-                                        };
+                                        let max_messages = resolve_cron_max_messages(max_messages);
+                                        let max_tokens = resolve_cron_max_tokens(max_tokens);
                                         if max_tokens.is_some() || max_messages.is_some() {
                                             let cron_sid = SessionId::for_channel(agent_id, "cron");
                                             // #3443: serialize prune through the

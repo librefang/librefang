@@ -14,16 +14,11 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::scheduler::{CronJob, CronJobId, CronSchedule};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::{debug, info, warn};
 
 /// Maximum consecutive errors before a job is auto-disabled.
 const MAX_CONSECUTIVE_ERRORS: u32 = 5;
-
-/// Per-process counter mixed into staging tmp filenames so two threads
-/// persisting concurrently never share a path. Combined with pid + nanos
-/// this also disambiguates against a second daemon on the same home_dir.
-static CRON_PERSIST_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // JobMeta — extra runtime state not stored in CronJob itself
@@ -147,19 +142,7 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        // Two daemons sharing the same home_dir, or two threads inside one
-        // process, both staging at `.json.tmp.{pid}` race the rename and
-        // produce a torn file (#3648).  Add a per-call atomic counter and
-        // monotonic nanos so each writer owns a distinct staging path.
-        let tmp_path = self.persist_path.with_extension(format!(
-            "json.tmp.{}.{}.{}",
-            std::process::id(),
-            CRON_PERSIST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
+        let tmp_path = crate::persist_tmp_path(&self.persist_path);
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {

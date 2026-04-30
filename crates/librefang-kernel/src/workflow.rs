@@ -17,15 +17,10 @@ use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
-
-/// Per-process counter mixed into the persist staging tmp filename so two
-/// threads (or two daemons on the same home_dir) never share a path (#3648).
-static WORKFLOW_PERSIST_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Unique identifier for a workflow definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -583,19 +578,7 @@ impl WorkflowEngine {
                 return;
             }
         }
-        // Two daemons sharing the same home_dir, or two threads inside one
-        // process, both staging at `.json.tmp.{pid}` race the rename and
-        // produce a torn file (#3648).  Add a per-call atomic counter and
-        // monotonic nanos so each writer owns a distinct staging path.
-        let tmp_path = path.with_extension(format!(
-            "json.tmp.{}.{}.{}",
-            std::process::id(),
-            WORKFLOW_PERSIST_SEQ.fetch_add(1, Ordering::Relaxed),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        ));
+        let tmp_path = crate::persist_tmp_path(path);
         {
             use std::io::Write as _;
             let write_result = (|| -> std::io::Result<()> {
