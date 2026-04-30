@@ -1442,37 +1442,18 @@ fn parse_output(lines: &[String]) -> Result<serde_json::Value, PluginRuntimeErro
 /// its JSON response to stdout.  The hook protocol is identical to subprocess
 /// hooks: one JSON object in, one JSON object out.
 ///
-/// Returns the parsed JSON output on success, or a `PluginRuntimeError` on
-/// failure.  When the `wasm-hooks` feature is not enabled, this always returns
-/// `Err(PluginRuntimeError::SpawnFailed(...))` with a clear message.
-#[cfg(feature = "wasm-hooks")]
-pub async fn run_wasm_hook(
-    wasm_path: &str,
-    input: &serde_json::Value,
-    _config: &HookConfig,
-) -> Result<serde_json::Value, PluginRuntimeError> {
-    // Full wasmtime + WASI integration is reserved for a follow-up implementation
-    // once the exact WASI API surface for wasmtime 43 is confirmed.  The variant,
-    // routing, and feature-gate scaffolding are all in place.
-    let _ = wasm_path;
-    let _ = input;
-    Err(PluginRuntimeError::SpawnFailed(
-        "Wasm hook execution not yet implemented (wasm-hooks feature is enabled but the \
-         wasmtime integration is pending)"
-            .to_string(),
-    ))
-}
-
-/// Stub used when the `wasm-hooks` feature is not compiled in.
-#[cfg(not(feature = "wasm-hooks"))]
+/// Currently always returns `Err(PluginRuntimeError::SpawnFailed)` — the
+/// wasmtime+WASI integration is not implemented. The `wasm-hooks` Cargo
+/// feature was removed in #3337 because it claimed support that did not
+/// exist; this stub keeps the call site stable until a real implementation
+/// lands.
 pub async fn run_wasm_hook(
     _wasm_path: &str,
     _input: &serde_json::Value,
     _config: &HookConfig,
 ) -> Result<serde_json::Value, PluginRuntimeError> {
     Err(PluginRuntimeError::SpawnFailed(
-        "Wasm hook support not compiled in — rebuild with the 'wasm-hooks' feature enabled"
-            .to_string(),
+        "Wasm hook execution is not implemented".to_string(),
     ))
 }
 
