@@ -1,39 +1,11 @@
-use librefang_kernel::LibreFangKernel;
 use librefang_kernel_handle::KernelHandle;
-use librefang_types::config::{KernelConfig, MemoryConfig, UserConfig};
+use librefang_types::config::UserConfig;
 use librefang_types::user_policy::{UserMemoryAccess, UserToolGate, UserToolPolicy};
 use std::collections::HashMap;
 
-fn boot() -> (LibreFangKernel, tempfile::TempDir) {
-    boot_with_users(Vec::new())
-}
+mod common;
 
-fn boot_with_users(users: Vec<UserConfig>) -> (LibreFangKernel, tempfile::TempDir) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let home = tmp.path().to_path_buf();
-    let data_dir = home.join("data");
-    std::fs::create_dir_all(&data_dir).expect("data dir");
-    std::fs::create_dir_all(home.join("skills")).unwrap();
-    std::fs::create_dir_all(home.join("workspaces").join("agents")).unwrap();
-    std::fs::create_dir_all(home.join("workspaces").join("hands")).unwrap();
-
-    let config = KernelConfig {
-        home_dir: home.clone(),
-        data_dir: data_dir.clone(),
-        network_enabled: false,
-        memory: MemoryConfig {
-            sqlite_path: Some(data_dir.join("test.db")),
-            ..Default::default()
-        },
-        users,
-        ..KernelConfig::default()
-    };
-
-    (
-        LibreFangKernel::boot_with_config(config).expect("kernel boot"),
-        tmp,
-    )
-}
+use common::{boot_kernel as boot, boot_kernel_with_users as boot_with_users};
 
 fn telegram_user_with_policy(
     name: &str,
