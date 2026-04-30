@@ -138,8 +138,10 @@ pub struct PluginEvent {
 }
 
 /// Rate-limit window between consecutive `error!` logs from
-/// [`PluginEventBus::record_consumer_lag`]. Mirrors the kernel
-/// `EventBus`'s 10 s cadence so the two buses behave the same.
+/// [`PluginEventBus::record_consumer_lag`]. Must stay in sync with the
+/// hardcoded `10` in `librefang_kernel::event_bus::EventBus::record_consumer_lag`
+/// (search for `from_secs(10)` in `crates/librefang-kernel/src/event_bus.rs`)
+/// so the two buses behave identically.
 const LAG_WARN_INTERVAL_SECS: u64 = 10;
 
 /// A simple in-process event bus for plugin events.
