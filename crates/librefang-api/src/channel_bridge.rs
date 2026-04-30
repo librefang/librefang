@@ -1499,18 +1499,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             match self.kernel.vault_redeem_recovery_code(code) {
                                 Ok(true) => true,
                                 Ok(false) => {
-                                    // Fail-secure: if recording the failure
-                                    // hits a wedged audit DB, refuse the
-                                    // attempt rather than handing the
-                                    // attacker unlimited tries.  The HTTP
-                                    // path already does this.
-                                    if self
+                                    // Atomically check lockout + record failure (#3584).
+                                    // Fail-secure: wedged DB must not grant unlimited tries.
+                                    match self
                                         .kernel
                                         .approvals()
-                                        .record_totp_failure(sender_id)
-                                        .is_err()
+                                        .check_and_record_totp_failure(sender_id)
                                     {
-                                        return "TOTP service temporarily unavailable.".into();
+                                        Err(true) => {
+                                            return "Too many failed TOTP attempts. Try again later.".into();
+                                        }
+                                        Err(false) => {
+                                            return "TOTP service temporarily unavailable.".into();
+                                        }
+                                        Ok(()) => {}
                                     }
                                     return "Invalid recovery code.".into();
                                 }
@@ -1548,16 +1550,20 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                     true
                                 }
                                 Ok(false) => {
-                                    // Fail-secure parity with the HTTP path:
-                                    // a wedged audit DB must not silently
-                                    // grant unlimited TOTP attempts.
-                                    if self
+                                    // Atomically check lockout + record failure (#3584).
+                                    // Fail-secure parity with the HTTP path.
+                                    match self
                                         .kernel
                                         .approvals()
-                                        .record_totp_failure(sender_id)
-                                        .is_err()
+                                        .check_and_record_totp_failure(sender_id)
                                     {
-                                        return "TOTP service temporarily unavailable.".into();
+                                        Err(true) => {
+                                            return "Too many failed TOTP attempts. Try again later.".into();
+                                        }
+                                        Err(false) => {
+                                            return "TOTP service temporarily unavailable.".into();
+                                        }
+                                        Ok(()) => {}
                                     }
                                     return "Invalid TOTP code.".into();
                                 }

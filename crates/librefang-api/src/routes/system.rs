@@ -1843,17 +1843,28 @@ pub async fn approve_request(
                     match state.kernel.vault_redeem_recovery_code(code) {
                         Ok(true) => true,
                         Ok(false) => {
-                            if state
+                            // check_and_record_totp_failure atomically checks lockout
+                            // and records the failure, fixing TOCTOU (#3584).
+                            match state
                                 .kernel
                                 .approvals()
-                                .record_totp_failure("api_admin")
-                                .is_err()
+                                .check_and_record_totp_failure("api_admin")
                             {
-                                return ApiErrorResponse::internal(
-                                    "Failed to persist TOTP failure counter",
-                                )
-                                .into_json_tuple()
-                                .into_response();
+                                Err(true) => {
+                                    return ApiErrorResponse::bad_request(
+                                        "Too many failed TOTP attempts. Try again later.",
+                                    )
+                                    .into_json_tuple()
+                                    .into_response();
+                                }
+                                Err(false) => {
+                                    return ApiErrorResponse::internal(
+                                        "Failed to persist TOTP failure counter",
+                                    )
+                                    .into_json_tuple()
+                                    .into_response();
+                                }
+                                Ok(()) => {}
                             }
                             return ApiErrorResponse::bad_request("Invalid recovery code")
                                 .into_json_tuple()
@@ -1879,7 +1890,10 @@ pub async fn approve_request(
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state
+                            .kernel
+                            .approvals()
+                            .check_and_record_totp_failure("api_admin");
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -1897,18 +1911,27 @@ pub async fn approve_request(
                             true
                         }
                         Ok(false) => {
-                            // Fail-secure: reject even if counter persist fails (#3372).
-                            if state
+                            // Fail-secure: atomically check lockout + record failure (#3372/#3584).
+                            match state
                                 .kernel
                                 .approvals()
-                                .record_totp_failure("api_admin")
-                                .is_err()
+                                .check_and_record_totp_failure("api_admin")
                             {
-                                return ApiErrorResponse::internal(
-                                    "Failed to persist TOTP failure counter",
-                                )
-                                .into_json_tuple()
-                                .into_response();
+                                Err(true) => {
+                                    return ApiErrorResponse::bad_request(
+                                        "Too many failed TOTP attempts. Try again later.",
+                                    )
+                                    .into_json_tuple()
+                                    .into_response();
+                                }
+                                Err(false) => {
+                                    return ApiErrorResponse::internal(
+                                        "Failed to persist TOTP failure counter",
+                                    )
+                                    .into_json_tuple()
+                                    .into_response();
+                                }
+                                Ok(()) => {}
                             }
                             return ApiErrorResponse::bad_request("Invalid TOTP code")
                                 .into_json_tuple()
@@ -2527,7 +2550,7 @@ pub async fn totp_setup(
                         let _ = state
                             .kernel
                             .approvals()
-                            .record_totp_failure(SETUP_LOCKOUT_KEY);
+                            .check_and_record_totp_failure(SETUP_LOCKOUT_KEY);
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2550,17 +2573,25 @@ pub async fn totp_setup(
                     }
                 };
                 if !verified {
-                    // Fail-secure: reject even if counter persist fails (#3372).
-                    if state
+                    // Fail-secure: atomically check lockout + record failure (#3372/#3584).
+                    match state
                         .kernel
                         .approvals()
-                        .record_totp_failure(SETUP_LOCKOUT_KEY)
-                        .is_err()
+                        .check_and_record_totp_failure(SETUP_LOCKOUT_KEY)
                     {
-                        return ApiErrorResponse::internal(
-                            "Failed to persist TOTP failure counter",
-                        )
-                        .into_json_tuple();
+                        Err(true) => {
+                            return ApiErrorResponse::bad_request(
+                                "Too many failed TOTP attempts. Try again later.",
+                            )
+                            .into_json_tuple();
+                        }
+                        Err(false) => {
+                            return ApiErrorResponse::internal(
+                                "Failed to persist TOTP failure counter",
+                            )
+                            .into_json_tuple();
+                        }
+                        Ok(()) => {}
                     }
                     return ApiErrorResponse::bad_request(
                         "Invalid current_code. Provide a valid TOTP or recovery code to reset.",
@@ -2659,7 +2690,10 @@ pub async fn totp_confirm(
 
     // Replay-prevention check (#3359): reject a code already used in the last 60 s.
     if state.kernel.approvals().is_totp_code_used(&body.code) {
-        let _ = state.kernel.approvals().record_totp_failure("api_admin");
+        let _ = state
+            .kernel
+            .approvals()
+            .check_and_record_totp_failure("api_admin");
         return ApiErrorResponse::bad_request(
             "TOTP code has already been used. Wait for the next 30-second window.",
         )
@@ -2683,15 +2717,23 @@ pub async fn totp_confirm(
             )
         }
         Ok(false) => {
-            // Fail-secure: reject even if counter persist fails (#3372).
-            if state
+            // Fail-secure: atomically check lockout + record failure (#3372/#3584).
+            match state
                 .kernel
                 .approvals()
-                .record_totp_failure("api_admin")
-                .is_err()
+                .check_and_record_totp_failure("api_admin")
             {
-                return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                Err(true) => {
+                    return ApiErrorResponse::bad_request(
+                        "Too many failed TOTP attempts. Try again later.",
+                    )
                     .into_json_tuple();
+                }
+                Err(false) => {
+                    return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                        .into_json_tuple();
+                }
+                Ok(()) => {}
             }
             ApiErrorResponse::bad_request(
                 "Invalid TOTP code. Check your authenticator app and try again.",
@@ -2801,15 +2843,23 @@ pub async fn totp_revoke(
     };
 
     if !verified {
-        // Fail-secure: reject even if counter persist fails (#3372).
-        if state
+        // Fail-secure: atomically check lockout + record failure (#3372/#3584).
+        match state
             .kernel
             .approvals()
-            .record_totp_failure(REVOKE_LOCKOUT_KEY)
-            .is_err()
+            .check_and_record_totp_failure(REVOKE_LOCKOUT_KEY)
         {
-            return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+            Err(true) => {
+                return ApiErrorResponse::bad_request(
+                    "Too many failed TOTP attempts. Try again later.",
+                )
                 .into_json_tuple();
+            }
+            Err(false) => {
+                return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                    .into_json_tuple();
+            }
+            Ok(()) => {}
         }
         return ApiErrorResponse::bad_request(
             "Invalid code. Provide a valid TOTP or recovery code.",

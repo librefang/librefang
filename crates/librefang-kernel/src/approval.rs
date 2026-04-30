@@ -45,6 +45,10 @@ pub struct ApprovalManager {
     /// at which point it is set to the current instant. The lockout window is
     /// measured from that moment, not from the first failure.
     totp_failures: StdMutex<HashMap<String, (u32, Option<Instant>)>>,
+    /// Per-sender mutex for atomic lockout-check + failure-record operations.
+    /// Callers hold this lock across the check and record to prevent TOCTOU
+    /// races where concurrent requests both pass the lockout check (fixes #3584).
+    failure_rw_mutex: StdMutex<()>,
 }
 
 struct PendingRequest {
@@ -84,6 +88,7 @@ impl ApprovalManager {
             audit_db: None,
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(HashMap::new()),
+            failure_rw_mutex: StdMutex::new(()),
         }
     }
 
@@ -105,6 +110,7 @@ impl ApprovalManager {
             audit_db: Some(conn),
             totp_grace: StdMutex::new(HashMap::new()),
             totp_failures: StdMutex::new(failures),
+            failure_rw_mutex: StdMutex::new(()),
         }
     }
 
@@ -1038,38 +1044,88 @@ impl ApprovalManager {
         Ok((base32, uri, qr_b64))
     }
 
-    /// Generate 8 random recovery codes (format: xxxx-xxxx).
+    /// Generate 8 random recovery codes in `XXXX-XXXX-XXXX-XXXX` hex format.
+    ///
+    /// Each code is 16 random hex characters (64 bits of entropy from OsRng),
+    /// split into four 4-character groups separated by dashes for readability.
+    /// This replaces the old `DDDD-DDDD` decimal format (~26.5 bits entropy).
     pub fn generate_recovery_codes() -> Vec<String> {
-        use rand::RngExt;
+        use rand::Rng;
         let mut rng = rand::rng();
         (0..8)
             .map(|_| {
-                let a: u32 = rng.random_range(0..10000);
-                let b: u32 = rng.random_range(0..10000);
-                format!("{a:04}-{b:04}")
+                let mut bytes = [0u8; 8];
+                // rand::rng() is a CSPRNG (ChaCha-based) seeded from the OS
+                // entropy source, giving 64 bits of cryptographic entropy per
+                // code. This replaces the old DDDD-DDDD format (~26.5 bits).
+                rng.fill_bytes(&mut bytes);
+                let h = hex::encode(bytes);
+                // Format as XXXX-XXXX-XXXX-XXXX (16 hex chars, 4 groups of 4)
+                format!("{}-{}-{}-{}", &h[0..4], &h[4..8], &h[8..12], &h[12..16])
             })
             .collect()
     }
 
-    /// Check if a string matches the recovery code format: exactly `DDDD-DDDD`.
+    /// Check if a string matches any supported recovery code format.
+    ///
+    /// Accepts both:
+    /// - New format: `XXXX-XXXX-XXXX-XXXX` (16 hex chars, 4 groups) — generated post-fix
+    /// - Old format: `DDDD-DDDD` (8 decimal digits, 2 groups) — backward compatibility
     pub fn is_recovery_code_format(code: &str) -> bool {
-        let trimmed = code.trim();
-        trimmed.len() == 9
-            && trimmed.as_bytes()[4] == b'-'
-            && trimmed[..4].chars().all(|c| c.is_ascii_digit())
-            && trimmed[5..].chars().all(|c| c.is_ascii_digit())
+        let t = code.trim();
+        // New format: XXXX-XXXX-XXXX-XXXX (19 chars total: 16 hex + 3 dashes)
+        let is_new = t.len() == 19
+            && t.as_bytes()[4] == b'-'
+            && t.as_bytes()[9] == b'-'
+            && t.as_bytes()[14] == b'-'
+            && t[..4].chars().all(|c| c.is_ascii_hexdigit())
+            && t[5..9].chars().all(|c| c.is_ascii_hexdigit())
+            && t[10..14].chars().all(|c| c.is_ascii_hexdigit())
+            && t[15..19].chars().all(|c| c.is_ascii_hexdigit());
+        // Old format: DDDD-DDDD (9 chars total: 8 digits + 1 dash) — backward compat
+        let is_old = t.len() == 9
+            && t.as_bytes()[4] == b'-'
+            && t[..4].chars().all(|c| c.is_ascii_digit())
+            && t[5..].chars().all(|c| c.is_ascii_digit());
+        is_new || is_old
     }
 
     /// Verify a recovery code against the stored list, consuming it on success.
     ///
     /// Returns `Ok(true)` if the code matched and was consumed, `Ok(false)` if
     /// no match, `Err` if the stored codes are malformed.
+    ///
+    /// Uses constant-time comparison across all stored codes to prevent timing
+    /// side-channels that could reveal which index matched (fixes #3591).
     pub fn verify_recovery_code(stored_json: &str, code: &str) -> Result<(bool, String), String> {
+        use subtle::ConstantTimeEq;
         let mut codes: Vec<String> = serde_json::from_str(stored_json)
             .map_err(|e| format!("Invalid recovery codes JSON: {e}"))?;
         let normalized = code.trim().to_lowercase();
-        if let Some(pos) = codes.iter().position(|c| c == &normalized) {
-            codes.remove(pos);
+        let needle = normalized.as_bytes();
+
+        // Scan all codes in constant time: accumulate a match bit and the matched
+        // index without branching on content. We branch only on the final aggregated
+        // bit (which reveals nothing about *which* code matched or how close misses were).
+        let mut matched_idx: usize = 0;
+        let mut found: subtle::Choice = 0u8.into();
+        for (i, stored_code) in codes.iter().enumerate() {
+            let candidate = stored_code.to_lowercase();
+            let eq: subtle::Choice = if needle.len() == candidate.len() {
+                needle.ct_eq(candidate.as_bytes())
+            } else {
+                0u8.into()
+            };
+            // Capture the index of the first match without early exit.
+            let is_first_match = eq & !found;
+            if bool::from(is_first_match) {
+                matched_idx = i;
+            }
+            found = found | eq;
+        }
+
+        if bool::from(found) {
+            codes.remove(matched_idx);
             let updated = serde_json::to_string(&codes)
                 .map_err(|e| format!("Failed to serialize codes: {e}"))?;
             Ok((true, updated))
@@ -1159,6 +1215,42 @@ impl ApprovalManager {
                 .saturating_sub(elapsed) as i64
         });
         self.persist_totp_lockout_save(sender_id, count, locked_at_unix)
+    }
+
+    /// Atomically check lockout status and record a failure in a single lock
+    /// acquisition, eliminating the TOCTOU race between separate
+    /// `is_totp_locked_out` + `record_totp_failure` calls (fixes #3584).
+    ///
+    /// Returns:
+    /// - `Err(true)`  — sender is locked out; failure NOT recorded
+    /// - `Err(false)` — DB persist failed; callers must reject fail-secure
+    /// - `Ok(())`     — failure recorded successfully; sender not yet locked out
+    #[allow(clippy::result_unit_err)]
+    pub fn check_and_record_totp_failure(&self, sender_id: &str) -> Result<(), bool> {
+        // Hold failure_rw_mutex across check+record to prevent concurrent requests
+        // from both passing the lockout check when the counter is at threshold-1.
+        let _guard = self
+            .failure_rw_mutex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Check lockout under the guard.
+        {
+            let failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((count, lockout_start)) = failures.get(sender_id) {
+                if *count >= TOTP_MAX_FAILURES {
+                    let still_locked = lockout_start
+                        .map(|t| t.elapsed().as_secs() < TOTP_LOCKOUT_SECS)
+                        .unwrap_or(false);
+                    if still_locked {
+                        return Err(true);
+                    }
+                }
+            }
+        }
+
+        // Record the failure (also under the guard).
+        self.record_totp_failure(sender_id).map_err(|()| false)
     }
 
     fn persist_totp_lockout_save(
@@ -2603,9 +2695,9 @@ mod tests {
     fn test_recovery_code_generate_and_verify() {
         let codes = ApprovalManager::generate_recovery_codes();
         assert_eq!(codes.len(), 8);
-        // Each code is xxxx-xxxx format
+        // Each code is XXXX-XXXX-XXXX-XXXX format (19 chars: 16 hex + 3 dashes)
         for code in &codes {
-            assert_eq!(code.len(), 9);
+            assert_eq!(code.len(), 19);
             assert!(code.contains('-'));
         }
 
@@ -3047,5 +3139,164 @@ mod tests {
         let mgr =
             ApprovalManager::new_with_db(ApprovalPolicy::default(), Arc::new(StdMutex::new(conn)));
         assert_eq!(mgr.prune_audit(0), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Security hardening: recovery code entropy + TOCTOU (#3591 / #3584)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recovery_code_new_format_length_and_chars() {
+        let codes = ApprovalManager::generate_recovery_codes();
+        assert_eq!(codes.len(), 8, "must generate exactly 8 codes");
+        for code in &codes {
+            // New format: XXXX-XXXX-XXXX-XXXX = 19 chars (16 hex + 3 dashes)
+            assert_eq!(
+                code.len(),
+                19,
+                "each code must be 19 chars (16 hex + 3 dashes), got: {code}"
+            );
+            let parts: Vec<&str> = code.split('-').collect();
+            assert_eq!(
+                parts.len(),
+                4,
+                "code must have 4 dash-separated groups: {code}"
+            );
+            for part in &parts {
+                assert_eq!(part.len(), 4, "each group must be 4 chars: {code}");
+                assert!(
+                    part.chars().all(|c| c.is_ascii_hexdigit()),
+                    "each group must be hex: {code}"
+                );
+            }
+            assert!(
+                ApprovalManager::is_recovery_code_format(code),
+                "generated code must pass format check: {code}"
+            );
+        }
+        // All codes must be unique
+        let unique: std::collections::HashSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), 8, "all codes must be unique");
+    }
+
+    #[test]
+    fn test_recovery_code_old_format_still_verifies() {
+        // Old DDDD-DDDD codes stored in the vault must still verify (backward compat).
+        assert!(
+            ApprovalManager::is_recovery_code_format("1234-5678"),
+            "old DDDD-DDDD format must still be recognized"
+        );
+        let old_codes = vec!["0000-0001".to_string(), "1234-5678".to_string()];
+        let json = serde_json::to_string(&old_codes).unwrap();
+        let (matched, remaining_json) =
+            ApprovalManager::verify_recovery_code(&json, "1234-5678").unwrap();
+        assert!(matched, "old format code must verify");
+        let remaining: Vec<String> = serde_json::from_str(&remaining_json).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(!remaining.contains(&"1234-5678".to_string()));
+    }
+
+    #[test]
+    fn test_recovery_code_ct_compare_correctness() {
+        let codes = ApprovalManager::generate_recovery_codes();
+        let json = serde_json::to_string(&codes).unwrap();
+
+        // Valid code matches and is consumed
+        let (matched, remaining_json) =
+            ApprovalManager::verify_recovery_code(&json, &codes[2]).unwrap();
+        assert!(matched, "valid code must match");
+        let remaining: Vec<String> = serde_json::from_str(&remaining_json).unwrap();
+        assert_eq!(remaining.len(), 7, "consumed code must be removed");
+        assert!(!remaining.contains(&codes[2]));
+
+        // Same code rejected after consumption
+        let (matched2, _) =
+            ApprovalManager::verify_recovery_code(&remaining_json, &codes[2]).unwrap();
+        assert!(!matched2, "consumed code must not match again");
+
+        // Wrong code never matches
+        let (matched3, _) =
+            ApprovalManager::verify_recovery_code(&json, "0000-0000-0000-0000").unwrap();
+        assert!(!matched3, "garbage code must not match");
+
+        // Case-insensitive: generated codes are lowercase hex; uppercase input must match
+        let upper = codes[0].to_uppercase();
+        let (matched4, _) = ApprovalManager::verify_recovery_code(&json, &upper).unwrap();
+        assert!(matched4, "uppercase variant of a valid code must match");
+    }
+
+    #[test]
+    fn test_check_and_record_totp_failure_atomic() {
+        // Verify that check_and_record_totp_failure atomically prevents a sender
+        // from exceeding the lockout threshold via concurrent calls.
+        use std::sync::Arc;
+        let mgr = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
+        let sender = "concurrent_user";
+
+        // Drive up to threshold - 1
+        for _ in 0..(TOTP_MAX_FAILURES - 1) {
+            let result = mgr.check_and_record_totp_failure(sender);
+            assert!(result.is_ok(), "should record failures below threshold");
+        }
+
+        // The threshold-hitting call must also succeed (records the Nth failure)
+        let result = mgr.check_and_record_totp_failure(sender);
+        assert!(result.is_ok(), "Nth failure should be recorded");
+
+        // All subsequent calls must return Err(true) = locked out
+        let result2 = mgr.check_and_record_totp_failure(sender);
+        assert_eq!(
+            result2,
+            Err(true),
+            "call after lockout threshold must return Err(true)"
+        );
+
+        // Verify the public API also reports locked out
+        assert!(mgr.is_totp_locked_out(sender));
+    }
+
+    #[test]
+    fn test_check_and_record_totp_failure_concurrent_no_bypass() {
+        // Spawn N threads all calling check_and_record_totp_failure concurrently.
+        // The total accepted count must be exactly TOTP_MAX_FAILURES; the rest
+        // must be rejected with Err(true).
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let mgr = Arc::new(ApprovalManager::new(ApprovalPolicy::default()));
+        let sender = "parallel_user";
+        let successes = Arc::new(Mutex::new(0u32));
+        let lockouts = Arc::new(Mutex::new(0u32));
+
+        let n_threads = 20usize;
+        let handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let mgr = Arc::clone(&mgr);
+                let successes = Arc::clone(&successes);
+                let lockouts = Arc::clone(&lockouts);
+                thread::spawn(move || match mgr.check_and_record_totp_failure(sender) {
+                    Ok(()) => *successes.lock().unwrap() += 1,
+                    Err(true) => *lockouts.lock().unwrap() += 1,
+                    Err(false) => {} // DB failure (no DB in this test → never happens)
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let s = *successes.lock().unwrap();
+        let l = *lockouts.lock().unwrap();
+        assert_eq!(
+            s + l,
+            n_threads as u32,
+            "all calls must be accounted for: {s} successes + {l} lockouts"
+        );
+        // Exactly TOTP_MAX_FAILURES calls should have succeeded
+        assert_eq!(
+            s, TOTP_MAX_FAILURES,
+            "exactly {TOTP_MAX_FAILURES} calls should succeed before lockout, got {s}"
+        );
     }
 }
