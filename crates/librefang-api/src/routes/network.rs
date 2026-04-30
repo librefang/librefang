@@ -778,9 +778,21 @@ pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let url = match body["url"].as_str() {
+    let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+    };
+    // Canonicalize once at the boundary so the pending key, the trust-list
+    // key inserted on approve, and every later trust-gate comparison all
+    // share the same string. Otherwise `https://x.com/` and `https://x.com`
+    // would split into two pending entries and the gate at /api/a2a/send
+    // would reject whichever variant the caller didn't approve. (#3786)
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
     };
 
     // SSRF protection: validate URL before making any outbound request
@@ -858,7 +870,18 @@ pub async fn a2a_discover_external(
             // SECURITY (Bug #3786): Store in the PENDING list, not the trusted kernel
             // list. The agent cannot receive tasks until the operator explicitly
             // approves it via POST /api/a2a/agents/{url}/approve.
+            let card_name = card.name.clone();
             state.pending_a2a_agents.insert(url.clone(), card);
+
+            // Bug #3786: audit every discovery so silent agent enumeration is detectable.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::A2aDiscovered,
+                format!("url={url} name={card_name}"),
+                "pending",
+                None,
+                Some("api".to_string()),
+            );
 
             (
                 StatusCode::ACCEPTED,
@@ -893,9 +916,18 @@ pub async fn a2a_send_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let url = match body["url"].as_str() {
+    let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+    };
+    // Canonicalize before any trust-list comparison so case / port /
+    // trailing-slash variants all match the form stored at approve time.
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
@@ -910,6 +942,27 @@ pub async fn a2a_send_external(
              Use POST /api/a2a/agents/{url}/approve to trust it first.",
         )
         .into_json_tuple();
+    }
+
+    // SECURITY (Bug #3786): Operator-approved trust gate. Without this check
+    // any caller with a valid API key can dispatch tasks to arbitrary URLs as
+    // long as SSRF allows them — defeating the whole approval workflow. Only
+    // URLs that have been explicitly approved (via /api/a2a/agents/{id}/approve
+    // or seeded via static config) may receive tasks.
+    {
+        let trusted = state
+            .kernel
+            .a2a_agents()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !trusted.iter().any(|(u, _)| u == &url) {
+            return ApiErrorResponse::bad_request(
+                "Target URL is not a trusted A2A agent. \
+                 Discover and approve it first via POST /api/a2a/discover \
+                 followed by POST /api/a2a/agents/{url}/approve.",
+            )
+            .into_json_tuple();
+        }
     }
 
     // SSRF protection: validate URL before making any outbound request
@@ -956,12 +1009,39 @@ pub async fn a2a_external_task_status(
     Path(task_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let url = match params.get("url") {
+    let raw_url = match params.get("url") {
         Some(u) => u.clone(),
         None => {
             return ApiErrorResponse::bad_request("Missing 'url' query parameter").into_json_tuple()
         }
     };
+    // Canonicalize before the trust gate so cosmetic variants on the query
+    // string don't split the comparison from the form stored at approve.
+    let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
+        Some(u) => u,
+        None => {
+            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
+                .into_json_tuple();
+        }
+    };
+
+    // SECURITY (Bug #3786): trust gate — only query task status from
+    // operator-approved A2A agents. Otherwise this endpoint doubles as an
+    // SSRF probe surface against any URL the global SSRF allowlist accepts.
+    {
+        let trusted = state
+            .kernel
+            .a2a_agents()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !trusted.iter().any(|(u, _)| u == &url) {
+            return ApiErrorResponse::bad_request(
+                "Target URL is not a trusted A2A agent. \
+                 Discover and approve it first via POST /api/a2a/discover.",
+            )
+            .into_json_tuple();
+        }
+    }
 
     // SSRF protection: validate URL before making any outbound request
     let ssrf_allowed = state
@@ -1016,7 +1096,12 @@ pub async fn a2a_approve_external(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     // The path parameter may be URL-encoded; decode it for matching.
-    let url = crate::percent_decode(&id);
+    let decoded = crate::percent_decode(&id);
+    // Canonicalize so the lookup matches whatever form the discover
+    // handler used as the storage key. Without this, an operator who
+    // approves `https://x.com/` after discover stored `https://x.com`
+    // (or vice versa) would 404.
+    let url = librefang_runtime::a2a::canonicalize_a2a_url(&decoded).unwrap_or(decoded);
 
     match state.pending_a2a_agents.remove(&url) {
         Some((_, card)) => {
@@ -1026,6 +1111,7 @@ pub async fn a2a_approve_external(
                 "A2A agent approved by operator and promoted to trusted list."
             );
             let card_json = serde_json::to_value(&card).unwrap_or_default();
+            let card_name = card.name.clone();
             // Promote to kernel's trusted list.
             {
                 let mut agents = state
@@ -1040,6 +1126,17 @@ pub async fn a2a_approve_external(
                     agents.push((url.clone(), card));
                 }
             }
+            // Bug #3786: audit the trust promotion — this is the moment the
+            // agent gains the ability to receive tasks, so it must be in the
+            // operator's audit trail.
+            state.kernel.audit().record_with_context(
+                "system",
+                librefang_runtime::audit::AuditAction::A2aTrusted,
+                format!("url={url} name={card_name}"),
+                "ok",
+                None,
+                Some("api".to_string()),
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
