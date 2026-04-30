@@ -58,14 +58,7 @@ impl EventBus {
         // would silence the first 10 s of lag — a fresh process that
         // immediately sees backlog would only bump dropped_count and stay
         // quiet, defeating the "make lag visible" goal of #3630.
-        //
-        // `checked_sub` not bare `-`: on Linux/macOS `Instant` wraps
-        // `CLOCK_MONOTONIC`, which counts from system boot. If LibreFang
-        // starts within 11 s of boot (systemd auto-start, fresh CI
-        // container) the underlying value is < 11 s and `Sub<Duration>`
-        // panics. Falling back to `now()` only relinquishes the warmup,
-        // not correctness — the very first burst may not log, but the
-        // counter still bumps and the second log is at most 10 s later.
+        // checked_sub: CLOCK_MONOTONIC can be <11 s on boot; fallback forfeits warmup, not correctness.
         let warmup = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(11))
             .unwrap_or_else(std::time::Instant::now);
@@ -314,13 +307,7 @@ mod tests {
         assert_eq!(bus.dropped_count(), 10);
     }
 
-    /// Pins the warmup behaviour: a freshly-constructed bus must have its
-    /// `last_drop_warn` backdated far enough that the very first
-    /// `record_consumer_lag` call falls outside the 10 s rate-limit window,
-    /// fires the `error!` log, and advances the timestamp. If someone
-    /// reverts the warmup to `Instant::now()`, this test catches the
-    /// silent regression that #3630 was filed against — lag bursts in the
-    /// first 10 s of process life would only bump the counter, not surface.
+    /// Warmup regression guard: first lag burst must advance `last_drop_warn` (#3630).
     #[tokio::test]
     async fn first_lag_burst_after_construction_advances_warn_timestamp() {
         let bus = EventBus::new();
