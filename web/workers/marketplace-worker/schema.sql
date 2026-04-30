@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS ui_errors (
   ua         TEXT
 );
 
+-- Page visit counts (replaces KV visit counter)
+-- Special rows: '__total__' for all-time total, '__migrated__' as migration flag
+CREATE TABLE IF NOT EXISTS visit_counts (
+  date   TEXT NOT NULL PRIMARY KEY,  -- YYYY-MM-DD, '__total__', or '__migrated__'
+  count  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_packages_kind ON packages(kind);
 CREATE INDEX IF NOT EXISTS idx_packages_downloads ON packages(total_downloads DESC);
 CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at DESC);

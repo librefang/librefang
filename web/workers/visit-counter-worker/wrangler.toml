@@ -5,3 +5,8 @@ compatibility_date = "2025-01-01"
 [[kv_namespaces]]
 binding = "VISIT_COUNTER"
 id = "3ddec4f5f8024982b1ccd49fa6b00e3b"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "librefang-marketplace"
+database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
