@@ -915,7 +915,7 @@ export function OverviewPage() {
             {systemTiles.map((tile) => (
               <button
                 key={tile.label}
-                onClick={() => navigate({ to: tile.page as any })}
+                onClick={() => navigate({ to: tile.page as never })}
                 className="px-2.5 py-2 rounded-md bg-main/60 border border-border-subtle flex items-center justify-between gap-2 cursor-pointer text-left text-text-main hover:border-brand/40 transition-colors"
               >
                 <div className="min-w-0">
