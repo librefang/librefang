@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 /// Maximum events retained in the history ring buffer.
 const HISTORY_SIZE: usize = 1000;
@@ -176,9 +176,32 @@ impl EventBus {
         history.iter().rev().take(limit).cloned().collect()
     }
 
-    /// Return the total number of events dropped due to no active receivers.
+    /// Return the total number of events dropped due to no active receivers
+    /// or consumer-side lag (see [`recv_event_skipping_lag`]).
     pub fn dropped_count(&self) -> u64 {
         self.dropped_count.load(Ordering::Relaxed)
+    }
+
+    /// Record that the consumer side dropped `n` events due to lag, and emit
+    /// an error log if the rate-limit window has expired. Use this from any
+    /// loop that receives from a [`broadcast::Receiver`] returned by
+    /// [`Self::subscribe_agent`] or [`Self::subscribe_all`] when it sees
+    /// [`broadcast::error::RecvError::Lagged`] — silent lag drops would
+    /// otherwise hide missed triggers (issue #3630).
+    pub fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        let total = self.dropped_count.fetch_add(n, Ordering::Relaxed) + n;
+        if let Ok(mut last) = self.last_drop_warn.lock() {
+            if last.elapsed() >= std::time::Duration::from_secs(10) {
+                error!(
+                    lagged = n,
+                    total_dropped = total,
+                    context = context,
+                    "Event bus: consumer lagged behind broadcast queue, events dropped — \
+                     receiver should be drained faster or buffer increased",
+                );
+                *last = std::time::Instant::now();
+            }
+        }
     }
 
     /// Remove an agent's channel when it's terminated.
@@ -208,6 +231,32 @@ impl Default for EventBus {
     }
 }
 
+/// Receive the next event from a broadcast receiver, treating
+/// [`broadcast::error::RecvError::Lagged`] as a "skip and report" condition
+/// rather than terminating the consumer. Lagged drops are routed through
+/// [`EventBus::record_consumer_lag`] so they show up as `error!` logs and
+/// in `dropped_count()`. Returns `None` if the channel is closed.
+///
+/// Without this helper, callers that exit on `Lagged` turn a transient
+/// burst into a permanent miss; callers that ignore `Lagged` lose triggers
+/// silently (issue #3630).
+pub async fn recv_event_skipping_lag(
+    rx: &mut broadcast::Receiver<Event>,
+    bus: &EventBus,
+    context: &'static str,
+) -> Option<Event> {
+    loop {
+        match rx.recv().await {
+            Ok(event) => return Some(event),
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                bus.record_consumer_lag(n, context);
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +274,16 @@ mod tests {
         bus.publish(event).await;
         let history = bus.history(10).await;
         assert_eq!(history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn record_consumer_lag_increments_dropped_count() {
+        let bus = EventBus::new();
+        assert_eq!(bus.dropped_count(), 0);
+        bus.record_consumer_lag(7, "test");
+        assert_eq!(bus.dropped_count(), 7);
+        bus.record_consumer_lag(3, "test");
+        assert_eq!(bus.dropped_count(), 10);
     }
 
     #[tokio::test]

@@ -1530,8 +1530,24 @@ fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
     Some(qualified)
 }
 
-/// Default context window size (tokens) for token-based trimming.
+/// Default context window size (tokens) for token-based trimming when the
+/// model is in the catalog but its `context_window` was unset. Referenced by
+/// `docs/architecture/message-history-trimming.md` and
+/// `docs/src/app/configuration/core/page.mdx` so kept as the authoritative
+/// value even when no runtime path currently reads it.
+#[allow(dead_code)]
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
+
+/// Conservative fallback for **unknown** models — i.e. the catalog had no
+/// entry for this model name. 200K silently assumes a Claude-class window;
+/// for a small open-source model that actually supports 8K, an oversized
+/// prompt only fails at the provider with HTTP 400 *after* tokens are
+/// already metered. 8192 is the smallest window any modern provider ships
+/// (gpt-3.5, llama-2-base, …), so this errs on the side of trimming early
+/// rather than burning tokens (#3349). Operators with larger windows must
+/// set `agent.toml: model.context_window` (or the equivalent provider
+/// catalog entry) explicitly.
+const UNKNOWN_MODEL_CONTEXT_WINDOW: usize = 8192;
 
 /// Agent lifecycle phase within the execution loop.
 /// Used for UX indicators (typing, reactions) without coupling to channel types.
@@ -3214,8 +3230,19 @@ pub async fn run_agent_loop(
         crate::dangerous_command::DangerousCommandChecker::default(),
     ));
 
-    // Build context budget from model's actual context window (or fallback to default)
-    let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    // Build context budget from model's actual context window. If the model
+    // wasn't in the catalog (`None`), pick a conservative 8K fallback — a
+    // 200K assumption silently bills the user for prompts the provider then
+    // rejects with HTTP 400 (#3349).
+    let ctx_window = context_window_tokens.unwrap_or_else(|| {
+        tracing::warn!(
+            model = %manifest.model.model,
+            fallback = UNKNOWN_MODEL_CONTEXT_WINDOW,
+            "Model not in catalog — falling back to conservative context window. \
+             Set `model.context_window` in agent.toml to silence this warning."
+        );
+        UNKNOWN_MODEL_CONTEXT_WINDOW
+    });
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — triggers LLM-based summarisation when token usage
     // exceeds 80% of the context window, before falling back to brute-force trim.
@@ -4603,8 +4630,19 @@ pub async fn run_agent_loop_streaming(
         crate::dangerous_command::DangerousCommandChecker::default(),
     ));
 
-    // Build context budget from model's actual context window (or fallback to default)
-    let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    // Build context budget from model's actual context window. If the model
+    // wasn't in the catalog (`None`), pick a conservative 8K fallback — a
+    // 200K assumption silently bills the user for prompts the provider then
+    // rejects with HTTP 400 (#3349).
+    let ctx_window = context_window_tokens.unwrap_or_else(|| {
+        tracing::warn!(
+            model = %manifest.model.model,
+            fallback = UNKNOWN_MODEL_CONTEXT_WINDOW,
+            "Model not in catalog — falling back to conservative context window. \
+             Set `model.context_window` in agent.toml to silence this warning."
+        );
+        UNKNOWN_MODEL_CONTEXT_WINDOW
+    });
     let context_budget = ContextBudget::new(ctx_window);
     // Context compressor — LLM-based soft compression before hard trim.
     let context_compressor = crate::context_compressor::ContextCompressor::with_defaults();

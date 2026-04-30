@@ -147,6 +147,21 @@ impl ChatGptTokenCache {
         let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         *lock = Some(token);
     }
+
+    /// Drop a token that was just rejected by the API. Without this, the
+    /// post-lock re-check in `refresh_token()` would observe the still-TTL-
+    /// valid rejected token and return it as "fresh", causing the retry to
+    /// 401 again (#3625). Concurrent callers all racing on the same rejected
+    /// token converge on a single refresh: first invalidates → all see None
+    /// after the lock → leader refreshes → followers pick up the new token.
+    pub fn invalidate_if_matches(&self, rejected: &str) {
+        let mut lock = self.cached.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = lock.as_ref() {
+            if t.token.as_str() == rejected {
+                *lock = None;
+            }
+        }
+    }
 }
 
 impl Default for ChatGptTokenCache {
@@ -327,6 +342,10 @@ impl ChatGptDriver {
             }
             _ => return Ok(http_resp),
         }
+
+        // Drop the just-rejected token so the post-lock cache re-check in
+        // refresh_token() can't return it as "still valid" (#3625).
+        self.token_cache.invalidate_if_matches(token.token.as_str());
 
         let refreshed = self.refresh_token().await?;
         let http_resp = self
@@ -995,6 +1014,23 @@ mod tests {
         let cached = cache.get();
         assert!(cached.is_some());
         assert_eq!(*cached.unwrap().token, "test-session-token");
+    }
+
+    #[test]
+    fn test_invalidate_if_matches_drops_only_matching_token() {
+        let cache = ChatGptTokenCache::new();
+        cache.set(CachedSessionToken {
+            token: Zeroizing::new("rejected".to_string()),
+            expires_at: Instant::now() + Duration::from_secs(86400),
+        });
+
+        // Different token in cache → no-op (e.g. another waiter already refreshed).
+        cache.invalidate_if_matches("some-other-token");
+        assert!(cache.get().is_some());
+
+        // Matching token → cache cleared so the next refresh actually runs.
+        cache.invalidate_if_matches("rejected");
+        assert!(cache.get().is_none());
     }
 
     #[test]
