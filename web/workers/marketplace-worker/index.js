@@ -3,9 +3,10 @@
 // Auth: GitHub OAuth (stateless JWT in cookie)
 
 const CORS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': 'https://librefang.ai',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Credentials': 'true',
 }
 
 const JSON_HEADERS = { ...CORS, 'Content-Type': 'application/json' }
@@ -164,7 +165,8 @@ async function handleListPackages(request, env) {
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 100)
   const offset = parseInt(url.searchParams.get('offset') || '0')
 
-  const sortCol = sort === 'updated' ? 'updated_at' : sort === 'stars' ? 'stars' : 'total_downloads'
+  const SORT_COLS = { updated: 'updated_at', stars: 'stars', downloads: 'total_downloads' }
+  const sortCol = SORT_COLS[sort] ?? 'total_downloads'
 
   let where = '1=1'
   const binds = []
@@ -193,7 +195,7 @@ async function handleListPackages(request, env) {
     `SELECT COUNT(*) as total FROM packages WHERE ${where.replace(/LIMIT.*/, '')}`
   ).bind(...binds.slice(0, -2)).first()
 
-  return json({ packages: rows.results.map(formatPackage), total: countRow.total })
+  return json({ packages: rows.results.map(formatPackage), total: countRow?.total ?? 0 })
 }
 
 async function handleGetPackage(slug, env) {

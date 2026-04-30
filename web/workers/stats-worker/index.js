@@ -69,8 +69,10 @@ async function handleGitHubStats(request, env, ctx, forceRefresh) {
     prs: prCount,
   }
 
-  await upsertTodayStats(env, today, entry)
-  const history = await getLast30Days(env)
+  const [, history] = await Promise.all([
+    upsertTodayStats(env, today, entry),
+    getLast30Days(env),
+  ])
 
   const body = JSON.stringify({
     ...entry,

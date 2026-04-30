@@ -229,8 +229,8 @@ async function handleErrorReport(request, env, ctx) {
   if (typeof message !== 'string' || message.length === 0 || message.length > 2000)
     return new Response('invalid payload', { status: 400, headers: CORS })
 
-  ctx.waitUntil(
-    env.DB.prepare(
+  ctx.waitUntil((async () => {
+    await env.DB.prepare(
       `INSERT INTO ui_errors (at, message, stack, pathname, lang, ua)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(
@@ -240,8 +240,11 @@ async function handleErrorReport(request, env, ctx) {
       typeof pathname === 'string' ? pathname.slice(0, 256) : null,
       typeof lang === 'string' ? lang.slice(0, 16) : null,
       typeof ua === 'string' ? ua.slice(0, 256) : null,
-    ).run(),
-  )
+    ).run()
+    await env.DB.prepare(
+      `DELETE FROM ui_errors WHERE at < datetime('now', '-30 days')`,
+    ).run()
+  })())
 
   return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json', ...CORS } })
 }
