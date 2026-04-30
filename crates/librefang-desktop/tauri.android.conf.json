@@ -1,6 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "ai.librefang.app",
+  "build": {
+    "frontendDist": "../librefang-api/static/react"
+  },
   "app": {
     "windows": [
       {

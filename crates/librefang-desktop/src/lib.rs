@@ -467,7 +467,15 @@ pub fn run(server_url: Option<String>, force_local: bool) {
             {
                 if !show_connection_screen && !initial_url.is_empty() {
                     if let Some(window) = app.get_webview_window("main") {
-                        let url: tauri::Url = initial_url.parse().expect("Invalid server URL");
+                        // Release builds use the embedded dashboard with
+                        // the daemon URL hash-encoded; debug stays
+                        // thin-client. Both branches resolve through
+                        // `connection::navigation_target` so the rule
+                        // lives in one place.
+                        let target = connection::navigation_target(&initial_url);
+                        let url: tauri::Url = target
+                            .parse()
+                            .expect("navigation_target must return parsable URL");
                         window.navigate(url)?;
                     } else {
                         warn!("Mobile main window not found at setup time");
