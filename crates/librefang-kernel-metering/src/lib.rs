@@ -20,7 +20,7 @@ const DEFAULT_OUTPUT_COST_PER_M: f64 = 3.0;
 /// This ledger holds an *estimated* cost for every in-flight LLM call so
 /// the budget gate can include pending spend in its decision. Reserve
 /// before the network call, settle (or release) after.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct CostReservationLedger {
     /// Total reserved USD across all in-flight calls.
     reserved_usd: Mutex<f64>,
@@ -55,6 +55,7 @@ impl CostReservationLedger {
 /// [`MeteringReservation::settle`] once the actual usage record is in
 /// hand so the in-memory ledger doesn't double-count alongside the
 /// settled SQLite row.
+#[derive(Debug)]
 #[must_use = "a budget reservation must be settled or released"]
 pub struct MeteringReservation {
     ledger: Arc<CostReservationLedger>,
