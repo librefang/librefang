@@ -13360,12 +13360,6 @@ system_prompt = "You are a helpful assistant."
                                 });
                             }
                         }
-                        // Persist immediately after each job execution so that
-                        // last_run / next_run are durable on disk even if the
-                        // daemon crashes before the periodic flush fires.
-                        if let Err(e) = kernel.cron_scheduler.persist() {
-                            tracing::warn!(job = %job_name, "Cron per-job persist failed: {e}");
-                        }
                     }
 
                     // Periodic persist as a safety net (every ~5 minutes / 20 ticks * 15s)
