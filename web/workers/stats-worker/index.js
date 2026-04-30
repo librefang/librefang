@@ -1,8 +1,6 @@
 // GitHub Stats Worker
 // Tracks GitHub repo metrics (stars, forks, issues, PRs, releases).
-// HTTP Cache API handles response caching — KV is only used for the 90-day
-// history blob and the one-time migration flag (both require persistence
-// across cache evictions and cron writes).
+// Storage: D1 (github_stats_history + kv_store). Cache API for HTTP responses.
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -63,25 +61,26 @@ async function handleGitHubStats(request, env, ctx, forceRefresh) {
     0,
   )
 
-  const history = await appendTodayToHistory(env, {
+  const today = isoDate()
+  const entry = {
     stars: repo.stargazers_count || 0,
     forks: repo.forks_count || 0,
     issues: repo.open_issues_count || 0,
     prs: prCount,
-  })
+  }
+
+  await upsertTodayStats(env, today, entry)
+  const history = await getLast30Days(env)
 
   const body = JSON.stringify({
-    stars: repo.stargazers_count || 0,
-    forks: repo.forks_count || 0,
-    issues: repo.open_issues_count || 0,
-    prs: prCount,
+    ...entry,
     lastUpdate: repo.updated_at || '',
     createdAt: repo.created_at || '',
     downloads,
-    starHistory: history.slice(-30),
+    starHistory: history,
   })
 
-  const response = jsonResponse(body, 1800) // 30 min
+  const response = jsonResponse(body, 1800)
   ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
   return response
 }
@@ -95,7 +94,6 @@ async function handleReleases(request, env, ctx) {
     'https://api.github.com/repos/librefang/librefang/releases?per_page=20',
     { headers: ghHeaders(env) },
   )
-
   if (!res.ok) return errorResponse(`GitHub API returned ${res.status}`, 502)
 
   const body = await res.text()
@@ -121,85 +119,35 @@ async function recordDailyStats(env) {
   }
 
   const repo = await repoRes.json()
-  await appendTodayToHistory(env, {
+  await upsertTodayStats(env, isoDate(), {
     stars: repo.stargazers_count || 0,
     forks: repo.forks_count || 0,
     issues: repo.open_issues_count || 0,
     prs: parseLinkHeaderCount(pullsRes.headers.get('link')),
   })
-
-  console.log('Recorded daily stats:', new Date().toISOString().split('T')[0], 'stars:', repo.stargazers_count)
+  console.log('Recorded daily stats:', isoDate(), 'stars:', repo.stargazers_count)
 }
 
 // ---------------------------------------------------------------------------
-// History (KV — must survive cache eviction and be written by cron)
+// D1 helpers
 // ---------------------------------------------------------------------------
 
-async function appendTodayToHistory(env, todayStats) {
-  const today = new Date().toISOString().split('T')[0]
-  let history = []
-
-  try {
-    const raw = await env.KV.get('stats_history')
-    if (raw) history = JSON.parse(raw)
-  } catch (e) {
-    console.error('KV read error:', e.message)
-  }
-
-  history = await migrateOldKeys(env, history)
-
-  const entry = { date: today, ...todayStats }
-  const idx = history.findIndex(h => h.date === today)
-  if (idx >= 0) history[idx] = entry
-  else history.push(entry)
-
-  if (history.length > 90) history = history.slice(-90)
-  await env.KV.put('stats_history', JSON.stringify(history))
-  return history
+async function upsertTodayStats(env, date, { stars, forks, issues, prs }) {
+  await env.DB.prepare(
+    `INSERT INTO github_stats_history (date, stars, forks, issues, prs)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(date) DO UPDATE SET
+       stars = excluded.stars, forks = excluded.forks,
+       issues = excluded.issues, prs = excluded.prs`,
+  ).bind(date, stars, forks, issues, prs).run()
 }
 
-// One-time migration from old per-day KV keys to single history blob.
-async function migrateOldKeys(env, history) {
-  if (history.length >= 7) return history
-  if (await env.KV.get('stats_migration_done')) return history
-
-  const existingDates = new Set(history.map(h => h.date))
-  const newEntries = []
-
-  for (let i = 0; i < 90; i++) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    const dateStr = d.toISOString().split('T')[0]
-    if (existingDates.has(dateStr)) continue
-
-    const stars = await env.KV.get('stars_' + dateStr)
-    if (!stars) continue
-
-    const [forks, issues, prs] = await Promise.all([
-      env.KV.get('forks_' + dateStr),
-      env.KV.get('issues_' + dateStr),
-      env.KV.get('prs_' + dateStr),
-    ])
-    newEntries.push({
-      date: dateStr,
-      stars: parseInt(stars, 10),
-      forks: forks ? parseInt(forks, 10) : 0,
-      issues: issues ? parseInt(issues, 10) : 0,
-      prs: prs ? parseInt(prs, 10) : 0,
-    })
-  }
-
-  if (newEntries.length > 0) {
-    history = [...history, ...newEntries]
-    history.sort((a, b) => a.date.localeCompare(b.date))
-    const seen = new Map()
-    for (const e of history) seen.set(e.date, e)
-    history = Array.from(seen.values()).slice(-90)
-    await env.KV.put('stats_history', JSON.stringify(history))
-  }
-
-  await env.KV.put('stats_migration_done', '1')
-  return history
+async function getLast30Days(env) {
+  const rows = await env.DB.prepare(
+    `SELECT date, stars, forks, issues, prs
+     FROM github_stats_history ORDER BY date DESC LIMIT 30`,
+  ).all()
+  return rows.results.reverse()
 }
 
 // ---------------------------------------------------------------------------
@@ -218,13 +166,13 @@ function parseLinkHeaderCount(link) {
   return m ? parseInt(m[1], 10) : 0
 }
 
+function isoDate() {
+  return new Date().toISOString().split('T')[0]
+}
+
 function jsonResponse(body, maxAge = 300) {
   return new Response(body, {
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': `public, max-age=${maxAge}`,
-      ...CORS,
-    },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${maxAge}`, ...CORS },
   })
 }
 

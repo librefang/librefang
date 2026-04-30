@@ -1,7 +1,6 @@
 // Registry Worker
 // Proxies librefang-registry (GitHub) with Cache API for HTTP responses.
-// KV is used only for mutable counters (clicks, errors) and registry_data
-// written by cron — everything else is Cache API (free, no quota).
+// Storage: D1 (registry_clicks, kv_store, ui_errors). No KV dependency.
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -12,18 +11,12 @@ const CORS = {
 const REGISTRY_API = 'https://api.github.com/repos/librefang/librefang-registry/contents'
 const REGISTRY_RAW = 'https://raw.githubusercontent.com/librefang/librefang-registry/main'
 
-// registry_data is written by cron and must survive cache eviction, so it
-// stays in KV. Serve it through Cache API on reads so KV is only hit when
-// the cache is cold or stale.
-const REGISTRY_CACHE_TTL = 3600        // 1 hour — Cache API max-age
-const REGISTRY_STALE_KV_TTL = 86400   // 24 hours — fall back to KV if cache miss
+const REGISTRY_CACHE_TTL = 3600       // 1h Cache API TTL
+const REGISTRY_STALE_TTL = 86400      // 24h — beyond this, refresh inline
 
 const CATEGORIES = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
 const CATEGORY_RE = /^(hands|channels|providers|workflows|agents|plugins|skills|mcp)\//
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i
-
-const ERROR_SHARDS = 4
-const ERRORS_MAX_PER_SHARD = 25
 
 export default {
   async fetch(request, env, ctx) {
@@ -65,7 +58,7 @@ export default {
 }
 
 // ---------------------------------------------------------------------------
-// Registry (stale-while-revalidate via Cache API, fallback to KV)
+// Registry (Cache API read, D1 written by cron)
 // ---------------------------------------------------------------------------
 
 async function handleRegistry(request, env, ctx, forceRefresh) {
@@ -73,29 +66,26 @@ async function handleRegistry(request, env, ctx, forceRefresh) {
 
   if (!forceRefresh) {
     const cached = await caches.default.match(cacheKey)
-    if (cached) {
-      // Trigger background refresh if the KV copy is newer than cache
-      ctx.waitUntil(maybeRevalidate(env, ctx, cacheKey))
-      return addCors(cached)
-    }
+    if (cached) return addCors(cached)
   }
 
-  // Cache miss — pull from KV (written by cron or inline refresh)
-  const kvData = await env.KV.get('registry_data')
-  const kvTime = await env.KV.get('registry_data_time')
-  const age = kvTime ? (Date.now() - parseInt(kvTime, 10)) / 1000 : Infinity
+  const row = await env.DB.prepare(
+    `SELECT value, updated_at FROM kv_store WHERE key = 'registry_data'`,
+  ).first()
 
-  if (kvData && age < REGISTRY_STALE_KV_TTL) {
-    const response = jsonResponse(kvData, REGISTRY_CACHE_TTL)
+  if (row && (Date.now() / 1000 - row.updated_at) < REGISTRY_STALE_TTL) {
+    const response = jsonResponse(row.value, REGISTRY_CACHE_TTL)
     ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
     return response
   }
 
-  // KV also stale — refresh inline
   await refreshRegistryCache(env)
-  const fresh = await env.KV.get('registry_data')
+  const fresh = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'registry_data'`,
+  ).first()
+
   if (fresh) {
-    const response = jsonResponse(fresh, REGISTRY_CACHE_TTL)
+    const response = jsonResponse(fresh.value, REGISTRY_CACHE_TTL)
     ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
     return response
   }
@@ -104,16 +94,6 @@ async function handleRegistry(request, env, ctx, forceRefresh) {
     JSON.stringify({ error: 'registry unavailable', fetchedAt: new Date().toISOString() }),
     { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS } },
   )
-}
-
-async function maybeRevalidate(env, ctx, cacheKey) {
-  const kvTime = await env.KV.get('registry_data_time')
-  if (!kvTime) return
-  // If KV was updated more recently than 5 min ago, refresh the cache entry
-  if (Date.now() - parseInt(kvTime, 10) < 5 * 60 * 1000) {
-    const kvData = await env.KV.get('registry_data')
-    if (kvData) await caches.default.put(cacheKey, jsonResponse(kvData, REGISTRY_CACHE_TTL))
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,12 +131,10 @@ async function handleRegistryCommit(request, env, ctx, rawPath) {
   const cached = await caches.default.match(cacheKey)
   if (cached) return addCors(cached)
 
-  const headers = ghHeaders(env)
   const upstream = await fetch(
     `https://api.github.com/repos/librefang/librefang-registry/commits?path=${encodeURIComponent(rawPath)}&per_page=1`,
-    { headers },
+    { headers: ghHeaders(env) },
   )
-
   if (!upstream.ok) return errorResponse(`upstream ${upstream.status}`, upstream.status)
 
   const commits = await upstream.json()
@@ -169,13 +147,13 @@ async function handleRegistryCommit(request, env, ctx, rawPath) {
       }
     : { sha: null, date: null, message: null }
 
-  const response = jsonResponse(JSON.stringify(result), 21600) // 6h
+  const response = jsonResponse(JSON.stringify(result), 21600)
   ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
   return response
 }
 
 // ---------------------------------------------------------------------------
-// Click tracking (KV — mutable counters, must persist)
+// Click tracking (D1 atomic upsert)
 // ---------------------------------------------------------------------------
 
 async function handleClick(request, env, ctx) {
@@ -240,7 +218,7 @@ async function handleMetrics(env) {
 }
 
 // ---------------------------------------------------------------------------
-// UI error reports (KV — mutable log)
+// UI error reports (D1)
 // ---------------------------------------------------------------------------
 
 async function handleErrorReport(request, env, ctx) {
@@ -251,53 +229,29 @@ async function handleErrorReport(request, env, ctx) {
   if (typeof message !== 'string' || message.length === 0 || message.length > 2000)
     return new Response('invalid payload', { status: 400, headers: CORS })
 
-  const entry = {
-    at: new Date().toISOString(),
-    message: message.slice(0, 2000),
-    stack: typeof stack === 'string' ? stack.slice(0, 4000) : undefined,
-    pathname: typeof pathname === 'string' ? pathname.slice(0, 256) : undefined,
-    lang: typeof lang === 'string' ? lang.slice(0, 16) : undefined,
-    ua: typeof ua === 'string' ? ua.slice(0, 256) : undefined,
-  }
-
-  const shard = Math.floor(Math.random() * ERROR_SHARDS)
-  const key = `ui_errors:${shard}`
-
-  ctx.waitUntil((async () => {
-    let errors = []
-    try {
-      const raw = await env.KV.get(key)
-      if (raw) errors = JSON.parse(raw)
-    } catch (_) { errors = [] }
-    errors.unshift(entry)
-    if (errors.length > ERRORS_MAX_PER_SHARD) errors.length = ERRORS_MAX_PER_SHARD
-    await env.KV.put(key, JSON.stringify(errors))
-  })())
+  ctx.waitUntil(
+    env.DB.prepare(
+      `INSERT INTO ui_errors (at, message, stack, pathname, lang, ua)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      new Date().toISOString(),
+      message.slice(0, 2000),
+      typeof stack === 'string' ? stack.slice(0, 4000) : null,
+      typeof pathname === 'string' ? pathname.slice(0, 256) : null,
+      typeof lang === 'string' ? lang.slice(0, 16) : null,
+      typeof ua === 'string' ? ua.slice(0, 256) : null,
+    ).run(),
+  )
 
   return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json', ...CORS } })
 }
 
 async function handleErrorList(env) {
-  const shards = await Promise.all([
-    ...Array.from({ length: ERROR_SHARDS }, (_, i) =>
-      env.KV.get(`ui_errors:${i}`).catch(() => null),
-    ),
-    env.KV.get('ui_errors').catch(() => null), // legacy key
-  ])
+  const rows = await env.DB.prepare(
+    `SELECT * FROM ui_errors ORDER BY at DESC LIMIT 100`,
+  ).all()
 
-  const merged = []
-  for (const raw of shards) {
-    if (!raw) continue
-    try {
-      const arr = JSON.parse(raw)
-      if (Array.isArray(arr)) merged.push(...arr)
-    } catch (_) { continue }
-  }
-
-  merged.sort((a, b) => String(b?.at || '').localeCompare(String(a?.at || '')))
-  if (merged.length > 100) merged.length = 100
-
-  return new Response(JSON.stringify({ errors: merged }), {
+  return new Response(JSON.stringify({ errors: rows.results }), {
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...CORS },
   })
 }
@@ -370,11 +324,15 @@ async function refreshRegistryCache(env) {
       .map((cat, i) => `${cat}=${sigOf(dirs[i].filter(f => f.name !== 'README.md'))}`)
       .join('|')
 
-    const existing = await env.KV.get('registry_data')
+    const existing = await env.DB.prepare(
+      `SELECT value FROM kv_store WHERE key = 'registry_data'`,
+    ).first()
     if (existing) {
       try {
-        if (JSON.parse(existing).signature === signature) {
-          await env.KV.put('registry_data_time', String(Date.now()))
+        if (JSON.parse(existing.value).signature === signature) {
+          await env.DB.prepare(
+            `UPDATE kv_store SET updated_at = ? WHERE key = 'registry_data'`,
+          ).bind(Math.floor(Date.now() / 1000)).run()
           console.log('Registry unchanged, skipping manifest fetch')
           return
         }
@@ -403,10 +361,11 @@ async function refreshRegistryCache(env) {
       signature,
     }
 
-    await Promise.all([
-      env.KV.put('registry_data', JSON.stringify(result)),
-      env.KV.put('registry_data_time', String(Date.now())),
-    ])
+    await env.DB.prepare(
+      `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(JSON.stringify(result), Math.floor(Date.now() / 1000)).run()
+
     console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels,',
       agents.length, 'agents,', skills.length, 'skills,', mcp.length, 'mcp')
   } catch (e) {

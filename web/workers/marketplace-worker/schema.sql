@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS download_counts_pending (
   PRIMARY KEY (package_id, version_id, week)
 );
 
--- Registry item click counts (replaces KV shard pattern)
+-- Registry item click counts
 CREATE TABLE IF NOT EXISTS registry_clicks (
   category   TEXT NOT NULL,
   item_id    TEXT NOT NULL,
@@ -64,8 +64,38 @@ CREATE TABLE IF NOT EXISTS registry_clicks (
   PRIMARY KEY (category, item_id)
 );
 
+-- GitHub repo daily stats history (replaces KV stats_history blob)
+CREATE TABLE IF NOT EXISTS github_stats_history (
+  date    TEXT NOT NULL PRIMARY KEY,  -- YYYY-MM-DD
+  stars   INTEGER NOT NULL DEFAULT 0,
+  forks   INTEGER NOT NULL DEFAULT 0,
+  issues  INTEGER NOT NULL DEFAULT 0,
+  prs     INTEGER NOT NULL DEFAULT 0
+);
+
+-- Key-value store for singleton config/state (replaces remaining KV keys)
+-- Used for: registry_data, registry_data_time, stats_migration_done
+CREATE TABLE IF NOT EXISTS kv_store (
+  key        TEXT NOT NULL PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- UI error reports (replaces KV ui_errors:* shards)
+CREATE TABLE IF NOT EXISTS ui_errors (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  at         TEXT NOT NULL,
+  message    TEXT NOT NULL,
+  stack      TEXT,
+  pathname   TEXT,
+  lang       TEXT,
+  ua         TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_packages_kind ON packages(kind);
 CREATE INDEX IF NOT EXISTS idx_packages_downloads ON packages(total_downloads DESC);
 CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_versions_package ON package_versions(package_id);
 CREATE INDEX IF NOT EXISTS idx_clicks_category ON registry_clicks(category, count DESC);
+CREATE INDEX IF NOT EXISTS idx_stats_history_date ON github_stats_history(date DESC);
+CREATE INDEX IF NOT EXISTS idx_ui_errors_at ON ui_errors(at DESC);
