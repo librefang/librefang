@@ -534,8 +534,12 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         match candidate.finish_reason.as_deref() {
             Some("MAX_TOKENS") => StopReason::MaxTokens,
             // Safety / policy refusals — surface so caller can react (#3450).
-            Some("SAFETY") | Some("RECITATION") | Some("BLOCKLIST")
-            | Some("PROHIBITED_CONTENT") | Some("SPII") | Some("IMAGE_SAFETY")
+            Some("SAFETY")
+            | Some("RECITATION")
+            | Some("BLOCKLIST")
+            | Some("PROHIBITED_CONTENT")
+            | Some("SPII")
+            | Some("IMAGE_SAFETY")
             | Some("LANGUAGE") => StopReason::ContentFiltered,
             _ => StopReason::EndTurn,
         }
@@ -766,8 +770,12 @@ pub(crate) async fn stream_gemini_sse(
         Some("STOP") => StopReason::EndTurn,
         Some("MAX_TOKENS") => StopReason::MaxTokens,
         // Safety / policy refusals — surface so caller can react (#3450).
-        Some("SAFETY") | Some("RECITATION") | Some("BLOCKLIST")
-        | Some("PROHIBITED_CONTENT") | Some("SPII") | Some("IMAGE_SAFETY")
+        Some("SAFETY")
+        | Some("RECITATION")
+        | Some("BLOCKLIST")
+        | Some("PROHIBITED_CONTENT")
+        | Some("SPII")
+        | Some("IMAGE_SAFETY")
         | Some("LANGUAGE") => StopReason::ContentFiltered,
         _ => {
             if !tool_calls.is_empty() {
@@ -1224,8 +1232,12 @@ impl LlmDriver for GeminiDriver {
                 Some("STOP") => StopReason::EndTurn,
                 Some("MAX_TOKENS") => StopReason::MaxTokens,
                 // Safety / policy refusals — surface so caller can react (#3450).
-                Some("SAFETY") | Some("RECITATION") | Some("BLOCKLIST")
-                | Some("PROHIBITED_CONTENT") | Some("SPII") | Some("IMAGE_SAFETY")
+                Some("SAFETY")
+                | Some("RECITATION")
+                | Some("BLOCKLIST")
+                | Some("PROHIBITED_CONTENT")
+                | Some("SPII")
+                | Some("IMAGE_SAFETY")
                 | Some("LANGUAGE") => StopReason::ContentFiltered,
                 _ => {
                     if !tool_calls.is_empty() {

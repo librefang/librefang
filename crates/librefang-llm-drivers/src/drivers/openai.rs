@@ -1605,9 +1605,8 @@ impl LlmDriver for OpenAIDriver {
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
                             .and_then(|v| v.as_u64());
-                        let deepseek_cached = u
-                            .get("prompt_cache_hit_tokens")
-                            .and_then(|v| v.as_u64());
+                        let deepseek_cached =
+                            u.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64());
                         if let Some(cached) = nested_cached.or(deepseek_cached) {
                             if cached > 0 {
                                 usage.cache_read_input_tokens = cached;

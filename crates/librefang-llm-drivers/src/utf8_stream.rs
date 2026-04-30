@@ -48,7 +48,8 @@ impl Utf8StreamDecoder {
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
                 // Safe: validated by from_utf8 above.
-                let head = unsafe { std::str::from_utf8_unchecked(&buf[..valid_up_to]) }.to_string();
+                let head =
+                    unsafe { std::str::from_utf8_unchecked(&buf[..valid_up_to]) }.to_string();
 
                 match e.error_len() {
                     // None = trailing partial codepoint — buffer it.
