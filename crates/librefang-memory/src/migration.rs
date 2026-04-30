@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 29;
+const SCHEMA_VERSION: u32 = 30;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -68,6 +68,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(27, migrate_v27);
     run_step!(28, migrate_v28);
     run_step!(29, migrate_v29);
+    run_step!(30, migrate_v30);
 
     Ok(())
 }
@@ -897,6 +898,26 @@ fn migrate_v29(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
          VALUES (29, datetime('now'), 'Add deleted_at/finished_at retention timestamps')",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Version 30: Add `session_id` column to `usage_events` so spend/tokens can
+/// be rolled up per session (Recent sessions table on the dashboard).
+/// Pre-v30 rows leave `session_id` NULL and are simply excluded from
+/// per-session aggregates.
+fn migrate_v30(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "usage_events", "session_id") {
+        conn.execute("ALTER TABLE usage_events ADD COLUMN session_id TEXT", [])?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_events(session_id)",
+        [],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (30, datetime('now'), 'Add session_id column to usage_events for per-session cost rollup')",
         [],
     )?;
     Ok(())
