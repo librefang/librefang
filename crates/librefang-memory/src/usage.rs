@@ -1,7 +1,7 @@
 //! Usage tracking store — records LLM usage events for cost monitoring.
 
 use chrono::Utc;
-use librefang_types::agent::{AgentId, UserId};
+use librefang_types::agent::{AgentId, SessionId, UserId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use rusqlite::{Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,11 @@ pub struct UsageRecord {
     /// "discord", "api", "cron", "cli"). `None` for unattributed calls.
     #[serde(default)]
     pub channel: Option<String>,
+    /// Session this LLM call belonged to, when available. `None` for
+    /// session-less paths (ephemeral side-questions, background review)
+    /// and for pre-v30 records that pre-date this column.
+    #[serde(default)]
+    pub session_id: Option<SessionId>,
 }
 
 impl UsageRecord {
@@ -73,6 +78,7 @@ impl UsageRecord {
             latency_ms,
             user_id: None,
             channel: None,
+            session_id: None,
         }
     }
 }
@@ -186,12 +192,13 @@ impl UsageStore {
     fn insert_record(conn: &Connection, record: &UsageRecord) -> LibreFangResult<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        // RBAC M5: persist user_id/channel alongside the existing columns.
-        // Schema v23 added these as NULL-able, so missing attribution still
+        // RBAC M5 + session attribution: persist user_id/channel/session_id
+        // alongside the existing columns. Schema v23 added user_id/channel,
+        // v30 added session_id — all are NULL-able so missing attribution
         // round-trips as NULL.
         conn.execute(
-            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO usage_events (id, agent_id, timestamp, model, provider, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms, user_id, channel, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 id,
                 record.agent_id.0.to_string(),
@@ -205,6 +212,7 @@ impl UsageStore {
                 record.latency_ms as i64,
                 record.user_id.map(|u| u.to_string()),
                 record.channel.as_deref(),
+                record.session_id.map(|s| s.0.to_string()),
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
