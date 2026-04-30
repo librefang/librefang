@@ -13,6 +13,7 @@ import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
 import { useMarketplace } from '../lib/useMarketplace'
+import type { MarketplacePkg } from '../lib/useMarketplace'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -50,7 +51,7 @@ function isPopular(item: Detail) {
 
 type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads'
 
-function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>, downloads: Map<string, number>): Detail[] {
+function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>, marketplace: Map<string, MarketplacePkg>): Detail[] {
   const arr = [...items]
   switch (key) {
     case 'nameAsc':
@@ -65,7 +66,7 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
         return a.name.localeCompare(b.name)
       })
     case 'downloads':
-      return arr.sort((a, b) => (downloads.get(b.id) ?? 0) - (downloads.get(a.id) ?? 0))
+      return arr.sort((a, b) => (marketplace.get(b.id)?.total_downloads ?? 0) - (marketplace.get(a.id)?.total_downloads ?? 0))
     case 'popular':
     default:
       return arr.sort((a, b) => {
@@ -94,11 +95,6 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const queryClient = useQueryClient()
   const { isFavorite, toggle: toggleFavorite } = useFavorites()
   const marketplace = useMarketplace(category)
-  const downloadsMap = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const [id, pkg] of marketplace) m.set(id, pkg.total_downloads)
-    return m
-  }, [marketplace])
   // Seed from ?category= so bookmarks / shared links preserve the filter.
   // The grid's filter treats query as a substring against id/name/desc/
   // category, so a category name in this slot filters to that chip.
@@ -148,7 +144,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   }, [trendingQuery.data])
 
   const filtered = useMemo(() => {
-    const sorted = sortItems(items, sortBy, trendingIds, downloadsMap)
+    const sorted = sortItems(items, sortBy, trendingIds, marketplace)
     // Favorites always pin to the top within whatever sort the user picked.
     // Stable partition so relative order inside each group is preserved.
     const pinned: Detail[] = []
