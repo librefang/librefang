@@ -368,6 +368,15 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Record that the consumer side dropped `n` events due to broadcast
+    /// lag. Called by listeners that receive from [`subscribe_events`] when
+    /// they observe `RecvError::Lagged(n)`. The production impl forwards
+    /// to `EventBus::record_consumer_lag` so lag drops show up in the
+    /// kernel's `dropped_count` metric and trigger a rate-limited
+    /// `error!` log (issue #3630). Default is a no-op so test mocks
+    /// without an event bus don't need to thread one in.
+    fn record_consumer_lag(&self, _n: u64, _context: &'static str) {}
+
     // ── Budget, Network, A2A ──
 
     /// Show global budget status (limits, spend, % used).
@@ -1308,7 +1317,13 @@ impl BridgeManager {
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Approval event listener lagged by {n} events");
+                                // Route through the kernel's lag counter so
+                                // approval-event misses contribute to
+                                // EventBus::dropped_count and surface as a
+                                // rate-limited error! log (#3630). Default
+                                // impl is a no-op for test mocks without an
+                                // event bus.
+                                handle.record_consumer_lag(n, "channel_approval_listener");
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 info!("Event bus closed — stopping approval listener");
