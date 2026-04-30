@@ -17,25 +17,15 @@ pub enum KeyError {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Ed25519KeyPair {
     public_key: String,
-    #[serde(skip)]
-    private_key_bytes: Vec<u8>,
+    // Base64-encoded 32-byte private key seed. Must be persisted alongside the
+    // public key so the keypair survives daemon restarts.
+    private_key: String,
 }
 
 impl Ed25519KeyPair {
     pub fn generate() -> Self {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(uuid::Uuid::new_v4().to_string().as_bytes());
-        hasher.update(
-            chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .unwrap_or(0)
-                .to_le_bytes(),
-        );
-        let result = hasher.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&result[..32]);
-        let signing_key = SigningKey::from_bytes(&bytes);
+        use rand::rngs::OsRng;
+        let signing_key = SigningKey::generate(&mut OsRng);
         let verifying_key = signing_key.verifying_key();
 
         Ed25519KeyPair {
@@ -43,7 +33,10 @@ impl Ed25519KeyPair {
                 &base64::engine::general_purpose::STANDARD,
                 verifying_key.as_bytes(),
             ),
-            private_key_bytes: signing_key.to_bytes().to_vec(),
+            private_key: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                signing_key.to_bytes(),
+            ),
         }
     }
 
@@ -66,12 +59,18 @@ impl Ed25519KeyPair {
     }
 
     pub fn signing_key(&self) -> Result<SigningKey, KeyError> {
-        if self.private_key_bytes.len() != 32 {
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &self.private_key,
+        )
+        .map_err(|_| KeyError::InvalidFormat)?;
+
+        if bytes.len() != 32 {
             return Err(KeyError::InvalidFormat);
         }
 
         let mut array = [0u8; 32];
-        array.copy_from_slice(&self.private_key_bytes);
+        array.copy_from_slice(&bytes);
         Ok(SigningKey::from_bytes(&array))
     }
 
@@ -154,7 +153,7 @@ impl PeerKeyManager {
 pub fn verify_signature(pubkey: &str, data: &[u8], signature: &str) -> Result<bool, KeyError> {
     let kp = Ed25519KeyPair {
         public_key: pubkey.to_string(),
-        private_key_bytes: vec![],
+        private_key: String::new(),
     };
     kp.verify(data, signature)
 }
