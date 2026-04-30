@@ -107,6 +107,10 @@ pub struct SkillRequirements {
     pub tools: Vec<String>,
     /// Capabilities this skill needs from the host.
     pub capabilities: Vec<String>,
+    /// Wall-clock timeout for a single tool invocation, in seconds (#3454).
+    /// Falls back to `loader::DEFAULT_SKILL_TIMEOUT_SECS` (120s) when unset
+    /// or `0`. Values are clamped to a sane upper bound at execution time.
+    pub timeout_secs: Option<u64>,
 }
 
 /// Declaration of a config variable a skill depends on.
