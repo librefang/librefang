@@ -1,4 +1,4 @@
-import { formatTime, formatRelativeTime } from "../lib/datetime";
+import { formatRelativeTime } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -76,7 +76,6 @@ import {
   useStartExperiment,
   useSuspendAgent,
 } from "../lib/mutations/agents";
-import { StaggerList } from "../components/ui/StaggerList";
 
 /**
  * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
@@ -297,18 +296,6 @@ export function AgentsPage() {
     // Closing the drawer no longer deselects the agent — the inline detail
     // panel remains visible. Use deselectAgent() to fully exit the
     // selection (e.g. when an agent is deleted).
-    setDetailDrawerOpen(false);
-    setEditingModel(false);
-    setEditingName(false);
-    closeToolsEditor();
-  }
-
-  // Currently used by deleteMutation when the active agent is removed.
-  // Inline-style void hint stops tsc complaining when the symbol gets
-  // tree-shaken in tighter no-unused-locals builds.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  function deselectAgent() {
-    setDetailAgent(null);
     setDetailDrawerOpen(false);
     setEditingModel(false);
     setEditingName(false);
@@ -737,12 +724,9 @@ export function AgentsPage() {
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
     const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
-    const skillsCount = Array.isArray((agent as AgentView).capabilities?.skills)
-      ? (agent as AgentView).capabilities.skills.length
-      : 0;
-    const toolsCount = Array.isArray((agent as AgentView).capabilities?.tools)
-      ? (agent as AgentView).capabilities.tools.length
-      : 0;
+    const detailCaps = (agent as AgentView).capabilities;
+    const skillsCount = Array.isArray(detailCaps?.skills) ? detailCaps.skills.length : 0;
+    const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
       { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
@@ -1009,10 +993,11 @@ export function AgentsPage() {
 
   // ---------- Skills tab — 2-col card grid per design canvas
   const renderSkillsTab = (agent: AgentDetail) => {
-    const skills: string[] = Array.isArray((agent as AgentView).skills)
-      ? (agent as AgentView).skills
-      : Array.isArray((agent as AgentView).capabilities?.skills)
-        ? (agent as AgentView).capabilities.skills
+    const view = agent as AgentView;
+    const skills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
         : [];
     return (
       <div className="flex flex-col gap-3">
@@ -1059,7 +1044,9 @@ export function AgentsPage() {
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
     const cron = cronJobsQuery.data ?? [];
-    const triggers = Array.isArray((agent as AgentView).triggers) ? (agent as AgentView).triggers : [];
+    const triggers: AgentTriggerSummary[] = Array.isArray((agent as AgentView).triggers)
+      ? ((agent as AgentView).triggers as AgentTriggerSummary[])
+      : [];
     // Synthetic "last 14 runs" — backend doesn't expose per-fire history
     // through a single agent-scoped endpoint yet, so we visualise an
     // agent-id-seeded waveform as a placeholder. Wire up real run
