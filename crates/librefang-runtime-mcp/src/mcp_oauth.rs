@@ -465,10 +465,12 @@ struct AuthorizationServerMetadata {
 ///
 /// SECURITY (#3623): All discovered endpoint URLs are validated through the
 /// SSRF guard (`is_ssrf_blocked_url`) before being returned.  This rejects
-/// non-http/https schemes, URLs with a userinfo component, and any host
-/// that resolves into a loopback, link-local, RFC 1918, or other reserved
-/// range — a malicious MCP server could otherwise point any of these
-/// endpoints at internal services or smuggle credentials through userinfo.
+/// non-http/https schemes, URLs with a userinfo component, and any literal
+/// IP or known internal hostname (loopback, link-local, RFC 1918, IMDS,
+/// IPv4-mapped IPv6, NAT64, …) — a malicious MCP server could otherwise
+/// point an endpoint at an internal service or attach userinfo that leaks
+/// into logs and reqwest's connection-pool key.  DNS resolution is out
+/// of scope; mitigate rebinding at the network layer.
 pub fn parse_authorization_server_metadata(
     body: &str,
     server_url: &str,
