@@ -45,7 +45,7 @@ pub struct ApprovalManager {
     /// at which point it is set to the current instant. The lockout window is
     /// measured from that moment, not from the first failure.
     totp_failures: StdMutex<HashMap<String, (u32, Option<Instant>)>>,
-    /// Per-sender mutex for atomic lockout-check + failure-record operations.
+    /// Global mutex for atomic lockout-check + failure-record operations.
     /// Callers hold this lock across the check and record to prevent TOCTOU
     /// races where concurrent requests both pass the lockout check (fixes #3584).
     failure_rw_mutex: StdMutex<()>,
@@ -1105,8 +1105,9 @@ impl ApprovalManager {
         let needle = normalized.as_bytes();
 
         // Scan all codes in constant time: accumulate a match bit and the matched
-        // index without branching on content. We branch only on the final aggregated
-        // bit (which reveals nothing about *which* code matched or how close misses were).
+        // index without branching on content. matched_idx is updated via bitmask
+        // arithmetic (no branch), so no timing signal leaks which index matched.
+        // We branch only on the final aggregated bit after the full scan.
         let mut matched_idx: usize = 0;
         let mut found: subtle::Choice = 0u8.into();
         for (i, stored_code) in codes.iter().enumerate() {
@@ -1116,11 +1117,12 @@ impl ApprovalManager {
             } else {
                 0u8.into()
             };
-            // Capture the index of the first match without early exit.
+            // CT conditional move: update matched_idx without branching.
+            // is_first_match is 1 only on the first matching iteration; wrapping_neg
+            // turns 1 → usize::MAX (all ones) and 0 → 0, giving a branch-free mask.
             let is_first_match = eq & !found;
-            if bool::from(is_first_match) {
-                matched_idx = i;
-            }
+            let mask = (is_first_match.unwrap_u8() as usize).wrapping_neg();
+            matched_idx = (matched_idx & !mask) | (i & mask);
             found = found | eq;
         }
 
