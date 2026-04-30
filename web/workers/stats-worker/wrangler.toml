@@ -6,7 +6,7 @@ account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
 [[d1_databases]]
 binding = "DB"
 database_name = "librefang-marketplace"
-database_id = "REPLACE_WITH_ACTUAL_D1_ID"
+database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
 
 # Runs daily at UTC 00:00
 [triggers]
