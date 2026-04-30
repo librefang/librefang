@@ -94,7 +94,7 @@ pub(crate) fn resolve_cron_max_messages(raw: Option<usize>) -> Option<usize> {
 /// - `None`    → no cap
 /// - `Some(0)` → disable (treat as no cap)
 /// - `Some(n)` otherwise → use as-is
-pub(crate) fn resolve_cron_max_tokens(raw: Option<u32>) -> Option<u32> {
+pub(crate) fn resolve_cron_max_tokens(raw: Option<u64>) -> Option<u64> {
     match raw {
         Some(0) => None,
         other => other,
