@@ -689,6 +689,52 @@ function SidebarUserBlock({
   );
 }
 
+// Mobile bottom-tab nav. Mirrors the design canvas
+// (`shell.jsx::BottomTabs` + `data.jsx::MOBILE_TABS`): five primary tabs,
+// the fifth (`More`) opens the full nav drawer.
+const MOBILE_TAB_ITEMS = [
+  { to: "/overview", labelKey: "nav.overview", icon: Home },
+  { to: "/agents", labelKey: "nav.agents", icon: Users },
+  { to: "/chat", labelKey: "nav.chat", icon: MessageCircle },
+  { to: "/approvals", labelKey: "nav.approvals", icon: CheckCircle },
+] as const;
+
+function MobileBottomTabs({ onMore }: { onMore: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <nav
+      className="flex shrink-0 border-t border-border-subtle bg-surface/95 backdrop-blur-md lg:hidden"
+      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      aria-label={t("nav.mobile_tabs", { defaultValue: "Bottom navigation" })}
+    >
+      {MOBILE_TAB_ITEMS.map((tab) => {
+        const Icon = tab.icon;
+        return (
+          <Link
+            key={tab.to}
+            to={tab.to}
+            activeOptions={{ exact: false, includeSearch: false }}
+            activeProps={{ "aria-current": "page" }}
+            className="group relative flex flex-1 flex-col items-center justify-center gap-1 py-2 text-text-dim transition-colors aria-[current=page]:text-brand active:bg-surface-hover/40"
+          >
+            <span className="absolute top-0 left-1/2 h-0.5 w-6 -translate-x-1/2 rounded-full bg-brand opacity-0 shadow-[0_0_6px_currentColor] group-aria-[current=page]:opacity-100 transition-opacity" />
+            <Icon className="h-5 w-5" aria-hidden="true" />
+            <span className="text-[10px] font-medium leading-none">{t(tab.labelKey)}</span>
+          </Link>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onMore}
+        className="flex flex-1 flex-col items-center justify-center gap-1 py-2 text-text-dim transition-colors active:bg-surface-hover/40"
+      >
+        <Menu className="h-5 w-5" aria-hidden="true" />
+        <span className="text-[10px] font-medium leading-none">{t("nav.more", { defaultValue: "More" })}</span>
+      </button>
+    </nav>
+  );
+}
+
 // Routes that must fill the remaining viewport height without scrolling.
 const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 
@@ -1201,6 +1247,7 @@ export function App() {
             )}
           </AnimatePresence>
         </main>
+        <MobileBottomTabs onMore={() => setMobileMenuOpen(true)} />
       </div>
 
       {!isNoAuthRoute && <OfflineBanner />}

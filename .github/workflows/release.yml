@@ -1472,14 +1472,16 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        # `--no-default-features --features mobile-no-email`: rustls-connector
-        # 0.23.0 (pulled by channel-email) → rustls-platform-verifier 0.7.0 →
-        # Verifier::new_with_extra_roots is not implemented for Android.
+        # `-f mobile-no-email -- --no-default-features`: tauri-cli takes
+        # `-f` directly but `--no-default-features` is a cargo flag that
+        # must follow `--`. rustls-connector 0.23.0 (pulled by channel-email)
+        # → rustls-platform-verifier 0.7.0 → Verifier::new_with_extra_roots
+        # is not implemented for Android.
         run: |
           cargo tauri android build \
             --target aarch64 \
             --apk --aab \
-            --no-default-features --features mobile-no-email
+            -f mobile-no-email -- --no-default-features
 
       - name: Locate artifacts
         id: art
@@ -1704,12 +1706,13 @@ jobs:
         working-directory: crates/librefang-desktop
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # `--no-default-features --features mobile-no-email`: rustls-connector
-        # 0.23.0 (pulled by channel-email) → rustls-platform-verifier 0.7.0 →
-        # Verifier::new_with_extra_roots is not implemented on Android, and we
-        # keep iOS on the same flavor so mobile binaries are consistent.
+        # `-f mobile-no-email -- --no-default-features`: see android build
+        # above for why `--no-default-features` goes after `--`. We keep iOS
+        # on the same channel flavor as Android so mobile binaries are
+        # consistent and don't pull channel-email deps that aren't useful
+        # on iOS either.
         run: |
-          cargo tauri ios build --target aarch64 --no-default-features --features mobile-no-email
+          cargo tauri ios build --target aarch64 -f mobile-no-email -- --no-default-features
 
       - name: Locate .ipa
         id: art
