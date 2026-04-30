@@ -748,6 +748,30 @@ fn consume_oauth_nonce(state: &Arc<AppState>, nonce: &str) -> Result<(), Respons
     Ok(())
 }
 
+/// Outcome of validating the `nonce` claim in a JWT id_token against the
+/// nonce the relying party signed into the OAuth `state` parameter.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NonceCheck {
+    /// id_token nonce matches the state nonce.
+    Ok,
+    /// id_token nonce is present but differs from the state nonce.
+    Mismatch,
+    /// id_token has no nonce claim — must reject (#3364).
+    Missing,
+}
+
+/// OIDC nonce validation. The relying party always includes a `nonce` in
+/// the auth request; the IDP MUST echo it back in the id_token. A missing
+/// claim is rejected, never silently accepted (which would let an attacker
+/// replay an id_token captured from another login session).
+pub(crate) fn check_id_token_nonce(token_nonce: Option<&str>, state_nonce: &str) -> NonceCheck {
+    match token_nonce {
+        Some(n) if n == state_nonce => NonceCheck::Ok,
+        Some(_) => NonceCheck::Mismatch,
+        None => NonceCheck::Missing,
+    }
+}
+
 /// Shared code exchange logic for both GET and POST callback handlers.
 async fn handle_code_exchange(
     ext_auth: &librefang_types::config::ExternalAuthConfig,
@@ -832,8 +856,9 @@ async fn handle_code_exchange(
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
                 Ok(c) => {
                     // Verify nonce claim against the nonce we sent in the auth request.
-                    match c.nonce {
-                        Some(ref token_nonce) if token_nonce != &state_payload.nonce => {
+                    match check_id_token_nonce(c.nonce.as_deref(), &state_payload.nonce) {
+                        NonceCheck::Ok => {}
+                        NonceCheck::Mismatch => {
                             warn!("Nonce mismatch in ID token");
                             return (
                                 StatusCode::BAD_REQUEST,
@@ -841,8 +866,10 @@ async fn handle_code_exchange(
                             )
                                 .into_response();
                         }
-                        None => {
-                            // We always send a nonce; a well-behaved provider must echo it.
+                        NonceCheck::Missing => {
+                            // #3364: OIDC requires the IDP echo the nonce we sent.
+                            // Falling back to userinfo here lets a replayed id_token
+                            // from a different login session sign in as the captured user.
                             warn!(
                                 "ID token is missing the nonce claim — \
                                  rejecting to prevent nonce-bypass attack"
@@ -855,7 +882,6 @@ async fn handle_code_exchange(
                             )
                                 .into_response();
                         }
-                        Some(_) => {} // nonce present and matches — OK
                     }
                     Some(c)
                 }
@@ -2014,6 +2040,86 @@ mod tests {
 
     // ── resolve_providers tests ─────────────────────────────────────────
 
+    // #3703: ensure the default is to require verified email — operators
+    // must opt out explicitly per provider, not the other way around.
+    #[test]
+    fn require_email_verified_defaults_true() {
+        let config = librefang_types::config::ExternalAuthConfig::default();
+        assert!(
+            config.require_email_verified,
+            "default OIDC config must require email_verified to keep allowed_domains meaningful"
+        );
+    }
+
+    // #3703: per-provider override `None` must inherit the global setting
+    // so the secure default is not silently bypassed by configs written
+    // before the field existed. Drives `resolve_providers` directly so a
+    // future refactor that drops `unwrap_or(global_require_email_verified)`
+    // breaks this test instead of silently re-opening the bypass.
+    #[tokio::test]
+    async fn require_email_verified_per_provider_inherits_global() {
+        fn provider(id: &str, require: Option<bool>) -> librefang_types::config::OidcProvider {
+            librefang_types::config::OidcProvider {
+                id: id.into(),
+                display_name: id.into(),
+                issuer_url: String::new(),
+                auth_url: "https://idp/auth".into(),
+                token_url: "https://idp/token".into(),
+                userinfo_url: "https://idp/userinfo".into(),
+                jwks_uri: String::new(),
+                client_id: "c".into(),
+                client_secret_env: "S".into(),
+                redirect_url: "http://localhost/cb".into(),
+                scopes: vec![],
+                allowed_domains: vec![],
+                audience: String::new(),
+                require_email_verified: require,
+            }
+        }
+
+        // Global=true, provider=None → inherit true.
+        let cfg_inherit_true = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: true,
+            providers: vec![provider("inherit-true", None)],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_inherit_true).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            resolved[0].require_email_verified,
+            "provider with None override must inherit global=true"
+        );
+
+        // Global=false, provider=None → inherit false (negative direction).
+        let cfg_inherit_false = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: false,
+            providers: vec![provider("inherit-false", None)],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_inherit_false).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            !resolved[0].require_email_verified,
+            "provider with None override must inherit global=false"
+        );
+
+        // Global=true, provider=Some(false) → explicit override wins.
+        let cfg_override = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: true,
+            providers: vec![provider("override", Some(false))],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_override).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            !resolved[0].require_email_verified,
+            "explicit per-provider override must beat global"
+        );
+    }
+
     #[tokio::test]
     async fn test_resolve_providers_empty_config() {
         let config = librefang_types::config::ExternalAuthConfig::default();
@@ -2091,6 +2197,45 @@ mod tests {
         };
         let providers = resolve_providers(&config).await;
         assert!(providers.is_empty());
+    }
+
+    /// Regression: #3364 — OIDC id_token MUST carry the nonce we signed into
+    /// `state`. A missing claim must be rejected outright; previously the
+    /// callback fell through to userinfo (no nonce binding), letting a
+    /// captured id_token from a different login session sign in as that user.
+    #[test]
+    fn id_token_missing_nonce_is_rejected_not_fallback() {
+        assert_eq!(
+            check_id_token_nonce(None, "state-nonce-abc"),
+            NonceCheck::Missing,
+            "no nonce claim => reject (no userinfo fallback)"
+        );
+    }
+
+    #[test]
+    fn id_token_mismatched_nonce_is_rejected() {
+        assert_eq!(
+            check_id_token_nonce(Some("attacker-nonce"), "state-nonce-abc"),
+            NonceCheck::Mismatch
+        );
+    }
+
+    #[test]
+    fn id_token_matching_nonce_is_accepted() {
+        assert_eq!(
+            check_id_token_nonce(Some("state-nonce-abc"), "state-nonce-abc"),
+            NonceCheck::Ok
+        );
+    }
+
+    #[test]
+    fn id_token_empty_nonce_does_not_match_nonempty_state() {
+        // Empty-string is "present but empty" — must not be treated as a
+        // wildcard match against any state nonce.
+        assert_eq!(
+            check_id_token_nonce(Some(""), "state-nonce-abc"),
+            NonceCheck::Mismatch
+        );
     }
 
     #[tokio::test]

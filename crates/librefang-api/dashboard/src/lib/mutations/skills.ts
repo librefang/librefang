@@ -78,7 +78,17 @@ export function useFangHubInstall() {
 export function useCreateSkill() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: createSkill,
+    // Accept an optional signal so callers can cancel on unmount.
+    mutationFn: (vars: {
+      name: string;
+      description: string;
+      prompt_context: string;
+      tags?: string[];
+      signal?: AbortSignal;
+    }) => {
+      const { signal, ...params } = vars;
+      return createSkill(params, signal);
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: skillKeys.lists() }),
   });
 }

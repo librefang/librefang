@@ -109,6 +109,15 @@ pub enum LibreFangError {
         /// The total count of tool errors in the final iteration.
         error_count: u32,
     },
+
+    /// The provider blocked the response with a safety / policy filter.
+    /// Carries any partial text the model returned before the refusal so
+    /// the caller can surface it to the user (#3450).
+    #[error("Content filtered by provider: {message}")]
+    ContentFiltered {
+        /// Partial text emitted before the refusal (may be empty).
+        message: String,
+    },
 }
 
 /// Alias for Result with LibreFangError.

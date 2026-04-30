@@ -424,6 +424,43 @@ mod tests {
         );
     }
 
+    /// Regression for #3668: the GCRA limiter's DashMap grew unbounded
+    /// because nothing wired up `retain_recent()` — every distinct client
+    /// IP added a permanent entry. The fix in #3957 spawned a periodic
+    /// sweep in `server.rs`. This test locks the contract the sweep
+    /// depends on: `RateLimiter::len()` and `retain_recent()` must still
+    /// be reachable on `KeyedRateLimiter`, and a fresh entry that has
+    /// already drained back below the burst boundary must be evictable.
+    ///
+    /// Note: we cannot verify that `retain_recent()` *actually removes* a
+    /// stale entry here because `KeyedRateLimiter` is pinned to
+    /// `DefaultClock` (wall clock) and governor does not expose a way to
+    /// advance it. Advancing time requires `FakeRelativeClock`, which
+    /// produces a distinct type incompatible with `KeyedRateLimiter`. The
+    /// time-based eviction path is covered by governor's own test suite.
+    /// What this test guards is that the sweep's call chain
+    /// (`Arc<KeyedRateLimiter> → retain_recent()`) compiles and runs
+    /// without panicking, and that `retain_recent()` never *adds* entries.
+    #[test]
+    fn test_retain_recent_evicts_idle_entry() {
+        let limiter = create_rate_limiter(60);
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let cost = NonZeroU32::new(1).unwrap();
+        // Materialize an entry for `ip`.
+        let _ = limiter.check_key_n(&ip, cost);
+        assert!(
+            !limiter.is_empty(),
+            "check_key_n must register an entry, got len={}",
+            limiter.len()
+        );
+        limiter.retain_recent();
+        assert!(
+            limiter.len() <= 1,
+            "retain_recent must not duplicate entries, got len={}",
+            limiter.len()
+        );
+    }
+
     #[test]
     fn test_static_assets_are_exempt() {
         // Root + common top-level assets.

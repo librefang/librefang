@@ -30,6 +30,7 @@ pub mod scheduler;
 pub mod session_lifecycle;
 pub mod session_policy;
 pub mod session_stream_hub;
+pub mod supervised_spawn;
 pub mod supervisor;
 pub mod trajectory;
 pub mod triggers;
@@ -39,3 +40,29 @@ pub mod workflow;
 
 pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
+
+// ---------------------------------------------------------------------------
+// Shared persist utility
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global counter so concurrent persist calls never share a staging path.
+static PERSIST_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a unique `.json.tmp.<pid>.<seq>.<nanos>` staging path for atomic
+/// file writes (#3648). Two daemons sharing the same `home_dir`, or two
+/// threads within one process, each get a distinct path.
+pub(crate) fn persist_tmp_path(final_path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    final_path.with_extension(format!(
+        "json.tmp.{}.{}.{}",
+        std::process::id(),
+        PERSIST_SEQ.fetch_add(1, Ordering::Relaxed),
+        nanos,
+    ))
+}

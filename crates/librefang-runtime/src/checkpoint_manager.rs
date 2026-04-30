@@ -584,21 +584,34 @@ fn run_git(
     let timed_out_c = Arc::clone(&timed_out);
     let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
+    // Cancel-the-killer channel: closes the SIGKILL window once the child has
+    // been reaped by `wait_with_output()`. Without this, the OS could recycle
+    // the pid before the killer thread fires (#3370).
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
     std::thread::spawn(move || {
-        std::thread::sleep(timeout_dur);
-        timed_out_c.store(true, Ordering::SeqCst);
-        // Best-effort SIGKILL; harmless if the process already exited.
-        #[cfg(unix)]
-        {
-            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = pid;
+        use std::sync::mpsc::RecvTimeoutError;
+        match done_rx.recv_timeout(timeout_dur) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                // Child already reaped — do nothing.
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                timed_out_c.store(true, Ordering::SeqCst);
+                #[cfg(unix)]
+                {
+                    let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = pid;
+                }
+            }
         }
     });
 
-    match child.wait_with_output() {
+    let wait_result = child.wait_with_output();
+    let _ = done_tx.send(());
+    match wait_result {
         Err(e) => {
             warn!(error = %e, "git wait_with_output failed");
             (false, String::new(), e.to_string())

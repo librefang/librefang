@@ -145,44 +145,114 @@ fn default_user_id() -> String {
 
 /// Map a [`librefang_types::error::LibreFangError`] to the appropriate HTTP status code.
 ///
-/// Previously every failure was mapped to 500. This function now returns
+/// Previously every failure was mapped to 500 (#3661). This function now returns
 /// semantically correct codes for `InvalidInput` (400), `AgentNotFound` /
-/// `SessionNotFound` (404), `CapabilityDenied` (403), and `QuotaExceeded` (429)
-/// so callers can distinguish between client errors and server errors.
-fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
-    map_memory_error(e.to_string())
+/// `SessionNotFound` (404), `CapabilityDenied` / `AuthDenied` (403), and
+/// `QuotaExceeded` (429) so the dashboard can distinguish client errors
+/// from server errors and surface actionable messages.
+///
+/// Type-based matching (rather than `Display` prefix matching) ensures the
+/// classification doesn't silently break if a `#[error(...)]` template ever
+/// changes — the compiler will flag a missing arm.
+fn internal_error<E>(e: E) -> (StatusCode, Json<serde_json::Value>)
+where
+    E: Into<MemoryRouteError>,
+{
+    e.into().into_response_tuple()
 }
 
-fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
-    // Classify by the error message prefix emitted by LibreFangError Display impls.
-    // This avoids a dependency on the concrete type at every call-site while still
-    // providing correct HTTP semantics.
-    //
-    // Body policy: client-facing errors (4xx) echo the full message because
-    // the content is already shaped from caller-supplied input or
-    // documented quota state.  Server-side errors (5xx) deliberately
-    // return a generic body — the underlying message can carry a
-    // database path, an internal trace ID, or other deployment detail
-    // we don't want to leak across an API boundary.  The original
-    // `internal_error` returned only "Internal server error"; #3661
-    // unintentionally regressed that by echoing every error message.
-    let (status, body_msg) = if msg.starts_with("Invalid input:") {
-        (StatusCode::BAD_REQUEST, msg)
-    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
-        (StatusCode::NOT_FOUND, msg)
-    } else if msg.starts_with("Capability denied:") {
-        (StatusCode::FORBIDDEN, msg)
-    } else if msg.starts_with("Resource quota exceeded:") {
-        (StatusCode::TOO_MANY_REQUESTS, msg)
-    } else {
-        tracing::error!("Memory operation failed: {msg}");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal server error".to_string(),
-        )
-    };
+/// Internal classification helper. Owns its message so 4xx bodies can echo
+/// caller-supplied input back without ambiguity. 5xx bodies return a
+/// generic "Internal server error" to avoid leaking deployment detail
+/// (DB paths, internal trace IDs, low-level error chains).
+enum MemoryRouteError {
+    InvalidInput(String),
+    NotFound(String),
+    Forbidden(String),
+    QuotaExceeded(String),
+    Internal(String),
+}
 
-    (status, Json(serde_json::json!({ "error": body_msg })))
+impl MemoryRouteError {
+    fn into_response_tuple(self) -> (StatusCode, Json<serde_json::Value>) {
+        let (status, body_msg) = match self {
+            MemoryRouteError::InvalidInput(m) => (StatusCode::BAD_REQUEST, m),
+            MemoryRouteError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            MemoryRouteError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            MemoryRouteError::QuotaExceeded(m) => (StatusCode::TOO_MANY_REQUESTS, m),
+            MemoryRouteError::Internal(m) => {
+                tracing::error!("Memory operation failed: {m}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            }
+        };
+        (status, Json(serde_json::json!({ "error": body_msg })))
+    }
+}
+
+// Type-based mapping: stable against Display-template changes.
+impl From<librefang_types::error::LibreFangError> for MemoryRouteError {
+    fn from(e: librefang_types::error::LibreFangError) -> Self {
+        use librefang_types::error::LibreFangError as E;
+        match e {
+            E::InvalidInput(m) => MemoryRouteError::InvalidInput(format!("Invalid input: {m}")),
+            E::AgentNotFound(m) => MemoryRouteError::NotFound(format!("Agent not found: {m}")),
+            E::SessionNotFound(m) => MemoryRouteError::NotFound(format!("Session not found: {m}")),
+            E::CapabilityDenied(m) => {
+                MemoryRouteError::Forbidden(format!("Capability denied: {m}"))
+            }
+            E::AuthDenied(m) => MemoryRouteError::Forbidden(format!("Auth denied: {m}")),
+            E::QuotaExceeded(m) => {
+                MemoryRouteError::QuotaExceeded(format!("Resource quota exceeded: {m}"))
+            }
+            // All other variants are server-side or systemic; collapse to 500.
+            other => MemoryRouteError::Internal(other.to_string()),
+        }
+    }
+}
+
+// Fallback for `anyhow::Error`-style call sites: keep prefix-based hint
+// for messages already shaped like a `LibreFangError`, otherwise treat
+// as an internal failure.
+impl From<anyhow::Error> for MemoryRouteError {
+    fn from(e: anyhow::Error) -> Self {
+        classify_by_message(e.to_string())
+    }
+}
+
+impl From<String> for MemoryRouteError {
+    fn from(s: String) -> Self {
+        classify_by_message(s)
+    }
+}
+
+impl From<&str> for MemoryRouteError {
+    fn from(s: &str) -> Self {
+        classify_by_message(s.to_string())
+    }
+}
+
+fn classify_by_message(msg: String) -> MemoryRouteError {
+    if msg.starts_with("Invalid input:") {
+        MemoryRouteError::InvalidInput(msg)
+    } else if msg.starts_with("Agent not found:") || msg.starts_with("Session not found:") {
+        MemoryRouteError::NotFound(msg)
+    } else if msg.starts_with("Capability denied:") || msg.starts_with("Auth denied:") {
+        MemoryRouteError::Forbidden(msg)
+    } else if msg.starts_with("Resource quota exceeded:") {
+        MemoryRouteError::QuotaExceeded(msg)
+    } else {
+        MemoryRouteError::Internal(msg)
+    }
+}
+
+// Test helper: keep the legacy string-based entry-point for the
+// `map_memory_error_*` regression tests.
+#[cfg(test)]
+fn map_memory_error(msg: String) -> (StatusCode, Json<serde_json::Value>) {
+    classify_by_message(msg).into_response_tuple()
 }
 
 /// Build a [`MemoryNamespaceGuard`] for the current request from the

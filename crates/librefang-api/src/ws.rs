@@ -374,6 +374,19 @@ pub async fn agent_ws(
     }
 
     if auth_required {
+        // SECURITY (#3610): Loud reject if a client still sends `?token=` in
+        // the WS URL. The credential leaks into proxy access logs and browser
+        // history; we removed support in #3610 but this fail-closed branch
+        // catches stale dashboards / scripted clients that haven't migrated
+        // to the `bearer.<token>` sub-protocol or `Authorization` header.
+        if ws_query_param(&uri, "token").is_some() {
+            warn!(
+                ip = %addr.ip(),
+                "WebSocket upgrade rejected: ?token= query param removed in #3610 — \
+                 use the Sec-WebSocket-Protocol bearer.<token> sub-protocol instead"
+            );
+            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        }
         // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
         let matches_any = |token: &str| -> bool {
             use subtle::ConstantTimeEq;
@@ -2238,5 +2251,18 @@ mod tests {
         );
         let locality = detect_connection_locality(&addr, &headers);
         assert_eq!(locality.forwarded_ip.unwrap().to_string(), "1.1.1.1");
+    }
+
+    #[test]
+    fn issue_3610_query_token_visibility_helper() {
+        // Regression: ws_query_param still surfaces a `?token=` parameter so
+        // upgrade handlers can fail-closed on it (#3610). The helper itself is
+        // not the security boundary — the handler must reject — but if this
+        // ever returns None for a present `token` param the fail-closed gate
+        // would silently degrade.
+        let uri: Uri = "/api/terminal/ws?token=leaked".parse().unwrap();
+        assert_eq!(ws_query_param(&uri, "token").as_deref(), Some("leaked"));
+        let uri: Uri = "/api/terminal/ws?cols=120".parse().unwrap();
+        assert_eq!(ws_query_param(&uri, "token"), None);
     }
 }

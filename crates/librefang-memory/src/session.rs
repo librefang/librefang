@@ -120,6 +120,62 @@ impl SessionStore {
         Self { conn }
     }
 
+    /// Best-effort reconcile of the FTS index against `sessions`.
+    ///
+    /// Older releases (#3451) wrote the `sessions` row and the
+    /// `sessions_fts` row in two separate statements without a transaction.
+    /// A crash in between left the FTS index out of sync — either missing
+    /// rows for live sessions or carrying orphaned rows for sessions that
+    /// were since deleted. Run this once at substrate boot to repair both
+    /// classes of drift.
+    ///
+    /// Failures here are logged and swallowed: the database remains
+    /// usable, full-text search just degrades to whatever the index
+    /// currently holds.
+    pub fn reconcile_fts_index(&self) {
+        let Ok(conn) = self.conn.lock() else {
+            warn!("session FTS reconcile: failed to lock connection");
+            return;
+        };
+
+        // 1. Drop FTS rows whose sessions row no longer exists.
+        match conn.execute(
+            "DELETE FROM sessions_fts \
+             WHERE session_id NOT IN (SELECT id FROM sessions)",
+            [],
+        ) {
+            Ok(n) if n > 0 => {
+                warn!(removed = n, "reconciled orphan FTS rows from sessions_fts");
+            }
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "FTS reconcile: orphan cleanup failed"),
+        }
+
+        // 2. Build FTS rows for sessions that don't yet have one. We don't
+        //    repopulate `content` here — only the next `save_session`
+        //    knows the up-to-date message text and will write it
+        //    transactionally. Inserting an empty placeholder is enough to
+        //    surface the gap to operators inspecting the index, but we
+        //    skip that to avoid polluting search; instead we just log.
+        let missing: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions s \
+                 WHERE NOT EXISTS (\
+                     SELECT 1 FROM sessions_fts f WHERE f.session_id = s.id\
+                 )",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if missing > 0 {
+            warn!(
+                missing,
+                "sessions_fts is missing rows for live sessions; \
+                 they will be reindexed on next save_session"
+            );
+        }
+    }
+
     /// Load a session from the database.
     pub fn get_session(&self, session_id: SessionId) -> LibreFangResult<Option<Session>> {
         let conn = self
@@ -263,23 +319,24 @@ impl SessionStore {
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
-        // Delete existing FTS entry, then insert fresh content. Log on
-        // failure — silently dropping these keeps orphan/stale rows in
-        // sessions_fts whose JOINs to the real sessions table return
-        // NULL, poisoning full-text search results.
-        if let Err(e) = tx.execute(
+        // Delete the existing FTS row and insert the fresh content. Failures
+        // here MUST abort the transaction — previously they were logged and
+        // swallowed, which committed the new sessions row while leaving the
+        // FTS index pointing at stale or missing content (#3451). On rollback
+        // the on-disk session is unchanged, so a subsequent save retries the
+        // whole pair atomically.
+        tx.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![session_id_str],
-        ) {
-            warn!(session_id = %session_id_str, error = %e, "Failed to clear FTS entry for session");
-        }
+        )
+        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
+
         if !content.is_empty() {
-            if let Err(e) = tx.execute(
+            tx.execute(
                 "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
                 rusqlite::params![session_id_str, agent_id_str, content],
-            ) {
-                warn!(session_id = %session_id_str, error = %e, "Failed to insert FTS entry for session");
-            }
+            )
+            .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
         }
 
         tx.commit()
@@ -537,10 +594,35 @@ impl SessionStore {
     /// `session_id IS NULL` and contribute nothing — list views will show
     /// `null` for those rows, not stale data.
     pub fn list_sessions(&self) -> LibreFangResult<Vec<serde_json::Value>> {
+        self.list_sessions_paginated(None, 0)
+    }
+
+    /// Total number of sessions stored.
+    pub fn count_sessions(&self) -> LibreFangResult<usize> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(total.max(0) as usize)
+    }
+
+    /// Paginated session listing. `limit = None` returns all rows from `offset` onward.
+    /// Pushes LIMIT/OFFSET into SQLite so we never deserialize message blobs we won't return (#3485).
+    pub fn list_sessions_paginated(
+        &self,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<serde_json::Value>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        // SQLite uses -1 for "no limit"
+        let lim_sql: i64 = limit.map(|n| n as i64).unwrap_or(-1);
+        let off_sql: i64 = offset as i64;
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
@@ -555,12 +637,12 @@ impl SessionStore {
                      WHERE session_id IS NOT NULL
                      GROUP BY session_id
                  ) u ON u.session_id = s.id
-                 ORDER BY s.created_at DESC",
+                 ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(rusqlite::params![lim_sql, off_sql], |row| {
                 let session_id: String = row.get(0)?;
                 let agent_id: String = row.get(1)?;
                 let messages_blob: Vec<u8> = row.get(2)?;

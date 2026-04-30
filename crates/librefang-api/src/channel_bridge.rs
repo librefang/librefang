@@ -28,6 +28,13 @@ fn sanitize_channel_error(err: &str) -> String {
         "I've hit my usage limit and need to rest. I'll be back soon!".to_string()
     } else if lower.contains("auth") || lower.contains("not logged in") || lower.contains("401") {
         "I'm having trouble with my credentials. Please let the admin know.".to_string()
+    } else if lower.contains("content filtered by provider") || lower.contains("content_filter") {
+        // Distinct branch for provider safety / refusal so the user sees a
+        // clear "your request was blocked" message instead of the generic
+        // "something went wrong" fallback. The kernel already routes the
+        // matching `content_filtered` operator notification separately
+        // (#3450) — this is the user-facing companion.
+        "I can't help with that — the request was blocked by the model's safety filter.".to_string()
     } else if lower.contains("exited with code") || lower.contains("llm driver") {
         "Sorry, something went wrong on my end. Please try again in a moment.".to_string()
     } else {
@@ -43,26 +50,42 @@ fn sanitize_channel_error(err: &str) -> String {
 /// Some providers emit tool calls as plain text (recovered by
 /// `agent_loop::recover_text_tool_calls`). These should not be
 /// forwarded to the user through streaming channels.
+///
+/// Long responses (>2000 chars) only match start-of-text patterns.
+/// The `contains()`-based patterns are skipped for long text because
+/// natural language responses that discuss tools (e.g. explaining how
+/// `agent_send` works) will naturally contain tool-call-like substrings
+/// without being leaked tool calls. Real leaked tool calls are compact.
 fn looks_like_tool_call(text: &str) -> bool {
     let t = text.trim();
-    // JSON-style tool calls (may appear at start of text)
-    t.starts_with("[{")
+    // Start-of-text patterns: safe regardless of length — a response that
+    // literally begins with a JSON tool call array is always a leak.
+    if t.starts_with("[{")
         || t.starts_with("functions.")
         || t.starts_with("{\"type\":\"function\"")
         || (t.starts_with('[') && t.contains("'type': 'text'"))
-        || contains_bare_json_tool_call(t)
-        // Tag-based patterns — use contains() because tool call tags may
-        // appear after natural language preamble
-        || t.contains("<function=")
-        || t.contains("<function>")
-        || t.contains("<function ")
-        || t.contains("<tool>")
-        || t.contains("[TOOL_CALL]")
-        || t.contains("<tool_call>")
-        // Pattern 4: markdown code block containing a tool call
-        || contains_markdown_tool_call(t)
-        // Pattern 5: backtick-wrapped tool call
-        || contains_backtick_tool_call(t)
+    {
+        return true;
+    }
+
+    // For shorter text, apply deeper heuristics.  Long responses are
+    // natural language that may reference tools; filtering them silently
+    // drops legitimate answers.
+    const MAX_HEURISTIC_LEN: usize = 2000;
+    t.len() <= MAX_HEURISTIC_LEN
+        && (contains_bare_json_tool_call(t)
+            // Tag-based patterns — use contains() because tool call tags may
+            // appear after natural language preamble
+            || t.contains("<function=")
+            || t.contains("<function>")
+            || t.contains("<function ")
+            || t.contains("<tool>")
+            || t.contains("[TOOL_CALL]")
+            || t.contains("<tool_call>")
+            // Pattern 4: markdown code block containing a tool call
+            || contains_markdown_tool_call(t)
+            // Pattern 5: backtick-wrapped tool call
+            || contains_backtick_tool_call(t))
 }
 
 fn contains_markdown_tool_call(text: &str) -> bool {
@@ -428,7 +451,7 @@ fn start_stream_text_bridge_with_status(
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
-                            debug!("Streaming bridge: filtered leaked tool call text at ContentComplete");
+                            warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
                         } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
                         {
                             debug!(
@@ -501,7 +524,10 @@ fn start_stream_text_bridge_with_status(
 
         if !iter_buf.is_empty() && !saw_tool_use {
             if looks_like_tool_call(&iter_buf) {
-                debug!("Streaming bridge: filtered leaked tool call text in final flush");
+                warn!(
+                    "Streaming bridge: filtered leaked tool call text in final flush (len={})",
+                    iter_buf.len()
+                );
             } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
                 debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
             } else {
@@ -1603,8 +1629,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn subscribe_events(
         &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>>
+    {
         Some(self.kernel.event_bus_ref().subscribe_all())
+    }
+
+    fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        self.kernel.event_bus_ref().record_consumer_lag(n, context);
     }
 
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
@@ -3132,8 +3163,25 @@ pub async fn start_channel_bridge_with_config(
             }
             DingTalkReceiveMode::Webhook => {
                 if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
-                    let secret =
-                        read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
+                    // #3441: refuse to register a webhook adapter with an empty
+                    // signing secret.  An empty secret would still reject all
+                    // verifications (HMAC of an empty key fails the equality
+                    // check), but this is loud rather than silent — a misconfig
+                    // here means every inbound message is dropped, and the
+                    // operator should know at boot.
+                    let secret = match read_token(&dt_config.secret_env, "DingTalk (secret)") {
+                        Some(s) if !s.is_empty() => s,
+                        _ => {
+                            tracing::error!(
+                                env = %dt_config.secret_env,
+                                "DingTalk webhook adapter requires a non-empty signing secret \
+                                 (env var unset or empty); refusing to register adapter \
+                                 (default-deny). Set the env var or switch receive_mode \
+                                 to \"stream\".",
+                            );
+                            continue;
+                        }
+                    };
                     let adapter = Arc::new(
                         DingTalkAdapter::new(token, secret, dt_config.webhook_port)
                             .with_account_id(dt_config.account_id.clone()),
@@ -4333,5 +4381,41 @@ mod tests {
             msg.contains("ref:"),
             "expected ref in generic msg, got: {msg}"
         );
+    }
+
+    /// Provider safety / content-filter refusals must surface as a clear
+    /// "blocked by safety filter" message to the user, not get swallowed
+    /// by the generic "something went wrong" fallback (#3450). Both the
+    /// `LibreFangError::ContentFiltered` Display string and the raw
+    /// upstream `content_filter` token must trigger the branch.
+    #[test]
+    fn test_sanitize_channel_error_content_filter() {
+        let msg =
+            sanitize_channel_error("Content filtered by provider: I cannot help with that request");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
+        );
+
+        let msg = sanitize_channel_error("API error: finish_reason=content_filter");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
+        );
+    }
+
+    /// `KernelBridgeAdapter::record_consumer_lag` must forward to
+    /// `EventBus::record_consumer_lag`, which increments `dropped_count`.
+    /// This test exercises the EventBus path directly (constructing a full
+    /// kernel in a unit test would be prohibitively expensive) and mirrors
+    /// the assertion in `event_bus::tests::record_consumer_lag_increments_dropped_count`.
+    #[test]
+    fn test_event_bus_record_consumer_lag_increments_dropped_count() {
+        let bus = librefang_kernel::event_bus::EventBus::new();
+        assert_eq!(bus.dropped_count(), 0);
+        bus.record_consumer_lag(5, "test-context");
+        assert_eq!(bus.dropped_count(), 5);
+        bus.record_consumer_lag(3, "test-context");
+        assert_eq!(bus.dropped_count(), 8);
     }
 }

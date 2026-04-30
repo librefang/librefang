@@ -101,6 +101,17 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             | "/api/config/reload"
             | "/api/auth/change-password"
             | "/api/shutdown"
+            // #3621: TOTP enrollment is an Owner-equivalent action — a
+            // confirmed enrollment hands the holder approve power for every
+            // privileged tool call, so any non-Owner bearer token must not
+            // be able to start, confirm, or revoke the enrollment.
+            | "/api/approvals/totp/setup"
+            | "/api/approvals/totp/confirm"
+            | "/api/approvals/totp/revoke"
+            // A2A discover registers a remote agent into the pending registry,
+            // expanding the trust surface; restrict to Owner so non-Owner API keys
+            // cannot fill the registry or stage impersonation attempts (#3483).
+            | "/api/a2a/discover"
     ) {
         return true;
     }
@@ -708,19 +719,38 @@ pub async fn auth(
             .unwrap_or_default();
     }
 
-    // Check Authorization: Bearer <token> header, then fallback to X-API-Key
+    // Check Authorization: Bearer <token> header, then fallback to X-API-Key,
+    // then fallback to Sec-WebSocket-Protocol: bearer.<token> for WS upgrades.
+    // Browsers cannot set custom headers on WebSocket handshakes, so the
+    // dashboard encodes the session token as a sub-protocol entry — this must
+    // be checked here for non-loopback connections (Docker bridge, LAN) where
+    // the loopback fast-path above is not taken.
     let bearer_token = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
-    let api_token = bearer_token.or_else(|| {
-        request
-            .headers()
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-    });
+    let api_token = bearer_token
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+        })
+        .or_else(|| {
+            // WS upgrade fallback: Sec-WebSocket-Protocol: bearer.<token>
+            request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .find(|p| p.starts_with("bearer."))
+                        .and_then(|p| p.strip_prefix("bearer."))
+                })
+        });
 
     // Cookie-based session token — only accepted for SPA shell navigation
     // (`/dashboard/*`). API endpoints still require a Bearer/header token so
@@ -979,6 +1009,54 @@ mod tests {
             assert!(
                 user_role_allows_request(UserRole::Owner, &post, path),
                 "Owner must be allowed to POST {path}"
+            );
+        }
+    }
+
+    // #3621: TOTP enrollment must be Owner-only. Without this gate, any
+    // bearer token (including a Viewer or User role) could overwrite the
+    // unconfirmed `totp_secret` and hijack enrollment, or wipe a confirmed
+    // enrollment via `revoke` and silently disable 2FA on login.
+    #[test]
+    fn test_totp_enrollment_is_owner_only() {
+        let post = axum::http::Method::POST;
+        for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
+            for path in [
+                "/api/approvals/totp/setup",
+                "/api/approvals/totp/confirm",
+                "/api/approvals/totp/revoke",
+            ] {
+                assert!(
+                    !user_role_allows_request(role, &post, path),
+                    "{role:?} must NOT be allowed to POST {path}"
+                );
+            }
+        }
+        // Owner still has access.
+        for path in [
+            "/api/approvals/totp/setup",
+            "/api/approvals/totp/confirm",
+            "/api/approvals/totp/revoke",
+        ] {
+            assert!(
+                user_role_allows_request(UserRole::Owner, &post, path),
+                "Owner must be allowed to POST {path}"
+            );
+        }
+
+        // Regression for over-gating: GET /api/approvals/totp/status is a
+        // read-only enrollment-status probe and must remain reachable for
+        // every authenticated role, including non-Owner ones.
+        let get = axum::http::Method::GET;
+        for role in [
+            UserRole::Viewer,
+            UserRole::User,
+            UserRole::Admin,
+            UserRole::Owner,
+        ] {
+            assert!(
+                user_role_allows_request(role, &get, "/api/approvals/totp/status"),
+                "{role:?} must be allowed to GET /api/approvals/totp/status"
             );
         }
     }

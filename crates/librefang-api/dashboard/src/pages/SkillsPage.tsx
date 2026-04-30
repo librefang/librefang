@@ -601,6 +601,8 @@ function CreateSkillModal({
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        // Propagate unmount aborts down to the underlying fetch.
+        signal: controller.signal,
       });
       if (mountedRef.current && !controller.signal.aborted) {
         onCreated();

@@ -14510,7 +14510,7 @@
       ]
     },
     "max_request_body_bytes": {
-      "default": 1048576,
+      "default": 8388608,
       "description": "Maximum request body size in bytes (global safety net). Individual endpoints may enforce tighter limits.",
       "format": "uint",
       "minimum": 0.0,

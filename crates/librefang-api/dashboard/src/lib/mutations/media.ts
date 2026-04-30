@@ -13,7 +13,7 @@ import {
   type MediaVideoSubmitResult,
   type MediaMusicResult,
 } from "../http/client";
-import { budgetKeys } from "../queries/keys";
+import { budgetKeys, userBudgetKeys, usageKeys } from "../queries/keys";
 
 export function useGenerateImage(
   options?: Partial<
@@ -29,7 +29,10 @@ export function useGenerateImage(
     ...options,
     mutationFn: generateImage,
     onSettled: (...args) => {
+      // Media generation hits both global and per-user budget plus usage tallies.
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
       options?.onSettled?.(...args);
     },
   });
@@ -49,7 +52,10 @@ export function useSynthesizeSpeech(
     ...options,
     mutationFn: synthesizeSpeech,
     onSettled: (...args) => {
+      // Media generation hits both global and per-user budget plus usage tallies.
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
       options?.onSettled?.(...args);
     },
   });
@@ -69,7 +75,10 @@ export function useSubmitVideo(
     ...options,
     mutationFn: submitVideo,
     onSettled: (...args) => {
+      // Media generation hits both global and per-user budget plus usage tallies.
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
       options?.onSettled?.(...args);
     },
   });
@@ -89,7 +98,10 @@ export function useGenerateMusic(
     ...options,
     mutationFn: generateMusic,
     onSettled: (...args) => {
+      // Media generation hits both global and per-user budget plus usage tallies.
       queryClient.invalidateQueries({ queryKey: budgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: userBudgetKeys.all });
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
       options?.onSettled?.(...args);
     },
   });

@@ -239,15 +239,39 @@ fn extract_text_body(parsed: &mailparse::ParsedMail<'_>) -> String {
         .unwrap_or_default()
 }
 
+/// One successfully-parsed email pulled from IMAP, with the `(folder, uid)`
+/// pair we need to flag it Seen / Quarantine after downstream processing.
+struct FetchedEmail {
+    folder: String,
+    uid: u32,
+    from_addr: String,
+    subject: String,
+    message_id: String,
+    body: String,
+}
+
+/// UID outcome for `mark_uids_outcome`.
+enum UidOutcome {
+    /// Mark `\Seen` — the message was successfully delivered.
+    Processed,
+    /// Mark a custom `Librefang-Quarantine` keyword AND `\Seen` so the
+    /// user's inbox shows it but the agent will ignore it on the next poll.
+    Quarantined,
+}
+
 /// Fetch unseen emails from IMAP using blocking I/O.
-/// Returns a Vec of (from_addr, subject, message_id, body).
+///
+/// IMPORTANT: This does NOT flag any UID as `\Seen`. The caller is responsible
+/// for invoking `mark_uids_outcome` after successfully processing each
+/// message — this prevents permanent message loss when parsing fails or a
+/// sender is denied (issue #3481).
 fn fetch_unseen_emails(
     host: &str,
     port: u16,
     username: &str,
     password: &str,
     folders: &[String],
-) -> Result<Vec<(String, String, String, String)>, String> {
+) -> Result<Vec<FetchedEmail>, String> {
     let tcp = std::net::TcpStream::connect((host, port))
         .map_err(|e| format!("TCP connect failed: {e}"))?;
     let tls = rustls_connector::RustlsConnector::new_with_native_certs()
@@ -283,12 +307,17 @@ fn fetch_unseen_emails(
             continue;
         }
 
-        let uids = match session.uid_search("UNSEEN") {
+        // Skip messages already quarantined by a previous poll. Fall back to
+        // plain UNSEEN if the server rejects custom keyword search.
+        let uids = match session.uid_search("UNSEEN UNKEYWORD Librefang-Quarantine") {
             Ok(uids) => uids,
-            Err(e) => {
-                warn!(folder, error = %e, "IMAP SEARCH UNSEEN failed");
-                continue;
-            }
+            Err(_) => match session.uid_search("UNSEEN") {
+                Ok(uids) => uids,
+                Err(e) => {
+                    warn!(folder, error = %e, "IMAP SEARCH UNSEEN failed");
+                    continue;
+                }
+            },
         };
 
         if uids.is_empty() {
@@ -304,7 +333,7 @@ fn fetch_unseen_emails(
             .collect::<Vec<_>>()
             .join(",");
 
-        let fetches = match session.uid_fetch(&uid_set, "RFC822") {
+        let fetches = match session.uid_fetch(&uid_set, "(UID RFC822)") {
             Ok(f) => f,
             Err(e) => {
                 warn!(folder, error = %e, "IMAP FETCH failed");
@@ -312,7 +341,13 @@ fn fetch_unseen_emails(
             }
         };
 
+        // Track which UIDs in this batch parsed successfully so we can
+        // quarantine the rest — leaving them UNSEEN would loop forever on the
+        // same poison pill, but marking Seen would silently drop them.
+        let mut parsed_uids = std::collections::HashSet::new();
+
         for fetch in fetches.iter() {
+            let Some(uid) = fetch.uid else { continue };
             let body_bytes = match fetch.body() {
                 Some(b) => b,
                 None => continue,
@@ -321,7 +356,7 @@ fn fetch_unseen_emails(
             let parsed = match mailparse::parse_mail(body_bytes) {
                 Ok(p) => p,
                 Err(e) => {
-                    warn!(error = %e, "Failed to parse email");
+                    warn!(folder, uid, error = %e, "Failed to parse email — quarantining");
                     continue;
                 }
             };
@@ -332,17 +367,114 @@ fn fetch_unseen_emails(
             let text_body = extract_text_body(&parsed);
 
             let from_addr = extract_email_addr(&from);
-            results.push((from_addr, subject, message_id, text_body));
+            parsed_uids.insert(uid);
+            results.push(FetchedEmail {
+                folder: folder.clone(),
+                uid,
+                from_addr,
+                subject,
+                message_id,
+                body: text_body,
+            });
         }
 
-        // Mark fetched messages as Seen
-        if let Err(e) = session.uid_store(&uid_set, "+FLAGS (\\Seen)") {
-            warn!(error = %e, "Failed to mark emails as Seen");
+        // UIDs we couldn't parse → quarantine so we don't reprocess them
+        // forever (but keep them visible to the user).
+        let unparsed: Vec<u32> = uid_list
+            .iter()
+            .copied()
+            .filter(|u| !parsed_uids.contains(u))
+            .collect();
+        if !unparsed.is_empty() {
+            mark_uids_on_session(&mut session, &unparsed, UidOutcome::Quarantined);
         }
     }
 
     let _ = session.logout();
     Ok(results)
+}
+
+/// Apply a UID outcome on an already-selected mailbox session.
+fn mark_uids_on_session<T: std::io::Read + std::io::Write>(
+    session: &mut imap::Session<T>,
+    uids: &[u32],
+    outcome: UidOutcome,
+) {
+    if uids.is_empty() {
+        return;
+    }
+    let uid_set: String = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let flags = match outcome {
+        UidOutcome::Processed => "+FLAGS (\\Seen)",
+        UidOutcome::Quarantined => "+FLAGS (\\Seen Librefang-Quarantine)",
+    };
+    if let Err(e) = session.uid_store(&uid_set, flags) {
+        warn!(uids = %uid_set, error = %e, "Failed to update IMAP flags");
+    }
+}
+
+/// Mark a set of `(folder, uid)` pairs with the given outcome on a fresh IMAP
+/// session — used by the poller after downstream processing decides whether
+/// each message was delivered or denied.
+fn mark_uids_outcome(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    items: Vec<(String, u32, UidOutcome)>,
+) -> Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let tcp = std::net::TcpStream::connect((host, port))
+        .map_err(|e| format!("TCP connect failed: {e}"))?;
+    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
+        .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls_stream = tls
+        .connect(host, tcp)
+        .map_err(|e| format!("TLS handshake failed: {e}"))?;
+    let client = imap::Client::new(tls_stream);
+    let mut session = match client.login(username, password) {
+        Ok(s) => s,
+        Err((login_err, client)) => {
+            let authenticator = PlainAuthenticator {
+                username: username.to_string(),
+                password: password.to_string(),
+            };
+            client
+                .authenticate("PLAIN", &authenticator)
+                .map_err(|(e, _)| {
+                    format!("IMAP login failed: {login_err}; AUTH=PLAIN also failed: {e}")
+                })?
+        }
+    };
+
+    // Group by folder so we can SELECT once per folder.
+    use std::collections::BTreeMap;
+    let mut by_folder: BTreeMap<String, (Vec<u32>, Vec<u32>)> = BTreeMap::new();
+    for (folder, uid, outcome) in items {
+        let entry = by_folder.entry(folder).or_default();
+        match outcome {
+            UidOutcome::Processed => entry.0.push(uid),
+            UidOutcome::Quarantined => entry.1.push(uid),
+        }
+    }
+
+    for (folder, (processed, quarantined)) in by_folder {
+        if let Err(e) = session.select(&folder) {
+            warn!(folder, error = %e, "IMAP SELECT failed during flag update");
+            continue;
+        }
+        mark_uids_on_session(&mut session, &processed, UidOutcome::Processed);
+        mark_uids_on_session(&mut session, &quarantined, UidOutcome::Quarantined);
+    }
+
+    let _ = session.logout();
+    Ok(())
 }
 
 #[async_trait]
@@ -412,12 +544,25 @@ impl ChannelAdapter for EmailAdapter {
                     }
                 };
 
-                for (from_addr, subject, message_id, body) in emails {
-                    // Exact-match allowlist (substring match would let evil-trusted.com bypass).
+                let mut flag_updates: Vec<(String, u32, UidOutcome)> = Vec::new();
+                for FetchedEmail {
+                    folder,
+                    uid,
+                    from_addr,
+                    subject,
+                    message_id,
+                    body,
+                } in emails
+                {
+                    // Exact-match allowlist (substring match would let
+                    // evil-trusted.com bypass). Denied senders go to
+                    // quarantine (#3481): marking Seen would silently drop
+                    // them, but leaving UNSEEN would loop forever.
                     if !allowed_senders.is_empty()
                         && !sender_matches_allowlist(&from_addr, &allowed_senders)
                     {
-                        debug!(from = %from_addr, "Email from non-allowed sender, skipping");
+                        debug!(from = %from_addr, "Email from non-allowed sender, quarantining");
+                        flag_updates.push((folder, uid, UidOutcome::Quarantined));
                         continue;
                     }
 
@@ -466,7 +611,36 @@ impl ChannelAdapter for EmailAdapter {
                     }
                     if tx.send(msg).await.is_err() {
                         info!("Email channel receiver dropped, stopping poll");
+                        // Best-effort flush of accumulated flag updates.
+                        if !flag_updates.is_empty() {
+                            let h = imap_host.clone();
+                            let u = username.clone();
+                            let p = password.clone();
+                            let updates = std::mem::take(&mut flag_updates);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                            })
+                            .await;
+                        }
                         return;
+                    }
+                    // Successfully delivered to bridge — safe to mark Seen.
+                    flag_updates.push((folder, uid, UidOutcome::Processed));
+                }
+
+                // Apply flag updates in a fresh blocking call.
+                if !flag_updates.is_empty() {
+                    let h = imap_host.clone();
+                    let u = username.clone();
+                    let p = password.clone();
+                    let updates = std::mem::take(&mut flag_updates);
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        mark_uids_outcome(&h, imap_port, &u, p.as_str(), updates)
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| Err(format!("spawn_blocking panic: {join_err}")))
+                    {
+                        warn!("Failed to apply IMAP flag updates: {e}");
                     }
                 }
             }

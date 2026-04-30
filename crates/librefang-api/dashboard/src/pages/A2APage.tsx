@@ -1,5 +1,5 @@
 import { formatTime } from "../lib/datetime";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { fadeInScale } from "../lib/motion";
@@ -23,6 +23,10 @@ export function A2APage() {
   const [discoverUrl, setDiscoverUrl] = useState("");
   const [showDiscover, setShowDiscover] = useState(false);
   useCreateShortcut(() => setShowDiscover(true));
+
+  // Stable ids so each label can target its associated input/textarea (a11y).
+  const discoverUrlId = useId();
+  const taskMessageId = useId();
 
   // Send task state
   const [taskAgent, setTaskAgent] = useState<A2AAgentItem | null>(null);
@@ -110,7 +114,11 @@ export function A2APage() {
         <Card padding="md">
           <h3 className="text-sm font-black mb-3">{t("a2a.discover_agent")}</h3>
           <div className="flex flex-col sm:flex-row gap-3">
+            <label htmlFor={discoverUrlId} className="sr-only">
+              {t("a2a.discover_placeholder")}
+            </label>
             <input
+              id={discoverUrlId}
               type="url"
               value={discoverUrl}
               onChange={(e) => setDiscoverUrl(e.target.value)}
@@ -225,7 +233,11 @@ export function A2APage() {
                 <p className="text-xs text-text-dim">
                   {t("a2a.send_to")} <span className="font-bold text-brand">{taskAgent.name || taskAgent.url}</span>
                 </p>
+                <label htmlFor={taskMessageId} className="sr-only">
+                  {t("a2a.task_placeholder")}
+                </label>
                 <textarea
+                  id={taskMessageId}
                   value={taskMessage}
                   onChange={(e) => setTaskMessage(e.target.value)}
                   placeholder={t("a2a.task_placeholder")}
