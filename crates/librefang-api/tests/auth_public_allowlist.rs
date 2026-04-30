@@ -1,16 +1,19 @@
-//! Integration test: public-allowlist vs registered-route drift detection.
+//! Static documentation test for the public-route catalog.
 //!
-//! This test boots the real router via `server::build_router` and sends
-//! unauthenticated GET requests to a set of known-registered paths.  Each path
-//! must either:
+//! LIMITATIONS (intentional, scope-of-fix):
+//! - This test does NOT enumerate axum's live router. It walks a hardcoded
+//!   REGISTERED_GET_ROUTES table maintained by hand.
+//! - Adding a route in server.rs WITHOUT also adding it to REGISTERED_GET_ROUTES
+//!   will silently pass this test. A proper router-enumeration drift gate is
+//!   tracked as follow-up work; see #3712 acceptance criteria.
 //!
-//! 1. Appear in one of the typed `PUBLIC_ROUTES_*` constants in
-//!    `middleware.rs` — in which case the response must NOT be 401, OR
-//! 2. Not appear there — in which case the response MUST be 401.
-//!
-//! When a contributor adds a new route in `server.rs` and forgets to classify
-//! it in the allowlist, this test fails loudly instead of silently letting the
-//! dashboard break or silently bypassing auth.
+//! What this test DOES catch:
+//! - A path classified Authed in the table that's actually marked public via
+//!   PUBLIC_ROUTES_* will fail.
+//! - A path classified Public in the table that's actually still authed will
+//!   fail (returns 401 vs expected non-401).
+//! - Drift WITHIN the catalog: if a const slice's path doesn't match the
+//!   table entry's classification, that's caught.
 //!
 //! Run: cargo test -p librefang-api --test auth_public_allowlist -- --nocapture
 
@@ -81,8 +84,10 @@ async fn boot_router_with_api_key(api_key: &str) -> RouterHarness {
     }
 }
 
-/// Returns `true` if `path` appears in `PUBLIC_ROUTES_ALWAYS` or
-/// `PUBLIC_ROUTES_GET_ONLY`.  Only checks routes marked GET-compatible.
+/// Returns `true` if `path` is unconditionally public on GET requests — i.e.
+/// it appears in `PUBLIC_ROUTES_ALWAYS`, `PUBLIC_ROUTES_GET_ONLY`, or is
+/// handled by the dedicated `is_mcp_oauth_callback` guard in the middleware
+/// (pattern: `/api/mcp/servers/*/auth/callback`).
 fn is_in_always_public(path: &str) -> bool {
     for r in PUBLIC_ROUTES_ALWAYS {
         let ok = match r.match_kind {
@@ -98,10 +103,6 @@ fn is_in_always_public(path: &str) -> bool {
         if r.method != PublicMethod::GetOnly {
             continue;
         }
-        // MCP OAuth callback: prefix matches /api/mcp/servers/ but the real
-        // gate also requires path.ends_with("/auth/callback").  For catalog
-        // purposes we treat any path under that prefix as GET-only-public
-        // (the test paths we send don't hit real handlers anyway).
         let ok = match r.match_kind {
             PublicMatch::Exact => path == r.path,
             PublicMatch::Prefix => path.starts_with(r.path),
@@ -109,6 +110,11 @@ fn is_in_always_public(path: &str) -> bool {
         if ok {
             return true;
         }
+    }
+    // Mirror the is_mcp_oauth_callback guard: GET /api/mcp/servers/*/auth/callback
+    // is public via a dedicated check in auth(), not via PUBLIC_ROUTES_GET_ONLY.
+    if path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback") {
+        return true;
     }
     false
 }
@@ -139,15 +145,14 @@ async fn get_status(app: axum::Router, path: &str) -> StatusCode {
 // ---------------------------------------------------------------------------
 // The route table under test.
 //
-// This is the canonical list of GET-able paths registered in server.rs.
-// Keeping it here (rather than trying to enumerate axum's router at runtime)
-// makes drift explicit: if you add a route to server.rs you must add it here
-// too, otherwise CI catches you.
+// This is a hand-maintained list of GET-able paths. It is NOT auto-derived
+// from server.rs — see the file-level LIMITATIONS note for why adding a
+// route to server.rs without updating this table passes CI silently.
 //
 // Classification:
-//   "always"    -> must be in PUBLIC_ROUTES_ALWAYS or PUBLIC_ROUTES_GET_ONLY
-//   "dashboard" -> must be in PUBLIC_ROUTES_DASHBOARD_READS
-//   "authed"    -> must NOT be in any public list (401 without token)
+//   AlwaysPublic  -> must be in PUBLIC_ROUTES_ALWAYS or PUBLIC_ROUTES_GET_ONLY
+//   DashboardRead -> must be in PUBLIC_ROUTES_DASHBOARD_READS
+//   Authed        -> must NOT be in any public list (401 without token)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +204,10 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
         "/api/mcp/servers/myserver/auth/callback",
         Expect::AlwaysPublic,
     ),
+    re(
+        "/api/mcp/servers/test-srv/auth/callback",
+        Expect::AlwaysPublic,
+    ),
     // Dashboard reads (public when require_auth_for_reads is off, which is default)
     re("/api/agents", Expect::DashboardRead),
     re("/api/a2a/agents", Expect::DashboardRead),
@@ -216,6 +225,7 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/hands/my-hand", Expect::DashboardRead),
     re("/api/mcp/catalog", Expect::DashboardRead),
     re("/api/mcp/health", Expect::DashboardRead),
+    re("/api/config", Expect::DashboardRead),
     re("/api/mcp/servers", Expect::DashboardRead),
     re("/api/models", Expect::DashboardRead),
     re("/api/models/aliases", Expect::DashboardRead),
@@ -228,7 +238,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/workflows", Expect::DashboardRead),
     // Auth-required endpoints (must 401 without Bearer token)
     re("/api/health/detail", Expect::Authed),
-    re("/api/config", Expect::Authed),
+    // Security regression: /api/mcp/servers/{name} and /auth/status must NOT be
+    // publicly reachable — the server config (including env vars) and OAuth token
+    // state are sensitive. Only /auth/callback is public (via is_mcp_oauth_callback).
+    re("/api/mcp/servers/test-srv", Expect::Authed),
+    re("/api/mcp/servers/test-srv/auth/status", Expect::Authed),
     re("/api/agents/some-id/session", Expect::Authed),
     re("/api/agents/some-id/metrics", Expect::Authed),
     re("/api/agents/some-id/logs", Expect::Authed),
@@ -403,4 +417,43 @@ async fn dashboard_read_routes_reachable_without_auth_when_no_key_configured() {
             failures.join("\n  ")
         );
     }
+}
+
+/// Security regression: removing the broad `/api/mcp/servers/` prefix from
+/// PUBLIC_ROUTES_GET_ONLY must keep the individual server config and auth-status
+/// endpoints auth-protected, while the `/auth/callback` redirect path stays public.
+///
+/// Verifies fix for the regression introduced in the original allowlist PR where
+/// `prefix_get("/api/mcp/servers/")` exposed `/api/mcp/servers/{name}` (returns
+/// server config including env vars) and `/api/mcp/servers/{name}/auth/status`
+/// (returns McpAuthState including OAuthTokens) without a Bearer token.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_servers_prefix_does_not_leak_protected_paths() {
+    let harness = boot_router_with_api_key("test-secret-key").await;
+
+    // These two must return 401 — they expose sensitive data.
+    for path in [
+        "/api/mcp/servers/test-srv",
+        "/api/mcp/servers/test-srv/auth/status",
+    ] {
+        let status = get_status(harness.app.clone(), path).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{path} must return 401 without a token (exposes server config / OAuth tokens)"
+        );
+    }
+
+    // The OAuth callback redirect must remain public — browser arrives here
+    // without an API key after completing the OAuth provider flow.
+    let callback_status = get_status(
+        harness.app.clone(),
+        "/api/mcp/servers/test-srv/auth/callback",
+    )
+    .await;
+    assert_ne!(
+        callback_status,
+        StatusCode::UNAUTHORIZED,
+        "/api/mcp/servers/test-srv/auth/callback must be reachable without a token (OAuth callback)"
+    );
 }

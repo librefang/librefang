@@ -461,6 +461,12 @@ impl PublicRoute {
 ///
 /// These are either static assets needed to render the login screen, auth
 /// flow entry points, or minimal liveness probes that leak nothing sensitive.
+///
+/// Ordering note: entries here are grouped by semantic role (assets /
+/// auth-flow / pairing / liveness / OAuth) rather than sorted alphabetically,
+/// for readability. `PUBLIC_ROUTES_GET_ONLY` and `PUBLIC_ROUTES_DASHBOARD_READS`
+/// are sorted alphabetically by path. Maintain the chosen ordering when adding
+/// new entries to each slice.
 pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
     // Static assets / shell
     PublicRoute::exact_any("/"),
@@ -496,8 +502,6 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::prefix_get("/dashboard/assets/"),
     // i18n locale bundles — static, fetched before auth flow
     PublicRoute::prefix_get("/locales/"),
-    // MCP OAuth callback: /api/mcp/servers/{name}/auth/callback
-    PublicRoute::prefix_get("/api/mcp/servers/"),
 ];
 
 /// Routes in the "dashboard reads" group — public when `require_auth_for_reads`
@@ -512,6 +516,7 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/budget/agents"),
     PublicRoute::prefix_get("/api/budget/agents/"),
     PublicRoute::exact_get("/api/channels"),
+    PublicRoute::exact_get("/api/config"),
     PublicRoute::prefix_get("/api/cron/"),
     PublicRoute::exact_get("/api/hands"),
     PublicRoute::exact_get("/api/hands/active"),
@@ -531,12 +536,6 @@ pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
 ];
 
 /// Check whether a normalised path matches a [`PublicRoute`] entry.
-///
-/// For MCP OAuth callbacks (`/api/mcp/servers/*/auth/callback`) the prefix
-/// match on `/api/mcp/servers/` is intentionally broad — the caller must
-/// additionally check that the path ends with `/auth/callback` when needed.
-/// The auth middleware applies that extra guard; the constant just records the
-/// prefix so the test can enumerate it.
 fn matches_route(route: &PublicRoute, path: &str, is_get: bool) -> bool {
     let method_ok = match route.method {
         PublicMethod::Any => true,
@@ -729,8 +728,9 @@ pub async fn auth(
 
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
-    // The prefix "/api/mcp/servers/" is in PUBLIC_ROUTES_GET_ONLY; apply the
-    // extra `/auth/callback` suffix guard here to avoid widening the allowlist.
+    // This is the sole public entry point for the MCP OAuth flow; the prefix
+    // "/api/mcp/servers/" is NOT in the PUBLIC_ROUTES_* slices so that
+    // /api/mcp/servers/{name} and /auth/status remain auth-protected.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
 
@@ -761,8 +761,8 @@ pub async fn auth(
     let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
 
     // Walk PUBLIC_ROUTES_GET_ONLY: public on GET only regardless of auth config.
-    // For /api/mcp/servers/* the prefix match is intentionally broad — the
-    // is_mcp_oauth_callback guard above applies the extra suffix check.
+    // MCP OAuth callbacks are handled separately by is_mcp_oauth_callback above
+    // (prefix + suffix check), not via a PUBLIC_ROUTES_GET_ONLY prefix entry.
     let always_public_get_only = is_get
         && (PUBLIC_ROUTES_GET_ONLY
             .iter()
