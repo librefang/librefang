@@ -47,6 +47,7 @@ import {
   type HubCounts,
   type HubHealthMap,
 } from "../components/SkillHubBar";
+import { getSkillHub } from "../lib/skillHubs";
 import {
   Wrench,
   Search,
@@ -73,7 +74,6 @@ import {
   Zap,
   Plus,
   History,
-  Eye,
   RotateCcw,
   FileText,
   Tag,
@@ -192,28 +192,31 @@ function SkillCard({
   onViewDetail,
   t,
 }: SkillCardProps) {
-  const isAccentSource = source === "skillhub" || source === "clawhub-cn";
-
+  // Card accent + icon style. Browse cards tint with the source hub's
+  // brand color so a grid view of mixed hubs is colour-coded by origin
+  // (matches the design canvas). Installed cards stay green.
+  const hub = variant !== "installed" && source ? getSkillHub(source) : null;
   const accentClass =
     variant === "installed"
       ? "from-success via-success/60 to-success/30"
-      : isAccentSource
-        ? "from-accent via-accent/60 to-accent/30"
-        : "from-brand via-brand/60 to-brand/30";
-
+      : "from-brand via-brand/60 to-brand/30";
   const iconClass =
     variant === "installed"
       ? "bg-success/10 border-success/20 text-success"
-      : isAccentSource
-        ? "bg-accent/10 border-accent/20 text-accent"
-        : "bg-brand/10 border-brand/20 text-brand";
-
+      : !hub
+        ? "bg-brand/10 border-brand/20 text-brand"
+        : "";
+  const iconStyle = hub
+    ? {
+        background: `${hub.color}1a`,
+        borderColor: `${hub.color}40`,
+        color: hub.color,
+      }
+    : undefined;
   const hoverTextClass =
     variant === "installed"
       ? "group-hover:text-success"
-      : isAccentSource
-        ? "group-hover:text-accent"
-        : "group-hover:text-brand";
+      : "group-hover:text-brand";
 
   const icon =
     variant === "installed" ? (
@@ -232,158 +235,140 @@ function SkillCard({
     <Card
       hover
       padding="none"
-      className={`flex flex-col overflow-hidden group ${onViewDetail ? "cursor-pointer" : ""}`}
+      className={`relative flex flex-col overflow-hidden group ${onViewDetail ? "cursor-pointer" : ""}`}
       onClick={onViewDetail}
     >
+      {/* Abs hub-source ribbon — top-right of the card so the origin is
+       *  legible at a glance even when the card is in a dense grid. */}
+      {hubBadge && (
+        <div className="absolute top-2.5 right-2.5 pointer-events-none">
+          {hubBadge}
+        </div>
+      )}
       <div className={`h-1 bg-linear-to-r ${accentClass}`} />
       <div className="p-4 flex-1 flex flex-col gap-3">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div
-              className={`w-8 h-8 shrink-0 rounded-lg flex items-center justify-center border ${iconClass}`}
-            >
-              {icon}
-            </div>
-            <div className="min-w-0">
+        {/* Header — larger 38px icon, name row, author/version meta */}
+        <div className="flex items-start gap-3 pr-20">
+          <div
+            className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center border ${iconClass}`}
+            style={iconStyle}
+          >
+            {icon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <h3
                 className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
               >
                 {name}
               </h3>
-              <p className="text-[10px] text-text-dim font-mono">
-                v{version ?? "1.0.0"}
-              </p>
+              {variant === "installed" && (
+                <Badge variant="success">{t("skills.installed")}</Badge>
+              )}
+              {variant !== "installed" && isInstalled && (
+                <Badge variant="success">
+                  <CheckCircle2 className="w-2.5 h-2.5" />
+                  {t("skills.installed")}
+                </Badge>
+              )}
             </div>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {hubBadge}
-            {variant === "installed" && (
-              <Badge variant="success">{t("skills.installed")}</Badge>
-            )}
-            {variant !== "installed" && isInstalled && (
-              <Badge variant="success">
-                <CheckCircle2 className="w-2.5 h-2.5" />
-                {t("skills.installed")}
-              </Badge>
-            )}
+            <p className="text-[10.5px] text-text-dim font-mono mt-0.5 truncate">
+              {[
+                variant === "installed" ? "skill" : variant === "fanghub" ? "fanghub" : source,
+                author,
+                version ? `v${version}` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
           </div>
         </div>
 
         {/* Description */}
-        <p className="text-xs text-text-dim line-clamp-2 flex-1 italic">
+        <p className="text-xs text-text-dim line-clamp-2 flex-1 leading-relaxed">
           {description || "—"}
         </p>
 
-        {/* Marketplace stats */}
-        {(stars !== undefined || updatedAt) && (
-          <div className="flex items-center gap-3 text-[10px] font-bold text-text-dim">
-            {stars !== undefined ? (
-              <>
-                <span className="flex items-center gap-1">
-                  <Star className="w-3 h-3 text-warning" />
-                  {stars}
-                </span>
-                {downloads !== undefined && (
-                  <span className="flex items-center gap-1">
-                    <Download className="w-3 h-3" />
-                    {downloads}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="flex items-center gap-1">
-                <Calendar className="w-3 h-3" />
-                {formatDate(updatedAt!)}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Installed meta */}
-        {variant === "installed" && (author || toolsCount !== undefined) && (
-          <div className="flex justify-between text-[10px] font-bold text-text-dim">
-            {author && (
-              <span>
-                {t("skills.author")}: {author}
-              </span>
-            )}
-            {toolsCount !== undefined && (
-              <span>
-                {t("skills.tools")}: {toolsCount}
-              </span>
-            )}
-          </div>
-        )}
+        {/* Stats + inline Install button. Mirrors the design canvas where
+         *  installs / rating sit on the same row as the install action so
+         *  vertically dense card grids don't waste a whole row on stats. */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {stars !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Star className="w-3 h-3 text-warning" />
+              {stars}
+            </span>
+          )}
+          {downloads !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Download className="w-3 h-3" />
+              {downloads.toLocaleString()}
+            </span>
+          )}
+          {variant === "installed" && toolsCount !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Wrench className="w-3 h-3" />
+              {toolsCount}
+            </span>
+          )}
+          {updatedAt && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Calendar className="w-3 h-3" />
+              {formatDate(updatedAt)}
+            </span>
+          )}
+          <span className="flex-1" />
+          {/* Inline action — Install (browse) or Uninstall (installed). */}
+          {variant === "installed" && onUninstall ? (
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onUninstall}
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                className="text-error hover:text-error"
+              >
+                {t("skills.uninstall")}
+              </Button>
+            </div>
+          ) : variant !== "installed" && isInstalled ? (
+            // Header already carries the installed badge — leave the
+            // action slot empty so we don't double-stamp the card.
+            null
+          ) : variant !== "installed" && onInstall ? (
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={onInstall}
+                disabled={installPending}
+                leftIcon={
+                  installPending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )
+                }
+              >
+                {installPending ? t("skills.installing") : t("skills.install")}
+              </Button>
+            </div>
+          ) : null}
+        </div>
 
         {/* Tags */}
         {tags && tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
-            {tags.slice(0, 3).map((tag) => (
+            {tags.slice(0, 4).map((tag) => (
               <span
                 key={tag}
-                className="px-1.5 py-0.5 text-[10px] rounded-full bg-surface-2 text-text-dim font-medium"
+                className="px-1.5 py-0.5 text-[10px] rounded font-mono text-text-dim/80 border border-border-subtle/60 bg-main/40"
               >
                 {tag}
               </span>
             ))}
           </div>
         )}
-
-        {/* Actions */}
-        {variant === "installed" ? (
-          <div
-            className="flex gap-2"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {onViewDetail && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="flex-1"
-                onClick={onViewDetail}
-                leftIcon={<Eye className="w-3.5 h-3.5" />}
-              >
-                {t("common.detail")}
-              </Button>
-            )}
-            {onUninstall && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="flex-1 text-error hover:text-error"
-                onClick={onUninstall}
-                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
-              >
-                {t("skills.uninstall")}
-              </Button>
-            )}
-          </div>
-        ) : isInstalled ? (
-          <Button variant="secondary" size="sm" disabled className="w-full">
-            <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
-            {t("skills.installed")}
-          </Button>
-        ) : onInstall ? (
-          <div onClick={(e) => e.stopPropagation()}>
-            <Button
-              variant="primary"
-              size="sm"
-              className="w-full"
-              onClick={onInstall}
-              disabled={installPending}
-              leftIcon={
-                installPending ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Download className="w-3.5 h-3.5" />
-                )
-              }
-            >
-              {installPending ? t("skills.installing") : t("skills.install")}
-            </Button>
-          </div>
-        ) : null}
       </div>
     </Card>
   );
