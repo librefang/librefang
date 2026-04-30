@@ -1,6 +1,6 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon, Download, Star } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -13,6 +13,7 @@ import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { fetchRegistryRaw, pathCandidatesFor, fetchFirstAvailable } from '../lib/registry-raw'
+import { useMarketplace } from '../lib/useMarketplace'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
@@ -216,6 +217,9 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
     retry: 1,
   })
 
+  const marketplace = useMarketplace(category)
+  const mktPkg = marketplace.get(id)
+
   const catHref = lang === 'en' ? `/${category}` : `/${lang}/${category}`
   const categoryLabel = t.registry?.categories[category]?.title || category
   const desc = item ? getLocalizedDesc(item, lang) : ''
@@ -295,6 +299,32 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
                   {tag}
                 </span>
               ))}
+            </div>
+          )}
+          {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0) && (
+            <div className="flex flex-wrap items-center gap-4 mb-3 text-xs font-mono text-gray-500">
+              {mktPkg.total_downloads > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <Download className="w-3.5 h-3.5" />
+                  {mktPkg.total_downloads.toLocaleString()} {t.registry?.downloads || 'downloads'}
+                </span>
+              )}
+              {mktPkg.weekly_downloads > 0 && (
+                <span className="flex items-center gap-1.5 text-gray-400">
+                  ↑ {mktPkg.weekly_downloads.toLocaleString()} {t.registry?.thisWeek || 'this week'}
+                </span>
+              )}
+              {mktPkg.stars > 0 && (
+                <span className="flex items-center gap-1.5">
+                  <Star className="w-3.5 h-3.5" />
+                  {mktPkg.stars.toLocaleString()}
+                </span>
+              )}
+              {mktPkg.latest_version && (
+                <span className="text-cyan-600 dark:text-cyan-500">
+                  v{mktPkg.latest_version}
+                </span>
+              )}
             </div>
           )}
           {commitQuery.data?.date && (

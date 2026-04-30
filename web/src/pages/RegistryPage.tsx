@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star, Download } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from './../i18n'
@@ -12,6 +12,7 @@ import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
+import { useMarketplace, type MarketplacePkg } from '../lib/useMarketplace'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -47,9 +48,9 @@ function isPopular(item: Detail) {
   return item.tags?.includes('popular') ?? false
 }
 
-type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending'
+type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads'
 
-function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>): Detail[] {
+function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>, marketplace: Map<string, MarketplacePkg>): Detail[] {
   const arr = [...items]
   switch (key) {
     case 'nameAsc':
@@ -63,6 +64,8 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
         if (ac !== bc) return bc - ac
         return a.name.localeCompare(b.name)
       })
+    case 'downloads':
+      return arr.sort((a, b) => (marketplace.get(b.id)?.total_downloads ?? 0) - (marketplace.get(a.id)?.total_downloads ?? 0))
     case 'popular':
     default:
       return arr.sort((a, b) => {
@@ -90,6 +93,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const { data, isLoading, error, refetch, isFetching } = useRegistry()
   const queryClient = useQueryClient()
   const { isFavorite, toggle: toggleFavorite } = useFavorites()
+  const marketplace = useMarketplace(category)
   // Seed from ?category= so bookmarks / shared links preserve the filter.
   // The grid's filter treats query as a substring against id/name/desc/
   // category, so a category name in this slot filters to that chip.
@@ -100,7 +104,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const [sortBy, setSortBy] = useState<SortKey>(() => {
     if (typeof window === 'undefined') return 'popular'
     const raw = new URLSearchParams(window.location.search).get('sort')
-    return (['popular', 'nameAsc', 'nameDesc', 'trending'] as SortKey[]).includes(raw as SortKey)
+    return (['popular', 'nameAsc', 'nameDesc', 'trending', 'downloads'] as SortKey[]).includes(raw as SortKey)
       ? (raw as SortKey)
       : 'popular'
   })
@@ -139,7 +143,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   }, [trendingQuery.data])
 
   const filtered = useMemo(() => {
-    const sorted = sortItems(items, sortBy, trendingIds)
+    const sorted = sortItems(items, sortBy, trendingIds, marketplace)
     // Favorites always pin to the top within whatever sort the user picked.
     // Stable partition so relative order inside each group is preserved.
     const pinned: Detail[] = []
@@ -159,7 +163,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
           || (i.category || '').toLowerCase().includes(q)
           || (i.tags || []).some(tag => tag.toLowerCase().includes(q))
     })
-  }, [items, query, lang, sortBy, trendingIds, isFavorite, category])
+  }, [items, query, lang, sortBy, trendingIds, isFavorite, category, marketplace])
 
   const categories = useMemo(() => {
     const set = new Set<string>()
@@ -221,6 +225,9 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
               <option value="nameDesc">{t.registry?.sort?.nameDesc || 'Name Z–A'}</option>
               <option value="trending" disabled={!trendingQuery.data || trendingIds.size === 0}>
                 {t.registry?.sort?.trending || 'Most clicked'}
+              </option>
+              <option value="downloads" disabled={marketplace.size === 0}>
+                {t.registry?.sort?.downloads || 'Most downloaded'}
               </option>
             </select>
           </label>
@@ -378,6 +385,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                 }).catch(() => { /* prefetch failure is silent */ })
               }
               const starred = isFavorite(category, item.id)
+              const mktPkg = marketplace.get(item.id)
               return (
                 <a
                   key={item.id}
@@ -434,6 +442,22 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                           {tag}
                         </span>
                       ))}
+                    </div>
+                  )}
+                  {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0) && (
+                    <div className="flex items-center gap-3 mt-3 pt-2.5 border-t border-black/5 dark:border-white/5">
+                      {mktPkg.total_downloads > 0 && (
+                        <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
+                          <Download className="w-2.5 h-2.5" />
+                          {mktPkg.total_downloads.toLocaleString()}
+                        </span>
+                      )}
+                      {mktPkg.stars > 0 && (
+                        <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
+                          <Star className="w-2.5 h-2.5" />
+                          {mktPkg.stars.toLocaleString()}
+                        </span>
+                      )}
                     </div>
                   )}
                 </a>
