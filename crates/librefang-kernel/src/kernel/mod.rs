@@ -4840,6 +4840,8 @@ system_prompt = "You are a helpful assistant."
         );
         // Ephemeral side-questions have no sender context — no user/channel
         // attribution to record. Per-user budget rollup will skip these.
+        // session_id is also None: ephemerals run on a throwaway session
+        // that is not persisted in the sessions table.
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             provider: manifest.model.provider.clone(),
@@ -4851,6 +4853,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms,
             user_id: None,
             channel: None,
+            session_id: None,
         };
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
@@ -6514,6 +6517,7 @@ system_prompt = "You are a helpful assistant."
                         // before the spawn — moves into this async block.
                         user_id: attribution_user_id,
                         channel: attribution_channel.clone(),
+                        session_id: Some(effective_session_id),
                     };
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
                         &usage_record,
@@ -8187,6 +8191,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms,
             user_id: attribution_user_id,
             channel: attribution_channel.clone(),
+            session_id: Some(effective_session_id),
         };
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
@@ -15038,6 +15043,7 @@ system_prompt = "You are a helpful assistant."
                 // attribution. Spend rolls up under `system`.
                 user_id: None,
                 channel: Some("system".to_string()),
+                session_id: None,
             };
             if let Err(e) = kernel.metering.record(&usage_record) {
                 tracing::debug!(error = %e, "Failed to record background review usage");

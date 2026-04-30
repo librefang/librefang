@@ -25,7 +25,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::Manager;
-#[cfg(desktop)]
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tracing::{info, warn};
