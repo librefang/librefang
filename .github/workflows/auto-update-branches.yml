@@ -15,6 +15,14 @@ jobs:
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
+          # Use a PAT (not the default GITHUB_TOKEN) so the resulting merge
+          # commit is authored under the bot account's identity instead of
+          # `github-actions[bot]`. GitHub silently suppresses workflow runs
+          # for any commit pushed by GITHUB_TOKEN to prevent recursion, so
+          # auto-updated PRs were ending up with empty CI rollups (no
+          # pull_request event fires for the merge SHA). The PAT bypasses
+          # that protection.
+          github-token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           script: |
             const { data: prs } = await github.rest.pulls.list({
               owner: context.repo.owner,
