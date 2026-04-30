@@ -118,7 +118,11 @@ jobs:
 
       - name: Build debug APK (unsigned)
         working-directory: crates/librefang-desktop
-        run: cargo tauri android build --target aarch64 --debug --apk
+        # `--no-default-features --features mobile-no-email`: the default flavor
+        # pulls librefang-api/all-channels which enables channel-email →
+        # rustls-connector 0.23.0 → rustls-platform-verifier::Verifier::new_with_extra_roots,
+        # which is not implemented for the Android target in v0.7.0.
+        run: cargo tauri android build --target aarch64 --debug --apk --no-default-features --features mobile-no-email
 
   ios_smoke:
     name: iOS (simulator, unsigned)
@@ -179,4 +183,6 @@ jobs:
 
       - name: Build for simulator (unsigned)
         working-directory: crates/librefang-desktop
-        run: cargo tauri ios build --target aarch64-sim --debug
+        # Match the Android flavor — keeps mobile builds consistent and avoids
+        # pulling channel-email dependencies that aren't useful on iOS either.
+        run: cargo tauri ios build --target aarch64-sim --debug --no-default-features --features mobile-no-email
