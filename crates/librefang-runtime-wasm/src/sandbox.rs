@@ -1195,12 +1195,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Either the host rejected the request outright (error in response),
-        // or serde_json's depth guard fired during host_call deserialise. We
-        // accept any path that DOES NOT produce a normal `ok` response.
+        // serde_json's RECURSION_LIMIT (128) fires during host_call
+        // deserialisation; the host returns an error response. Assert that
+        // the output has an "error" key — accepting "no ok" is too loose and
+        // would pass even if the guest simply returned nothing.
         assert!(
-            result.output.get("error").is_some() || result.output.get("ok").is_none(),
-            "Deeply-nested host_call request should be rejected, got: {:?}",
+            result.output.get("error").is_some(),
+            "Deeply-nested host_call request must produce an error response, got: {:?}",
             result.output
         );
     }
@@ -1226,7 +1227,9 @@ mod tests {
     async fn test_per_store_callback_traps_on_real_timeout() {
         let sandbox = WasmSandbox::new().unwrap();
         let config = SandboxConfig {
-            fuel_limit: 1_000_000_000,
+            // u64::MAX: fuel tracking stays enabled (keeps epoch check-points active)
+            // but can't be exhausted in 1 s — wall-clock timeout wins.
+            fuel_limit: u64::MAX,
             timeout_secs: Some(1),
             ..Default::default()
         };
@@ -1242,13 +1245,14 @@ mod tests {
             .await
             .unwrap_err();
 
-        // The trap-handler builds the timeout message from a fixed format;
-        // assert against that (not raw wasmtime output) so the test fails
-        // if the per-store callback wiring regresses and execution exits
-        // through an unrelated error path.
+        // Verify the error is a wall-clock timeout (not fuel, not ABI, not
+        // compilation). The message is built by the trap-handler from the
+        // fixed "timed out after …s" format — asserting on it means the test
+        // catches any regression where the per-store callback is unwired and
+        // execution exits through an unrelated path.
         match &err {
             SandboxError::Execution(msg) if msg.contains("timed out") => {}
-            other => panic!("Expected wall-clock timeout error, got: {other}"),
+            other => panic!("Expected SandboxError::Execution with 'timed out', got: {other:?}"),
         }
     }
 }

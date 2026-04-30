@@ -6,7 +6,7 @@
 //! These functions are called from the `host_call` dispatch in `sandbox.rs`.
 //! They receive `&GuestState` (not `&mut`) and return JSON values.
 
-use crate::sandbox::GuestState;
+use crate::sandbox::{GuestState, MAX_GUEST_RESULT_BYTES};
 use librefang_types::capability::{capability_matches, Capability};
 use serde_json::json;
 use std::net::ToSocketAddrs;
@@ -789,7 +789,18 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
     // a flat key space, so agent A can read or overwrite agent B's keys.
     let namespaced_key = format!("{}:{key}", state.agent_id);
     match kernel.memory_recall(&namespaced_key, None) {
-        Ok(Some(val)) => json!({"ok": val}),
+        Ok(Some(val)) => {
+            // SECURITY (#3866): cap the value returned to the guest so a
+            // value stored before this cap existed cannot be used to push
+            // an unbounded buffer back through host_call.
+            let serialized_len = serde_json::to_vec(&val).map(|v| v.len()).unwrap_or(0);
+            if serialized_len > MAX_GUEST_RESULT_BYTES {
+                return json!({"error": format!(
+                    "Stored value too large to return: {serialized_len} bytes (max {MAX_GUEST_RESULT_BYTES})"
+                )});
+            }
+            json!({"ok": val})
+        }
         Ok(None) => json!({"ok": null}),
         Err(e) => json!({"error": e}),
     }
@@ -803,9 +814,9 @@ const MAX_KV_KEY_BYTES: usize = 1024;
 
 /// Maximum serialized value size accepted by `host_kv_set` (Bug #3866).
 ///
-/// The value is cloned and persisted in SQLite; without a cap a guest
-/// can grow the memory store unboundedly with a single call.
-const MAX_KV_VALUE_BYTES: usize = 1024 * 1024;
+/// Aliased from `MAX_GUEST_RESULT_BYTES` so all 1 MiB payload caps stay in
+/// sync with a single definition.
+const MAX_KV_VALUE_BYTES: usize = MAX_GUEST_RESULT_BYTES;
 
 fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let key = match params.get("key").and_then(|k| k.as_str()) {
@@ -827,22 +838,24 @@ fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
     ) {
         return e;
     }
-    let value = match params.get("value") {
-        Some(v) => v.clone(),
+    let value_ref = match params.get("value") {
+        Some(v) => v,
         None => return json!({"error": "Missing 'value' parameter"}),
     };
     // SECURITY (#3866): cap serialized value size to bound SQLite growth.
-    // Fail-closed: a serialization error must reject the call, not silently
-    // skip the size guard.
-    let value_bytes = match serde_json::to_vec(&value) {
+    // Serialize via the borrow first so we don't clone a potentially large
+    // value before knowing it passes the cap. Fail-closed: a serialization
+    // error rejects the call rather than silently skipping the size guard.
+    let serialized_len = match serde_json::to_vec(value_ref) {
         Ok(v) => v.len(),
         Err(e) => return json!({"error": format!("Failed to serialize value: {e}")}),
     };
-    if value_bytes > MAX_KV_VALUE_BYTES {
+    if serialized_len > MAX_KV_VALUE_BYTES {
         return json!({"error": format!(
-            "Value too large: {value_bytes} bytes (max {MAX_KV_VALUE_BYTES})"
+            "Value too large: {serialized_len} bytes (max {MAX_KV_VALUE_BYTES})"
         )});
     }
+    let value = value_ref.clone();
     let kernel = match &state.kernel {
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
