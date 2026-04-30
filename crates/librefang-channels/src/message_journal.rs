@@ -281,42 +281,109 @@ impl MessageJournal {
     /// Compact the journal file: rewrite only non-completed entries.
     /// Call periodically or on shutdown.
     ///
-    /// Sync filesystem ops (`File::create`, `flush`, `sync_all`, `rename`) run
-    /// inside `spawn_blocking` so they cannot stall the async runtime while
-    /// we still hold the inner mutex (issue #3646 — every channel intake
-    /// awaits this same `tokio::Mutex`, so a slow `sync_all` would serialize
-    /// all incoming messages behind the compactor). Path + entries are
-    /// cloned out and `inner` is `drop`ped *before* the await, otherwise
-    /// the lock would still span the entire fsync window and intake would
-    /// block on the blocking thread instead of the runtime — same stall,
-    /// different scheduler.
+    /// Two-phase, lock-aware design:
+    ///
+    /// 1. **Snapshot under lock** — clone path + pending entries + their
+    ///    message-ids out, then drop the lock so channel intake (`record`,
+    ///    `update_status`) is not stalled while we fsync the temp file.
+    /// 2. **Slow write off lock** — `File::create` + `flush` + `sync_all`
+    ///    happen inside `spawn_blocking` without holding the mutex
+    ///    (issue #3646: every intake awaits the same `tokio::Mutex`, so
+    ///    holding it across `sync_all` serializes all channel traffic
+    ///    behind the compactor regardless of which scheduler runs the I/O).
+    /// 3. **Re-acquire lock for atomic rename** — before swapping
+    ///    `tmp.jsonl → journal.jsonl`, take the lock again and verify no
+    ///    new entries were appended to `pending` since the snapshot. If
+    ///    any are present, `record()` has already appended their lines to
+    ///    the live file; renaming our stale tmp over it would truncate
+    ///    those lines and lose just-journaled messages on the next crash
+    ///    (audit of #3967). When that happens, abort this compaction
+    ///    (the next tick retries) and clean up the tmp file.
     pub async fn compact(&self) {
-        let (path, entries) = {
+        use std::collections::HashSet;
+        let (path, snapshot_ids, entries) = {
             let inner = self.inner.lock().await;
             let path = inner.path.clone();
+            let snapshot_ids: HashSet<String> = inner.pending.keys().cloned().collect();
             let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
-            (path, entries)
+            (path, snapshot_ids, entries)
         };
         let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
         let remaining = entries.len();
 
-        let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let mut file = std::fs::File::create(&tmp_path)?;
+        let tmp_for_write = tmp_path.clone();
+        let write_join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&tmp_for_write)?;
             for entry in &entries {
                 let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
                 writeln!(file, "{line}")?;
             }
             file.flush()?;
             file.sync_all()?;
-            std::fs::rename(&tmp_path, &path)?;
             Ok(())
         })
         .await;
 
-        match join {
+        match write_join {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!(error = %e, "Journal compaction temp write failed");
+                // Best-effort cleanup of the partial tmp file.
+                let cleanup = tmp_path.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
+                return;
+            }
+            Err(e) => {
+                error!(error = %e, "spawn_blocking panicked compacting journal");
+                let cleanup = tmp_path.clone();
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
+                return;
+            }
+        }
+
+        // Re-acquire the lock for the rename. `record()` holds this same
+        // mutex across its disk-append spawn_blocking, so once we own it
+        // again no append can interleave with our rename. We also detect
+        // any append that happened *during* the slow write window above
+        // and abort if so — otherwise the rename would overwrite those
+        // freshly-journaled lines on disk.
+        let inner = self.inner.lock().await;
+        let raced: Vec<String> = inner
+            .pending
+            .keys()
+            .filter(|id| !snapshot_ids.contains(*id))
+            .cloned()
+            .collect();
+        if !raced.is_empty() {
+            drop(inner);
+            warn!(
+                appended = raced.len(),
+                "Journal compaction aborted: entries were appended during compact; will retry next cycle",
+            );
+            let cleanup = tmp_path.clone();
+            let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
+            return;
+        }
+
+        let path_for_rename = path.clone();
+        let tmp_for_rename = tmp_path.clone();
+        let rename_join =
+            tokio::task::spawn_blocking(move || std::fs::rename(&tmp_for_rename, &path_for_rename))
+                .await;
+        drop(inner);
+
+        match rename_join {
             Ok(Ok(())) => debug!(remaining, "Journal compacted"),
-            Ok(Err(e)) => error!(error = %e, "Journal compaction failed"),
-            Err(e) => error!(error = %e, "spawn_blocking panicked compacting journal"),
+            Ok(Err(e)) => {
+                error!(error = %e, "Journal compaction rename failed");
+                let cleanup = tmp_path;
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
+            }
+            Err(e) => {
+                error!(error = %e, "spawn_blocking panicked renaming journal");
+                let cleanup = tmp_path;
+                let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(cleanup)).await;
+            }
         }
     }
 
@@ -472,6 +539,46 @@ mod tests {
         assert!(!journal.contains("msg-1").await);
         journal.record(test_entry("msg-1")).await;
         assert!(journal.contains("msg-1").await);
+    }
+
+    #[tokio::test]
+    async fn compact_does_not_lose_entries_appended_during_window() {
+        // Regression for the snapshot/rename race re-introduced when
+        // compact() dropped the inner mutex before the spawn_blocking
+        // fsync. If `record(D)` interleaves between compact's snapshot
+        // and rename, D's appended line on disk must NOT be truncated by
+        // the rename of the (stale) tmp file. Compact must either
+        // include D in the rewrite or abort and clean up.
+        let dir = TempDir::new().unwrap();
+        let journal = MessageJournal::open(dir.path()).unwrap();
+
+        journal.record(test_entry("msg-old")).await;
+
+        // Run compact concurrently with a record(); the record may
+        // observe an empty file (compact won) or its line preserved
+        // (compact aborted), but never lose the entry.
+        let j2 = journal.clone();
+        let compactor = tokio::spawn(async move { j2.compact().await });
+        // Tiny yield to let compact take its snapshot first; even if
+        // ordering varies, the invariant still holds.
+        tokio::task::yield_now().await;
+        journal.record(test_entry("msg-new")).await;
+        compactor.await.unwrap();
+
+        // Reopen and verify: msg-new must be recoverable. msg-old must
+        // also still be there because nothing completed it.
+        let journal2 = MessageJournal::open(dir.path()).unwrap();
+        let pending = journal2.pending_entries().await;
+        let ids: std::collections::HashSet<String> =
+            pending.iter().map(|e| e.message_id.clone()).collect();
+        assert!(
+            ids.contains("msg-new"),
+            "msg-new lost across compact race: pending = {ids:?}"
+        );
+        assert!(
+            ids.contains("msg-old"),
+            "msg-old lost across compact race: pending = {ids:?}"
+        );
     }
 
     #[tokio::test]
