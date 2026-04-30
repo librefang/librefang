@@ -1,0 +1,172 @@
+openapi: 3.1.0
+info:
+  title: FangHub Marketplace API
+  version: 1.0.0
+  description: Package registry for LibreFang skills, hands, extensions, and MCP servers
+
+servers:
+  - url: https://marketplace.librefang.ai
+
+paths:
+  /v1/packages:
+    get:
+      summary: List packages
+      parameters:
+        - name: kind
+          in: query
+          schema: { type: string, enum: [skill, hand, extension, mcp] }
+        - name: sort
+          in: query
+          schema: { type: string, enum: [downloads, stars, updated], default: downloads }
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Package list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  packages: { type: array, items: { $ref: '#/components/schemas/Package' } }
+                  total: { type: integer }
+    post:
+      summary: Create a package
+      security: [{ cookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name, kind]
+              properties:
+                slug: { type: string, pattern: '^[a-z0-9-]+$' }
+                name: { type: string }
+                kind: { type: string, enum: [skill, hand, extension, mcp] }
+                description: { type: string }
+                github_repo: { type: string, example: 'owner/repo' }
+                homepage: { type: string }
+                tags: { type: array, items: { type: string } }
+      responses:
+        '201': { description: Created }
+        '401': { description: Unauthorized }
+        '409': { description: Slug already taken }
+
+  /v1/packages/{slug}:
+    get:
+      summary: Get a package
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Package' }
+        '404': { description: Not Found }
+    put:
+      summary: Update a package (owner only)
+      security: [{ cookie: [] }]
+    delete:
+      summary: Delete a package (owner only)
+      security: [{ cookie: [] }]
+
+  /v1/packages/{slug}/versions:
+    get:
+      summary: List versions
+    post:
+      summary: Publish a new version (owner only)
+      security: [{ cookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, bundle_url, bundle_sha256]
+              properties:
+                version: { type: string, example: '1.0.0' }
+                bundle_url: { type: string }
+                bundle_sha256: { type: string }
+                changelog: { type: string }
+
+  /v1/download/{slug}/{version}:
+    get:
+      summary: Download a package version (redirects to bundle URL, increments counter)
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: version
+          in: path
+          required: true
+          schema: { type: string, description: 'Version string or "latest"' }
+      responses:
+        '302': { description: Redirect to bundle URL }
+        '404': { description: Not Found }
+
+  /v1/packages/{slug}/star:
+    post:
+      summary: Star a package
+      security: [{ cookie: [] }]
+    delete:
+      summary: Unstar a package
+      security: [{ cookie: [] }]
+
+  /auth/github:
+    get:
+      summary: Start GitHub OAuth flow
+
+  /auth/github/callback:
+    get:
+      summary: GitHub OAuth callback
+
+  /auth/me:
+    get:
+      summary: Get current user
+      security: [{ cookie: [] }]
+
+  /auth/logout:
+    get:
+      summary: Logout
+
+components:
+  schemas:
+    Package:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [skill, hand, extension, mcp] }
+        description: { type: string }
+        author_id: { type: string }
+        author_handle: { type: string }
+        author_avatar: { type: string }
+        github_repo: { type: string }
+        homepage: { type: string }
+        tags: { type: array, items: { type: string } }
+        total_downloads: { type: integer }
+        weekly_downloads: { type: integer }
+        stars: { type: integer }
+        is_verified: { type: boolean }
+        is_featured: { type: boolean }
+        latest_version: { type: string }
+        created_at: { type: integer }
+        updated_at: { type: integer }
+
+  securitySchemes:
+    cookie:
+      type: apiKey
+      in: cookie
+      name: mp_token

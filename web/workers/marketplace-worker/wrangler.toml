@@ -1,0 +1,16 @@
+name = "librefang-marketplace"
+main = "index.js"
+compatibility_date = "2024-01-01"
+account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "librefang-marketplace"
+database_id = "REPLACE_WITH_ACTUAL_D1_ID"
+
+[vars]
+GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
+
+# Weekly stats aggregation
+[triggers]
+crons = ["0 0 * * 0"]
