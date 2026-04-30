@@ -163,17 +163,23 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
     Some(url_str.clone())
 }
 
-/// Return `true` when the given host string resolves to a network range that
-/// must not be reachable via OAuth metadata fetches (SSRF defence-in-depth).
+/// Return `true` when the given host string is a literal IP address or
+/// known internal hostname that must not be reachable via OAuth metadata
+/// fetches (SSRF defence-in-depth).  No DNS resolution is performed —
+/// only the literal value is matched.  A public hostname that DNS-rebinds
+/// to an internal IP at fetch time is out of scope; mitigate at the
+/// network layer.
 ///
-/// Blocked ranges:
-/// * Exact hostnames: `localhost`, `metadata.google.internal`
+/// Blocked values:
+/// * Exact hostnames:   `localhost`, `metadata.google.internal`
 /// * IPv4 loopback      127.0.0.0/8
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-/// * IPv4 link-local    169.254.0.0/16
+/// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
+/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is private
+/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is private
 fn is_ssrf_blocked_host(host: &str) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -297,8 +303,9 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
-/// Returns `None` if the origin resolves to a private/loopback/link-local
-/// host (SSRF guard — see `is_ssrf_blocked_host`).
+/// Returns `None` when the origin's host is a literal private / loopback /
+/// link-local address or a known internal hostname (SSRF guard — see
+/// `is_ssrf_blocked_host`).  No DNS resolution is performed.
 pub fn well_known_url(server_url: &str) -> Option<String> {
     let parsed = Url::parse(server_url).ok()?;
     // Block SSRF before constructing the well-known URL.
