@@ -7,11 +7,12 @@ image = "ghcr.io/librefang/librefang:latest"
 [env]
   LIBREFANG_HOME = "/data"
   LIBREFANG_LISTEN = "0.0.0.0:4545"
-  # Allow unauthenticated access for the public live demo. The daemon logs a
-  # warning at startup when this flag is set so the intent is visible in ops
-  # tooling. Remove this and set LIBREFANG_API_KEY (or configure api_key in
-  # config.toml) for any deployment that should not be publicly accessible.
-  LIBREFANG_ALLOW_NO_AUTH = "1"
+  # SAFETY: this template is safe-by-default. The auth middleware will fail-closed
+  # for non-loopback requests when no LIBREFANG_API_KEY is configured.
+  #
+  # For the canonical librefang/librefang public demo at flyio.librefang.ai,
+  # the maintainer sets LIBREFANG_ALLOW_NO_AUTH=1 via `flyctl secrets set` AFTER deploy
+  # — NOT in this committed file. See deploy.sh for the API-key generation flow.
 
 [http_service]
   internal_port = 4545

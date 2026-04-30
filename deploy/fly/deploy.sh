@@ -2,15 +2,35 @@
 set -euo pipefail
 
 # LibreFang — One-command deploy to Fly.io
-# Usage: curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
+#
+# Usage:
+#   curl -sL https://raw.githubusercontent.com/librefang/librefang/main/deploy/fly/deploy.sh | bash
+#
+# By default this script generates a random LIBREFANG_API_KEY and sets it as a
+# Fly secret so your deployment is locked from the start. Keep the printed key —
+# it is the Bearer token required for every API call.
+#
+# Flags:
+#   --public-demo   Skip API-key generation and set LIBREFANG_ALLOW_NO_AUTH=1
+#                   instead. Use this ONLY for the canonical public demo at
+#                   flyio.librefang.ai where unauthenticated read access is
+#                   intentional. Never use this flag for private deployments.
 
 REPO="https://github.com/librefang/librefang.git"
 REGION="nrt"
+PUBLIC_DEMO=0
 
 info()  { printf "\033[1;34m→\033[0m %s\n" "$1"; }
 ok()    { printf "\033[1;32m✓\033[0m %s\n" "$1"; }
 warn()  { printf "\033[1;33m⚠\033[0m %s\n" "$1"; }
 err()   { printf "\033[1;31m✗\033[0m %s\n" "$1" >&2; exit 1; }
+
+for arg in "$@"; do
+  case "$arg" in
+    --public-demo) PUBLIC_DEMO=1 ;;
+    *) err "Unknown argument: $arg" ;;
+  esac
+done
 
 # --- 1. Check / Install flyctl ---
 if ! command -v flyctl &>/dev/null; then
@@ -182,12 +202,24 @@ for idx in "${SELECTED_INDICES[@]}"; do
   fi
 done
 
-# --- 7. Deploy ---
+# --- 7. Auth posture ---
+if [ "$PUBLIC_DEMO" -eq 1 ]; then
+  warn "Public-demo mode: setting LIBREFANG_ALLOW_NO_AUTH=1 (unauthenticated access enabled)"
+  flyctl secrets set "LIBREFANG_ALLOW_NO_AUTH=1" --app "$APP_NAME"
+  LIBREFANG_API_KEY=""
+else
+  LIBREFANG_API_KEY=$(openssl rand -hex 16)
+  info "Generating random API key and setting it as a Fly secret..."
+  flyctl secrets set "LIBREFANG_API_KEY=$LIBREFANG_API_KEY" --app "$APP_NAME"
+  ok "API key set. Keep the value printed at the end of this script."
+fi
+
+# --- 8. Deploy ---
 echo ""
 info "Deploying LibreFang (this may take a few minutes on first build)..."
 flyctl deploy --app "$APP_NAME" --config deploy/fly/fly.toml --remote-only
 
-# --- 8. Done ---
+# --- 9. Done ---
 echo ""
 APP_URL="https://$APP_NAME.fly.dev"
 ok "LibreFang is live!"
@@ -196,9 +228,20 @@ echo "  Dashboard:  $APP_URL"
 echo "  API:        $APP_URL/api/health"
 echo "  Manage:     flyctl dashboard --app $APP_NAME"
 echo ""
-echo "  To add or change API keys later:"
+echo "  To add or change LLM provider keys later:"
 echo "    flyctl secrets set <PROVIDER>_API_KEY=your-key --app $APP_NAME"
 echo ""
+if [ -n "$LIBREFANG_API_KEY" ]; then
+  echo "  ┌─────────────────────────────────────────────────────────┐"
+  echo "  │  Your API key (save this — it will not be shown again)  │"
+  echo "  │                                                         │"
+  printf "  │  Authorization: Bearer %-33s│\n" "$LIBREFANG_API_KEY"
+  echo "  │                                                         │"
+  echo "  │  To rotate: flyctl secrets set LIBREFANG_API_KEY=\$(     │"
+  echo "  │    openssl rand -hex 16) --app $APP_NAME               │"
+  echo "  └─────────────────────────────────────────────────────────┘"
+  echo ""
+fi
 
 # Cleanup
 rm -rf "$TMPDIR"
