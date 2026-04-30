@@ -17,6 +17,16 @@
 // In thin-client mode (debug builds, desktop, or any non-Tauri page) this
 // is a no-op — the bootstrap detects `window.location.protocol !== "tauri:"`
 // or an unset base and bails out before touching globals.
+//
+// IMPORTANT: `setupBundleMode()` runs in `main.tsx` after the imports
+// but before `createRoot().render()`. ESM evaluates module bodies in
+// textual import order, so any module imported by `main.tsx` (or
+// transitively) that issues a fetch / opens a WebSocket *during its own
+// module evaluation* would beat the patch. Today none do
+// (`react-i18next`, `@tanstack/react-query`, `@tanstack/react-router`,
+// `i18next` w/ bundled JSON resources). Adding a backend-loaded i18n
+// (`i18next-http-backend`) or any other eager-fetching module here will
+// silently regress bundled mobile — keep the rule.
 
 const BASE_KEY = "librefang-api-base";
 
@@ -27,6 +37,8 @@ const SAME_ORIGIN_PREFIXES = [
   "/.well-known/",
   "/a2a/",
   "/connect",
+  "/hooks/",
+  "/mcp",
 ];
 
 function isApiPath(path: string): boolean {
@@ -95,31 +107,29 @@ export function setupBundleMode(): void {
   }) as typeof window.fetch;
 
   const ORIG_WS = window.WebSocket;
-  // Replace the global constructor with a wrapper that rewrites relative or
-  // tauri://localhost-bound URLs onto the daemon's ws/wss base. Constants
-  // (CONNECTING/OPEN/...) and the prototype chain are forwarded so existing
-  // `instanceof WebSocket` and static-property reads keep working.
-  function PatchedWS(
-    this: WebSocket,
-    url: string | URL,
-    protocols?: string | string[],
-  ): WebSocket {
-    let u = typeof url === "string" ? url : url.href;
-    if (u.startsWith("/") && isApiPath(u)) {
-      u = wsBase + u;
-    } else if (u.startsWith("ws://localhost") || u.startsWith("wss://localhost")) {
-      const path = u.replace(/^wss?:\/\/localhost/, "");
-      if (isApiPath(path)) u = wsBase + path;
-    } else {
-      const stripped = maybeStripTauriOrigin(u);
-      if (stripped && isApiPath(stripped)) {
-        u = wsBase + stripped;
+  // Replace the global with a subclass that rewrites relative /
+  // `tauri://localhost`-bound URLs onto the daemon's ws/wss base before
+  // delegating to the real constructor. `extends ORIG_WS` automatically
+  // forwards the static constants (`OPEN` / `CONNECTING` / `CLOSING` /
+  // `CLOSED`) that the dashboard reads as `WebSocket.OPEN` (TerminalPage,
+  // ChatPage retry logic), and gives `instanceof WebSocket` for free —
+  // both broken if we used a function constructor with `Object.assign`.
+  class PatchedWS extends ORIG_WS {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      let u = typeof url === "string" ? url : url.href;
+      if (u.startsWith("/") && isApiPath(u)) {
+        u = wsBase + u;
+      } else if (u.startsWith("ws://localhost") || u.startsWith("wss://localhost")) {
+        const path = u.replace(/^wss?:\/\/localhost/, "");
+        if (isApiPath(path)) u = wsBase + path;
+      } else {
+        const stripped = maybeStripTauriOrigin(u);
+        if (stripped && isApiPath(stripped)) {
+          u = wsBase + stripped;
+        }
       }
+      super(u, protocols);
     }
-    return new ORIG_WS(u, protocols);
   }
-  PatchedWS.prototype = ORIG_WS.prototype;
-  Object.assign(PatchedWS, ORIG_WS);
-  // @ts-expect-error — replacing the global is the whole point.
-  window.WebSocket = PatchedWS;
+  window.WebSocket = PatchedWS as unknown as typeof WebSocket;
 }

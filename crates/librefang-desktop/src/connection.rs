@@ -81,6 +81,14 @@ pub async fn test_connection(url: String) -> Result<serde_json::Value, String> {
 /// requests onto the daemon (CORS on the daemon must allow
 /// `tauri://localhost`). In every other case — mobile dev, desktop — we
 /// stay in thin-client mode and navigate directly to the daemon URL.
+///
+/// The cfg gate is `not(debug_assertions)`, so any release-profile mobile
+/// build picks the bundled branch — including `cargo tauri ios dev
+/// --release`. If you run that without a fresh `pnpm build` for the
+/// dashboard the App will load whichever stale bundle is still in
+/// `crates/librefang-api/static/react/`. Either rebuild the dashboard
+/// first or stick with the default `cargo tauri ios dev` (debug
+/// profile, thin-client).
 #[cfg(all(any(target_os = "ios", target_os = "android"), not(debug_assertions)))]
 pub(crate) fn navigation_target(daemon_url: &str) -> String {
     let mut bundled =
