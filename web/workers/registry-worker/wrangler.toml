@@ -1,0 +1,12 @@
+name = "librefang-registry"
+main = "index.js"
+compatibility_date = "2024-01-01"
+account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "5d12c668469a4dd39f3b2b378cc20036"
+
+# Daily registry refresh at UTC 02:00 (after stats worker at 00:00)
+[triggers]
+crons = ["0 2 * * *"]
