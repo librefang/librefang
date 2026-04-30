@@ -2485,12 +2485,21 @@ pub async fn totp_setup(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpSetupBody>,
 ) -> impl IntoResponse {
+    // #3621: setup uses its own lockout bucket so a hostile actor cannot
+    // exhaust the shared `api_admin` lockout (used by every other TOTP entry
+    // surface) just by spamming setup attempts. The owner-only middleware
+    // gate (see `is_owner_only_write`) already keeps non-Owner roles out.
+    const SETUP_LOCKOUT_KEY: &str = "api_admin_totp_setup";
     let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
     // If TOTP is already confirmed, require verification of the old code
     let already_confirmed = state.kernel.vault_get("totp_confirmed").as_deref() == Some("true");
 
     if already_confirmed {
-        if state.kernel.approvals().is_totp_locked_out("api_admin") {
+        if state
+            .kernel
+            .approvals()
+            .is_totp_locked_out(SETUP_LOCKOUT_KEY)
+        {
             return ApiErrorResponse::bad_request(
                 "Too many failed TOTP attempts. Try again later.",
             )
@@ -2515,7 +2524,10 @@ pub async fn totp_setup(
                 } else {
                     // TOTP code — check replay before verifying (#3359).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state.kernel.approvals().record_totp_failure("api_admin");
+                        let _ = state
+                            .kernel
+                            .approvals()
+                            .record_totp_failure(SETUP_LOCKOUT_KEY);
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2542,7 +2554,7 @@ pub async fn totp_setup(
                     if state
                         .kernel
                         .approvals()
-                        .record_totp_failure("api_admin")
+                        .record_totp_failure(SETUP_LOCKOUT_KEY)
                         .is_err()
                     {
                         return ApiErrorResponse::internal(
@@ -2729,8 +2741,16 @@ pub async fn totp_revoke(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TotpRevokeBody>,
 ) -> impl IntoResponse {
+    // #3621: revoke uses its own lockout bucket so failed code attempts on
+    // this path cannot exhaust the shared `api_admin` lockout (used by every
+    // other TOTP entry surface) and DoS legitimate approve/login flows.
+    const REVOKE_LOCKOUT_KEY: &str = "api_admin_totp_revoke";
     let totp_issuer = state.kernel.approvals().policy().totp_issuer.clone();
-    if state.kernel.approvals().is_totp_locked_out("api_admin") {
+    if state
+        .kernel
+        .approvals()
+        .is_totp_locked_out(REVOKE_LOCKOUT_KEY)
+    {
         return ApiErrorResponse::bad_request("Too many failed TOTP attempts. Try again later.")
             .into_json_tuple();
     }
@@ -2785,7 +2805,7 @@ pub async fn totp_revoke(
         if state
             .kernel
             .approvals()
-            .record_totp_failure("api_admin")
+            .record_totp_failure(REVOKE_LOCKOUT_KEY)
             .is_err()
         {
             return ApiErrorResponse::internal("Failed to persist TOTP failure counter")

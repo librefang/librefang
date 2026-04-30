@@ -2014,6 +2014,86 @@ mod tests {
 
     // ── resolve_providers tests ─────────────────────────────────────────
 
+    // #3703: ensure the default is to require verified email — operators
+    // must opt out explicitly per provider, not the other way around.
+    #[test]
+    fn require_email_verified_defaults_true() {
+        let config = librefang_types::config::ExternalAuthConfig::default();
+        assert!(
+            config.require_email_verified,
+            "default OIDC config must require email_verified to keep allowed_domains meaningful"
+        );
+    }
+
+    // #3703: per-provider override `None` must inherit the global setting
+    // so the secure default is not silently bypassed by configs written
+    // before the field existed. Drives `resolve_providers` directly so a
+    // future refactor that drops `unwrap_or(global_require_email_verified)`
+    // breaks this test instead of silently re-opening the bypass.
+    #[tokio::test]
+    async fn require_email_verified_per_provider_inherits_global() {
+        fn provider(id: &str, require: Option<bool>) -> librefang_types::config::OidcProvider {
+            librefang_types::config::OidcProvider {
+                id: id.into(),
+                display_name: id.into(),
+                issuer_url: String::new(),
+                auth_url: "https://idp/auth".into(),
+                token_url: "https://idp/token".into(),
+                userinfo_url: "https://idp/userinfo".into(),
+                jwks_uri: String::new(),
+                client_id: "c".into(),
+                client_secret_env: "S".into(),
+                redirect_url: "http://localhost/cb".into(),
+                scopes: vec![],
+                allowed_domains: vec![],
+                audience: String::new(),
+                require_email_verified: require,
+            }
+        }
+
+        // Global=true, provider=None → inherit true.
+        let cfg_inherit_true = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: true,
+            providers: vec![provider("inherit-true", None)],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_inherit_true).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            resolved[0].require_email_verified,
+            "provider with None override must inherit global=true"
+        );
+
+        // Global=false, provider=None → inherit false (negative direction).
+        let cfg_inherit_false = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: false,
+            providers: vec![provider("inherit-false", None)],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_inherit_false).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            !resolved[0].require_email_verified,
+            "provider with None override must inherit global=false"
+        );
+
+        // Global=true, provider=Some(false) → explicit override wins.
+        let cfg_override = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            require_email_verified: true,
+            providers: vec![provider("override", Some(false))],
+            ..Default::default()
+        };
+        let resolved = resolve_providers(&cfg_override).await;
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            !resolved[0].require_email_verified,
+            "explicit per-provider override must beat global"
+        );
+    }
+
     #[tokio::test]
     async fn test_resolve_providers_empty_config() {
         let config = librefang_types::config::ExternalAuthConfig::default();

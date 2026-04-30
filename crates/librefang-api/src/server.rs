@@ -760,10 +760,41 @@ fn sessions_path(home_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Load persisted sessions from disk, dropping any that have already expired.
+///
+/// SECURITY (#3725): An older daemon revision wrote `sessions.json` at the
+/// default umask, which on most setups leaves the file world-readable.
+/// New writes go through `save_sessions` and land at 0600 from the first
+/// byte, but a file already on disk from the older revision keeps its
+/// permissive mode until something rewrites it. Tighten on load so a daemon
+/// upgraded onto a multi-user host stops leaking bearer tokens immediately
+/// instead of waiting for the next session mutation.
 fn load_sessions(
     home_dir: &std::path::Path,
 ) -> std::collections::HashMap<String, crate::password_hash::SessionToken> {
     let path = sessions_path(home_dir);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    path = %path.display(),
+                    mode = format!("{mode:o}"),
+                    "sessions.json is group/world-readable; tightening to 0600"
+                );
+                if let Err(e) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to tighten sessions.json permissions; tokens still readable until next save"
+                    );
+                }
+            }
+        }
+    }
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return std::collections::HashMap::new(),
@@ -1910,6 +1941,29 @@ mod observability_tests {
         assert_ne!(
             a, b,
             "two daemons with distinct home_dirs must NOT share a compose project"
+        );
+    }
+
+    // #3725: a sessions.json file already on disk at world-readable
+    // permissions (i.e. left over from a daemon revision before the
+    // 0600-on-write fix) must be tightened on the next load so an
+    // upgrade closes the leak immediately.
+    #[cfg(unix)]
+    #[test]
+    fn load_sessions_tightens_permissive_legacy_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join("data")).unwrap();
+        let path = sessions_path(home);
+        std::fs::write(&path, "{}").unwrap();
+        // Simulate the legacy world-readable file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = load_sessions(home);
+        let after = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            after, 0o600,
+            "legacy permissive sessions.json must be tightened on load"
         );
     }
 }
