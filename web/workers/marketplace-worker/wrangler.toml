@@ -9,7 +9,7 @@ database_name = "librefang-marketplace"
 database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
 
 [vars]
-GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
+GITHUB_CLIENT_ID = "Iv1.3683b4ad4a41e982"
 
 # Weekly stats aggregation
 [triggers]
