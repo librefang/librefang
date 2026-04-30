@@ -310,8 +310,8 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       } else {
         setMessage({ type: "error", text: res.error || t("settings.pw_failed") });
       }
-    } catch (err: any) {
-      setMessage({ type: "error", text: err.message || t("settings.pw_failed") });
+    } catch (err) {
+      setMessage({ type: "error", text: toastErr(err, t("settings.pw_failed")) });
     } finally {
       setSubmitting(false);
     }
@@ -1013,7 +1013,7 @@ export function App() {
                     {group.items.map((item) => (
                       <Link
                         key={item.to}
-                        to={item.to as any}
+                        to={item.to as never}
                         className={navBase}
                         activeProps={{ className: `${navBase} ${navActive}` }}
                         onClick={() => setMobileMenuOpen(false)}

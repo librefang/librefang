@@ -1,6 +1,7 @@
-import { type ComponentType, type ReactNode, useState } from "react";
+import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { RefreshCw, HelpCircle } from "lucide-react";
+import type { Components } from "react-markdown";
 import { Modal } from "./Modal";
 import { MarkdownContent } from "./MarkdownContent";
 
@@ -33,7 +34,7 @@ function toHelpMarkdown(s: string): string {
   );
 }
 
-const HELP_MARKDOWN_COMPONENTS: Record<string, ComponentType<any>> = {
+const HELP_MARKDOWN_COMPONENTS: Components = {
   p: ({ children }: { children: ReactNode }) => (
     <p className="text-sm text-text-dim leading-relaxed mb-4 last:mb-0">{children}</p>
   ),
@@ -63,7 +64,7 @@ const HELP_MARKDOWN_COMPONENTS: Record<string, ComponentType<any>> = {
   li: ({ children }: { children: ReactNode }) => (
     <li className="pl-1">{children}</li>
   ),
-  code: ({ node, children, ...props }: any) => {
+  code: ({ node, children, ...props }) => {
     const isBlock =
       node?.position?.start?.line !== node?.position?.end?.line ||
       String(children).includes("\n");

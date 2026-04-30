@@ -33,6 +33,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
 import { truncateId } from "../lib/string";
@@ -87,17 +88,6 @@ import {
  * exported interface for other consumers and removes the need for
  * `(agent as AgentView).field` casts inside the master-detail rendering.
  */
-/**
- * Extract a human-readable message from a `catch (err: unknown)` value.
- * `Error.message` is the common path; otherwise fall back to a non-empty
- * string coercion before yielding to the caller's localized fallback.
- */
-function toastErr(err: unknown, fallback: string): string {
-  if (err instanceof Error && err.message) return err.message;
-  if (typeof err === "string" && err) return err;
-  return fallback;
-}
-
 type AgentTriggerSummary = {
   event_pattern?: string;
   name?: string;

@@ -1,10 +1,10 @@
 import { memo, useMemo } from "react";
-import type { ReactNode, ComponentType } from "react";
-import Markdown from "react-markdown";
+import type { ReactNode } from "react";
+import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-type PluggableList = any[];
+import type { PluggableList } from "unified";
 
-const defaultComponents: Record<string, ComponentType<any>> = {
+const defaultComponents: Components = {
   p: ({ children }: { children: ReactNode }) => <p className="mb-1.5 last:mb-0">{children}</p>,
   h1: ({ children }: { children: ReactNode }) => <h1 className="text-sm font-bold mb-1.5">{children}</h1>,
   h2: ({ children }: { children: ReactNode }) => <h2 className="text-xs font-bold mb-1">{children}</h2>,
@@ -12,7 +12,7 @@ const defaultComponents: Record<string, ComponentType<any>> = {
   ul: ({ children }: { children: ReactNode }) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children}</ul>,
   ol: ({ children }: { children: ReactNode }) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children}</ol>,
   li: ({ children }: { children: ReactNode }) => <li className="text-xs">{children}</li>,
-  code: ({ node, children, ...props }: any) => {
+  code: ({ node, children, ...props }) => {
     const isBlock = node?.position?.start?.line !== node?.position?.end?.line || String(children).includes("\n");
     return isBlock
       ? <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-1.5"><code>{children}</code></pre>
@@ -39,7 +39,7 @@ interface MarkdownContentProps {
   className?: string;
   remarkPlugins?: PluggableList;
   rehypePlugins?: PluggableList;
-  components?: Record<string, ComponentType<any>>;
+  components?: Components;
 }
 
 export const MarkdownContent = memo(function MarkdownContent({
