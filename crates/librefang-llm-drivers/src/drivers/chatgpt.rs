@@ -370,7 +370,7 @@ impl ChatGptDriver {
         let mut instructions: Option<String> = request.system.clone();
         let mut input_items = Vec::new();
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_str = match msg.role {
                 Role::System => {
                     // Merge system messages into instructions

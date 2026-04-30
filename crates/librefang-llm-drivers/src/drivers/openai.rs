@@ -652,7 +652,7 @@ impl OpenAIDriver {
         }
 
         // Convert messages
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             match (&msg.role, &msg.content) {
                 (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
                     oai_messages.push(OaiMessage {

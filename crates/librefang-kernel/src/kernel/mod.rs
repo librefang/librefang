@@ -15655,11 +15655,10 @@ system_prompt = "You are a helpful assistant."
     fn extract_json_from_llm_response(text: &str) -> Option<String> {
         // Strategy 1: Extract from Markdown code block (```json ... ``` or ``` ... ```)
         // Cached: this runs on every structured-output LLM response (#3491).
-        static CODE_BLOCK_RE: std::sync::LazyLock<regex::Regex> =
-            std::sync::LazyLock::new(|| {
-                regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{.*?\})\s*```")
-                    .expect("static json code-block regex compiles")
-            });
+        static CODE_BLOCK_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(?s)```(?:json)?\s*\n?(\{.*?\})\s*```")
+                .expect("static json code-block regex compiles")
+        });
         let code_block_re: &regex::Regex = &CODE_BLOCK_RE;
         if let Some(caps) = code_block_re.captures(text) {
             let candidate = caps.get(1)?.as_str().to_string();
