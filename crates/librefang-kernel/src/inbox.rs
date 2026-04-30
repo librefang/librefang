@@ -105,7 +105,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
         "Inbox watcher started"
     );
 
-    tokio::spawn(async move {
+    crate::supervised_spawn::spawn_supervised("inbox_watcher", async move {
         let mut interval = tokio::time::interval(poll_interval);
         // Track files we have already queued so a slow send_message doesn't
         // cause double-processing before the file is moved.
@@ -252,7 +252,7 @@ pub fn start_inbox_watcher(kernel: Arc<LibreFangKernel>) {
                     .to_string_lossy()
                     .to_string();
 
-                tokio::spawn(async move {
+                crate::supervised_spawn::spawn_supervised("inbox_dispatch", async move {
                     let inbox_prompt = format!("[INBOX FILE: {file_name}]\n{message}");
 
                     info!(

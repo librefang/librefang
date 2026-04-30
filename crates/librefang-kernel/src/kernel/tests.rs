@@ -3680,6 +3680,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         RunningTask {
             abort: h_a.abort_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     kernel.running_tasks.insert(
@@ -3687,6 +3688,7 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
         RunningTask {
             abort: h_b.abort_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
 
@@ -3755,6 +3757,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     kernel.running_tasks.insert(
@@ -3762,6 +3765,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     // Different agent — must NOT be touched by stop_agent_run.
@@ -3770,6 +3774,7 @@ fn test_stop_agent_run_fans_out_across_sessions() {
         RunningTask {
             abort: mk_handle(),
             started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
         },
     );
 
@@ -3851,6 +3856,7 @@ fn test_fork_does_not_overwrite_parent_registration() {
         RunningTask {
             abort: parent_abort,
             started_at: parent_started_at,
+            task_id: uuid::Uuid::new_v4(),
         },
     );
     let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
