@@ -6,6 +6,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import {
   type AgentDetail,
+  type AgentItem,
+  type CronJobItem,
   type PromptVersion,
   type PromptExperiment,
   type ExperimentVariantMetrics,
@@ -85,6 +87,17 @@ import {
  * exported interface for other consumers and removes the need for
  * `(agent as AgentView).field` casts inside the master-detail rendering.
  */
+/**
+ * Extract a human-readable message from a `catch (err: unknown)` value.
+ * `Error.message` is the common path; otherwise fall back to a non-empty
+ * string coercion before yielding to the caller's localized fallback.
+ */
+function toastErr(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string" && err) return err;
+  return fallback;
+}
+
 type AgentTriggerSummary = {
   event_pattern?: string;
   name?: string;
@@ -399,9 +412,9 @@ export function AgentsPage() {
         setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
         setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
         setToolsDisabledState(Boolean(agentTools?.disabled));
-      } catch (err: any) {
+      } catch (err) {
         if (cancelled) return;
-        addToast(err?.message || t("agents.tools_load_failed", { defaultValue: "Failed to load tools" }), "error");
+        addToast(toastErr(err, t("agents.tools_load_failed", { defaultValue: "Failed to load tools" })), "error");
       } finally {
         if (!cancelled) {
           setToolsEditorLoading(false);
@@ -459,9 +472,9 @@ export function AgentsPage() {
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
           addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
         },
-        onError: (e: any) => {
+        onError: (e) => {
           addToast(
-            e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }),
+            toastErr(e, t("agents.model_save_failed", { defaultValue: "Failed to update model" })),
             "error",
           );
         },
@@ -660,7 +673,7 @@ export function AgentsPage() {
     [toolAllowlistDraft, toolBlocklistDraft],
   );
 
-  const selectAgent = async (agent: any) => {
+  const selectAgent = async (agent: AgentItem) => {
     setAgentTab("conversation");
     setDetailLoading(true);
     try {
@@ -672,7 +685,7 @@ export function AgentsPage() {
     setDetailLoading(false);
   };
 
-  const renderAgentRow = (agent: any) => {
+  const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
     const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
     const stateLower = (agent.state || "").toLowerCase();
@@ -765,16 +778,16 @@ export function AgentsPage() {
             <div className="flex items-center gap-1.5 shrink-0">
               {isSuspended ? (
                 <Button variant="ghost" size="sm" leftIcon={<Play className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await resumeMutation.mutateAsync(agent.id); } catch (e: any) {
-                    addToast(e?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error");
+                  try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                    addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
                   }
                 }}>
                   {t("agents.resume", { defaultValue: "Resume" })}
                 </Button>
               ) : (
                 <Button variant="ghost" size="sm" leftIcon={<Pause className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await suspendMutation.mutateAsync(agent.id); } catch (e: any) {
-                    addToast(e?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error");
+                  try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
+                    addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
                   }
                 }}>
                   {t("agents.suspend", { defaultValue: "Pause" })}
@@ -850,8 +863,8 @@ export function AgentsPage() {
           icon={<X className="h-6 w-6 text-error" />}
           action={
             <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
-              try { await resumeMutation.mutateAsync(agent.id); } catch (e: any) {
-                addToast(e?.message || t("agents.resume_failed", { defaultValue: "Failed to resume" }), "error");
+              try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume" })), "error");
               }
             }}>
               {t("agents.resume", { defaultValue: "Resume" })}
@@ -1063,7 +1076,7 @@ export function AgentsPage() {
         </div>
         {hasSchedule ? (
           <>
-            {cron.map((c: any, i: number) => (
+            {cron.map((c: CronJobItem & AgentCronSummary, i: number) => (
               <div
                 key={`c-${i}`}
                 className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
@@ -1086,7 +1099,7 @@ export function AgentsPage() {
                 </Button>
               </div>
             ))}
-            {triggers.map((trig: any, i: number) => (
+            {triggers.map((trig: AgentTriggerSummary, i: number) => (
               <div
                 key={`t-${i}`}
                 className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
@@ -1762,8 +1775,8 @@ export function AgentsPage() {
                       try {
                         await resumeMutation.mutateAsync(detailAgent.id);
                         await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                      } catch (err: any) {
-                        addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error");
+                      } catch (err) {
+                        addToast(toastErr(err, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
                       }
                     }}
                   >
@@ -1779,8 +1792,8 @@ export function AgentsPage() {
                       try {
                         await suspendMutation.mutateAsync(detailAgent.id);
                         await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                      } catch (err: any) {
-                        addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error");
+                      } catch (err) {
+                        addToast(toastErr(err, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
                       }
                     }}
                   >
@@ -1795,8 +1808,8 @@ export function AgentsPage() {
                   onClick={async () => {
                     try {
                       await cloneMutation.mutateAsync(detailAgent.id);
-                    } catch (err: any) {
-                      addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error");
+                    } catch (err) {
+                      addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");
                     }
                   }}
                 >
@@ -1986,8 +1999,8 @@ export function AgentsPage() {
                     void refreshDetailAgent(toolsEditorAgentId);
                   }
                   closeToolsEditor();
-                } catch (err: any) {
-                  addToast(err?.message || t("agents.tools_save_failed", { defaultValue: "Failed to update tools" }), "error");
+                } catch (err) {
+                  addToast(toastErr(err, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })), "error");
                 } finally {
                   setToolsEditorSaving(false);
                 }
@@ -2212,7 +2225,7 @@ export function AgentsPage() {
           )}
 
           {spawnMutation.error && (
-            <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+            <p className="text-xs text-error">{toastErr(spawnMutation.error, String(spawnMutation.error))}</p>
           )}
 
           <div className="flex gap-2 pt-2">
