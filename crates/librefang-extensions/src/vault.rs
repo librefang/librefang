@@ -10,9 +10,9 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
-// sha2 is used only in non-test keyring functions
+// sha2: Sha256/Digest used in non-test keyring helpers; Sha512 imported locally in mix_fingerprint_sources
 #[cfg(not(test))]
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -1005,8 +1005,8 @@ fn collect_os_machine_id_material() -> Vec<u8> {
 ///   `os_material`.
 /// - If `random_id` is somehow recoverable (e.g. backup), `os_material` still
 ///   provides a second factor that must match the live machine.
-#[cfg(not(test))]
 fn mix_fingerprint_sources(random_id: &[u8], os_material: &[u8]) -> Vec<u8> {
+    use sha2::{Digest as _, Sha512};
     let mut hasher = Sha512::new();
     // Domain separator so this context can't be confused with other SHA-512 uses.
     hasher.update(b"librefang-machine-fingerprint-v2\x00");
@@ -1056,7 +1056,6 @@ fn predictable_machine_fingerprint() -> Vec<u8> {
 /// matching the rest of the codebase (see `password_hash.rs`). Using
 /// `Argon2::default()` is intentionally avoided here because the defaults
 /// silently changed across argon2 crate minor versions.
-#[cfg(not(test))]
 fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
     let params =
         Params::new(19_456, 2, 1, None).map_err(|e| format!("Argon2 params error: {e}"))?;
@@ -1068,38 +1067,6 @@ fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8;
     Ok(derived)
 }
 
-// Test-visible helpers that mirror the non-test implementations without
-// filesystem access, so unit tests remain hermetic.
-#[cfg(test)]
-fn mix_fingerprint_sources_test(random_id: &[u8], os_material: &[u8]) -> Vec<u8> {
-    use sha2::{Digest, Sha512};
-    let mut hasher = Sha512::new();
-    hasher.update(b"librefang-machine-fingerprint-v2\x00");
-    let len = (random_id.len() as u32).to_le_bytes();
-    hasher.update(len);
-    hasher.update(random_id);
-    let len = (os_material.len() as u32).to_le_bytes();
-    hasher.update(len);
-    hasher.update(os_material);
-    hasher.finalize()[..32].to_vec()
-}
-
-/// Derive a 256-bit wrapping key using the same explicit Argon2id params as
-/// the non-test path.  Used in migration unit tests.
-#[cfg(test)]
-fn derive_wrapping_key_test(
-    fingerprint: &[u8],
-    salt: &[u8],
-) -> Result<Zeroizing<[u8; 32]>, String> {
-    let params =
-        Params::new(19_456, 2, 1, None).map_err(|e| format!("Argon2 params error: {e}"))?;
-    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut derived = Zeroizing::new([0u8; 32]);
-    argon2
-        .hash_password_into(fingerprint, salt, derived.as_mut())
-        .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    Ok(derived)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1401,8 +1368,8 @@ mod tests {
         let random_id = [0xABu8; 32];
         let os_material = b"test-machine-id-12345678".to_vec();
 
-        let f1 = mix_fingerprint_sources_test(&random_id, &os_material);
-        let f2 = mix_fingerprint_sources_test(&random_id, &os_material);
+        let f1 = mix_fingerprint_sources(&random_id, &os_material);
+        let f2 = mix_fingerprint_sources(&random_id, &os_material);
         assert_eq!(f1, f2, "fingerprint mixer must be deterministic");
         assert_eq!(f1.len(), 32);
     }
@@ -1415,8 +1382,8 @@ mod tests {
         let id_a = [0x11u8; 32];
         let id_b = [0x22u8; 32];
 
-        let fa = mix_fingerprint_sources_test(&id_a, &os_material);
-        let fb = mix_fingerprint_sources_test(&id_b, &os_material);
+        let fa = mix_fingerprint_sources(&id_a, &os_material);
+        let fb = mix_fingerprint_sources(&id_b, &os_material);
         assert_ne!(
             fa, fb,
             "different random_ids must produce different fingerprints"
@@ -1431,8 +1398,8 @@ mod tests {
         let mat_a = b"machine-id-aaa".to_vec();
         let mat_b = b"machine-id-bbb".to_vec();
 
-        let fa = mix_fingerprint_sources_test(&random_id, &mat_a);
-        let fb = mix_fingerprint_sources_test(&random_id, &mat_b);
+        let fa = mix_fingerprint_sources(&random_id, &mat_a);
+        let fb = mix_fingerprint_sources(&random_id, &mat_b);
         assert_ne!(
             fa, fb,
             "different OS materials must produce different fingerprints"
@@ -1444,7 +1411,7 @@ mod tests {
     #[test]
     fn mix_fingerprint_sources_handles_empty_os_material() {
         let random_id = [0x99u8; 32];
-        let result = mix_fingerprint_sources_test(&random_id, &[]);
+        let result = mix_fingerprint_sources(&random_id, &[]);
         assert_eq!(result.len(), 32);
     }
 
@@ -1456,8 +1423,8 @@ mod tests {
         let salt_a = [0x01u8; 16];
         let salt_b = [0x02u8; 16];
 
-        let ka = derive_wrapping_key_test(&fingerprint, &salt_a).unwrap();
-        let kb = derive_wrapping_key_test(&fingerprint, &salt_b).unwrap();
+        let ka = derive_wrapping_key(&fingerprint, &salt_a).unwrap();
+        let kb = derive_wrapping_key(&fingerprint, &salt_b).unwrap();
         assert_ne!(
             ka.as_ref(),
             kb.as_ref(),
@@ -1472,8 +1439,8 @@ mod tests {
         let fingerprint = [0x77u8; 32];
         let salt = [0xAAu8; 16];
 
-        let k1 = derive_wrapping_key_test(&fingerprint, &salt).unwrap();
-        let k2 = derive_wrapping_key_test(&fingerprint, &salt).unwrap();
+        let k1 = derive_wrapping_key(&fingerprint, &salt).unwrap();
+        let k2 = derive_wrapping_key(&fingerprint, &salt).unwrap();
         assert_eq!(
             k1.as_ref(),
             k2.as_ref(),
@@ -1490,7 +1457,7 @@ mod tests {
         // Simulate "old" fingerprint (random_id only, no OS material mixed in).
         let old_fingerprint = [0x11u8; 32];
         let old_salt = [0x01u8; 16];
-        let old_wrapping_key = derive_wrapping_key_test(&old_fingerprint, &old_salt).unwrap();
+        let old_wrapping_key = derive_wrapping_key(&old_fingerprint, &old_salt).unwrap();
 
         // Encrypt a fake master key with the old wrapping key.
         let fake_master_key = b"fake-master-key-b64-encoded-aaaa";
@@ -1506,9 +1473,9 @@ mod tests {
 
         // "Migration": re-derive with new fingerprint (random_id + OS material).
         let new_fingerprint =
-            mix_fingerprint_sources_test(&old_fingerprint, b"etc-machine-id-abc123");
+            mix_fingerprint_sources(&old_fingerprint, b"etc-machine-id-abc123");
         let new_salt = [0x02u8; 16];
-        let new_wrapping_key = derive_wrapping_key_test(&new_fingerprint, &new_salt).unwrap();
+        let new_wrapping_key = derive_wrapping_key(&new_fingerprint, &new_salt).unwrap();
 
         // Re-encrypt with new wrapping key.
         let mut new_nonce_bytes = [0u8; 12];
