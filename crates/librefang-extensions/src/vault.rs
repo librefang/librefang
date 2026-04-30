@@ -1042,16 +1042,6 @@ fn machine_fingerprint() -> Vec<u8> {
 }
 
 /// Collect all available OS-provided machine identity material into a single
-/// byte buffer.  Each source is length-prefixed before concatenation to prevent
-/// cross-source collisions (e.g. "AB" + "C" ≠ "A" + "BC").
-///
-/// Sources probed (in order, all optional):
-/// - `/etc/machine-id`                        (Linux systemd)
-/// - `/var/lib/dbus/machine-id`               (older Linux / D-Bus)
-/// - `/proc/sys/kernel/random/boot_id`        (Linux only; resets on reboot)
-/// - `/private/var/db/SystemPolicyConfiguration/SystemPolicy` (macOS blob)
-/// - `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`      (Windows — via env probe)
-/// Collect all available OS-provided machine identity material into a single
 /// byte buffer.
 ///
 /// Each source is emitted with a fixed ASCII label and a 4-byte LE length
