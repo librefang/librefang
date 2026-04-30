@@ -8752,13 +8752,6 @@ fn cmd_config_set(key: &str, value: &str) {
             toml::Value::Boolean(b)
         } else if let Ok(v) = parse_toml_integer(value) {
             v
-        } else if value.parse::<u64>().is_ok() {
-            // Numeric but overflows i64 — surface the error rather than silently storing as string.
-            ui::error(&format!(
-                "value {value} exceeds i64::MAX ({}); TOML cannot store unsigned integers above this bound",
-                i64::MAX
-            ));
-            std::process::exit(1);
         } else if let Ok(f) = value.parse::<f64>() {
             toml::Value::Float(f)
         } else {
