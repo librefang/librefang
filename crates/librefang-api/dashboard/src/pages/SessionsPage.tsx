@@ -12,6 +12,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { StaggerList } from "../components/ui/StaggerList";
@@ -45,8 +46,8 @@ export function SessionsPage() {
       })
       .sort((a, b) => {
         // Active first
-        if ((a as any).active && !(b as any).active) return -1;
-        if (!(a as any).active && (b as any).active) return 1;
+        if (a.active && !b.active) return -1;
+        if (!a.active && b.active) return 1;
         return (b.created_at || "").localeCompare(a.created_at || "");
       });
   }, [sessionsQuery.data, search, agentMap]);
@@ -62,8 +63,8 @@ export function SessionsPage() {
     try {
       await switchMutation.mutateAsync({ agentId, sessionId });
       addToast(t("common.success"), "success");
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e) {
+      addToast(toastErr(e, t("common.error")), "error");
     } finally { setPendingId(null); }
   }
 
@@ -73,8 +74,8 @@ export function SessionsPage() {
     setPendingId(sessionId);
     try {
       await deleteMutation.mutateAsync({ sessionId, agentId });
-    } catch (e: any) {
-      addToast(e.message || t("common.error"), "error");
+    } catch (e) {
+      addToast(toastErr(e, t("common.error")), "error");
     } finally { setPendingId(null); }
   }
 
