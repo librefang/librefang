@@ -34,6 +34,11 @@ function tryAutoReload(err: unknown): boolean {
   return true;
 }
 
+// `ComponentType<any>` mirrors React's own `lazy<T extends ComponentType<any>>`
+// signature. Contravariance on the props parameter means narrower types
+// (`ComponentType<{}>` / `<unknown>` / `<never>`) reject lazy targets that
+// have required props, defeating the purpose of the wrapper.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function lazyWithReload<T extends ComponentType<any>>(
   factory: () => Promise<{ default: T }>,
 ): React.LazyExoticComponent<T> {
@@ -480,7 +485,7 @@ export const router = createRouter({
   routeTree,
   basepath: "/dashboard",
   defaultPreload: "intent",
-  defaultErrorComponent: ChunkErrorBoundary as any,
+  defaultErrorComponent: ChunkErrorBoundary,
 });
 
 declare module "@tanstack/react-router" {
