@@ -23,7 +23,7 @@ tracing-subscriber = { workspace = true }
 # Shared: works on desktop and mobile.
 # `tauri` appears again in the desktop target block below with extra features —
 # Cargo merges features from both entries; mobile gets the base crate only.
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 serde = { workspace = true }
