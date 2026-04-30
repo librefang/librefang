@@ -19,6 +19,7 @@ mod tray;
 mod updater;
 
 use librefang_extensions::dotenv;
+use librefang_kernel::event_bus::recv_event_skipping_lag;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::event::{EventPayload, LifecycleEvent, SystemEvent};
 use std::net::IpAddr;
@@ -119,52 +120,49 @@ pub struct ServerHandleHolder(pub std::sync::Mutex<Option<server::ServerHandle>>
 /// Forward critical kernel events as native OS notifications.
 ///
 /// Only truly critical events — crashes, hard quota limits, and kernel shutdown.
+///
+/// Lag handling routes through [`recv_event_skipping_lag`] so consumer-side
+/// drops are counted in `EventBus::dropped_count()` and surfaced as `error!`
+/// logs rather than a silent `warn!` on a per-listener counter (issue #3630).
 pub async fn forward_kernel_events(
     app_handle: tauri::AppHandle,
     event_rx: &mut tokio::sync::broadcast::Receiver<librefang_types::event::Event>,
+    kernel: &Arc<LibreFangKernel>,
 ) {
-    loop {
-        match event_rx.recv().await {
-            Ok(event) => {
-                let (title, body) = match &event.payload {
-                    EventPayload::Lifecycle(LifecycleEvent::Crashed { agent_id, error }) => (
-                        "Agent Crashed".to_string(),
-                        format!("Agent {agent_id} crashed: {error}"),
-                    ),
-                    EventPayload::System(SystemEvent::KernelStopping) => (
-                        "Kernel Stopping".to_string(),
-                        "LibreFang kernel is shutting down".to_string(),
-                    ),
-                    EventPayload::System(SystemEvent::QuotaEnforced {
-                        agent_id,
-                        spent,
-                        limit,
-                    }) => (
-                        "Quota Enforced".to_string(),
-                        format!("Agent {agent_id} quota hit: ${spent:.4} / ${limit:.4}"),
-                    ),
-                    _ => continue,
-                };
+    while let Some(event) =
+        recv_event_skipping_lag(event_rx, kernel.event_bus_ref(), "desktop_notifications").await
+    {
+        let (title, body) = match &event.payload {
+            EventPayload::Lifecycle(LifecycleEvent::Crashed { agent_id, error }) => (
+                "Agent Crashed".to_string(),
+                format!("Agent {agent_id} crashed: {error}"),
+            ),
+            EventPayload::System(SystemEvent::KernelStopping) => (
+                "Kernel Stopping".to_string(),
+                "LibreFang kernel is shutting down".to_string(),
+            ),
+            EventPayload::System(SystemEvent::QuotaEnforced {
+                agent_id,
+                spent,
+                limit,
+            }) => (
+                "Quota Enforced".to_string(),
+                format!("Agent {agent_id} quota hit: ${spent:.4} / ${limit:.4}"),
+            ),
+            _ => continue,
+        };
 
-                if let Err(e) = app_handle
-                    .notification()
-                    .builder()
-                    .title(&title)
-                    .body(&body)
-                    .show()
-                {
-                    warn!("Failed to send desktop notification: {e}");
-                }
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!("Notification listener lagged, skipped {n} events");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                info!("Event bus closed, stopping notification listener");
-                break;
-            }
+        if let Err(e) = app_handle
+            .notification()
+            .builder()
+            .title(&title)
+            .body(&body)
+            .show()
+        {
+            warn!("Failed to send desktop notification: {e}");
         }
     }
+    info!("Event bus closed, stopping notification listener");
 }
 
 /// Resolved startup mode.
@@ -455,25 +453,34 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                 }
             }
 
-            // Mobile window. Without this, iOS/Android launches into a
-            // black WebView because tauri.conf.json's `app.windows` is
-            // empty and Tauri 2 does not auto-create a mobile window.
-            // The OS manages size/orientation, so we only set the URL
-            // and visibility.
+            // Mobile window is declared in tauri.{ios,android}.conf.json
+            // (url=lfconnect://localhost/, label=main). Tauri 2 mobile does
+            // not honor `WebviewWindowBuilder::new` for the *first* window
+            // in setup() — iOS/Android wire the rootViewController / main
+            // Activity to a window declared in the conf, and a programmatic
+            // builder call here ends up creating no visible surface (black
+            // screen). If the resolved URL is already known (Remote mode
+            // via saved pref or env), navigate away from the connection
+            // screen now; otherwise leave the conf-declared lfconnect://
+            // page up so the user can pick.
             #[cfg(mobile)]
             {
-                let url = if show_connection_screen {
-                    WebviewUrl::CustomProtocol(
-                        "lfconnect://localhost/"
+                if !show_connection_screen && !initial_url.is_empty() {
+                    if let Some(window) = app.get_webview_window("main") {
+                        // Release builds use the embedded dashboard with
+                        // the daemon URL hash-encoded; debug stays
+                        // thin-client. Both branches resolve through
+                        // `connection::navigation_target` so the rule
+                        // lives in one place.
+                        let target = connection::navigation_target(&initial_url);
+                        let url: tauri::Url = target
                             .parse()
-                            .expect("lfconnect URL must parse"),
-                    )
-                } else {
-                    WebviewUrl::External(initial_url.parse().expect("Invalid server URL"))
-                };
-                let _window = WebviewWindowBuilder::new(app, "main", url)
-                    .visible(true)
-                    .build()?;
+                            .expect("navigation_target must return parsable URL");
+                        window.navigate(url)?;
+                    } else {
+                        warn!("Mobile main window not found at setup time");
+                    }
+                }
             }
 
             // Set up system tray (desktop only)
@@ -486,10 +493,11 @@ pub fn run(server_url: Option<String>, force_local: bool) {
                     let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
                     if let Some(ref inner) = *guard {
                         let app_handle = app.handle().clone();
-                        let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+                        let kernel = inner.kernel.clone();
+                        let mut event_rx = kernel.event_bus_ref().subscribe_all();
                         drop(guard);
                         tauri::async_runtime::spawn(async move {
-                            forward_kernel_events(app_handle, &mut event_rx).await;
+                            forward_kernel_events(app_handle, &mut event_rx, &kernel).await;
                         });
                     }
                 }

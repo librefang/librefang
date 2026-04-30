@@ -1457,7 +1457,7 @@ jobs:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_B64" ]; then
-            echo "::warning::ANDROID_KEYSTORE_B64 not set — falling back to debug build (unsigned, not for distribution)"
+            echo "::warning::ANDROID_KEYSTORE_B64 not set — skipping Android build (no unsigned debug fallback; release artifacts must be signed)"
             echo "signed=false" >> "$GITHUB_OUTPUT"
           else
             echo "$ANDROID_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.jks"
@@ -1472,22 +1472,23 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        # `-f mobile-no-email -- --no-default-features`: tauri-cli takes
+        # `-f` directly but `--no-default-features` is a cargo flag that
+        # must follow `--`. rustls-connector 0.23.0 (pulled by channel-email)
+        # → rustls-platform-verifier 0.7.0 → Verifier::new_with_extra_roots
+        # is not implemented for Android.
         run: |
           cargo tauri android build \
             --target aarch64 \
-            --apk --aab
-
-      - name: Build unsigned debug (fallback)
-        if: steps.keystore.outputs.signed != 'true'
-        working-directory: crates/librefang-desktop
-        run: cargo tauri android build --target aarch64 --debug --apk
+            --apk --aab \
+            -f mobile-no-email -- --no-default-features
 
       - name: Locate artifacts
         id: art
         run: |
           set -euo pipefail
           AAB=$(find . -name "*.aab" -path "*/release/*" | head -1 || true)
-          APK=$(find . -name "*.apk" \( -path "*/release/*" -o -path "*/debug/*" \) | head -1 || true)
+          APK=$(find . -name "*.apk" -path "*/release/*" | head -1 || true)
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
           echo "apk=$APK" >> "$GITHUB_OUTPUT"
 
@@ -1673,7 +1674,7 @@ jobs:
           APPLE_PROVISIONING_PROFILE_B64: ${{ secrets.APPLE_PROVISIONING_PROFILE_B64 }}
         run: |
           if [ -z "$APPLE_CERT_P12" ] || [ -z "$APPLE_PROVISIONING_PROFILE_B64" ]; then
-            echo "::warning::Apple signing secrets missing — falling back to simulator build (unsigned, not for TestFlight)"
+            echo "::warning::Apple signing secrets missing — skipping iOS build (no unsigned simulator fallback; release artifacts must be signed)"
             echo "signed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -1705,13 +1706,13 @@ jobs:
         working-directory: crates/librefang-desktop
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # `-f mobile-no-email -- --no-default-features`: see android build
+        # above for why `--no-default-features` goes after `--`. We keep iOS
+        # on the same channel flavor as Android so mobile binaries are
+        # consistent and don't pull channel-email deps that aren't useful
+        # on iOS either.
         run: |
-          cargo tauri ios build --target aarch64
-
-      - name: Build simulator (fallback)
-        if: steps.keychain.outputs.signed != 'true'
-        working-directory: crates/librefang-desktop
-        run: cargo tauri ios build --target aarch64-sim --debug
+          cargo tauri ios build --target aarch64 -f mobile-no-email -- --no-default-features
 
       - name: Locate .ipa
         id: art

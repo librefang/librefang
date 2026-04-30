@@ -23,7 +23,7 @@ tracing-subscriber = { workspace = true }
 # Shared: works on desktop and mobile.
 # `tauri` appears again in the desktop target block below with extra features —
 # Cargo merges features from both entries; mobile gets the base crate only.
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 serde = { workspace = true }
@@ -52,6 +52,11 @@ mini = ["librefang-api/mini"]
 custom-protocol = ["tauri/custom-protocol"]
 # Documents the mobile build path (no-op flag, mobile targets are cfg-gated)
 mobile = []
+# Mobile build flavor — excludes channel-email because rustls-connector 0.23.0
+# pulls rustls-platform-verifier 0.7.0, whose `Verifier::new_with_extra_roots`
+# is not implemented on the Android target. Used by mobile-smoke.yml with
+# `--no-default-features --features mobile-no-email`.
+mobile-no-email = ["librefang-api/all-channels-no-email"]
 
 [[bin]]
 name = "librefang-desktop"

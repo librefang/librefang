@@ -74,6 +74,71 @@ tokio::task_local! {
     static PUBLISH_EVENT_DEPTH: std::cell::Cell<u32>;
 }
 
+/// Extract a `(user_text, assistant_text)` seed pair for session-label
+/// generation.  Returns `None` when the session lacks at least one
+/// non-empty user message AND one non-empty assistant message — there
+/// is nothing to title until both sides have spoken once.
+fn extract_label_seed(messages: &[librefang_types::message::Message]) -> Option<(String, String)> {
+    use librefang_types::message::{ContentBlock, MessageContent, Role};
+
+    fn text_of(m: &librefang_types::message::Message) -> String {
+        match &m.content {
+            MessageContent::Text(t) => t.trim().to_string(),
+            MessageContent::Blocks(blocks) => {
+                let mut buf = String::new();
+                for b in blocks {
+                    if let ContentBlock::Text { text, .. } = b {
+                        if !buf.is_empty() {
+                            buf.push(' ');
+                        }
+                        buf.push_str(text.trim());
+                    }
+                }
+                buf
+            }
+        }
+    }
+
+    let user = messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .map(text_of)
+        .filter(|s| !s.is_empty())?;
+    let assistant = messages
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .map(text_of)
+        .filter(|s| !s.is_empty())?;
+    Some((user, assistant))
+}
+
+/// Clean up a raw model-generated title: strip surrounding quotes,
+/// keep only the first line, and cap at 60 chars (UTF-8 safe).  Models
+/// occasionally prefix with `Title:` or wrap in quotes despite the
+/// prompt — the cleanup keeps the column rendering tidy without
+/// rejecting otherwise-valid titles.
+fn sanitize_session_title(raw: &str) -> String {
+    let first_line = raw.lines().next().unwrap_or("").trim();
+    // Strip a leading "Title:" / "title:" prefix some models add.
+    let without_prefix = first_line
+        .strip_prefix("Title:")
+        .or_else(|| first_line.strip_prefix("title:"))
+        .unwrap_or(first_line)
+        .trim();
+    // Strip surrounding ASCII quotes / single quotes / backticks.
+    let trimmed = without_prefix
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('`')
+        .trim();
+    // Cap at 60 chars (UTF-8 safe) — same ceiling derive_session_label
+    // uses, so list views don't shift width when one path beats the
+    // other.
+    librefang_types::truncate_str(trimmed, 60)
+        .trim()
+        .to_string()
+}
+
 /// Build the MCP bridge config that lets CLI-based drivers (Claude Code)
 /// reach back into the daemon's own `/mcp` endpoint. Uses loopback when the
 /// API listens on a wildcard address.
@@ -626,6 +691,15 @@ pub struct LibreFangKernel {
     /// cooldowns catch up. Semaphore starts at
     /// [`Self::MAX_INFLIGHT_SKILL_REVIEWS`] permits.
     skill_review_concurrency: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Per-agent fire-and-forget background tasks (skill reviews, owner
+    /// notifications, …) that hold semaphore permits or spend tokens on
+    /// behalf of a specific agent. `kill_agent` drains and aborts these so
+    /// permits release immediately and a deleted agent stops accruing cost
+    /// from in-flight retry loops (#3705).
+    pub(crate) agent_watchers: dashmap::DashMap<
+        AgentId,
+        std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    >,
     /// Generation counter for MCP tool definitions — bumped whenever mcp_tools
     /// are modified (connect, disconnect, rebuild). Used by the tool list cache.
     mcp_generation: std::sync::atomic::AtomicU64,
@@ -3159,6 +3233,7 @@ impl LibreFangKernel {
             skill_review_concurrency: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 Self::MAX_INFLIGHT_SKILL_REVIEWS,
             )),
+            agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
             budget_config: std::sync::RwLock::new(initial_budget),
@@ -3566,6 +3641,25 @@ impl LibreFangKernel {
                                 break;
                             }
                         }
+                    }
+                    // Reconciliation (#3665): if the persisted state is
+                    // `Running` but no in-memory process actually exists
+                    // (the registry was wiped by `shutdown()` or a crash),
+                    // a previous shutdown failed to persist `Suspended`.
+                    // Emit a warning so unclean shutdowns are visible in
+                    // logs rather than silently re-spawning into a state
+                    // that looks identical to a clean boot.
+                    if matches!(
+                        restored_entry.state,
+                        AgentState::Running | AgentState::Crashed
+                    ) {
+                        warn!(
+                            agent = %name,
+                            id = %agent_id,
+                            prev_state = ?restored_entry.state,
+                            "Agent restored from non-clean state — last shutdown likely \
+                             crashed before persisting Suspended. Reconciling state on boot."
+                        );
                     }
                     if is_enabled {
                         restored_entry.state = AgentState::Running;
@@ -4775,6 +4869,8 @@ system_prompt = "You are a helpful assistant."
         );
         // Ephemeral side-questions have no sender context — no user/channel
         // attribution to record. Per-user budget rollup will skip these.
+        // session_id is also None: ephemerals run on a throwaway session
+        // that is not persisted in the sessions table.
         let usage_record = librefang_memory::usage::UsageRecord {
             agent_id,
             provider: manifest.model.provider.clone(),
@@ -4786,6 +4882,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms,
             user_id: None,
             channel: None,
+            session_id: None,
         };
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
@@ -5187,7 +5284,7 @@ system_prompt = "You are a helpful assistant."
                     let review_agent_id = agent_id;
                     let audit_log_success = audit_log.clone();
                     let agent_id_for_success = agent_id_str.clone();
-                    tokio::spawn(async move {
+                    let review_handle = tokio::spawn(async move {
                         // Move the permit into the task so it's released
                         // on task exit. Binding it to `_permit` keeps
                         // clippy happy (dropped at end of scope).
@@ -5266,6 +5363,9 @@ system_prompt = "You are a helpful assistant."
                             );
                         }
                     });
+                    // Track the review task so kill_agent can abort it and
+                    // release its semaphore permit promptly (#3705).
+                    self.register_agent_watcher(agent_id, review_handle);
                 }
 
                 Ok(result)
@@ -6415,6 +6515,7 @@ system_prompt = "You are a helpful assistant."
                         // before the spawn — moves into this async block.
                         user_id: attribution_user_id,
                         channel: attribution_channel.clone(),
+                        session_id: Some(effective_session_id),
                     };
                     if let Err(e) = kernel_clone.metering.check_all_and_record(
                         &usage_record,
@@ -6800,6 +6901,9 @@ system_prompt = "You are a helpful assistant."
             Some(w) => w.clone(),
             None => return,
         };
+        // Note: this is kernel-scoped (not agent-scoped) — sending owner
+        // notifications via channel adapters touches `kernel.send_channel_message`
+        // which has its own lifecycle. No per-agent tracking needed here.
         tokio::spawn(async move {
             let kernel = match weak.upgrade() {
                 Some(k) => k,
@@ -8088,6 +8192,7 @@ system_prompt = "You are a helpful assistant."
             latency_ms,
             user_id: attribution_user_id,
             channel: attribution_channel.clone(),
+            session_id: Some(effective_session_id),
         };
         if let Err(e) = self.metering.check_all_and_record(
             &usage_record,
@@ -8156,6 +8261,12 @@ system_prompt = "You are a helpful assistant."
                 result.cost_usd = None;
             }
         }
+
+        // Fire-and-forget: ask the auxiliary cheap-tier model to generate a
+        // short title for this session if it doesn't have one yet.  Spawned
+        // AFTER the response is delivered so it never competes with the
+        // user's turn for model attention; failures / timeouts are silent.
+        self.spawn_session_label_generation(agent_id, effective_session_id);
 
         Ok(result)
     }
@@ -9768,6 +9879,41 @@ system_prompt = "You are a helpful assistant."
         ))
     }
 
+    /// Track a per-agent fire-and-forget background task so `kill_agent`
+    /// can abort it and free its semaphore permit. Drops finished entries
+    /// opportunistically to keep the vec bounded (#3705).
+    pub(crate) fn register_agent_watcher(
+        &self,
+        agent_id: AgentId,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        let slot = self
+            .agent_watchers
+            .entry(agent_id)
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            .clone();
+        // The trailing `;` matters: without it the if-let is the function's
+        // tail expression, which keeps the LockResult's temporaries borrowing
+        // `slot` until function exit — and `slot` itself drops at the same
+        // point, tripping E0597. The semicolon ends the statement so the
+        // temporaries (and the guard) drop before `slot` does.
+        if let Ok(mut guard) = slot.lock() {
+            guard.retain(|h| !h.is_finished());
+            guard.push(handle);
+        };
+    }
+
+    /// Abort and drop every tracked watcher task for `agent_id`.
+    fn abort_agent_watchers(&self, agent_id: AgentId) {
+        if let Some((_, slot)) = self.agent_watchers.remove(&agent_id) {
+            if let Ok(mut guard) = slot.lock() {
+                for h in guard.drain(..) {
+                    h.abort();
+                }
+            }
+        }
+    }
+
     /// Kill an agent.
     pub fn kill_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         let entry = self
@@ -9775,6 +9921,10 @@ system_prompt = "You are a helpful assistant."
             .remove(agent_id)
             .map_err(KernelError::LibreFang)?;
         self.background.stop_agent(agent_id);
+        // Abort any per-agent fire-and-forget tasks (skill reviews, …) so
+        // they release semaphore permits and stop spending tokens on
+        // behalf of a now-deleted agent (#3705).
+        self.abort_agent_watchers(agent_id);
         self.scheduler.unregister(agent_id);
         self.capabilities.revoke_all(agent_id);
         self.event_bus.unsubscribe_agent(agent_id);
@@ -11276,6 +11426,137 @@ system_prompt = "You are a helpful assistant."
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
+    }
+
+    /// Auto-generate a short session title via the auxiliary cheap-tier
+    /// LLM and persist it to `sessions.label`. Fire-and-forget — runs in
+    /// a tokio task so the originating turn is never blocked.
+    ///
+    /// No-op when:
+    /// - the session already has a label (user-set or previously generated)
+    /// - the session lacks at least one non-empty user + one non-empty
+    ///   assistant message (nothing to summarise yet)
+    /// - the aux driver call fails or times out
+    /// - the model returns empty / all-whitespace text
+    pub fn spawn_session_label_generation(&self, agent_id: AgentId, session_id: SessionId) {
+        let memory = Arc::clone(&self.memory);
+        let aux = self.aux_client.load_full();
+        tokio::spawn(async move {
+            // Bail early if the label is already set — preserves user
+            // overrides and prevents repeated billing on the same session.
+            let session = match memory.get_session(session_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => return,
+                Err(e) => {
+                    debug!(
+                        session_id = %session_id.0,
+                        error = %e,
+                        "session-label: failed to load session"
+                    );
+                    return;
+                }
+            };
+            if session.label.is_some() {
+                return;
+            }
+            let Some((user_text, assistant_text)) = extract_label_seed(&session.messages) else {
+                return;
+            };
+
+            let resolution = aux.resolve(librefang_types::config::AuxTask::Title);
+            let driver = resolution.driver;
+            // When the chain resolved a concrete (provider, model) use it; if
+            // we fell back to the primary driver `resolved` is empty — the
+            // driver will pick its own configured model.
+            let model = resolution
+                .resolved
+                .first()
+                .map(|(_, m)| m.clone())
+                .unwrap_or_default();
+
+            let prompt = format!(
+                "Conversation so far:\nUser: {user}\nAssistant: {asst}\n\n\
+                 Write a 3 to 6 word title for this conversation. \
+                 Reply with the title text only — no quotes, no punctuation, no prefix.",
+                user = librefang_types::truncate_str(&user_text, 800),
+                asst = librefang_types::truncate_str(&assistant_text, 800),
+            );
+
+            let req = CompletionRequest {
+                model,
+                messages: vec![librefang_types::message::Message::user(prompt)],
+                tools: vec![],
+                max_tokens: 32,
+                temperature: 0.2,
+                system: Some(
+                    "You generate short, descriptive session titles. \
+                     Reply with the title text only."
+                        .to_string(),
+                ),
+                thinking: None,
+                prompt_caching: false,
+                cache_ttl: None,
+                response_format: None,
+                timeout_secs: None,
+                extra_body: None,
+                agent_id: Some(agent_id.to_string()),
+            };
+
+            let resp = match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                driver.complete(req),
+            )
+            .await
+            {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %session_id.0,
+                        error = %e,
+                        "session-label: aux LLM call failed"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    debug!(
+                        agent_id = %agent_id,
+                        session_id = %session_id.0,
+                        "session-label: aux LLM call timed out (10s)"
+                    );
+                    return;
+                }
+            };
+
+            let title = sanitize_session_title(&resp.text());
+            if title.is_empty() {
+                return;
+            }
+
+            // Re-check the label right before writing — a concurrent
+            // user-set label via PUT /api/sessions/:id/label must win.
+            if let Ok(Some(s)) = memory.get_session(session_id) {
+                if s.label.is_some() {
+                    return;
+                }
+            }
+
+            if let Err(e) = memory.set_session_label(session_id, Some(&title)) {
+                debug!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    error = %e,
+                    "session-label: failed to persist label"
+                );
+            } else {
+                info!(
+                    agent_id = %agent_id,
+                    session_id = %session_id.0,
+                    title = %title,
+                    "Auto-generated session label"
+                );
+            }
+        });
     }
 
     /// Lightweight one-shot LLM call for classification tasks (e.g., reply precheck).
@@ -13295,17 +13576,38 @@ system_prompt = "You are a helpful assistant."
 
         self.supervisor.shutdown();
 
-        // Update agent states to Suspended in persistent storage (not delete)
+        // Update agent states to Suspended in persistent storage (not delete).
+        // Track failures so we can emit a single critical summary if any
+        // agent could not be persisted — without this, a partial-shutdown
+        // would leave on-disk state at the old `Running` value with only a
+        // per-agent error in the log, easy to miss (#3665).
+        let mut total = 0usize;
+        let mut state_failures = 0usize;
+        let mut save_failures = 0usize;
         for entry in self.registry.list() {
+            total += 1;
             if let Err(e) = self.registry.set_state(entry.id, AgentState::Suspended) {
+                state_failures += 1;
                 tracing::error!(agent_id = %entry.id, "failed to set agent state to Suspended on shutdown: {e}");
             }
             // Re-save with Suspended state for clean resume on next boot
             if let Some(updated) = self.registry.get(entry.id) {
                 if let Err(e) = self.memory.save_agent(&updated) {
+                    save_failures += 1;
                     tracing::error!(agent_id = %entry.id, "failed to persist agent state on shutdown: {e}");
                 }
             }
+        }
+
+        if state_failures > 0 || save_failures > 0 {
+            tracing::error!(
+                total_agents = total,
+                state_failures,
+                save_failures,
+                "Kernel shutdown completed with persistence errors — some agents \
+                 may resume in stale state on next boot. Inspect data/agents.* \
+                 before restarting."
+            );
         }
 
         info!(
@@ -14782,6 +15084,7 @@ system_prompt = "You are a helpful assistant."
                 // attribution. Spend rolls up under `system`.
                 user_id: None,
                 channel: Some("system".to_string()),
+                session_id: None,
             };
             if let Err(e) = kernel.metering.record(&usage_record) {
                 tracing::debug!(error = %e, "Failed to record background review usage");
@@ -17394,9 +17697,15 @@ impl KernelHandle for LibreFangKernel {
             .a2a_external_agents
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // Return (name, key) pairs where `key` is the trust-list key
+        // (first tuple element), not `card.url`. The card's self-declared
+        // url is `<base>/a2a` while the trust gate at /api/a2a/send and
+        // tool_a2a_send compare against the canonicalized base URL. Using
+        // `card.url` here would silently mismatch the gate and break every
+        // statically-seeded entry. (Bug #3786)
         agents
             .iter()
-            .map(|(_, card)| (card.name.clone(), card.url.clone()))
+            .map(|(key, card)| (card.name.clone(), key.clone()))
             .collect()
     }
 
@@ -17406,10 +17715,12 @@ impl KernelHandle for LibreFangKernel {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let name_lower = name.to_lowercase();
+        // See list_a2a_agents — return the trust-list key, not card.url,
+        // so callers get a URL that the gate will accept.
         agents
             .iter()
             .find(|(_, card)| card.name.to_lowercase() == name_lower)
-            .map(|(_, card)| card.url.clone())
+            .map(|(key, _)| key.clone())
     }
 
     async fn send_channel_message(

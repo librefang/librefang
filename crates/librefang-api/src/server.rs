@@ -925,6 +925,14 @@ pub async fn build_router(
             format!("http://{listen_addr}").parse().unwrap(),
             format!("http://localhost:{port}").parse().unwrap(),
             format!("http://127.0.0.1:{port}").parse().unwrap(),
+            // Tauri 2 mobile bundled webview origins. iOS WKWebView
+            // exposes the embedded dashboard via the `tauri://localhost`
+            // custom scheme; Android serves it through
+            // WebViewAssetLoader at `https://tauri.localhost`. Both have
+            // to clear the CORS check so `bundleMode.ts`'s rewritten
+            // `/api/*` requests against this daemon succeed.
+            "tauri://localhost".parse().unwrap(),
+            "https://tauri.localhost".parse().unwrap(),
         ];
         // Also allow common dev ports
         for p in [3000u16, 8080] {
