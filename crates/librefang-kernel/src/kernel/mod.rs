@@ -17067,12 +17067,12 @@ impl KernelHandle for LibreFangKernel {
                 // depth=0 scope, defeating the depth cap on chains that
                 // travel through memory updates.
                 let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
-                spawn_logged("memory_event_publish", PUBLISH_EVENT_DEPTH.scope(
-                    std::cell::Cell::new(parent_depth),
-                    async move {
+                spawn_logged(
+                    "memory_event_publish",
+                    PUBLISH_EVENT_DEPTH.scope(std::cell::Cell::new(parent_depth), async move {
                         kernel.publish_event(event).await;
-                    },
-                ));
+                    }),
+                );
             }
         }
         Ok(())
