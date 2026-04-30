@@ -3,8 +3,18 @@
 use crate::{EnvPassthroughPolicy, SkillError, SkillManifest, SkillRuntime, SkillToolResult};
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, warn};
+
+/// Default wall-clock cap per skill subprocess invocation (#3454).
+pub const DEFAULT_SKILL_TIMEOUT_SECS: u64 = 120;
+/// Hard upper bound: even if a skill manifest asks for more, never wait longer
+/// than this. Caps adversarial / typo'd manifests from wedging the agent loop.
+pub const MAX_SKILL_TIMEOUT_SECS: u64 = 600;
+/// Per-stream stdout/stderr cap; child is killed on overflow (#3455).
+const SKILL_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Per-iteration read chunk size for the cap drain loop.
+const SKILL_READ_CHUNK_BYTES: usize = 8192;
 
 /// Env vars that can never flow through to a skill subprocess regardless of
 /// skill manifest or operator config. These either inject code
@@ -79,6 +89,289 @@ fn validate_script_path(skill_dir: &Path, entry: &str) -> Result<std::path::Path
     }
 
     Ok(canonical_script)
+}
+
+/// Resolve a manifest-supplied timeout to an effective duration (#3454).
+fn resolve_skill_timeout(req_timeout_secs: Option<u64>) -> std::time::Duration {
+    let raw = req_timeout_secs.unwrap_or(DEFAULT_SKILL_TIMEOUT_SECS);
+    let clamped = if raw == 0 {
+        DEFAULT_SKILL_TIMEOUT_SECS
+    } else {
+        raw.min(MAX_SKILL_TIMEOUT_SECS)
+    };
+    std::time::Duration::from_secs(clamped)
+}
+
+/// Outcome of [`drain_child_with_caps`].
+///
+/// `Completed` carries the child's exit status, captured stdout/stderr
+/// (clamped to `SKILL_MAX_OUTPUT_BYTES` per stream) and a `truncated` flag
+/// set when either pipe hit the cap and the child was killed. `TimedOut`
+/// signals the wall-clock cap fired; `kill_on_drop(true)` on the spawning
+/// `Command` reaps the child as the future is dropped.
+enum DrainOutcome {
+    Completed {
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        truncated: bool,
+    },
+    TimedOut {
+        timeout_secs: u64,
+    },
+}
+
+/// Drive a spawned child to completion with both wall-clock timeout (#3454)
+/// and per-stream stdout/stderr byte caps (#3455). Mirrors the
+/// `host_shell_exec` pattern from #4099: `select!`-based concurrent drain so a
+/// child that only writes to stdout doesn't hang waiting for stderr EOF, and
+/// `start_kill()` is fired the instant either pipe overflows so the other
+/// pipe sees EOF immediately. `kill_on_drop(true)` on the spawning `Command`
+/// guarantees the child is reaped even if this future is dropped (#3624).
+async fn drain_child_with_caps(
+    mut child: tokio::process::Child,
+    timeout_dur: std::time::Duration,
+) -> Result<DrainOutcome, SkillError> {
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| SkillError::ExecutionFailed("child has no stdout pipe".into()))?;
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| SkillError::ExecutionFailed("child has no stderr pipe".into()))?;
+
+    let exec = async {
+        let cap = SKILL_MAX_OUTPUT_BYTES;
+        let mut stdout_buf: Vec<u8> = Vec::new();
+        let mut stderr_buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        let mut out_done = false;
+        let mut err_done = false;
+        while !out_done || !err_done {
+            let mut out_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
+            let mut err_chunk = [0u8; SKILL_READ_CHUNK_BYTES];
+            tokio::select! {
+                n = stdout_pipe.read(&mut out_chunk), if !out_done => match n? {
+                    0 => out_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stdout_buf.len()).min(n);
+                        stdout_buf.extend_from_slice(&out_chunk[..take]);
+                        if stdout_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+                n = stderr_pipe.read(&mut err_chunk), if !err_done => match n? {
+                    0 => err_done = true,
+                    n => {
+                        let take = cap.saturating_sub(stderr_buf.len()).min(n);
+                        stderr_buf.extend_from_slice(&err_chunk[..take]);
+                        if stderr_buf.len() >= cap { truncated = true; break; }
+                    }
+                },
+            }
+        }
+        if truncated {
+            // We've stopped reading; kill the child so it doesn't keep
+            // producing output we'll never drain. start_kill() queues SIGKILL
+            // on Linux/macOS / TerminateProcess on Windows; it does not block.
+            let _ = child.start_kill();
+        }
+        // Drop the owned pipe handles before wait(). On Windows, child.wait()
+        // waits on the process handle alone, but on Linux/macOS keeping the
+        // reader end open after we've stopped polling can leave kernel buffers
+        // referenced; freeing them ASAP is just hygiene. tokio::process::Child
+        // does not require pipes drained for wait() to return (unlike the
+        // sync wait_with_output) so this is correct, not a workaround.
+        drop(stdout_pipe);
+        drop(stderr_pipe);
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf, truncated))
+    };
+
+    match tokio::time::timeout(timeout_dur, exec).await {
+        Ok(Ok((status, stdout, stderr, truncated))) => Ok(DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated,
+        }),
+        Ok(Err(e)) => Err(SkillError::ExecutionFailed(format!("child wait: {e}"))),
+        // Future drop here causes kill_on_drop(true) on the spawning Command to reap the subprocess.
+        Err(_) => Ok(DrainOutcome::TimedOut {
+            timeout_secs: timeout_dur.as_secs(),
+        }),
+    }
+}
+
+/// Build the JSON payload returned when a skill's output trips
+/// `SKILL_MAX_OUTPUT_BYTES` and the child gets killed (#3455). Includes
+/// the first ~64 KiB of stdout/stderr so operators investigating a runaway
+/// skill can see what it was trying to print before being severed.
+const SKILL_TRUNCATED_HEAD_BYTES: usize = 64 * 1024;
+
+fn truncated_skill_payload(runtime: &str, stdout: &[u8], stderr: &[u8]) -> serde_json::Value {
+    let head = |buf: &[u8]| -> String {
+        let take = buf.len().min(SKILL_TRUNCATED_HEAD_BYTES);
+        String::from_utf8_lossy(&buf[..take]).into_owned()
+    };
+    serde_json::json!({
+        "error": format!(
+            "{runtime} skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
+        ),
+        "stdout_head": head(stdout),
+        "stderr_head": head(stderr),
+        "truncated": true,
+    })
+}
+
+/// Lightweight JSON Schema check for skill tool inputs (#3453).
+///
+/// We do not pull in a full `jsonschema` dependency yet; this validates the
+/// subset of Draft-07 that skill manifests realistically use:
+///
+/// - `type`: one of `"object" | "array" | "string" | "number" | "integer" |
+///   "boolean" | "null"` (or an array of those for unions)
+/// - `required`: a list of property names that must be present in an object
+/// - `properties.<name>.type`: per-field type check (one level deep)
+///
+/// Anything richer (`oneOf`, `pattern`, `minLength`, nested `properties`, …)
+/// is currently *not* enforced and is tracked as follow-up work; this still
+/// closes the trivial DoS where a hostile LLM call sends `null` or a giant
+/// nested object straight into the subprocess. Returns `Ok(())` if the schema
+/// is missing, empty, or non-object (back-compat with skills that ship no
+/// schema).
+fn validate_input_against_schema(
+    input: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(schema_obj) = schema.as_object() else {
+        return Ok(());
+    };
+    if schema_obj.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(type_node) = schema_obj.get("type") {
+        check_type(input, type_node).map_err(|e| format!("input: {e}"))?;
+    }
+
+    // Required property check applies only to object schemas.
+    let is_object_schema = schema_obj
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(|s| s == "object")
+        .unwrap_or(false);
+
+    if is_object_schema {
+        let input_obj = input.as_object();
+        if let Some(required) = schema_obj.get("required").and_then(|r| r.as_array()) {
+            for req in required {
+                let Some(name) = req.as_str() else { continue };
+                let present = input_obj
+                    .map(|o| o.contains_key(name) && !o.get(name).unwrap().is_null())
+                    .unwrap_or(false);
+                if !present {
+                    return Err(format!("missing required property '{name}'"));
+                }
+            }
+        }
+        if let (Some(props), Some(input_obj)) = (
+            schema_obj.get("properties").and_then(|p| p.as_object()),
+            input_obj,
+        ) {
+            for (key, val) in input_obj {
+                let Some(prop_schema) = props.get(key).and_then(|s| s.as_object()) else {
+                    continue;
+                };
+                if let Some(type_node) = prop_schema.get("type") {
+                    check_type(val, type_node).map_err(|e| format!("property '{key}': {e}"))?;
+                }
+            }
+        }
+        // `additionalProperties: false` — Draft-07 default is `true` (extras
+        // allowed). When the manifest opts in to strict validation, extra
+        // keys not declared in `properties` are rejected so a hostile LLM
+        // can't sneak unchecked fields past the spawn (#3453 follow-up).
+        if let (Some(input_obj), Some(false)) = (
+            input_obj,
+            schema_obj
+                .get("additionalProperties")
+                .and_then(|v| v.as_bool()),
+        ) {
+            let declared: std::collections::HashSet<&str> = schema_obj
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|o| o.keys().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            for key in input_obj.keys() {
+                if !declared.contains(key.as_str()) {
+                    return Err(format!(
+                        "unexpected property '{key}' (additionalProperties: false)"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Type assertion for a single JSON value against a `type` node, which is
+/// either a string (e.g. `"string"`) or an array of strings (a union).
+fn check_type(value: &serde_json::Value, type_node: &serde_json::Value) -> Result<(), String> {
+    match type_node {
+        serde_json::Value::String(t) => check_single_type(value, t),
+        serde_json::Value::Array(types) => {
+            for t in types {
+                if let Some(t) = t.as_str() {
+                    if check_single_type(value, t).is_ok() {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(format!(
+                "expected one of {:?}, got {}",
+                types,
+                json_type_name(value)
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_single_type(value: &serde_json::Value, expected: &str) -> Result<(), String> {
+    let ok = match expected {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        // JSON Schema Draft-07: integer must be a whole number; reject floats.
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        // Unknown type keywords are passed through so we don't false-reject
+        // skills that (legitimately or illegitimately) use exotic schemas.
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "expected type {expected}, got {}",
+            json_type_name(value)
+        ))
+    }
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Resolve the effective env-passthrough allowlist for a skill, applying
@@ -168,16 +461,31 @@ pub async fn execute_skill_tool(
     input: &serde_json::Value,
     env_policy: Option<&EnvPassthroughPolicy>,
 ) -> Result<SkillToolResult, SkillError> {
-    // Verify the tool exists in the manifest
-    let _tool_def = manifest
+    // Verify the tool exists in the manifest and validate input against its declared schema (#3453).
+    let tool_def = manifest
         .tools
         .provided
         .iter()
         .find(|t| t.name == tool_name)
         .ok_or_else(|| SkillError::NotFound(format!("Tool {tool_name} not in skill manifest")))?;
+    if let Err(reason) = validate_input_against_schema(input, &tool_def.input_schema) {
+        warn!(
+            skill = %manifest.skill.name,
+            tool = tool_name,
+            reason = %reason,
+            "skill tool input rejected by input_schema validator (#3453)"
+        );
+        return Ok(SkillToolResult {
+            output: serde_json::json!({
+                "error": format!("input does not match tool input_schema: {reason}"),
+            }),
+            is_error: true,
+        });
+    }
 
     let effective_passthrough =
         resolve_effective_passthrough(&manifest.env_passthrough, &manifest.skill.name, env_policy);
+    let timeout = resolve_skill_timeout(manifest.requirements.timeout_secs);
 
     match manifest.runtime.runtime_type {
         SkillRuntime::Python => {
@@ -188,6 +496,7 @@ pub async fn execute_skill_tool(
                 input,
                 &manifest.config,
                 &effective_passthrough,
+                timeout,
             )
             .await
         }
@@ -199,6 +508,7 @@ pub async fn execute_skill_tool(
                 input,
                 &manifest.config,
                 &effective_passthrough,
+                timeout,
             )
             .await
         }
@@ -210,6 +520,7 @@ pub async fn execute_skill_tool(
                 input,
                 &manifest.config,
                 &effective_passthrough,
+                timeout,
             )
             .await
         }
@@ -240,6 +551,7 @@ async fn execute_python(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
     env_passthrough: &[String],
+    timeout_dur: std::time::Duration,
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -334,28 +646,48 @@ async fn execute_python(
         drop(stdin);
     }
 
-    let timeout_dur = std::time::Duration::from_secs(120);
-    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(SkillError::ExecutionFailed(format!("Wait for Python: {e}")));
-        }
-        Err(_) => {
-            // wait_with_output() consumed `child`; the future is dropped here
-            // and kill_on_drop(true) on the Command terminates the process.
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
             error!(
-                "Python skill timed out after 120s: {}",
-                script_path.display()
+                script = %script_path.display(),
+                timeout_secs,
+                "Python skill timed out"
             );
             return Ok(SkillToolResult {
-                output: "Python skill timed out after 120 seconds".into(),
+                output: serde_json::json!({
+                    "error": format!("Python skill timed out after {timeout_secs}s; child killed"),
+                }),
                 is_error: true,
             });
         }
+        DrainOutcome::Completed {
+            truncated: true,
+            stdout,
+            stderr,
+            ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Python skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: truncated_skill_payload("Python", &stdout, &stderr),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         error!("Python skill failed: {stderr}");
         return Ok(SkillToolResult {
             output: serde_json::json!({ "error": stderr.to_string() }),
@@ -364,7 +696,7 @@ async fn execute_python(
     }
 
     // Parse stdout as JSON
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     match serde_json::from_str::<serde_json::Value>(&stdout) {
         Ok(value) => Ok(SkillToolResult {
             output: value,
@@ -385,6 +717,7 @@ async fn execute_node(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
     env_passthrough: &[String],
+    timeout_dur: std::time::Duration,
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -467,37 +800,55 @@ async fn execute_node(
         drop(stdin);
     }
 
-    let timeout_dur = std::time::Duration::from_secs(120);
-    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(SkillError::ExecutionFailed(format!(
-                "Wait for Node.js: {e}"
-            )));
-        }
-        Err(_) => {
-            // wait_with_output() consumed `child`; the future is dropped here
-            // and kill_on_drop(true) on the Command terminates the process.
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
             error!(
-                "Node.js skill timed out after 120s: {}",
-                script_path.display()
+                script = %script_path.display(),
+                timeout_secs,
+                "Node.js skill timed out"
             );
             return Ok(SkillToolResult {
-                output: "Node.js skill timed out after 120 seconds".into(),
+                output: serde_json::json!({
+                    "error": format!("Node.js skill timed out after {timeout_secs}s; child killed"),
+                }),
                 is_error: true,
             });
         }
+        DrainOutcome::Completed {
+            truncated: true,
+            stdout,
+            stderr,
+            ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Node.js skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: truncated_skill_payload("Node.js", &stdout, &stderr),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         return Ok(SkillToolResult {
             output: serde_json::json!({ "error": stderr.to_string() }),
             is_error: true,
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     match serde_json::from_str::<serde_json::Value>(&stdout) {
         Ok(value) => Ok(SkillToolResult {
             output: value,
@@ -518,6 +869,7 @@ async fn execute_shell(
     input: &serde_json::Value,
     config: &std::collections::HashMap<String, serde_json::Value>,
     env_passthrough: &[String],
+    timeout_dur: std::time::Duration,
 ) -> Result<SkillToolResult, SkillError> {
     // SECURITY: Validate path containment before any filesystem access
     let script_path = validate_script_path(skill_dir, entry)?;
@@ -601,25 +953,48 @@ async fn execute_shell(
         drop(stdin);
     }
 
-    let timeout_dur = std::time::Duration::from_secs(120);
-    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
-        Ok(result) => {
-            result.map_err(|e| SkillError::ExecutionFailed(format!("Wait for shell: {e}")))?
-        }
-        Err(_) => {
+    let (status, stdout_bytes, stderr_bytes) = match drain_child_with_caps(child, timeout_dur)
+        .await?
+    {
+        DrainOutcome::TimedOut { timeout_secs } => {
             error!(
-                "Shell skill timed out after 120s: {}",
-                script_path.display()
+                script = %script_path.display(),
+                timeout_secs,
+                "Shell skill timed out"
             );
             return Ok(SkillToolResult {
-                output: "Shell script timed out after 120 seconds".into(),
+                output: serde_json::json!({
+                    "error": format!("Shell skill timed out after {timeout_secs}s; child killed"),
+                }),
                 is_error: true,
             });
         }
+        DrainOutcome::Completed {
+            truncated: true,
+            stdout,
+            stderr,
+            ..
+        } => {
+            error!(
+                script = %script_path.display(),
+                cap_bytes = SKILL_MAX_OUTPUT_BYTES,
+                "Shell skill output exceeded cap; child killed (#3455)"
+            );
+            return Ok(SkillToolResult {
+                output: truncated_skill_payload("Shell", &stdout, &stderr),
+                is_error: true,
+            });
+        }
+        DrainOutcome::Completed {
+            status,
+            stdout,
+            stderr,
+            truncated: false,
+        } => (status, stdout, stderr),
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
         error!("Shell skill failed: {stderr}");
         return Ok(SkillToolResult {
             output: serde_json::json!({ "error": stderr.to_string() }),
@@ -627,7 +1002,7 @@ async fn execute_shell(
         });
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     match serde_json::from_str::<serde_json::Value>(&stdout) {
         Ok(value) => Ok(SkillToolResult {
             output: value,
@@ -1365,5 +1740,398 @@ echo '{"greeting": "hello from shell"}'
 
         // Cleanup
         let _ = std::fs::remove_file(&evil_script);
+    }
+
+    // ---- #3454 timeout resolver tests ----
+
+    #[test]
+    fn test_resolve_timeout_uses_default_when_unset() {
+        let dur = resolve_skill_timeout(None);
+        assert_eq!(dur.as_secs(), DEFAULT_SKILL_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_resolve_timeout_uses_default_when_zero() {
+        // Zero is treated as "unset" rather than "no timeout" so a malformed
+        // skill manifest cannot disable the cap.
+        let dur = resolve_skill_timeout(Some(0));
+        assert_eq!(dur.as_secs(), DEFAULT_SKILL_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_resolve_timeout_clamps_to_upper_bound() {
+        let dur = resolve_skill_timeout(Some(MAX_SKILL_TIMEOUT_SECS + 1_000));
+        assert_eq!(dur.as_secs(), MAX_SKILL_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_resolve_timeout_honors_in_range_value() {
+        let dur = resolve_skill_timeout(Some(45));
+        assert_eq!(dur.as_secs(), 45);
+    }
+
+    // ---- #3453 input_schema validator tests ----
+
+    #[test]
+    fn test_validate_input_no_schema_passes() {
+        // Empty / missing schemas accept any input — back-compat for skills
+        // that ship no input_schema.
+        assert!(validate_input_against_schema(
+            &serde_json::json!({"x": 1}),
+            &serde_json::json!({})
+        )
+        .is_ok());
+        assert!(
+            validate_input_against_schema(&serde_json::json!(null), &serde_json::json!(null))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_input_object_required_missing() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"],
+        });
+        let err = validate_input_against_schema(&serde_json::json!({}), &schema).unwrap_err();
+        assert!(err.contains("required property 'url'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_input_object_required_null_rejected() {
+        // `null` for a required property is the same as missing.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "required": ["url"],
+        });
+        let err =
+            validate_input_against_schema(&serde_json::json!({"url": null}), &schema).unwrap_err();
+        assert!(err.contains("required property 'url'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_input_property_type_mismatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "n": { "type": "integer" } },
+        });
+        let err =
+            validate_input_against_schema(&serde_json::json!({"n": "abc"}), &schema).unwrap_err();
+        assert!(err.contains("property 'n'"), "got: {err}");
+        assert!(err.contains("integer"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_input_top_level_type_mismatch() {
+        // Hostile LLM passes a string where the schema asks for an object —
+        // exactly the case #3453 calls out.
+        let schema = serde_json::json!({"type": "object"});
+        let err =
+            validate_input_against_schema(&serde_json::json!("hostile"), &schema).unwrap_err();
+        assert!(err.contains("expected type object"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_input_integer_rejects_float() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "n": { "type": "integer" } },
+        });
+        let err =
+            validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema).unwrap_err();
+        assert!(err.contains("property 'n'"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_input_number_accepts_integer_and_float() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "n": { "type": "number" } },
+        });
+        assert!(validate_input_against_schema(&serde_json::json!({"n": 1}), &schema).is_ok());
+        assert!(validate_input_against_schema(&serde_json::json!({"n": 1.5}), &schema).is_ok());
+    }
+
+    #[test]
+    fn test_validate_input_type_union() {
+        // `type: ["string", "null"]` — accepts either branch.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "n": { "type": ["string", "null"] } },
+        });
+        assert!(validate_input_against_schema(&serde_json::json!({"n": "x"}), &schema).is_ok());
+        assert!(validate_input_against_schema(&serde_json::json!({"n": null}), &schema).is_ok());
+        assert!(validate_input_against_schema(&serde_json::json!({"n": 1}), &schema).is_err());
+    }
+
+    #[test]
+    fn test_validate_input_unknown_property_passes() {
+        // JSON Schema is open by default — extra fields are not rejected here.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+        });
+        assert!(validate_input_against_schema(
+            &serde_json::json!({"url": "http://x", "extra": 7}),
+            &schema
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn test_validate_input_additional_properties_false_rejects_extras() {
+        // Manifests that opt in to strict mode must reject undeclared keys
+        // so a hostile LLM can't sneak unchecked fields past the spawn.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "additionalProperties": false,
+        });
+        let err = validate_input_against_schema(
+            &serde_json::json!({"url": "http://x", "extra": 7}),
+            &schema,
+        )
+        .expect_err("extra property must be rejected when additionalProperties is false");
+        assert!(
+            err.contains("'extra'") && err.contains("additionalProperties"),
+            "error message should name the offending property and explain why: got {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_input_additional_properties_false_passes_declared() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "additionalProperties": false,
+        });
+        assert!(
+            validate_input_against_schema(&serde_json::json!({"url": "http://x"}), &schema).is_ok()
+        );
+    }
+
+    // ---- #3453 / #3454 end-to-end via execute_skill_tool ----
+
+    #[tokio::test]
+    async fn test_execute_skill_rejects_input_failing_schema() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        // Subprocess deliberately not present — the input check must short-circuit
+        // before we ever try to spawn the runtime.
+        std::fs::write(
+            dir.path().join("run.sh"),
+            "#!/bin/bash\necho should_not_run\n",
+        )
+        .unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "schema-guard".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "schema guard".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "run.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "do_thing".to_string(),
+                    description: "needs url".to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": { "url": { "type": "string" } },
+                        "required": ["url"],
+                    }),
+                }],
+            },
+            requirements: SkillRequirements::default(),
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
+        };
+
+        let result = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "do_thing",
+            // missing required `url`
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_error);
+        let err_msg = result.output["error"].as_str().unwrap_or_default();
+        assert!(
+            err_msg.contains("input_schema") || err_msg.contains("required property"),
+            "expected schema-rejection error, got: {err_msg}"
+        );
+    }
+
+    // ---- #3455 size-cap end-to-end ----
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_shell_output_cap_kills_runaway_child() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        // Endless `yes` floods stdout — without the cap this would OOM the host.
+        let script = "#!/bin/bash\nexec yes hello\n";
+        std::fs::write(dir.path().join("flood.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "flood".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "flood".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "flood.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "flood".to_string(),
+                    description: "flood test".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            // 10s timeout — long enough to fill 1 MiB many times over with `yes`,
+            // short enough that an unbounded run would still hang the test.
+            requirements: SkillRequirements {
+                tools: vec![],
+                capabilities: vec![],
+                timeout_secs: Some(10),
+            },
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
+        };
+
+        let started = std::time::Instant::now();
+        let result =
+            execute_skill_tool(&manifest, dir.path(), "flood", &serde_json::json!({}), None)
+                .await
+                .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_error,
+            "expected output-cap error, got ok: {:?}",
+            result.output
+        );
+        let err_msg = result.output["error"].as_str().unwrap_or_default();
+        assert!(
+            err_msg.contains("output exceeded"),
+            "expected output-cap error, got: {err_msg}"
+        );
+        // Cap kill must trip well before the 10s wall-clock timeout — generous
+        // ceiling to keep the test stable on slow CI.
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "cap kill took too long: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_shell_timeout_honors_manifest_override() {
+        use crate::{
+            SkillManifest, SkillMeta, SkillRequirements, SkillRuntimeConfig, SkillToolDef,
+            SkillTools,
+        };
+        use tempfile::TempDir;
+
+        if find_shell().is_none() {
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        // Sleeps longer than the configured 1s timeout — must be killed.
+        let script = "#!/bin/bash\nsleep 30\n";
+        std::fs::write(dir.path().join("sleeper.sh"), script).unwrap();
+
+        let manifest = SkillManifest {
+            skill: SkillMeta {
+                name: "sleeper".to_string(),
+                version: librefang_types::VERSION.to_string(),
+                description: "sleeper".to_string(),
+                author: String::new(),
+                license: String::new(),
+                tags: vec![],
+            },
+            runtime: SkillRuntimeConfig {
+                runtime_type: SkillRuntime::Shell,
+                entry: "sleeper.sh".to_string(),
+            },
+            tools: SkillTools {
+                provided: vec![SkillToolDef {
+                    name: "sleep_tool".to_string(),
+                    description: "sleeper".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            requirements: SkillRequirements {
+                tools: vec![],
+                capabilities: vec![],
+                timeout_secs: Some(1),
+            },
+            prompt_context: None,
+            source: None,
+            config: std::collections::HashMap::new(),
+            config_vars: Vec::new(),
+            env_passthrough: Vec::new(),
+        };
+
+        let started = std::time::Instant::now();
+        let result = execute_skill_tool(
+            &manifest,
+            dir.path(),
+            "sleep_tool",
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(result.is_error);
+        let err_msg = result.output["error"].as_str().unwrap_or_default();
+        assert!(
+            err_msg.contains("timed out"),
+            "expected timeout error, got: {err_msg}"
+        );
+        // 1s timeout + grace; generous ceiling against jittery CI.
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "manifest timeout was not honored: {elapsed:?}"
+        );
     }
 }
