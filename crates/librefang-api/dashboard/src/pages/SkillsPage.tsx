@@ -40,6 +40,15 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import {
+  SkillHubBar,
+  SkillHubHeadline,
+  HubBadge,
+  type HubFilter,
+  type HubCounts,
+  type HubHealthMap,
+} from "../components/SkillHubBar";
+import { getSkillHub } from "../lib/skillHubs";
+import {
   Wrench,
   Search,
   CheckCircle2,
@@ -65,7 +74,6 @@ import {
   Zap,
   Plus,
   History,
-  Eye,
   RotateCcw,
   FileText,
   Tag,
@@ -155,6 +163,9 @@ interface SkillCardProps {
   variant: SkillCardVariant;
   installPending?: boolean;
   source?: MarketplaceSource;
+  /** Optional hub origin badge rendered top-right (used by the unified
+   *  "all hubs" view to make every card's source obvious). */
+  hubBadge?: React.ReactNode;
   onInstall?: () => void;
   onUninstall?: () => void;
   onViewDetail?: () => void;
@@ -175,33 +186,33 @@ function SkillCard({
   variant,
   installPending,
   source,
+  hubBadge,
   onInstall,
   onUninstall,
   onViewDetail,
   t,
 }: SkillCardProps) {
-  const isAccentSource = source === "skillhub" || source === "clawhub-cn";
-
-  const accentClass =
-    variant === "installed"
-      ? "from-success via-success/60 to-success/30"
-      : isAccentSource
-        ? "from-accent via-accent/60 to-accent/30"
-        : "from-brand via-brand/60 to-brand/30";
-
+  // Card accent + icon style. Browse cards tint with the source hub's
+  // brand color so a grid view of mixed hubs is colour-coded by origin
+  // (matches the design canvas). Installed cards stay green.
+  const hub = variant !== "installed" && source ? getSkillHub(source) : null;
   const iconClass =
     variant === "installed"
       ? "bg-success/10 border-success/20 text-success"
-      : isAccentSource
-        ? "bg-accent/10 border-accent/20 text-accent"
-        : "bg-brand/10 border-brand/20 text-brand";
-
+      : !hub
+        ? "bg-brand/10 border-brand/20 text-brand"
+        : "";
+  const iconStyle = hub
+    ? {
+        background: `${hub.color}1a`,
+        borderColor: `${hub.color}40`,
+        color: hub.color,
+      }
+    : undefined;
   const hoverTextClass =
     variant === "installed"
       ? "group-hover:text-success"
-      : isAccentSource
-        ? "group-hover:text-accent"
-        : "group-hover:text-brand";
+      : "group-hover:text-brand";
 
   const icon =
     variant === "installed" ? (
@@ -220,155 +231,142 @@ function SkillCard({
     <Card
       hover
       padding="none"
-      className={`flex flex-col overflow-hidden group ${onViewDetail ? "cursor-pointer" : ""}`}
+      className={`relative flex flex-col overflow-hidden group ${onViewDetail ? "cursor-pointer" : ""}`}
       onClick={onViewDetail}
     >
-      <div className={`h-1 bg-linear-to-r ${accentClass}`} />
-      <div className="p-4 flex-1 flex flex-col gap-3">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div
-              className={`w-8 h-8 shrink-0 rounded-lg flex items-center justify-center border ${iconClass}`}
-            >
-              {icon}
-            </div>
-            <div className="min-w-0">
+      {/* Abs hub-source ribbon — top-right of the card so the origin is
+       *  legible at a glance even when the card is in a dense grid. */}
+      {hubBadge && (
+        <div className="absolute top-2.5 right-2.5 pointer-events-none">
+          {hubBadge}
+        </div>
+      )}
+      {/* `accentClass` was an experiment with a 1px gradient bar at the
+       *  top of every card; the canvas reference doesn't carry one and
+       *  it visually fights the abs hub badge, so it's gone now. */}
+      <div className="p-3.5 flex-1 flex flex-col gap-2.5">
+        {/* Header — larger 38px icon, name row, author/version meta */}
+        <div className="flex items-start gap-3 pr-20">
+          <div
+            className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center border ${iconClass}`}
+            style={iconStyle}
+          >
+            {icon}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <h3
                 className={`font-bold text-sm truncate transition-colors ${hoverTextClass}`}
               >
                 {name}
               </h3>
-              <p className="text-[10px] text-text-dim font-mono">
-                v{version ?? "1.0.0"}
-              </p>
+              {variant === "installed" && (
+                <Badge variant="success">{t("skills.installed")}</Badge>
+              )}
+              {variant !== "installed" && isInstalled && (
+                <Badge variant="success">
+                  <CheckCircle2 className="w-2.5 h-2.5" />
+                  {t("skills.installed")}
+                </Badge>
+              )}
             </div>
+            <p className="text-[10.5px] text-text-dim font-mono mt-0.5 truncate">
+              {[
+                variant === "installed" ? "skill" : variant === "fanghub" ? "fanghub" : source,
+                author,
+                version ? `v${version}` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
           </div>
-          {variant === "installed" && (
-            <Badge variant="success">{t("skills.installed")}</Badge>
-          )}
-          {variant !== "installed" && isInstalled && (
-            <Badge variant="success">
-              <CheckCircle2 className="w-2.5 h-2.5" />
-              {t("skills.installed")}
-            </Badge>
-          )}
         </div>
 
         {/* Description */}
-        <p className="text-xs text-text-dim line-clamp-2 flex-1 italic">
+        <p className="text-xs text-text-dim line-clamp-2 flex-1 leading-relaxed">
           {description || "—"}
         </p>
 
-        {/* Marketplace stats */}
-        {(stars !== undefined || updatedAt) && (
-          <div className="flex items-center gap-3 text-[10px] font-bold text-text-dim">
-            {stars !== undefined ? (
-              <>
-                <span className="flex items-center gap-1">
-                  <Star className="w-3 h-3 text-warning" />
-                  {stars}
-                </span>
-                {downloads !== undefined && (
-                  <span className="flex items-center gap-1">
-                    <Download className="w-3 h-3" />
-                    {downloads}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="flex items-center gap-1">
-                <Calendar className="w-3 h-3" />
-                {formatDate(updatedAt!)}
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Installed meta */}
-        {variant === "installed" && (author || toolsCount !== undefined) && (
-          <div className="flex justify-between text-[10px] font-bold text-text-dim">
-            {author && (
-              <span>
-                {t("skills.author")}: {author}
-              </span>
-            )}
-            {toolsCount !== undefined && (
-              <span>
-                {t("skills.tools")}: {toolsCount}
-              </span>
-            )}
-          </div>
-        )}
+        {/* Stats + inline Install button. Mirrors the design canvas where
+         *  installs / rating sit on the same row as the install action so
+         *  vertically dense card grids don't waste a whole row on stats. */}
+        <div className="flex items-center gap-3 flex-wrap">
+          {stars !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Star className="w-3 h-3 text-warning" />
+              {stars}
+            </span>
+          )}
+          {downloads !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Download className="w-3 h-3" />
+              {downloads.toLocaleString()}
+            </span>
+          )}
+          {variant === "installed" && toolsCount !== undefined && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Wrench className="w-3 h-3" />
+              {toolsCount}
+            </span>
+          )}
+          {updatedAt && (
+            <span className="flex items-center gap-1 text-[10.5px] font-mono text-text-dim/80">
+              <Calendar className="w-3 h-3" />
+              {formatDate(updatedAt)}
+            </span>
+          )}
+          <span className="flex-1" />
+          {/* Inline action — Install (browse) or Uninstall (installed). */}
+          {variant === "installed" && onUninstall ? (
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onUninstall}
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                className="text-error hover:text-error"
+              >
+                {t("skills.uninstall")}
+              </Button>
+            </div>
+          ) : variant !== "installed" && isInstalled ? (
+            // Header already carries the installed badge — leave the
+            // action slot empty so we don't double-stamp the card.
+            null
+          ) : variant !== "installed" && onInstall ? (
+            <div onClick={(e) => e.stopPropagation()}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onInstall}
+                disabled={installPending}
+                leftIcon={
+                  installPending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )
+                }
+              >
+                {installPending ? t("skills.installing") : t("skills.install")}
+              </Button>
+            </div>
+          ) : null}
+        </div>
 
         {/* Tags */}
         {tags && tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
-            {tags.slice(0, 3).map((tag) => (
+            {tags.slice(0, 4).map((tag) => (
               <span
                 key={tag}
-                className="px-1.5 py-0.5 text-[10px] rounded-full bg-surface-2 text-text-dim font-medium"
+                className="px-1.5 py-0.5 text-[10px] rounded font-mono text-text-dim/80 border border-border-subtle/60 bg-main/40"
               >
                 {tag}
               </span>
             ))}
           </div>
         )}
-
-        {/* Actions */}
-        {variant === "installed" ? (
-          <div
-            className="flex gap-2"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {onViewDetail && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="flex-1"
-                onClick={onViewDetail}
-                leftIcon={<Eye className="w-3.5 h-3.5" />}
-              >
-                {t("common.detail")}
-              </Button>
-            )}
-            {onUninstall && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="flex-1 text-error hover:text-error"
-                onClick={onUninstall}
-                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
-              >
-                {t("skills.uninstall")}
-              </Button>
-            )}
-          </div>
-        ) : isInstalled ? (
-          <Button variant="secondary" size="sm" disabled className="w-full">
-            <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
-            {t("skills.installed")}
-          </Button>
-        ) : onInstall ? (
-          <div onClick={(e) => e.stopPropagation()}>
-            <Button
-              variant="primary"
-              size="sm"
-              className="w-full"
-              onClick={onInstall}
-              disabled={installPending}
-              leftIcon={
-                installPending ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Download className="w-3.5 h-3.5" />
-                )
-              }
-            >
-              {installPending ? t("skills.installing") : t("skills.install")}
-            </Button>
-          </div>
-        ) : null}
       </div>
     </Card>
   );
@@ -1461,9 +1459,21 @@ export function SkillsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const [viewMode, setViewMode] = useState<ViewMode>("browse");
-  const [source, setSource] = useState<MarketplaceSource>("fanghub");
+  /**
+   * Which federated hub the browse grid pulls from. Defaults to
+   * `"fanghub"` so the page lands on a populated grid (FangHub is the
+   * always-warm local cache); switching to `"all"` aggregates every
+   * configured hub but gates the remote ones behind a search keyword
+   * to avoid wide network fan-outs on every page mount.
+   */
+  const [hubFilter, setHubFilter] = useState<HubFilter>("fanghub");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+
+  const isHubActive = useCallback(
+    (id: MarketplaceSource) => hubFilter === "all" || hubFilter === id,
+    [hubFilter],
+  );
 
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
@@ -1487,29 +1497,36 @@ export function SkillsPage() {
     ? (CATEGORIES.find((c) => c.id === selectedCategory)?.keyword ?? "")
     : search;
 
+  // Remote hub queries (clawhub / clawhub-cn) only fire when the user
+  // narrows to that hub OR types a keyword in "all hubs" — otherwise
+  // every Skills page mount would trigger a wide network search.
+  const remoteEligible = viewMode === "browse" && (hubFilter !== "all" || !!keyword);
+
   const clawhubQuery = useQuery({
     ...skillQueries.clawhubSearch(keyword || "python"),
-    enabled: viewMode === "browse" && source === "clawhub",
+    enabled: remoteEligible && isHubActive("clawhub"),
   });
 
   const clawhubCnQuery = useQuery({
     ...skillQueries.clawhubCnSearch(keyword || "python"),
-    enabled: viewMode === "browse" && source === "clawhub-cn",
+    enabled: remoteEligible && isHubActive("clawhub-cn"),
   });
 
   const skillhubBrowseQuery = useQuery({
     ...skillQueries.skillhubBrowse(),
-    enabled: viewMode === "browse" && source === "skillhub" && !keyword,
+    enabled: viewMode === "browse" && isHubActive("skillhub") && !keyword,
   });
   const skillhubSearchQuery = useQuery({
     ...skillQueries.skillhubSearch(keyword),
-    enabled: viewMode === "browse" && source === "skillhub" && !!keyword,
+    enabled: viewMode === "browse" && isHubActive("skillhub") && !!keyword,
   });
   const activeSkillhubQuery = keyword ? skillhubSearchQuery : skillhubBrowseQuery;
 
+  // FangHub is the LibreFang first-party registry — local cache, cheap
+  // enough to keep enabled whenever browsing, regardless of hub filter.
   const fanghubQuery = useQuery({
     ...skillQueries.fanghubList(),
-    enabled: viewMode === "browse" && source === "fanghub",
+    enabled: viewMode === "browse" && isHubActive("fanghub"),
   });
 
   const clawhubDetailQuery = useQuery({
@@ -1557,27 +1574,85 @@ export function SkillsPage() {
     [installedSkills],
   );
 
-  const browseItems = useMemo(() => {
-    if (source === "fanghub") return filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory);
-    if (source === "clawhub") {
-      return (clawhubQuery.data?.items ?? [])
-        .map((s) => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "clawhub") }))
-        .filter((s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
-    }
-    if (source === "clawhub-cn") {
-      return (clawhubCnQuery.data?.items ?? [])
-        .map((s) => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "clawhub-cn") }))
-        .filter((s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
-    }
-    // skillhub
-    return filterByCategory(
-      (activeSkillhubQuery.data?.items ?? []).map((s) => ({
+  /** Items from a non-fanghub remote registry, normalized with
+   *  `is_installed` and a `_hub` discriminator the unified card renderer
+   *  reads. Filtering on text match here so the per-hub list and the
+   *  merged "all" list stay in sync without repeating the predicate. */
+  const buildRemoteItems = useCallback(
+    (items: ClawHubBrowseItem[] | undefined, src: MarketplaceSource) =>
+      (items ?? [])
+        .map((s) => ({
+          ...s,
+          is_installed: isInstalledFromMarketplace(s.slug, src),
+          _hub: src,
+        }))
+        .filter(
+          (s) =>
+            !search ||
+            s.name.toLowerCase().includes(search.toLowerCase()) ||
+            (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false),
+        ),
+    [isInstalledFromMarketplace, search],
+  );
+
+  const fanghubItems = useMemo(
+    () =>
+      filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory).map((s) => ({
         ...s,
-        is_installed: isInstalledFromMarketplace(s.slug, "skillhub"),
+        _hub: "fanghub" as const,
       })),
-      selectedCategory,
-    );
-  }, [source, fanghubQuery.data, clawhubQuery.data, clawhubCnQuery.data, activeSkillhubQuery.data, isInstalledFromMarketplace, search, selectedCategory]);
+    [fanghubQuery.data, selectedCategory],
+  );
+  const clawhubItems = useMemo(
+    () => buildRemoteItems(clawhubQuery.data?.items, "clawhub"),
+    [buildRemoteItems, clawhubQuery.data],
+  );
+  const clawhubCnItems = useMemo(
+    () => buildRemoteItems(clawhubCnQuery.data?.items, "clawhub-cn"),
+    [buildRemoteItems, clawhubCnQuery.data],
+  );
+  const skillhubItems = useMemo(
+    () =>
+      filterByCategory(
+        buildRemoteItems(activeSkillhubQuery.data?.items, "skillhub"),
+        selectedCategory,
+      ),
+    [buildRemoteItems, activeSkillhubQuery.data, selectedCategory],
+  );
+
+  /** What the grid actually renders, narrowed to the active hub or
+   *  merged across all hubs when `hubFilter === "all"`. */
+  const browseItems = useMemo(() => {
+    if (hubFilter === "fanghub") return fanghubItems;
+    if (hubFilter === "clawhub") return clawhubItems;
+    if (hubFilter === "clawhub-cn") return clawhubCnItems;
+    if (hubFilter === "skillhub") return skillhubItems;
+    // "all" — merge. FangHub first (curated), then clawhub/clawhub-cn,
+    // then skillhub. Only includes hubs that actually returned data this
+    // render (clawhub etc. are search-gated).
+    return [...fanghubItems, ...clawhubItems, ...clawhubCnItems, ...skillhubItems];
+  }, [hubFilter, fanghubItems, clawhubItems, clawhubCnItems, skillhubItems]);
+
+  const hubCounts: HubCounts = useMemo(
+    () => ({
+      fanghub: fanghubItems.length,
+      clawhub: clawhubItems.length,
+      "clawhub-cn": clawhubCnItems.length,
+      skillhub: skillhubItems.length,
+    }),
+    [fanghubItems.length, clawhubItems.length, clawhubCnItems.length, skillhubItems.length],
+  );
+
+  const hubHealth: HubHealthMap = useMemo(() => {
+    const flag = (q: { isFetching: boolean; isError: boolean }) =>
+      q.isError ? ("down" as const) : q.isFetching ? ("checking" as const) : ("live" as const);
+    return {
+      fanghub: flag(fanghubQuery),
+      clawhub: flag(clawhubQuery),
+      "clawhub-cn": flag(clawhubCnQuery),
+      skillhub: flag(activeSkillhubQuery),
+    };
+  }, [fanghubQuery, clawhubQuery, clawhubCnQuery, activeSkillhubQuery]);
 
   const isAnyFetching =
     skillsQuery.isFetching ||
@@ -1597,7 +1672,7 @@ export function SkillsPage() {
 
   const handleInstall = (
     slug: string,
-    src: MarketplaceSource | "fanghub" = source,
+    src: MarketplaceSource,
   ) => {
     setInstallingId(slug);
     const hand = targetHand || undefined;
@@ -1671,22 +1746,6 @@ export function SkillsPage() {
             <span className="hidden sm:inline-block px-2.5 py-1 rounded-full border border-border-subtle bg-surface text-[10px] font-bold uppercase text-text-dim">
               {t("skills.installed_count", { count: installedSkills.length })}
             </span>
-            <select
-              value={source}
-              onChange={(e) => {
-                setSource(e.target.value as MarketplaceSource);
-                setSearch("");
-                setSelectedCategory(null);
-                setViewMode("browse");
-              }}
-              disabled={viewMode === "installed"}
-              className="h-8 rounded-xl border border-border-subtle bg-surface px-2 text-xs font-bold text-text-main cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <option value="fanghub">{t("skills.source_fanghub", { defaultValue: "FangHub" })}</option>
-              <option value="clawhub">{t("skills.source_clawhub", { defaultValue: "ClawHub" })}</option>
-              <option value="clawhub-cn">{t("skills.source_clawhub_cn", { defaultValue: "ClawHub CN" })}</option>
-              <option value="skillhub">{t("skills.source_skillhub", { defaultValue: "SkillHub" })}</option>
-            </select>
             <a
               href="https://librefang.ai/skills"
               target="_blank"
@@ -1757,6 +1816,25 @@ export function SkillsPage() {
         })}
       </div>
 
+      {/* Federated hub source bar (browse only). Replaces the old
+       *  4-option <select> with a horizontal pill row that exposes
+       *  health, latency hint (via tooltip), and per-hub counts. */}
+      {viewMode === "browse" && (
+        <SkillHubBar
+          hubFilter={hubFilter}
+          onChange={setHubFilter}
+          counts={hubCounts}
+          health={hubHealth}
+          totalCount={browseItems.length}
+        />
+      )}
+
+      {/* When a single hub is selected, surface its domain + tagline so
+       *  operators know exactly where they're searching. */}
+      {viewMode === "browse" && hubFilter !== "all" && (
+        <SkillHubHeadline hub={hubFilter} />
+      )}
+
       {/* Hand target selector */}
       {viewMode === "browse" && hands.length > 0 && (
         <div className="flex items-center gap-2">
@@ -1790,8 +1868,11 @@ export function SkillsPage() {
         />
       )}
 
-      {/* Search */}
-      {viewMode === "browse" && source !== "fanghub" && (
+      {/* Search — applies to every hub. FangHub items get prefix-matched
+       *  client-side, the remote hubs treat the keyword as their search
+       *  query (gated so we don't fan it out across all hubs without a
+       *  user-typed term). */}
+      {viewMode === "browse" && (
         <Input
           value={search}
           onChange={(e) => { setSearch(e.target.value); setSelectedCategory(null); }}
@@ -1838,68 +1919,88 @@ export function SkillsPage() {
 
       {/* ── Browse ── */}
       {viewMode === "browse" && (() => {
+        // Pick the "primary" query state for skeleton / error rendering.
+        // For "all", showing a single skeleton when *any* hub is fetching
+        // would be misleading; only block when nothing is rendered yet.
         const activeQuery =
-          source === "clawhub" ? clawhubQuery :
-          source === "clawhub-cn" ? clawhubCnQuery :
-          source === "skillhub" ? activeSkillhubQuery :
-          fanghubQuery;
+          hubFilter === "clawhub" ? clawhubQuery :
+          hubFilter === "clawhub-cn" ? clawhubCnQuery :
+          hubFilter === "skillhub" ? activeSkillhubQuery :
+          hubFilter === "fanghub" ? fanghubQuery :
+          null;
 
-        return activeQuery.isLoading ? (
-          <SkillGridSkeleton count={source === "fanghub" ? 4 : 6} />
-        ) : isRateLimitError(activeQuery.error) ? (
+        const isLoading = activeQuery
+          ? activeQuery.isLoading
+          : fanghubQuery.isLoading && browseItems.length === 0;
+        const queryError = activeQuery?.error ?? null;
+
+        return isLoading ? (
+          <SkillGridSkeleton count={hubFilter === "fanghub" ? 4 : 6} />
+        ) : queryError && isRateLimitError(queryError) ? (
           <EmptyState
             title={t("skills.rate_limited")}
             description={t("skills.rate_limited_desc")}
             icon={<Loader2 className="h-6 w-6 animate-spin" />}
           />
-        ) : activeQuery.error ? (
+        ) : queryError ? (
           <EmptyState
             title={t("skills.load_error")}
-            description={(activeQuery.error as Error).message}
+            description={(queryError as Error).message}
             icon={<Search className="h-6 w-6" />}
           />
         ) : browseItems.length === 0 ? (
           <EmptyState
-            title={t("skills.no_results")}
+            title={
+              hubFilter === "all" && !search
+                ? t("skills.search_to_explore", {
+                    defaultValue: "Type to search across hubs",
+                  })
+                : t("skills.no_results")
+            }
             icon={<Search className="h-6 w-6" />}
           />
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {source === "fanghub"
-              ? (browseItems as FangHubSkill[]).map((skill) => (
-                  <SkillCard
-                    key={skill.name}
-                    variant="fanghub"
-                    name={skill.name}
-                    version={skill.version}
-                    description={skill.description}
-                    tags={skill.tags}
-                    isInstalled={skill.is_installed}
-                    installPending={installingId === skill.name}
-                    onInstall={() => handleInstall(skill.name, "fanghub")}
-                    onViewDetail={() => setDetailsFangHub(skill)}
-                    t={t}
-                  />
-                ))
-              : (browseItems as ClawHubSkillWithStatus[]).map((s) => (
-                  <SkillCard
-                    key={s.slug}
-                    variant="marketplace"
-                    name={s.name}
-                    version={s.version}
-                    description={s.description}
-                    tags={s.tags}
-                    stars={s.stars}
-                    downloads={s.downloads}
-                    isInstalled={s.is_installed}
-                    installPending={installingId === s.slug}
-                    source={source as MarketplaceSource}
-                    onInstall={() => handleInstall(s.slug, source)}
-                    onViewDetail={() => { setDetailsSkill(s); setDetailsSource(source as MarketplaceSource); }}
-                    t={t}
-                  />
-                ))
-            }
+            {browseItems.map((entry) =>
+              entry._hub === "fanghub" ? (
+                <SkillCard
+                  key={`fanghub:${entry.name}`}
+                  variant="fanghub"
+                  name={entry.name}
+                  version={entry.version}
+                  description={entry.description}
+                  tags={entry.tags}
+                  isInstalled={entry.is_installed}
+                  installPending={installingId === entry.name}
+                  source="fanghub"
+                  hubBadge={<HubBadge hub="fanghub" />}
+                  onInstall={() => handleInstall(entry.name, "fanghub")}
+                  onViewDetail={() => setDetailsFangHub(entry as FangHubSkill)}
+                  t={t}
+                />
+              ) : (
+                <SkillCard
+                  key={`${entry._hub}:${entry.slug}`}
+                  variant="marketplace"
+                  name={entry.name}
+                  version={entry.version}
+                  description={entry.description}
+                  tags={entry.tags}
+                  stars={entry.stars}
+                  downloads={entry.downloads}
+                  isInstalled={entry.is_installed}
+                  installPending={installingId === entry.slug}
+                  source={entry._hub}
+                  hubBadge={<HubBadge hub={entry._hub} />}
+                  onInstall={() => handleInstall(entry.slug, entry._hub)}
+                  onViewDetail={() => {
+                    setDetailsSkill(entry as ClawHubSkillWithStatus);
+                    setDetailsSource(entry._hub);
+                  }}
+                  t={t}
+                />
+              ),
+            )}
           </div>
         );
       })()}
