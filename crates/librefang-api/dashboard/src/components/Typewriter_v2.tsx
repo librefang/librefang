@@ -1,32 +1,32 @@
 import { useState, useEffect, useMemo } from 'react';
 import { animate } from 'motion/react';
-import Markdown from 'react-markdown';
+import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 
-const mdComponents = {
-  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
-  h1: ({ children }: any) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
-  h2: ({ children }: any) => <h2 className="text-base font-bold mb-1.5">{children}</h2>,
-  h3: ({ children }: any) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
-  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-  li: ({ children }: any) => <li className="text-sm">{children}</li>,
-  code: ({ node, children, ...props }: any) => {
+const mdComponents: Components = {
+  p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  h1: ({ children }) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-base font-bold mb-1.5">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
+  ul: ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
+  li: ({ children }) => <li className="text-sm">{children}</li>,
+  code: ({ node, children, ...props }) => {
     const isBlock = node?.position?.start?.line !== node?.position?.end?.line || String(children).includes("\n");
     return isBlock
       ? <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>
       : <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]" {...props}>{children}</code>;
   },
-  pre: ({ children }: any) => <>{children}</>,
-  table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
-  th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
-  td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
-  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
-  strong: ({ children }: any) => <strong className="font-bold">{children}</strong>,
-  a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+  pre: ({ children }) => <>{children}</>,
+  table: ({ children }) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
+  th: ({ children }) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
+  td: ({ children }) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
+  blockquote: ({ children }) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
+  strong: ({ children }) => <strong className="font-bold">{children}</strong>,
+  a: ({ href, children }) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
 /// Streams `text` character-by-character into the markdown output to
