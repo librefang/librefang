@@ -464,10 +464,11 @@ struct AuthorizationServerMetadata {
 /// (RFC 8414). Extracts the required endpoints and converts to our internal type.
 ///
 /// SECURITY (#3623): All discovered endpoint URLs are validated through the
-/// SSRF guard (`is_ssrf_blocked_host`) before being returned.  A malicious
-/// MCP server could otherwise point any of these endpoints at loopback,
-/// link-local, or RFC 1918 addresses to trigger server-side requests to
-/// internal services.
+/// SSRF guard (`is_ssrf_blocked_url`) before being returned.  This rejects
+/// non-http/https schemes, URLs with a userinfo component, and any host
+/// that resolves into a loopback, link-local, RFC 1918, or other reserved
+/// range — a malicious MCP server could otherwise point any of these
+/// endpoints at internal services or smuggle credentials through userinfo.
 pub fn parse_authorization_server_metadata(
     body: &str,
     server_url: &str,
@@ -1154,9 +1155,14 @@ mod tests {
 
     #[test]
     fn parse_authorization_server_metadata_rejects_userinfo_endpoint() {
-        // Rogue MCP server tries to smuggle userinfo to bypass the host check.
+        // Userinfo on OAuth metadata is anomalous (RFC 6749 doesn't
+        // sanction it).  The post-`@` host here is public — `host_str()`
+        // returns "auth.example.com" and the host check passes — so this
+        // test fails ONLY if the userinfo guard is removed.  Pairs with
+        // `is_ssrf_blocked_url_rejects_userinfo` to lock the parser-level
+        // wiring at the same isolated regression point.
         let body = r#"{
-            "authorization_endpoint": "https://allowed.com@127.0.0.1/authorize",
+            "authorization_endpoint": "https://user@auth.example.com/authorize",
             "token_endpoint": "https://auth.example.com/token"
         }"#;
         let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
