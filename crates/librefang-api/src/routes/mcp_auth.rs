@@ -20,6 +20,10 @@ use subtle::ConstantTimeEq;
 /// SHA-256 prefix of the caller's user_id (UUID).  Embedded into the vault
 /// key + flow_id so a callback initiated by user A cannot be redeemed
 /// against user B's in-flight flow even if they targeted the same server.
+///
+/// Truncated to 64 bits — we only need collision avoidance among concurrent
+/// in-flight flows on a single daemon, not preimage resistance, so 16 hex
+/// chars of SHA-256 is sufficient.
 fn caller_fingerprint(user: &Option<Extension<AuthenticatedApiUser>>) -> String {
     let raw = match user {
         Some(Extension(u)) => u.user_id.to_string(),

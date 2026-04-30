@@ -1021,6 +1021,22 @@ mod tests {
             &delete,
             "/api/approvals/totp"
         ));
+
+        // Regression for over-gating: GET /api/approvals/totp/status is a
+        // read-only enrollment-status probe and must remain reachable for
+        // every authenticated role, including non-Owner ones.
+        let get = axum::http::Method::GET;
+        for role in [
+            UserRole::Viewer,
+            UserRole::User,
+            UserRole::Admin,
+            UserRole::Owner,
+        ] {
+            assert!(
+                user_role_allows_request(role, &get, "/api/approvals/totp/status"),
+                "{role:?} must be allowed to GET /api/approvals/totp/status"
+            );
+        }
     }
 
     #[test]

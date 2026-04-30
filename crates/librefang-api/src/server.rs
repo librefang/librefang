@@ -783,7 +783,15 @@ fn load_sessions(
                     mode = format!("{mode:o}"),
                     "sessions.json is group/world-readable; tightening to 0600"
                 );
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                if let Err(e) =
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to tighten sessions.json permissions; tokens still readable until next save"
+                    );
+                }
             }
         }
     }

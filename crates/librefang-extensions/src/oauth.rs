@@ -116,11 +116,19 @@ fn state_signing_key() -> &'static [u8] {
 
 /// Build an HMAC-signed state token bound to this specific flow.
 ///
+/// Returns `(token, nonce)` so the caller can keep the nonce in-process
+/// without round-tripping through `verify_signed_state` to recover it.
+///
 /// Format: `base64url(payload_json).base64url(hmac)`. Both halves are
 /// URL-safe (no padding) so the token survives an unmodified pass through
 /// the OAuth provider's `state` parameter.
-fn build_signed_state(provider: &str, client_id: &str, redirect_uri: &str) -> String {
+fn build_signed_state(
+    provider: &str,
+    client_id: &str,
+    redirect_uri: &str,
+) -> (String, String) {
     let nonce_bytes: [u8; 16] = rand::random();
+    let nonce = base64_url_encode(&nonce_bytes);
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -130,7 +138,7 @@ fn build_signed_state(provider: &str, client_id: &str, redirect_uri: &str) -> St
         provider: provider.to_string(),
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
-        nonce: base64_url_encode(&nonce_bytes),
+        nonce: nonce.clone(),
         exp,
     };
     let payload_json = serde_json::to_vec(&payload).unwrap_or_default();
@@ -138,7 +146,7 @@ fn build_signed_state(provider: &str, client_id: &str, redirect_uri: &str) -> St
     let mut mac = HmacSha256::new_from_slice(state_signing_key()).expect("HMAC accepts any key");
     mac.update(payload_b64.as_bytes());
     let sig = mac.finalize().into_bytes();
-    format!("{payload_b64}.{}", base64_url_encode(&sig))
+    (format!("{payload_b64}.{}", base64_url_encode(&sig)), nonce)
 }
 
 /// Verify a state token and return the embedded payload on success.
@@ -213,7 +221,8 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     // redirect_uri, nonce, exp) so a leaked random nonce alone is not
     // enough — a sibling local process trying to feed a stolen state to
     // a different listener / client_id is rejected at verify time.
-    let state = build_signed_state(&oauth.auth_url, client_id, &redirect_uri);
+    let (state, expected_nonce) =
+        build_signed_state(&oauth.auth_url, client_id, &redirect_uri);
     let expected_provider = oauth.auth_url.clone();
     let expected_client_id = client_id.to_string();
     let expected_redirect_uri = redirect_uri.clone();
@@ -249,19 +258,6 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     // Wait for callback
     let (code_tx, code_rx) = oneshot::channel::<String>();
     let code_tx = Arc::new(Mutex::new(Some(code_tx)));
-    let expected_nonce = match verify_signed_state(
-        &state,
-        &expected_provider,
-        &expected_client_id,
-        &expected_redirect_uri,
-    ) {
-        Ok(p) => p.nonce,
-        Err(e) => {
-            return Err(ExtensionError::OAuth(format!(
-                "Failed to seal state token: {e}"
-            )));
-        }
-    };
 
     // Spawn callback handler
     let server = axum::Router::new().route(
@@ -297,6 +293,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
                             );
                         }
                     };
+                    // Redundant w/ HMAC (covers `nonce`); kept in case a future refactor drops fields.
                     if !bool::from(payload.nonce.as_bytes().ct_eq(expected_nonce.as_bytes())) {
                         warn!("OAuth callback nonce mismatch");
                         return axum::response::Html(
@@ -470,7 +467,8 @@ mod tests {
 
     #[test]
     fn signed_state_round_trip_succeeds() {
-        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (state, nonce) =
+            build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         let payload = verify_signed_state(
             &state,
             "https://idp/auth",
@@ -478,12 +476,13 @@ mod tests {
             "http://127.0.0.1:1/cb",
         )
         .expect("valid state must verify");
-        assert!(!payload.nonce.is_empty());
+        assert_eq!(payload.nonce, nonce, "verify must echo the build-time nonce");
     }
 
     #[test]
     fn signed_state_rejects_provider_swap() {
-        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (state, _) =
+            build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         assert!(verify_signed_state(
             &state,
             "https://other/auth",
@@ -495,7 +494,8 @@ mod tests {
 
     #[test]
     fn signed_state_rejects_redirect_swap() {
-        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (state, _) =
+            build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         assert!(verify_signed_state(
             &state,
             "https://idp/auth",
@@ -507,7 +507,8 @@ mod tests {
 
     #[test]
     fn signed_state_rejects_client_id_swap() {
-        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (state, _) =
+            build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         assert!(verify_signed_state(
             &state,
             "https://idp/auth",
@@ -519,7 +520,8 @@ mod tests {
 
     #[test]
     fn signed_state_rejects_truncated_signature() {
-        let state = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (state, _) =
+            build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         let half = &state[..state.len() - 4];
         assert!(verify_signed_state(
             half,
@@ -532,9 +534,10 @@ mod tests {
 
     #[test]
     fn signed_state_uniqueness_across_calls() {
-        let s1 = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
-        let s2 = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (s1, n1) = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
+        let (s2, n2) = build_signed_state("https://idp/auth", "client-1", "http://127.0.0.1:1/cb");
         assert_ne!(s1, s2, "nonce must randomize each token");
+        assert_ne!(n1, n2, "returned nonces must differ across builds");
     }
 
     #[test]
