@@ -107,7 +107,7 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             // be able to start, confirm, or revoke the enrollment.
             | "/api/approvals/totp/setup"
             | "/api/approvals/totp/confirm"
-            | "/api/approvals/totp"
+            | "/api/approvals/totp/revoke"
     ) {
         return true;
     }
@@ -992,35 +992,34 @@ mod tests {
 
     // #3621: TOTP enrollment must be Owner-only. Without this gate, any
     // bearer token (including a Viewer or User role) could overwrite the
-    // unconfirmed `totp_secret` and hijack enrollment.
+    // unconfirmed `totp_secret` and hijack enrollment, or wipe a confirmed
+    // enrollment via `revoke` and silently disable 2FA on login.
     #[test]
     fn test_totp_enrollment_is_owner_only() {
         let post = axum::http::Method::POST;
-        let delete = axum::http::Method::DELETE;
         for role in [UserRole::Viewer, UserRole::User, UserRole::Admin] {
-            for path in ["/api/approvals/totp/setup", "/api/approvals/totp/confirm"] {
+            for path in [
+                "/api/approvals/totp/setup",
+                "/api/approvals/totp/confirm",
+                "/api/approvals/totp/revoke",
+            ] {
                 assert!(
                     !user_role_allows_request(role, &post, path),
                     "{role:?} must NOT be allowed to POST {path}"
                 );
             }
-            assert!(
-                !user_role_allows_request(role, &delete, "/api/approvals/totp"),
-                "{role:?} must NOT be allowed to DELETE /api/approvals/totp"
-            );
         }
         // Owner still has access.
-        for path in ["/api/approvals/totp/setup", "/api/approvals/totp/confirm"] {
+        for path in [
+            "/api/approvals/totp/setup",
+            "/api/approvals/totp/confirm",
+            "/api/approvals/totp/revoke",
+        ] {
             assert!(
                 user_role_allows_request(UserRole::Owner, &post, path),
                 "Owner must be allowed to POST {path}"
             );
         }
-        assert!(user_role_allows_request(
-            UserRole::Owner,
-            &delete,
-            "/api/approvals/totp"
-        ));
 
         // Regression for over-gating: GET /api/approvals/totp/status is a
         // read-only enrollment-status probe and must remain reachable for

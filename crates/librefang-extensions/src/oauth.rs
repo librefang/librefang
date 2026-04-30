@@ -122,11 +122,7 @@ fn state_signing_key() -> &'static [u8] {
 /// Format: `base64url(payload_json).base64url(hmac)`. Both halves are
 /// URL-safe (no padding) so the token survives an unmodified pass through
 /// the OAuth provider's `state` parameter.
-fn build_signed_state(
-    provider: &str,
-    client_id: &str,
-    redirect_uri: &str,
-) -> (String, String) {
+fn build_signed_state(provider: &str, client_id: &str, redirect_uri: &str) -> (String, String) {
     let nonce_bytes: [u8; 16] = rand::random();
     let nonce = base64_url_encode(&nonce_bytes);
     let exp = std::time::SystemTime::now()
@@ -221,8 +217,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     // redirect_uri, nonce, exp) so a leaked random nonce alone is not
     // enough — a sibling local process trying to feed a stolen state to
     // a different listener / client_id is rejected at verify time.
-    let (state, expected_nonce) =
-        build_signed_state(&oauth.auth_url, client_id, &redirect_uri);
+    let (state, expected_nonce) = build_signed_state(&oauth.auth_url, client_id, &redirect_uri);
     let expected_provider = oauth.auth_url.clone();
     let expected_client_id = client_id.to_string();
     let expected_redirect_uri = redirect_uri.clone();
@@ -476,7 +471,10 @@ mod tests {
             "http://127.0.0.1:1/cb",
         )
         .expect("valid state must verify");
-        assert_eq!(payload.nonce, nonce, "verify must echo the build-time nonce");
+        assert_eq!(
+            payload.nonce, nonce,
+            "verify must echo the build-time nonce"
+        );
     }
 
     #[test]

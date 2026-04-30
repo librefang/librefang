@@ -2032,10 +2032,7 @@ mod tests {
     // breaks this test instead of silently re-opening the bypass.
     #[tokio::test]
     async fn require_email_verified_per_provider_inherits_global() {
-        fn provider(
-            id: &str,
-            require: Option<bool>,
-        ) -> librefang_types::config::OidcProvider {
+        fn provider(id: &str, require: Option<bool>) -> librefang_types::config::OidcProvider {
             librefang_types::config::OidcProvider {
                 id: id.into(),
                 display_name: id.into(),
