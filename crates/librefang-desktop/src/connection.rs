@@ -189,10 +189,11 @@ pub async fn start_local(
         let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
         if let Some(ref inner) = *guard {
             let app_handle = app.clone();
-            let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+            let kernel = inner.kernel.clone();
+            let mut event_rx = kernel.event_bus_ref().subscribe_all();
             drop(guard);
             tauri::async_runtime::spawn(async move {
-                crate::forward_kernel_events(app_handle, &mut event_rx).await;
+                crate::forward_kernel_events(app_handle, &mut event_rx, &kernel).await;
             });
         }
     }
