@@ -5676,3 +5676,60 @@ fn sanitize_session_title_handles_empty() {
     assert_eq!(sanitize_session_title(""), "");
     assert_eq!(sanitize_session_title("   \n  "), "");
 }
+
+// ---------------------------------------------------------------------------
+// #3459 — cron_session_max_messages / max_tokens clamping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_cron_max_messages_none_passthrough() {
+    assert_eq!(resolve_cron_max_messages(None), None);
+}
+
+#[test]
+fn resolve_cron_max_messages_zero_disabled() {
+    // 0 must be treated as "disable", not "trim to 0 messages"
+    assert_eq!(resolve_cron_max_messages(Some(0)), None);
+}
+
+#[test]
+fn resolve_cron_max_messages_below_min_clamped() {
+    // 1, 2, 3 are all below MIN_CRON_HISTORY_MESSAGES=4 and must be clamped
+    for small in 1usize..4 {
+        assert_eq!(
+            resolve_cron_max_messages(Some(small)),
+            Some(MIN_CRON_HISTORY_MESSAGES),
+            "expected clamp for input {small}"
+        );
+    }
+}
+
+#[test]
+fn resolve_cron_max_messages_at_min_passthrough() {
+    assert_eq!(
+        resolve_cron_max_messages(Some(MIN_CRON_HISTORY_MESSAGES)),
+        Some(MIN_CRON_HISTORY_MESSAGES)
+    );
+}
+
+#[test]
+fn resolve_cron_max_messages_large_passthrough() {
+    assert_eq!(resolve_cron_max_messages(Some(100)), Some(100));
+}
+
+#[test]
+fn resolve_cron_max_tokens_none_passthrough() {
+    assert_eq!(resolve_cron_max_tokens(None), None);
+}
+
+#[test]
+fn resolve_cron_max_tokens_zero_disabled() {
+    // 0 must disable the cap, not force every fire to start empty
+    assert_eq!(resolve_cron_max_tokens(Some(0)), None);
+}
+
+#[test]
+fn resolve_cron_max_tokens_nonzero_passthrough() {
+    assert_eq!(resolve_cron_max_tokens(Some(8192)), Some(8192));
+    assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
+}

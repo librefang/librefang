@@ -578,7 +578,7 @@ impl WorkflowEngine {
                 return;
             }
         }
-        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp_path = crate::persist_tmp_path(path);
         {
             use std::io::Write as _;
             let write_result = (|| -> std::io::Result<()> {

@@ -320,7 +320,7 @@ impl TriggerEngine {
         let data = serde_json::to_string_pretty(&triggers).map_err(|e| {
             LibreFangError::Internal(format!("Failed to serialize trigger jobs: {e}"))
         })?;
-        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp_path = crate::persist_tmp_path(path);
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
