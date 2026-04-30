@@ -351,13 +351,24 @@ async fn quarantine_in_place(src: &Path) -> std::io::Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "inbox_file".to_string());
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let mut dest = src.with_file_name(format!("{file_name}.quarantined.{ts}"));
-    // Collision is unlikely but possible if poll_interval < 1s; nanosecond
-    // suffix gives us a deterministic non-colliding fallback.
-    if dest.exists() {
+    let dest_base = src.with_file_name(format!("{file_name}.quarantined.{ts}"));
+    // Collision is unlikely but possible if poll_interval < 1s.  Try the
+    // nanosecond-suffix variant; if that also exists, give up and let the
+    // caller fall back to the in_flight blocklist rather than silently
+    // overwriting a pre-existing quarantine file.
+    let dest = if !dest_base.exists() {
+        dest_base
+    } else {
         let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        dest = src.with_file_name(format!("{file_name}.quarantined.{ts}.{nanos}"));
-    }
+        let dest_nanos = src.with_file_name(format!("{file_name}.quarantined.{ts}.{nanos}"));
+        if dest_nanos.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("quarantine target already exists: {}", dest_nanos.display()),
+            ));
+        }
+        dest_nanos
+    };
     tokio::fs::rename(src, &dest).await?;
     warn!(
         from = %src.display(),
