@@ -877,10 +877,6 @@ export function buildAuthenticatedWebSocket(path: string): {
   return { url, protocols };
 }
 
-// Removed in #3610 cleanup: `buildAuthenticatedWebSocketUrl` deprecated shim.
-// All in-tree callers migrated to `buildAuthenticatedWebSocket`, which uses
-// the `bearer.<token>` sub-protocol so the credential never enters the URL.
-
 async function parseError(response: Response): Promise<ApiError> {
   // If 401, trigger global logout (only once to prevent infinite loop)
   if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {

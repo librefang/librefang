@@ -1262,7 +1262,9 @@ impl ApprovalManager {
     ///
     /// Also prunes entries older than 120 seconds from the table to keep it small.
     pub fn record_totp_code_used(&self, code: &str) {
-        self.record_totp_code_used_for(code, None);
+        // Ignore errors for non-action callers (enrollment confirm, revoke) —
+        // those flows don't have a structured error path to return a 500.
+        let _ = self.record_totp_code_used_for(code, None);
     }
 
     /// Record a successfully-verified TOTP code, binding it to the action it
@@ -1274,9 +1276,19 @@ impl ApprovalManager {
     /// auditor can prove which action a given TOTP code authorized; replay
     /// detection itself remains global on `code_hash` so the same code cannot
     /// be reused for a *different* action either.
-    pub fn record_totp_code_used_for(&self, code: &str, bound_to: Option<&str>) {
-        let Some(db) = &self.audit_db else { return };
-        let Ok(conn) = db.lock() else { return };
+    ///
+    /// Returns `Err` if the DB write fails. Callers that can propagate an HTTP
+    /// response MUST treat this as a 500 — a failed write leaves the code out
+    /// of the replay-detection table, allowing reuse.
+    pub fn record_totp_code_used_for(
+        &self,
+        code: &str,
+        bound_to: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let Some(db) = &self.audit_db else {
+            return Ok(());
+        };
+        let Ok(conn) = db.lock() else { return Ok(()) };
         let hash = Self::totp_code_hash(code);
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1285,22 +1297,21 @@ impl ApprovalManager {
         // Upsert the used-code entry. `bound_to` is informational; the unique
         // key is still `code_hash` so any replay of the same code is rejected
         // regardless of which action it claims to authorize.
-        if let Err(e) = conn.execute(
+        conn.execute(
             "INSERT INTO totp_used_codes (code_hash, used_at, bound_to)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(code_hash) DO UPDATE SET
                  used_at  = excluded.used_at,
                  bound_to = excluded.bound_to",
             rusqlite::params![hash, now_unix, bound_to],
-        ) {
-            warn!(error = %e, "failed to record TOTP code used");
-        }
+        )?;
         // Prune entries older than 120 seconds.
         let prune_before = now_unix - 120;
         let _ = conn.execute(
             "DELETE FROM totp_used_codes WHERE used_at < ?1",
             rusqlite::params![prune_before],
         );
+        Ok(())
     }
 
     /// SHA-256 hex of an OIDC state nonce.  We only persist the hash so
@@ -2755,7 +2766,10 @@ mod tests {
     #[test]
     fn issue_3360_totp_code_single_use_across_actions() {
         let mgr = make_manager_with_db();
-        mgr.record_totp_code_used_for("987654", Some("approval:11111111-1111-1111-1111-111111111111"));
+        mgr.record_totp_code_used_for(
+            "987654",
+            Some("approval:11111111-1111-1111-1111-111111111111"),
+        );
         // Same code claimed for a different approval — must still be flagged
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.

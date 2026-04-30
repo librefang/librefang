@@ -1913,10 +1913,23 @@ pub async fn approve_request(
                             // hash alone) so the code is single-use across
                             // all actions; the binding only documents *which*
                             // action used it for post-incident audit.
-                            state
+                            //
+                            // Fail-secure (#3372 parity): if the DB write
+                            // fails the code is NOT in the replay table and
+                            // could be reused, so reject with 500 rather than
+                            // silently approving.
+                            if state
                                 .kernel
                                 .approvals()
-                                .record_totp_code_used_for(code, Some(&format!("approval:{uuid}")));
+                                .record_totp_code_used_for(code, Some(&format!("approval:{uuid}")))
+                                .is_err()
+                            {
+                                return ApiErrorResponse::internal(
+                                    "Failed to persist TOTP used-code record",
+                                )
+                                .into_json_tuple()
+                                .into_response();
+                            }
                             // Audit trail: write the binding alongside the
                             // approval resolution so an auditor can correlate
                             // (totp_code_hash, approval_uuid) without joining
