@@ -431,6 +431,16 @@ mod tests {
     /// depends on: `RateLimiter::len()` and `retain_recent()` must still
     /// be reachable on `KeyedRateLimiter`, and a fresh entry that has
     /// already drained back below the burst boundary must be evictable.
+    ///
+    /// Note: we cannot verify that `retain_recent()` *actually removes* a
+    /// stale entry here because `KeyedRateLimiter` is pinned to
+    /// `DefaultClock` (wall clock) and governor does not expose a way to
+    /// advance it. Advancing time requires `FakeRelativeClock`, which
+    /// produces a distinct type incompatible with `KeyedRateLimiter`. The
+    /// time-based eviction path is covered by governor's own test suite.
+    /// What this test guards is that the sweep's call chain
+    /// (`Arc<KeyedRateLimiter> → retain_recent()`) compiles and runs
+    /// without panicking, and that `retain_recent()` never *adds* entries.
     #[test]
     fn test_retain_recent_evicts_idle_entry() {
         let limiter = create_rate_limiter(60);
@@ -443,11 +453,6 @@ mod tests {
             "check_key_n must register an entry, got len={}",
             limiter.len()
         );
-        // `retain_recent()` is a no-op for entries still inside the
-        // GCRA window. The important property is that it does not
-        // panic, does not invent entries, and is callable through the
-        // same Arc the sweep task holds. Real-time eviction is covered
-        // by governor's own tests.
         limiter.retain_recent();
         assert!(
             limiter.len() <= 1,

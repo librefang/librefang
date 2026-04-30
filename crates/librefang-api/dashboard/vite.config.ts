@@ -36,6 +36,10 @@ const SINGLETON_DEPS = [
   "recharts",
   "@xyflow/react",
   "zustand",
+  // `lucide-react` is listed here for pre-bundling (optimizeDeps.include) and
+  // separately in manualChunks.icons below for chunk splitting. The two roles
+  // are orthogonal: SINGLETON_DEPS controls Vite's dep pre-bundler; manualChunks
+  // controls the output chunk graph. Both entries are intentional (#3768).
   "lucide-react",
   // NOTE: `lucide-react/dynamic` is intentionally NOT listed (issue #3768).
   // It looks up icons by name string at runtime, so bundlers cannot tree-shake
