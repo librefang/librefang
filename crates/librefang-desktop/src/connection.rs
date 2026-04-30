@@ -73,6 +73,35 @@ pub async fn test_connection(url: String) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("Invalid response: {e}"))
 }
 
+/// Build the URL the WebView should navigate to once a daemon URL is
+/// known. On mobile release builds the dashboard ships embedded (see
+/// `tauri.{ios,android}.conf.json::build.frontendDist`); we navigate to
+/// `tauri://localhost/index.html#api=<percent-encoded daemon URL>` and
+/// let the dashboard's `bundleMode` bootstrap fence relative API/WS
+/// requests onto the daemon (CORS on the daemon must allow
+/// `tauri://localhost`). In every other case — mobile dev, desktop — we
+/// stay in thin-client mode and navigate directly to the daemon URL.
+///
+/// The cfg gate is `not(debug_assertions)`, so any release-profile mobile
+/// build picks the bundled branch — including `cargo tauri ios dev
+/// --release`. If you run that without a fresh `pnpm build` for the
+/// dashboard the App will load whichever stale bundle is still in
+/// `crates/librefang-api/static/react/`. Either rebuild the dashboard
+/// first or stick with the default `cargo tauri ios dev` (debug
+/// profile, thin-client).
+#[cfg(all(any(target_os = "ios", target_os = "android"), not(debug_assertions)))]
+pub(crate) fn navigation_target(daemon_url: &str) -> String {
+    let mut bundled =
+        tauri::Url::parse("tauri://localhost/index.html").expect("static bundled URL must parse");
+    bundled.set_fragment(Some(&format!("api={daemon_url}")));
+    bundled.to_string()
+}
+
+#[cfg(not(all(any(target_os = "ios", target_os = "android"), not(debug_assertions))))]
+pub(crate) fn navigation_target(daemon_url: &str) -> String {
+    daemon_url.to_string()
+}
+
 /// Connect to a remote LibreFang server. Validates the URL, verifies the
 /// server is reachable, optionally saves the preference, and navigates the
 /// WebView to the remote dashboard.
@@ -126,10 +155,13 @@ pub async fn connect_remote(
 
     info!("Connecting to remote server: {url}");
 
-    // Navigate WebView to the remote dashboard
+    // Navigate WebView. On mobile release builds the target points at the
+    // embedded dashboard with the daemon URL hash-encoded; on every other
+    // build it is the daemon URL directly. See `navigation_target`.
+    let target = navigation_target(&url);
     let js = format!(
         "window.location.href = {};",
-        serde_json::to_string(&url).unwrap_or_default()
+        serde_json::to_string(&target).unwrap_or_default()
     );
     window
         .eval(&js)
@@ -189,10 +221,11 @@ pub async fn start_local(
         let guard = ks.0.read().unwrap_or_else(|p| p.into_inner());
         if let Some(ref inner) = *guard {
             let app_handle = app.clone();
-            let mut event_rx = inner.kernel.event_bus_ref().subscribe_all();
+            let kernel = inner.kernel.clone();
+            let mut event_rx = kernel.event_bus_ref().subscribe_all();
             drop(guard);
             tauri::async_runtime::spawn(async move {
-                crate::forward_kernel_events(app_handle, &mut event_rx).await;
+                crate::forward_kernel_events(app_handle, &mut event_rx, &kernel).await;
             });
         }
     }
@@ -219,8 +252,16 @@ pub async fn start_local(
 }
 
 /// Returns self-contained HTML/CSS/JS for the connection screen.
+///
+/// On mobile, the "Start Local Server" path is removed: there's no
+/// embedded server on iOS / Android (the runtime branch is `cfg`-gated
+/// out), so the divider, the button, and the JS line that tries to
+/// `disabled = ...` it would all be dead code or worse — referencing
+/// `btn-local` from `setAllDisabled` after the button was removed
+/// would throw a TypeError on first click.
 pub fn connection_html() -> String {
-    r##"<!DOCTYPE html>
+    #[allow(unused_mut)]
+    let mut html = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -513,5 +554,24 @@ pub fn connection_html() -> String {
 </script>
 </body>
 </html>"##
-        .to_string()
+        .to_string();
+
+    #[cfg(mobile)]
+    {
+        // Mobile has no embedded server — strip the divider, the
+        // "Start Local Server" button, and the JS line in
+        // setAllDisabled that targets it (would throw a TypeError on
+        // first click otherwise). debug_assert verifies the sentinels
+        // still match the literal above so this fails loud if the
+        // HTML/JS is reformatted.
+        const LOCAL_HTML: &str = "\n  <div class=\"divider\">or</div>\n\n  <button class=\"btn-local\" id=\"btn-local\" onclick=\"startLocal()\">Start Local Server</button>\n";
+        const LOCAL_JS: &str = "    document.getElementById('btn-local').disabled = disabled;\n";
+        let after_html = html.replace(LOCAL_HTML, "");
+        debug_assert_ne!(after_html, html, "LOCAL_HTML sentinel not found");
+        let after_js = after_html.replace(LOCAL_JS, "");
+        debug_assert_ne!(after_js, after_html, "LOCAL_JS sentinel not found");
+        html = after_js;
+    }
+
+    html
 }

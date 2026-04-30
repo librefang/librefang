@@ -414,7 +414,8 @@ impl TelegramAdapter {
         // must use `split_to_utf16_chunks` rather than a plain byte/codepoint
         // split to avoid 400 errors on messages heavy with such characters.
         let chunks = split_to_utf16_chunks(&sanitized, TELEGRAM_MESSAGE_LIMIT);
-        for chunk in chunks {
+        let total = chunks.len();
+        for (idx, chunk) in chunks.iter().enumerate() {
             let mut body = serde_json::json!({
                 "chat_id": chat_id,
                 "text": chunk,
@@ -424,11 +425,27 @@ impl TelegramAdapter {
                 body["message_thread_id"] = serde_json::json!(tid);
             }
 
-            let resp = self.client.post(&url).json(&body).send().await?;
+            // Issue #3664: when a multi-chunk send fails part-way through
+            // we must surface the error to the caller — silently dropping
+            // chunks 2..N gives the user a truncated message with no signal
+            // that anything went wrong. We log the chunk index so operators
+            // can correlate the failure with the partial delivery.
+            let resp = self.client.post(&url).json(&body).send().await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    warn!(
+                        "Telegram sendMessage chunk {}/{total} network error: {e}",
+                        idx + 1
+                    );
+                    Box::new(e)
+                },
+            )?;
             let status = resp.status();
             if !status.is_success() {
                 let body_text = resp.text().await.unwrap_or_default();
-                warn!("Telegram sendMessage failed ({status}): {body_text}");
+                warn!(
+                    "Telegram sendMessage chunk {}/{total} failed ({status}): {body_text}",
+                    idx + 1
+                );
                 // If HTML parsing failed, retry as plain text (no parse_mode)
                 if status == reqwest::StatusCode::BAD_REQUEST
                     && body_text.contains("can't parse entities")
@@ -441,10 +458,28 @@ impl TelegramAdapter {
                         plain_body["message_thread_id"] = serde_json::json!(tid);
                     }
                     let retry = self.client.post(&url).json(&plain_body).send().await?;
-                    if !retry.status().is_success() {
+                    let retry_status = retry.status();
+                    if !retry_status.is_success() {
                         let retry_text = retry.text().await.unwrap_or_default();
-                        warn!("Telegram sendMessage plain fallback also failed: {retry_text}");
+                        warn!(
+                            "Telegram sendMessage chunk {}/{total} plain fallback also failed ({retry_status}): {retry_text}",
+                            idx + 1
+                        );
+                        return Err(format!(
+                            "Telegram sendMessage failed on chunk {}/{total}: HTTP {retry_status}",
+                            idx + 1
+                        )
+                        .into());
                     }
+                } else {
+                    // Non-recoverable failure: stop sending further chunks
+                    // and propagate so the caller can decide whether to
+                    // retry the full message or report failure upstream.
+                    return Err(format!(
+                        "Telegram sendMessage failed on chunk {}/{total}: HTTP {status}",
+                        idx + 1
+                    )
+                    .into());
                 }
             }
         }
@@ -2247,13 +2282,25 @@ impl ChannelAdapter for TelegramAdapter {
                 if let Err(e) = self.api_edit_message(chat_id, msg_id, chunks[0]).await {
                     warn!("Telegram: failed to edit first chunk (msg_id={msg_id}): {e}");
                 }
-                for chunk in &chunks[1..] {
+                let total = chunks.len();
+                for (i, chunk) in chunks[1..].iter().enumerate() {
                     if let Err(e) = self.api_send_message(chat_id, chunk, tid).await {
-                        warn!("Telegram: failed to send continuation chunk: {e}");
+                        // i is 0-indexed into chunks[1..], so the absolute
+                        // chunk number is i + 2.
+                        warn!(
+                            "Telegram: failed to send continuation chunk {}/{total}: {e}",
+                            i + 2
+                        );
                         // Stop sending further chunks — partial delivery is
                         // preferable to sending out-of-order fragments after
                         // a gap caused by a rate-limit or API error.
-                        break;
+                        // Surface the error to the caller so retry / alerting
+                        // logic can react (issue #3664).
+                        return Err(format!(
+                            "Telegram streaming send failed on chunk {}/{total}: {e}",
+                            i + 2
+                        )
+                        .into());
                     }
                 }
             }
