@@ -164,8 +164,15 @@ impl PluginEventBus {
         // a fresh process that immediately sees lag would only bump the
         // counter and stay silent for the first 10 s — defeating the
         // "make lag visible" goal of #3630.
-        let warmup =
-            std::time::Instant::now() - std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS + 1);
+        //
+        // `checked_sub` is required because `Instant` wraps `CLOCK_MONOTONIC`
+        // on Linux/macOS, which counts from system boot. A LibreFang process
+        // started inside the first 11 s of boot (systemd, fresh CI container)
+        // would otherwise panic on the bare `-`. The fallback only forfeits
+        // the warmup, not correctness.
+        let warmup = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS + 1))
+            .unwrap_or_else(std::time::Instant::now);
         Self {
             tx,
             dropped_count: std::sync::atomic::AtomicU64::new(0),
@@ -4628,6 +4635,24 @@ mod tests {
         assert_eq!(bus.dropped_count(), 7);
         bus.record_consumer_lag(3, "test");
         assert_eq!(bus.dropped_count(), 10);
+    }
+
+    /// Pins the warmup behaviour: a freshly-constructed `PluginEventBus`
+    /// must have its `last_drop_warn` backdated far enough that the very
+    /// first `record_consumer_lag` falls outside the 10 s rate-limit
+    /// window and advances the timestamp. Mirrors the kernel-side
+    /// `first_lag_burst_after_construction_advances_warn_timestamp`
+    /// test (#3630).
+    #[tokio::test]
+    async fn plugin_bus_first_lag_burst_advances_warn_timestamp() {
+        let bus = PluginEventBus::new(8);
+        let before = *bus.last_drop_warn.lock().unwrap();
+        bus.record_consumer_lag(1, "test_first_burst");
+        let after = *bus.last_drop_warn.lock().unwrap();
+        assert!(
+            after > before,
+            "first lag burst must advance last_drop_warn — warmup regression"
+        );
     }
 
     #[tokio::test]
