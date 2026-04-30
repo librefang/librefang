@@ -259,23 +259,25 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 
 /// Validate a full URL string against the SSRF block list (#3623).
 ///
-/// Parses the URL, extracts the host, and delegates to [`is_ssrf_blocked_host`].
-/// Returns `Ok(())` when the URL is safe, or `Err(reason)` when blocked.
+/// In order, the function:
+/// 1. Parses the URL.
+/// 2. Rejects non-`http`/`https` schemes — `file://`, `ftp://`, etc. would
+///    otherwise reach `reqwest` and be served from the local filesystem or
+///    a bare-TCP gateway.
+/// 3. Rejects URLs with a userinfo component (`user[:pass]@host`).  The
+///    `url` crate's `host_str()` correctly returns the part after `@`, so
+///    the IMDS-literal form `http://allowed.com@169.254.169.254/` is
+///    already caught by the host check in step 4.  Userinfo is rejected
+///    separately because RFC 6749 never sanctions it on OAuth endpoints,
+///    and a metadata document that contains it is anomalous input —
+///    likely phishing-shape (`http://user@public.example.com/`, where
+///    the host check passes), a credential-smuggling attempt, or
+///    accidental pollution that would leak into logs and reqwest's
+///    connection-pool key.  (PR #4099 / #3527 closed a related but
+///    distinct host-extraction bug on the wasm fetch path.)
+/// 4. Delegates the host check to [`is_ssrf_blocked_host`].
 ///
-/// Also rejects:
-/// * Non-`http`/`https` schemes — `file://`, `ftp://`, etc. would otherwise
-///   reach `reqwest` and be served from the local filesystem or a bare-TCP
-///   gateway.
-/// * URLs with a userinfo component (`user[:pass]@host`). The `url` crate's
-///   `host_str()` correctly returns the part after `@`, so the IMDS-literal
-///   form `http://allowed.com@169.254.169.254/` is already caught by the
-///   host check below. Userinfo is rejected separately because RFC 6749
-///   never sanctions it on OAuth endpoints, and a metadata document that
-///   contains it is anomalous input — likely phishing-shape
-///   (`http://user@public.example.com/`, where the host check passes), a
-///   credential-smuggling attempt, or accidental pollution that would leak
-///   into logs and reqwest's connection-pool key. (PR #4099 / #3527 closed
-///   a related but distinct host-extraction bug on the wasm fetch path.)
+/// Returns `Ok(())` when the URL is safe, or `Err(reason)` when blocked.
 ///
 /// Public so callers outside this module (e.g. the kernel OAuth provider's
 /// `try_refresh`, the API-layer token exchange) can re-validate stored
