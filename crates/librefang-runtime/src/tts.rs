@@ -358,9 +358,19 @@ mod tests {
         let engine = TtsEngine::new(config);
         // This may or may not error depending on env vars
         let result = engine.synthesize("Hello world", None, None).await;
-        // If no API keys are set, should error
+        // If no API keys are set: "No TTS provider configured…"
+        // If keys are set but the call fails: provider-specific error ("OpenAI TTS …", etc.)
         if let Err(err) = result {
-            assert!(err.contains("No TTS provider") || err.contains("not set"));
+            assert!(
+                err.contains("No TTS provider")
+                    || err.contains("not set")
+                    || err.contains("OpenAI TTS")
+                    || err.contains("ElevenLabs")
+                    || err.contains("Google TTS")
+                    || err.contains("Unknown TTS provider")
+                    || err.contains("request failed"),
+                "unexpected TTS error: {err}"
+            );
         }
     }
 

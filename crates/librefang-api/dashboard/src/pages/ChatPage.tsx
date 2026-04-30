@@ -21,7 +21,7 @@ import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -1007,7 +1007,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
     if (isMultiLine) {
       return (
         <div className="flex justify-start py-2">
-          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-primary [&_code]:font-mono [&_ul]:space-y-1 [&_ul>li]:list-none [&_ul>li]:flex [&_ul>li]:gap-2">
+          <div className="max-w-[min(90%,56ch)] text-xs text-text-dim/70 [&_code]:text-brand [&_code]:font-mono [&_ul]:space-y-1 [&_ul>li]:list-none [&_ul>li]:flex [&_ul>li]:gap-2">
             <MarkdownContent>{message.content}</MarkdownContent>
           </div>
         </div>
@@ -1039,11 +1039,11 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
         {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
-            isUser ? "bg-primary text-white shadow-sm" : "bg-surface border border-border-subtle"
+            isUser ? "bg-brand text-white shadow-sm" : "bg-surface border border-border-subtle"
           }`}>
-            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-primary" />}
+            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
           </div>
-          <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-primary" : "text-text-dim"}`}>
+          <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
             {isUser ? t("chat.you") : t("chat.bot")}
           </span>
         </div>
@@ -1127,7 +1127,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
         {(displayContent || isUser || message.isStreaming || message.error) && (
         <div className={`relative px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed shadow-sm min-w-0 [overflow-wrap:anywhere] ${
           isUser
-            ? "bg-primary text-white rounded-tr-md"
+            ? "bg-brand text-white rounded-tr-md"
             : message.error
               ? "bg-error/10 border border-error/20 text-error rounded-tl-md"
               : "bg-surface border border-border-subtle rounded-tl-md"
@@ -1137,9 +1137,9 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               <Typewriter_v2 text={displayContent} speed={10} />
             ) : (
               <div className="flex items-center gap-1 py-0.5">
-                <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
               </div>
             )
           ) : message.error ? (
@@ -1181,7 +1181,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
               if (showCost) parts.push(formatCost(message.cost_usd!));
               if (parts.length === 0) return null;
               return (
-                <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary/70 font-mono text-[9px]">
+                <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
                   {parts.join(" | ")}
                 </span>
               );
@@ -1191,7 +1191,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             {!message.isStreaming && !message.error && message.role === "assistant" && ttsAvailable && onSpeak && (
               <button
                 onClick={() => onSpeak(message.id, message.content)}
-                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-primary hover:bg-surface-hover transition-colors"
+                className="h-6 w-6 rounded-md flex items-center justify-center text-text-dim/60 hover:text-brand hover:bg-surface-hover transition-colors"
                 title={
                   ttsStatus === "loading" ? t("chat.tts_generating") :
                   isSpeaking && ttsStatus === "playing" ? t("chat.pause") :
@@ -1215,7 +1215,7 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
                 className={`h-6 w-6 rounded-md flex items-center justify-center transition-colors ${
                   copied
                     ? "text-success"
-                    : "text-text-dim/60 hover:text-primary hover:bg-surface-hover"
+                    : "text-text-dim/60 hover:text-brand hover:bg-surface-hover"
                 }`}
                 title={copied ? t("chat.copied") : t("chat.copy")}
               >
@@ -1693,7 +1693,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
             <button key={c.cmd} type="button"
               onClick={() => selectCmd(c)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
-              <span className="text-xs font-mono font-bold text-primary">{c.cmd}</span>
+              <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
               {c.argsHint && <span className="text-[10px] font-mono text-text-dim/60">{c.argsHint}</span>}
               <span className="text-[10px] text-text-dim ml-auto">{t(`chat.${c.descKey}`)}</span>
             </button>
@@ -1707,7 +1707,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
             <button key={`${m.provider}/${m.id}`} type="button"
               onClick={() => selectModel(m)}
               className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-lg text-left transition-colors ${i === activeIndex ? "bg-main" : "hover:bg-main"}`}>
-              <span className="text-xs font-mono font-bold text-primary">{m.provider}</span>
+              <span className="text-xs font-mono font-bold text-brand">{m.provider}</span>
               <span className="text-xs font-mono text-text">/</span>
               <span className="text-xs font-mono text-text">{m.id}</span>
               {m.display_name && <span className="text-[10px] text-text-dim ml-auto truncate max-w-[120px]">{m.display_name}</span>}
@@ -1724,7 +1724,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           title={t("chat.deep_thinking_hint")}
           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
             deepThinking
-              ? "border-primary/40 bg-primary/10 text-primary"
+              ? "border-brand/40 bg-brand/10 text-brand"
               : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
           }`}
         >
@@ -1737,7 +1737,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
           title={t("chat.show_thinking_hint")}
           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-medium transition-colors ${
             showThinkingProcess
-              ? "border-primary/40 bg-primary/10 text-primary"
+              ? "border-brand/40 bg-brand/10 text-brand"
               : "border-border-subtle bg-surface text-text-dim hover:text-text hover:border-border"
           }`}
         >
@@ -1767,7 +1767,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
             placeholder={voiceInput.isRecording ? t("chat.voice_recording") : voiceInput.isTranscribing ? t("chat.voice_transcribing") : placeholder}
             disabled={textareaDisabled}
             rows={1}
-            className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-primary focus:ring-2 focus:ring-primary/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
+            className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
@@ -1827,7 +1827,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
@@ -1846,6 +1846,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   attached?: boolean;
   /** Number of SSE events received on the attach stream (for operator visibility). */
   attachedEventCount?: number;
+  /** Mobile-only — opens the agent/session picker sheet. */
+  onOpenMobileSheet?: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1975,11 +1977,21 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-        <div className="relative">
+        {onOpenMobileSheet && (
+          <button
+            type="button"
+            onClick={onOpenMobileSheet}
+            className="lg:hidden -ml-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors shrink-0"
+            aria-label={t("chat.open_agent_picker", { defaultValue: "Open agent picker" })}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+        )}
+        <div className="relative hidden lg:block">
           <Wifi className="h-3.5 w-3.5 text-success" />
           <span className="absolute inset-0 rounded-full bg-success/30 animate-pulse" />
         </div>
-        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
+        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden lg:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
@@ -1995,10 +2007,10 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               : ""}
           </Badge>
         )}
-        <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
-        <span className="text-xs font-medium text-text-dim truncate">{agentName}</span>
+        <span className="text-text-dim/30 hidden lg:inline">&bull;</span>
+        <span className="text-xs font-semibold text-text-main truncate">{agentName}</span>
         {isLoading && (
-          <span className="ml-2 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-medium animate-pulse">
+          <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
             {wsConnected ? t("chat.ws_streaming") : t("chat.generating")}
           </span>
         )}
@@ -2038,7 +2050,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   value={modelSearch}
                   onChange={e => setModelSearch(e.target.value)}
                   placeholder={selectedProvider ? t("chat.search_models") : t("chat.search_providers", { defaultValue: "Search providers..." })}
-                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-primary"
+                  className="w-full px-2.5 py-1.5 text-xs rounded-lg bg-main border border-border-subtle focus:outline-none focus:border-brand"
                 />
                 {patchError && (
                   <p className="text-error text-[10px] mt-1.5 px-1">{patchError}</p>
@@ -2056,7 +2068,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                     <p className="text-xs text-error">{modelFetchError}</p>
                     <button
                       onClick={() => { void modelsQuery.refetch(); }}
-                      className="text-[10px] text-primary hover:underline"
+                      className="text-[10px] text-brand hover:underline"
                     >
                       {t("chat.retry")}
                     </button>
@@ -2079,7 +2091,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                         <div
                           key={p.id}
                           onClick={() => { setSelectedProvider(p.id); setModelSearch(""); }}
-                          className={`flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isCurrent ? "bg-primary/10 text-primary" : "hover:bg-surface-hover text-text-dim"}`}
+                          className={`flex items-center justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isCurrent ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
                         >
                           <div className="flex items-center gap-2">
                             {isCurrent && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />}
@@ -2108,7 +2120,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                         <div
                           key={`${model.provider}/${model.id}`}
                           onClick={() => { if (!isActive) handleSelectModel(model); }}
-                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-primary/10 text-primary" : "hover:bg-surface-hover text-text-dim"}`}
+                          className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
                         >
                           {isActive && patchPending
                             ? <Loader2 className="h-3 w-3 animate-spin shrink-0" />
@@ -2146,7 +2158,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   noKey && !isActive
                     ? "text-warning/50 hover:text-warning hover:bg-warning/10"
                     : mode === "always"
-                      ? "text-primary bg-primary/10 hover:bg-primary/20"
+                      ? "text-brand bg-brand/10 hover:bg-brand/20"
                       : mode === "auto"
                         ? "text-text-dim/50 hover:text-text hover:bg-surface-hover"
                         : "text-text-dim/30 hover:text-text-dim/60 hover:bg-surface-hover"
@@ -2197,7 +2209,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                     return (
                       <div
                         key={session.session_id}
-                        className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-primary/10 text-primary" : "hover:bg-surface-hover text-text-dim"}`}
+                        className={`group flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${isActive ? "bg-brand/10 text-brand" : "hover:bg-surface-hover text-text-dim"}`}
                         onClick={() => {
                           if (!isActive) {
                             onSwitchSession?.(session.session_id);
@@ -2236,7 +2248,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
                   <div className="p-1.5 border-t border-border-subtle/50">
                     <button
                       onClick={() => { onNewSession(); setSessionOpen(false); }}
-                      className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-primary hover:bg-primary/5 transition-colors"
+                      className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-brand hover:bg-brand/5 transition-colors"
                     >
                       <Plus className="h-3.5 w-3.5" />
                       {t("chat.new_session", { defaultValue: "New session" })}
@@ -2252,7 +2264,7 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
             <button
               onClick={onExport}
               title={t("chat.export_markdown", { defaultValue: "Export as Markdown" })}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-primary hover:bg-primary/5 transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-brand hover:bg-brand/5 transition-colors"
             >
               <Download className="h-3 w-3" />
               <span className="hidden sm:inline">{t("chat.export", { defaultValue: "Export" })}</span>
@@ -2293,7 +2305,7 @@ function useApprovalPoller(agentId: string | null) {
 const RISK_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   critical: { bg: "bg-error/10", text: "text-error", border: "border-error/30" },
   high: { bg: "bg-warning/10", text: "text-warning", border: "border-warning/30" },
-  medium: { bg: "bg-primary/10", text: "text-primary", border: "border-primary/30" },
+  medium: { bg: "bg-brand/10", text: "text-brand", border: "border-brand/30" },
   low: { bg: "bg-success/10", text: "text-success", border: "border-success/30" },
 };
 
@@ -2399,6 +2411,8 @@ export function ChatPage() {
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
+  // Mobile-only: agent picker / session list slide-in sheet visibility.
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
@@ -2413,6 +2427,7 @@ export function ChatPage() {
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
     setVisibleCount(50);
+    setMobileSheetOpen(false);
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
@@ -2720,13 +2735,13 @@ export function ChatPage() {
       onClick={() => selectAgent(agent.id)}
       className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors text-left group ${
         selectedAgentId === agent.id
-          ? "bg-primary text-white shadow-lg shadow-brand/20"
+          ? "bg-brand text-white shadow-lg shadow-brand/20"
           : "hover:bg-surface-hover"
       }`}
     >
       <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
         selectedAgentId === agent.id ? "bg-white/20"
-        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-primary"
+        : (agent.state || "").toLowerCase() === "running" ? "bg-linear-to-br from-brand/20 to-accent/20 text-brand"
         : "bg-main text-text-dim/40"
       }`}>
         {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name }).charAt(0).toUpperCase()}
@@ -2741,7 +2756,7 @@ export function ChatPage() {
           <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>
             {role ?? t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
           </p>
-          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-primary/10 text-primary"}`}>KEY</span>}
+          {(agent.auth_status === "configured" || agent.auth_status === "validated_key") && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand"}`}>KEY</span>}
           {agent.auth_status === "configured_cli" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-accent/10 text-accent"}`}>CLI</span>}
           {agent.auth_status === "auto_detected" && <span className={`shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase leading-none ${selectedAgentId === agent.id ? "bg-white/20" : "bg-warning/10 text-warning"}`}>AUTO</span>}
           {isAuthUnavailable(agent.auth_status) && <AlertCircle className="h-3 w-3 text-warning shrink-0" />}
@@ -2761,27 +2776,28 @@ export function ChatPage() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
+    <div className="flex h-[calc(100dvh-180px)] lg:h-[calc(100vh-140px)] flex-col min-h-0">
       {/* Bug #3849: two separate aria-live regions so WS state changes and
           new-message announcements are each surfaced independently — a single
           region with `||` would silence msgAriaAnnouncement whenever the WS
           connection string is non-empty. */}
       <div key={ariaNonce} aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
-      {/* Header */}
-      <header className="pb-2 sm:pb-4">
+      {/* Header — hidden on mobile to maximize chat real estate above the BottomTabs */}
+      <header className="hidden lg:block pb-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-3">
-            <div className="relative hidden sm:block">
-              <Sparkles className="h-5 w-5 text-primary" />
-              <span className="absolute inset-0 bg-primary/30 animate-pulse" />
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Sparkles className="h-5 w-5 text-brand" />
+              <span className="absolute inset-0 bg-brand/30 animate-pulse" />
             </div>
-            <span className="text-primary font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
-            <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
+            <span className="text-brand font-bold uppercase tracking-widest text-[10px]">{t("chat.neural_terminal")}</span>
+            <h1 className="text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
             onClick={() => void agentsQuery.refetch()}
-            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-primary transition-colors"
+            className="p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
+            aria-label={t("common.refresh", { defaultValue: "Refresh" })}
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -2789,9 +2805,9 @@ export function ChatPage() {
       </header>
 
       {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
-        {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
+      <div className="flex flex-1 min-h-0 overflow-hidden rounded-none lg:rounded-2xl border-y lg:border border-border-subtle bg-surface lg:shadow-xl lg:ring-1 lg:ring-black/5 dark:lg:ring-white/5">
+        {/* Left sidebar - Agent list (desktop only; mobile uses a sheet) */}
+        <aside className="hidden lg:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -2799,8 +2815,8 @@ export function ChatPage() {
               aria-pressed={showHandAgents}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
                 showHandAgents
-                  ? "border-primary/30 bg-primary/10 text-primary"
-                  : "border-border-subtle bg-surface text-text-dim hover:border-primary/20 hover:text-primary"
+                  ? "border-brand/30 bg-brand/10 text-brand"
+                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
               }`}
             >
               <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
@@ -2838,46 +2854,99 @@ export function ChatPage() {
         </aside>
 
         {/* Right side - Chat area */}
-        <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
+        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden bg-main/10 relative">
           {/* Background decoration */}
           <div className="absolute inset-0 pointer-events-none opacity-30">
-            <div className="absolute top-0 left-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl" />
+            <div className="absolute top-0 left-0 w-64 h-64 bg-brand/5 rounded-full blur-3xl" />
             <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
           </div>
 
-          {/* Mobile agent selector */}
-          <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
-            <select
-              value={selectedAgentId}
-              onChange={(e) => selectAgent(e.target.value)}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-primary"
-            >
-              <option value="">{t("chat.select_agent")}</option>
-              {picker.standalone.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
-                </option>
-              ))}
-              {picker.handGroups.map((group) => (
-                <optgroup
-                  key={group.hand_id}
-                  label={`${group.hand_icon ?? ""} ${group.hand_name}`.trim()}
-                >
-                  {group.agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.role}
-                      {agent.isCoordinator
-                        ? ` (${t("chat.hand_coordinator", { defaultValue: "coordinator" })})`
-                        : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
+          {/* Mobile agent picker — slide-in sheet from the left. The backing
+              <aside> is desktop-only (`hidden lg:flex`), so on mobile we mount
+              an absolutely-positioned drawer over the chat area instead of
+              consuming a fixed width. */}
+          {mobileSheetOpen && (
+            <div className="lg:hidden absolute inset-0 z-40">
+              <div
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                onClick={() => setMobileSheetOpen(false)}
+                aria-hidden="true"
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={t("nav.agents")}
+                className="absolute inset-y-0 left-0 w-[80%] max-w-xs bg-main border-r border-border-subtle flex flex-col shadow-xl"
+              >
+                <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">{t("nav.agents")}</h3>
+                  <button
+                    type="button"
+                    onClick={() => setMobileSheetOpen(false)}
+                    className="h-8 w-8 rounded-lg flex items-center justify-center text-text-dim hover:text-brand hover:bg-surface-hover"
+                    aria-label={t("common.close", { defaultValue: "Close" })}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="px-3 pt-3">
+                  <button
+                    onClick={() => setShowHandAgents((value) => !value)}
+                    aria-pressed={showHandAgents}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                      showHandAgents
+                        ? "border-brand/30 bg-brand/10 text-brand"
+                        : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+                    }`}
+                  >
+                    <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
+                  {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
+                    <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+                  ) : (
+                    <>
+                      {picker.standalone.length > 0 && (
+                        <div className="space-y-2">
+                          {picker.handGroups.length > 0 && (
+                            <h4 className="px-1 pt-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">
+                              {t("chat.group_standalone", { defaultValue: "Standalone" })}
+                            </h4>
+                          )}
+                          {picker.standalone.map((agent) => renderAgentButton(agent))}
+                        </div>
+                      )}
+                      {picker.handGroups.map((group) => (
+                        <div key={group.hand_id} className="space-y-2 pt-3">
+                          <h4 className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim flex items-center gap-1.5">
+                            {group.hand_icon && <span aria-hidden="true">{group.hand_icon}</span>}
+                            <span>{group.hand_name}</span>
+                          </h4>
+                          {group.agents.map((agent) =>
+                            renderAgentButton(agent, agent.role, agent.isCoordinator),
+                          )}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+                <div className="p-3 border-t border-border-subtle">
+                  <button
+                    onClick={() => { void agentsQuery.refetch(); }}
+                    className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
+                    <span>{t("common.refresh", { defaultValue: "Refresh" })}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {selectedAgentId && (
             <ConnectionBar
+              onOpenMobileSheet={() => setMobileSheetOpen(true)}
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
@@ -2917,24 +2986,24 @@ export function ChatPage() {
           )}
 
           {/* Message area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
                 <div className="absolute inset-0 bg-linear-to-b from-transparent via-transparent to-main/50" />
                 <div className="relative">
-                  <div className="w-24 h-24 rounded-3xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-primary/10">
-                    <MessageCircle className="h-12 w-12 text-primary" />
+                  <div className="w-24 h-24 rounded-3xl bg-linear-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
+                    <MessageCircle className="h-12 w-12 text-brand" />
                   </div>
-                  <div className="absolute inset-0 rounded-3xl bg-primary/10 animate-pulse" />
+                  <div className="absolute inset-0 rounded-3xl bg-brand/10 animate-pulse" />
                 </div>
                 <h3 className="text-2xl font-black mb-2">{t("chat.select_agent")}</h3>
                 <p className="text-sm text-text-dim max-w-xs">{t("chat.select_agent_desc")}</p>
               </div>
             ) : messages.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center">
-                <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-primary/10">
-                  <Bot className="h-10 w-10 text-primary" />
+                <div className="w-20 h-20 rounded-2xl bg-linear-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
+                  <Bot className="h-10 w-10 text-brand" />
                 </div>
                 <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
                 <p className="text-sm text-text-dim mt-2">{t("chat.welcome_system")}</p>
@@ -2973,8 +3042,11 @@ export function ChatPage() {
             </div>
           </div>
 
-          {/* Input area */}
-          <div className={`pt-2 px-2 pb-safe-2 sm:pt-4 sm:px-4 sm:pb-safe-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          {/* Input area — sticks to the bottom of the chat column. The
+              app-shell's <main> already keeps this row above the
+              MobileBottomTabs (lg:hidden, ~56px + safe-area), so we don't
+              need a separate fixed bar here. */}
+          <div className={`shrink-0 pt-2 px-2 pb-2 sm:pt-4 sm:px-4 sm:pb-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               agentId={selectedAgentId ?? ""}
               onSend={sendMessage}

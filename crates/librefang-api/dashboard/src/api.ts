@@ -200,7 +200,10 @@ export interface SkillDetail {
   has_prompt_context: boolean;
   prompt_context_length: number;
   prompt_context?: string | null;
-  source: any;
+  /** Backend-supplied skill source descriptor. Treated as opaque on the
+   *  dashboard — no UI introspects it today, so leave the shape unconstrained
+   *  rather than freezing a partial picture into the type. */
+  source: unknown;
   enabled: boolean;
   path: string;
   linked_files: Record<string, string[]>;
@@ -592,6 +595,12 @@ export interface SessionListItem {
   session_id: string;
   agent_id?: string;
   message_count?: number;
+  context_window_tokens?: number;
+  total_tokens?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cost_usd?: number;
+  duration_ms?: number;
   created_at?: string;
   label?: string | null;
   active?: boolean;

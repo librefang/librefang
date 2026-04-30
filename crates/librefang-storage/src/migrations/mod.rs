@@ -123,4 +123,9 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "retention_timestamps_v1",
         sql: include_str!("sql/019_retention_timestamps.surql"),
     },
+    Migration {
+        version: 20,
+        name: "usage_events_session_id_v1",
+        sql: include_str!("sql/020_usage_events_session_id.surql"),
+    },
 ];

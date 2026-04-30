@@ -14,6 +14,9 @@ import {
   Menu,
   Home,
   Layers,
+  Layout,
+  Image as ImageIcon,
+  History,
   MessageCircle,
   CheckCircle,
   Calendar,
@@ -22,7 +25,6 @@ import {
   User,
   Server,
   Network,
-  Bell,
   Hand,
   BarChart3,
   Database,
@@ -32,6 +34,8 @@ import {
   Puzzle,
   Cpu,
   Lock,
+  Check,
+  HelpCircle,
   Share2,
   Gauge,
   LogOut,
@@ -42,6 +46,7 @@ import {
   Plug,
 } from "lucide-react";
 import { useUIStore } from "./lib/store";
+import { toastErr } from "./lib/errors";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { PushDrawer } from "./components/ui/PushDrawer";
 import { ShortcutsHelp } from "./components/ui/ShortcutsHelp";
@@ -306,8 +311,8 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
       } else {
         setMessage({ type: "error", text: res.error || t("settings.pw_failed") });
       }
-    } catch (err: any) {
-      setMessage({ type: "error", text: err.message || t("settings.pw_failed") });
+    } catch (err) {
+      setMessage({ type: "error", text: toastErr(err, t("settings.pw_failed")) });
     } finally {
       setSubmitting(false);
     }
@@ -412,6 +417,324 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// Shared user menu panel — body of the user dropdown wherever it appears
+// (sidebar foot or topbar avatar). Mirrors the design canvas's
+// `shell.jsx::UserMenuPanel`:
+//
+//   ┌────────────────────────────────┐
+//   │  [avatar] name                 │
+//   │           role · mode (mono)   │
+//   ├────────────────────────────────┤
+//   │  THEME                         │
+//   │  [ Light | Dark ]              │
+//   │  LANGUAGE                      │
+//   │  English      en-US ✓          │
+//   │  简体中文     zh-CN            │
+//   ├────────────────────────────────┤
+//   │  Settings              ⌘,      │
+//   │  Docs & shortcuts      ⌘?      │
+//   │  Change credentials            │
+//   │  Sign out                      │
+//   └────────────────────────────────┘
+type UserMenuPanelProps = {
+  username: string;
+  authMode: AuthMode;
+  hostname: string;
+  theme: "dark" | "light";
+  language: string;
+  onToggleTheme: () => void;
+  onSwitchLanguage: (lang: "en" | "zh") => void;
+  onOpenChangePassword: () => void;
+  onOpenShortcuts: () => void;
+  onLogout: () => void | Promise<void>;
+  onClose: () => void;
+  t: ReturnType<typeof useTranslation>["t"];
+};
+
+function UserMenuPanel({
+  username,
+  authMode,
+  hostname,
+  theme,
+  language,
+  onToggleTheme,
+  onSwitchLanguage,
+  onOpenChangePassword,
+  onOpenShortcuts,
+  onLogout,
+  onClose,
+  t,
+}: UserMenuPanelProps) {
+  const initials = (username || "U").slice(0, 2).toUpperCase();
+  const roleLine = [authMode !== "none" ? authMode : null, hostname]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="rounded-xl border border-border-subtle bg-surface shadow-2xl backdrop-blur-md p-1.5 w-[260px]">
+      {/* Header row — avatar + name + meta */}
+      <div className="flex items-center gap-2.5 px-2.5 pt-2 pb-2.5">
+        <div
+          className="h-8 w-8 rounded-full grid place-items-center text-white text-[12px] font-semibold shrink-0"
+          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+        >
+          {initials}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[13px] font-semibold text-text-main truncate">
+            {username || t("common.user", { defaultValue: "User" })}
+          </div>
+          {roleLine && (
+            <div className="font-mono text-[10px] text-text-dim/80 truncate">{roleLine}</div>
+          )}
+        </div>
+      </div>
+
+      <div className="h-px bg-border-subtle mx-1 my-0.5" />
+
+      {/* Theme — segmented control. The store only models light/dark today,
+          so we ship a 2-way toggle (canvas had Light/Dark/Auto). */}
+      <div className="px-2.5 pt-1.5 pb-1">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Sun className="h-2.5 w-2.5 text-text-dim/70" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-dim/70">
+            {t("common.theme", { defaultValue: "Theme" })}
+          </span>
+        </div>
+        <div className="flex p-0.5 rounded-md border border-border-subtle bg-main/40">
+          {([
+            { id: "light", label: t("common.light", { defaultValue: "Light" }), Icon: Sun },
+            { id: "dark",  label: t("common.dark",  { defaultValue: "Dark" }),  Icon: Moon },
+          ] as const).map((opt) => {
+            const active = opt.id === theme;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => { if (!active) onToggleTheme(); }}
+                className={`flex-1 inline-flex items-center justify-center gap-1 px-1.5 py-1 text-[11px] font-mono rounded transition-colors ${
+                  active ? "bg-brand/15 text-brand" : "text-text-dim hover:text-text-main"
+                }`}
+              >
+                <opt.Icon className="h-2.5 w-2.5" />
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Language list */}
+      <div className="px-2.5 pt-2 pb-1">
+        <div className="flex items-center gap-1.5 mb-1.5">
+          <Globe className="h-2.5 w-2.5 text-text-dim/70" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-text-dim/70">
+            {t("common.language", { defaultValue: "Language" })}
+          </span>
+        </div>
+        <div className="flex flex-col gap-px">
+          {([
+            { id: "en", label: "English",   sub: "en-US" },
+            { id: "zh", label: "简体中文",  sub: "zh-CN" },
+          ] as const).map((opt) => {
+            const active = opt.id === language;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => onSwitchLanguage(opt.id)}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-[12.5px] text-left transition-colors ${
+                  active ? "bg-brand/8 text-text-main" : "text-text-main hover:bg-surface-hover"
+                }`}
+              >
+                <span className="flex-1">{opt.label}</span>
+                <span className="font-mono text-[10px] text-text-dim/70">{opt.sub}</span>
+                {active && <Check className="h-3 w-3 text-brand" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="h-px bg-border-subtle mx-1 my-1" />
+
+      {/* Action rows */}
+      <Link
+        to="/settings"
+        onClick={onClose}
+        className="flex items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <Settings className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1">{t("nav.settings")}</span>
+        <span className="font-mono text-[10px] text-text-dim/70">⌘,</span>
+      </Link>
+      <button
+        onClick={() => { onClose(); onOpenShortcuts(); }}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <HelpCircle className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1 text-left">{t("nav.shortcuts", { defaultValue: "Docs & shortcuts" })}</span>
+        <span className="font-mono text-[10px] text-text-dim/70">⌘?</span>
+      </button>
+      <button
+        onClick={() => { onClose(); onOpenChangePassword(); }}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-text-main hover:bg-surface-hover transition-colors"
+      >
+        <Lock className="h-3.5 w-3.5 text-text-dim shrink-0" />
+        <span className="flex-1 text-left">{t("settings.change_password")}</span>
+      </button>
+      {authMode !== "none" && (
+        <>
+          <div className="h-px bg-border-subtle mx-1 my-1" />
+          <button
+            onClick={async () => { onClose(); await onLogout(); }}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 rounded-md text-[12.5px] text-rose-400 hover:bg-rose-500/10 transition-colors"
+          >
+            <LogOut className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1 text-left">{t("nav.logout")}</span>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Sidebar user-row + dropdown menu. Mirrors the design canvas
+// `shell.jsx::Sidebar` footer (avatar + name + chevron) and reuses the
+// existing AppShell auth/theme/language wiring. The dropdown is anchored
+// above the row so it stays inside the viewport on short screens.
+type SidebarUserBlockProps = {
+  collapsed: boolean;
+  authMode: AuthMode;
+  hostname: string;
+  username: string;
+  onOpenChangePassword: () => void;
+  onOpenShortcuts: () => void;
+  onLogout: () => void | Promise<void>;
+  onToggleTheme: () => void;
+  onSwitchLanguage: (lang: "en" | "zh") => void;
+  theme: "dark" | "light";
+  language: string;
+  t: ReturnType<typeof useTranslation>["t"];
+};
+
+function SidebarUserBlock({
+  collapsed,
+  authMode,
+  hostname,
+  username,
+  onOpenChangePassword,
+  onOpenShortcuts,
+  onLogout,
+  onToggleTheme,
+  onSwitchLanguage,
+  theme,
+  language,
+  t,
+}: SidebarUserBlockProps) {
+  const [open, setOpen] = useState(false);
+  const initials = (username || "U").slice(0, 2).toUpperCase();
+  const subline = [authMode !== "none" ? authMode : null, hostname]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="relative border-t border-border-subtle">
+      <button
+        onClick={() => setOpen((x) => !x)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={`flex w-full items-center gap-2.5 ${collapsed ? "lg:justify-center px-2" : "px-3"} py-2.5 text-left transition-colors ${open ? "bg-brand/5" : "hover:bg-surface-hover"}`}
+      >
+        <div
+          className="h-[26px] w-[26px] rounded-full grid place-items-center text-white text-[11px] font-semibold shrink-0"
+          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+        >
+          {initials}
+        </div>
+        {!collapsed && (
+          <>
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-medium text-text-main truncate">
+                {username || t("common.user", { defaultValue: "User" })}
+              </div>
+              {subline && (
+                <div className="font-mono text-[10px] text-text-dim truncate">{subline}</div>
+              )}
+            </div>
+            <ChevronRight className={`h-3 w-3 text-text-dim transition-transform ${open ? "rotate-90" : ""}`} />
+          </>
+        )}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-[90]" onClick={() => setOpen(false)} />
+          <div className={`absolute z-[100] ${collapsed ? "left-full bottom-1 ml-2" : "left-2 right-2 bottom-full mb-1.5"}`}>
+            <UserMenuPanel
+              username={username}
+              authMode={authMode}
+              hostname={hostname}
+              theme={theme}
+              language={language}
+              onToggleTheme={onToggleTheme}
+              onSwitchLanguage={onSwitchLanguage}
+              onOpenChangePassword={onOpenChangePassword}
+              onOpenShortcuts={onOpenShortcuts}
+              onLogout={onLogout}
+              onClose={() => setOpen(false)}
+              t={t}
+            />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Mobile bottom-tab nav. Mirrors the design canvas
+// (`shell.jsx::BottomTabs` + `data.jsx::MOBILE_TABS`): five primary tabs,
+// the fifth (`More`) opens the full nav drawer.
+const MOBILE_TAB_ITEMS = [
+  { to: "/overview", labelKey: "nav.overview", icon: Home },
+  { to: "/agents", labelKey: "nav.agents", icon: Users },
+  { to: "/chat", labelKey: "nav.chat", icon: MessageCircle },
+  { to: "/approvals", labelKey: "nav.approvals", icon: CheckCircle },
+] as const;
+
+function MobileBottomTabs({ onMore }: { onMore: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <nav
+      className="flex shrink-0 border-t border-border-subtle bg-surface/95 backdrop-blur-md lg:hidden"
+      style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      aria-label={t("nav.mobile_tabs", { defaultValue: "Bottom navigation" })}
+    >
+      {MOBILE_TAB_ITEMS.map((tab) => {
+        const Icon = tab.icon;
+        return (
+          <Link
+            key={tab.to}
+            to={tab.to}
+            activeOptions={{ exact: false, includeSearch: false }}
+            activeProps={{ "aria-current": "page" }}
+            className="group relative flex flex-1 flex-col items-center justify-center gap-1 py-2 text-text-dim transition-colors aria-[current=page]:text-brand active:bg-surface-hover/40"
+          >
+            <span className="absolute top-0 left-1/2 h-0.5 w-6 -translate-x-1/2 rounded-full bg-brand opacity-0 shadow-[0_0_6px_currentColor] group-aria-[current=page]:opacity-100 transition-opacity" />
+            <Icon className="h-5 w-5" aria-hidden="true" />
+            <span className="text-[10px] font-medium leading-none">{t(tab.labelKey)}</span>
+          </Link>
+        );
+      })}
+      <button
+        type="button"
+        onClick={onMore}
+        className="flex flex-1 flex-col items-center justify-center gap-1 py-2 text-text-dim transition-colors active:bg-surface-hover/40"
+      >
+        <Menu className="h-5 w-5" aria-hidden="true" />
+        <span className="text-[10px] font-medium leading-none">{t("nav.more", { defaultValue: "More" })}</span>
+      </button>
+    </nav>
+  );
+}
+
 // Routes that must fill the remaining viewport height without scrolling.
 const FULL_HEIGHT_ROUTES = new Set(["/terminal"]);
 
@@ -442,6 +765,7 @@ export function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [appVersion, setAppVersion] = useState("");
   const [hostname, setHostname] = useState("");
+  const [username, setUsername] = useState("");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -511,6 +835,11 @@ export function App() {
       setTerminalEnabled(true);
     });
 
+    getDashboardUsername().then((u) => {
+      if (cancelled) return;
+      setUsername(u);
+    }).catch(() => { /* unauth or no-auth mode — fine, avatar shows the icon. */ });
+
     return () => {
       cancelled = true;
       setOnUnauthorized(null);
@@ -526,84 +855,93 @@ export function App() {
     }
   }, [theme]);
 
-  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
-    isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0" : "px-3 gap-3"
+  // Per design canvas (dashboard/project/app/shell.jsx::SidebarItem): 30px row,
+  // 13px font, brand-tinted bg, brand text, with a left-edge sky-blue glow bar
+  // marking the active state. Spacing matches the canvas to keep the nav dense
+  // enough for 5 sections to fit without scrolling on a 13" laptop.
+  const navBase = `relative flex items-center rounded-md border border-transparent text-[13px] text-text-dim transition-colors duration-200 hover:bg-surface-hover hover:text-brand group ${
+    isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0 h-[30px]" : "px-2.5 gap-2.5 h-[30px]"
   }`;
-  const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
+  // Tailwind v4: `before:` requires explicit `content-['']` for the pseudo
+  // element to render at all. The bar sits 1px inside the button's left edge
+  // (no negative offset) so it's visible regardless of any clipping ancestor.
+  const navActive = "bg-brand/10 text-brand font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-full before:bg-brand before:shadow-[0_0_8px_var(--color-brand)]";
 
+  // Nav structure mirrors the design canvas (data.jsx::NAV_PRIMARY +
+  // NAV_SECTIONS). The first group is the unlabeled "primary" rail and
+  // the rest fall under three labeled sections: Runtime, Observability,
+  // Admin. Routes map 1:1 to the existing tanstack-router paths in
+  // src/router.tsx — items the design surfaces but the daemon doesn't
+  // expose yet (Budget, Policy as standalone pages) are deliberately
+  // omitted instead of dead-linked.
   const navGroups = useMemo(() => {
-    const advancedItems = [
-      { to: "/comms", label: t("nav.comms"), icon: Activity },
-      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
-      { to: "/network", label: t("nav.network"), icon: Share2 },
-      { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+    const observabilityItems = [
+      { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
       { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
+      { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
+      { to: "/logs", label: t("nav.logs"), icon: FileText },
+      ...(terminalEnabled ? [{ to: "/terminal" as const, label: t("nav.terminal"), icon: Terminal }] : []),
+      { to: "/canvas", label: t("nav.canvas", { defaultValue: "Canvas" }), icon: Layout },
+      { to: "/comms", label: t("nav.comms"), icon: Activity },
+      { to: "/media", label: t("nav.media"), icon: ImageIcon },
     ];
     return [
-    {
-      key: "core",
-      label: t("nav.core"),
-      items: [
-        { to: "/overview", label: t("nav.overview"), icon: Home },
-        { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
-        { to: "/agents", label: t("nav.agents"), icon: Users },
-        { to: "/users", label: t("nav.users", "Users"), icon: Users },
-        { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
-        { to: "/hands", label: t("nav.hands"), icon: Hand },
-      ],
-    },
-    {
-      key: "configure",
-      label: t("nav.configure"),
-      items: [
-        { to: "/providers", label: t("nav.providers"), icon: Server },
-        { to: "/models", label: t("nav.models"), icon: Cpu },
-        { to: "/media", label: t("nav.media"), icon: Sparkles },
-        { to: "/channels", label: t("nav.channels"), icon: Network },
-        { to: "/skills", label: t("nav.skills"), icon: Bell },
-        { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
-        { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
-      ],
-    },
-    {
-      key: "config",
-      label: t("nav.config"),
-      items: [
-        { to: "/config/general", label: t("config.cat_general"), icon: Settings },
-        { to: "/config/memory", label: t("config.cat_memory"), icon: Database },
-        { to: "/config/tools", label: t("config.cat_tools"), icon: Sparkles },
-        { to: "/config/channels", label: t("config.cat_channels"), icon: Network },
-        { to: "/config/security", label: t("config.cat_security"), icon: Shield },
-        { to: "/config/network", label: t("config.cat_network"), icon: Share2 },
-        { to: "/config/infra", label: t("config.cat_infra"), icon: Server },
-      ],
-    },
-    {
-      key: "automate",
-      label: t("nav.automate"),
-      items: [
-        { to: "/workflows", label: t("nav.workflows"), icon: Layers },
-        { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
-        { to: "/goals", label: t("nav.goals"), icon: Shield },
-      ],
-    },
-    {
-      key: "observe",
-      label: t("nav.observe"),
-      items: [
-        { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
-        { to: "/memory", label: t("nav.memory"), icon: Database },
-        { to: "/logs", label: t("nav.logs"), icon: FileText },
-        { to: "/audit", label: t("nav.audit", "Audit"), icon: FileText },
-        { to: "/runtime", label: t("nav.runtime"), icon: Activity },
-      ],
-    },
-    {
-      key: "advanced",
-      label: t("nav.advanced"),
-      items: advancedItems,
-    },
-  ]; }, [t, terminalEnabled]);
+      {
+        // Empty key/label = render as unlabeled primary rail (NAV_PRIMARY in
+        // the design canvas).
+        key: "primary",
+        label: "",
+        items: [
+          { to: "/overview", label: t("nav.overview"), icon: Home },
+          { to: "/agents", label: t("nav.agents"), icon: Users },
+          { to: "/chat", label: t("nav.chat"), icon: MessageCircle },
+          { to: "/sessions", label: t("nav.sessions", { defaultValue: "Sessions" }), icon: History },
+          { to: "/skills", label: t("nav.skills"), icon: Sparkles },
+          { to: "/workflows", label: t("nav.workflows"), icon: Layers },
+          { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
+          { to: "/approvals", label: t("nav.approvals"), icon: CheckCircle },
+        ],
+      },
+      {
+        key: "runtime",
+        label: t("nav.runtime_section", { defaultValue: "Runtime" }),
+        items: [
+          { to: "/mcp-servers", label: t("nav.mcp_servers"), icon: Plug },
+          { to: "/channels", label: t("nav.channels"), icon: Network },
+          { to: "/providers", label: t("nav.providers"), icon: Server },
+          { to: "/models", label: t("nav.models"), icon: Cpu },
+          { to: "/memory", label: t("nav.memory"), icon: Database },
+          { to: "/network", label: t("nav.network"), icon: Share2 },
+          { to: "/a2a", label: t("nav.a2a"), icon: Globe },
+          { to: "/hands", label: t("nav.hands"), icon: Hand },
+          { to: "/plugins", label: t("nav.plugins"), icon: Puzzle },
+          { to: "/goals", label: t("nav.goals"), icon: Shield },
+        ],
+      },
+      {
+        key: "observability",
+        label: t("nav.observability", { defaultValue: "Observability" }),
+        items: observabilityItems,
+      },
+      {
+        key: "admin",
+        label: t("nav.admin", { defaultValue: "Admin" }),
+        items: [
+          { to: "/runtime", label: t("nav.runtime"), icon: Activity },
+          { to: "/config", label: t("nav.config", { defaultValue: "Config" }), icon: FileText },
+          { to: "/users", label: t("nav.users", "Users"), icon: User },
+          { to: "/settings", label: t("nav.settings"), icon: Settings },
+        ],
+      },
+    ];
+  }, [t, terminalEnabled]);
+
+  const currentPageLabel = useMemo(() => {
+    const current = navGroups
+      .flatMap((group) => group.items)
+      .find((item) => item.to === location.pathname);
+    return current?.label ?? t("nav.overview", { defaultValue: "Overview" });
+  }, [location.pathname, navGroups, t]);
 
   // Until auth is confirmed, do NOT mount the shell — `<Outlet />` and
   // `<NotificationCenter />` both fire `useDashboardSnapshot` /
@@ -639,199 +977,238 @@ export function App() {
         />
       )}
 
+      {/* Sidebar bg matches design canvas: solid white in light mode, but in
+          dark mode lets the body's radial sky-glow show through (rgba 2,6,23,
+          0.5 over slate-950 + radial).
+          IMPORTANT: do NOT add `backdrop-blur-*` here. CSS spec: any
+          `backdrop-filter` value other than `none` makes the element a
+          containing block for fixed-positioned descendants. That would trap
+          the user-menu's `fixed inset-0` close-on-outside-click backdrop
+          inside the sidebar's bounds. */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[220px] flex-col border-r border-border-subtle bg-surface lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(2,6,23,0.55)] lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
-        ${isSidebarCollapsed ? "lg:w-24" : "lg:w-[280px]"}
+        ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}
       `}>
-        <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-          isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-4"
+        {/* Brand block — 26px sky-gradient square with the LibreFang fang glyph,
+            "librefang" + "v{version} · prod" subtitle. Mirrors the design's
+            shell.jsx::Sidebar header. */}
+        <div className={`flex h-14 items-center transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-3.5"
         }`}>
-          <div className={`flex items-center gap-3 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 shadow-[0_0_15px_rgba(14,165,233,0.3)] ring-1 ring-brand/40 shrink-0">
-              <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
+          <div className={`flex items-center gap-2.5 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
+            <div
+              className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] shrink-0 shadow-[0_0_16px_rgba(56,189,248,0.45),inset_0_1px_0_rgba(255,255,255,0.3)]"
+              style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" stroke="#0c1424" strokeWidth="0.5" strokeLinejoin="round" />
+              </svg>
             </div>
-            <div className="flex flex-col">
-              <strong className="text-sm font-bold tracking-tight whitespace-nowrap">LibreFang</strong>
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
+            <div className="flex flex-col min-w-0">
+              <strong className="text-[13.5px] font-semibold tracking-tight whitespace-nowrap leading-tight">librefang</strong>
+              <span className="text-[10px] font-mono text-text-dim/80 whitespace-nowrap leading-tight">
+                {appVersion ? `v${appVersion}` : "v0.0.0"} · prod
+              </span>
             </div>
           </div>
           <button
             onClick={toggleSidebar}
-            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+            className="hidden lg:flex h-7 w-7 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
             title={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-label={isSidebarCollapsed ? t("nav.expand_sidebar", { defaultValue: "Expand sidebar" }) : t("nav.collapse_sidebar", { defaultValue: "Collapse sidebar" })}
             aria-expanded={!isSidebarCollapsed}
           >
-            {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            {isSidebarCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
           </button>
         </div>
 
-        <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin max-h-[calc(100vh-160px)]">
+        <nav className="overflow-y-auto overflow-x-hidden px-2 pb-3 scrollbar-thin max-h-[calc(100vh-140px)]">
           <button
             onClick={() => setPaletteOpen(true)}
-            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+            className={`mx-1 mb-3 flex items-center gap-2 rounded-lg border border-border-subtle bg-surface-hover/60 px-2.5 h-8 text-text-dim hover:border-brand/30 hover:text-brand ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
             title={`${t("common.search")} (⌘K)`}
             aria-label={`${t("common.search")} (⌘K)`}
+            style={{ width: "calc(100% - 8px)" }}
           >
-            <Search className="h-4 w-4" />
-            <span className="flex-1 text-left text-xs font-medium">{t("common.search")}</span>
-            <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
+            <Search className="h-3.5 w-3.5" />
+            <span className="flex-1 text-left text-xs">{t("common.search")}…</span>
+            <kbd className="text-[10px] font-mono bg-main border border-border-subtle px-1 py-px rounded">⌘K</kbd>
           </button>
 
-          <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-6"}`}>
-            {navGroups.map((group) => (
-              <div key={group.key} className="flex flex-col gap-1">
-                {navLayout === "collapsible" ? (
-                  // 二级菜单布局 - 可折叠
-                  <>
+          <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-4"}`}>
+            {navGroups.map((group) => {
+              const showHeader = Boolean(group.label);
+              return (
+                <div key={group.key} className="flex flex-col gap-0.5">
+                  {showHeader && navLayout === "collapsible" ? (
                     <button
                       onClick={() => toggleNavGroup(group.key)}
-                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
+                      className={`flex items-center justify-between px-2 mb-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-dim/70 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
                     >
                       {group.label}
                       <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
                     </button>
-                    <div className={`mt-1 flex flex-col gap-0.5 ${collapsedNavGroups[group.key] ? "lg:hidden" : ""}`}>
-                      {group.items.map((item) => (
-                        <Link
-                          key={item.to}
-                          to={item.to as any}
-                          className={navBase}
-                          activeProps={{ className: `${navBase} ${navActive}` }}
-                          onClick={() => setMobileMenuOpen(false)}
-                          title={isSidebarCollapsed ? item.label : undefined}
-                        >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  </>
-                ) : (
-                  // 分组布局 - 全部显示
-                  <>
-                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-widest text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
+                  ) : showHeader ? (
+                    <h3 className={`px-2 mb-0.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-text-dim/70 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
                       {group.label}
                     </h3>
-                    <div className="mt-1 flex flex-col gap-0.5">
-                      {group.items.map((item) => (
-                        <Link
-                          key={item.to}
-                          to={item.to as any}
-                          className={navBase}
-                          activeProps={{ className: `${navBase} ${navActive}` }}
-                          onClick={() => setMobileMenuOpen(false)}
-                          title={isSidebarCollapsed ? item.label : undefined}
-                        >
-                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
-                        </Link>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            ))}
+                  ) : null}
+                  {/* Collapse the body when the user folded a labeled section. */}
+                  <div className={`flex flex-col gap-px ${showHeader && navLayout === "collapsible" && collapsedNavGroups[group.key] ? "lg:hidden" : ""}`}>
+                    {group.items.map((item) => (
+                      <Link
+                        key={item.to}
+                        to={item.to as never}
+                        className={navBase}
+                        activeProps={{ className: `${navBase} ${navActive}` }}
+                        onClick={() => setMobileMenuOpen(false)}
+                        title={isSidebarCollapsed ? item.label : undefined}
+                      >
+                        {item.icon && <item.icon className="h-[15px] w-[15px] transition-transform group-hover:scale-105 group-hover:text-brand shrink-0" />}
+                        <span className={`flex-1 truncate ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
+                      </Link>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </nav>
 
-        <div className={`border-t border-border-subtle pt-4 px-4 pb-safe-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:p-0! lg:m-0! lg:mb-0!" : "lg:max-h-28 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
-          <div className="rounded-xl bg-linear-to-r from-success/5 to-transparent p-3 border border-success/10">
-            <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="relative flex h-2 w-2 shrink-0">
-                <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-pulse" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
-              </span>
-              <span className="text-xs font-semibold text-success">{t("common.daemon_online")}</span>
-            </div>
-            {(appVersion || hostname) && (
-              <div className="mt-1.5 space-y-0.5 text-[10px] font-mono text-text-dim">
-                {appVersion && <p className="truncate">v{appVersion}</p>}
-                {hostname && <p className="truncate">{hostname}</p>}
-              </div>
-            )}
-          </div>
-        </div>
+        {/* User-avatar footer — opens the unified user menu (theme / language /
+            settings / change credentials / logout). Replaces the old "daemon
+            online" status pane. Hostname & version moved into the brand block /
+            user menu so this row stays compact. */}
+        <SidebarUserBlock
+          collapsed={isSidebarCollapsed}
+          authMode={authMode}
+          hostname={hostname}
+          username={username}
+          onOpenChangePassword={() => setShowChangePassword(true)}
+          onOpenShortcuts={() => setShowShortcuts(true)}
+          onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+          onToggleTheme={toggleTheme}
+          onSwitchLanguage={(lang) => setLanguage(lang)}
+          theme={theme}
+          language={language}
+          t={t}
+        />
       </aside>
 
       <div className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 sm:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-6">
-          <div className="flex items-center gap-2">
+        {/* Compact topbar (h-12, ~48px). Theme/language/avatar moved into the
+            sidebar's user-row dropdown to match the design. Notifications
+            stays inline as a single iconed button. Mobile keeps a hamburger
+            and the brand block since the sidebar is hidden.
+
+            IMPORTANT: do NOT add `backdrop-blur-*` here. CSS spec: any
+            `backdrop-filter` value other than `none` makes the element a
+            containing block for fixed-positioned descendants AND establishes
+            a new stacking context. That traps our dropdown menus inside the
+            header, where they get covered by KPI cards / chart bars rendered
+            in the page below. Solid `bg-surface` is fine. */}
+        <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-4">
+          <div className="pointer-events-none absolute inset-x-0 top-0 hidden h-12 items-center justify-center lg:flex">
+            <span className="font-mono text-[11px] text-text-dim">
+              librefang · {currentPageLabel}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200 lg:hidden"
               aria-label={t("nav.open_menu", { defaultValue: "Open navigation menu" })}
               aria-expanded={isMobileMenuOpen}
             >
-              <Menu className="h-5 w-5" />
+              <Menu className="h-4 w-4" />
             </button>
             <div className="flex items-center gap-2 lg:hidden">
-              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
-                <div className="h-2.5 w-2.5 rounded-full bg-brand animate-pulse" />
+              <div
+                className="flex h-6 w-6 items-center justify-center rounded-md shrink-0 shadow-[0_0_12px_rgba(56,189,248,0.4)]"
+                style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
+              >
+                <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" />
+                </svg>
               </div>
-              <strong className="text-sm font-bold tracking-tight">LibreFang</strong>
+              <strong className="text-[13px] font-semibold tracking-tight">librefang</strong>
+            </div>
+            {/* Desktop: design-style breadcrumb. */}
+            <div className="hidden lg:flex items-center gap-2 text-text-dim min-w-0">
+              <span className="font-mono text-[11px] truncate">prod</span>
+              <ChevronRight className="h-3 w-3 text-text-dim/60" />
+              <span className="text-sm font-semibold text-text-main truncate">{currentPageLabel}</span>
             </div>
           </div>
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setPaletteOpen(true)}
+              className="hidden sm:flex h-8 w-8 items-center justify-center rounded-md text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+              title={t("common.search", { defaultValue: "Search" })}
+              aria-label={t("common.search", { defaultValue: "Search" })}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
             <NotificationCenter />
-            <button
-              onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-              title={t("common.change_language")}
-              aria-label={t("common.change_language")}
-            >
-              <Globe className="h-4 w-4" />
-            </button>
-            <button
-              onClick={toggleTheme}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
-              title={t("common.toggle_theme")}
-              aria-label={t("common.toggle_theme")}
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
+            {terminalEnabled ? (
+              <Link
+                to="/terminal"
+                className="hidden sm:inline-flex h-8 items-center gap-1.5 rounded-md border border-border-subtle bg-surface-hover/70 px-2.5 text-xs font-semibold text-text-main hover:border-brand/30 hover:text-brand transition-colors"
+              >
+                <Terminal className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">Console</span>
+              </Link>
+            ) : null}
+            {/* Avatar button — top-right pattern from the design canvas
+                (`shell.jsx::TopBar`, "user-menu" variant). Visible on every
+                breakpoint so the menu is always one click away from the
+                topbar; the sidebar's user-row dropdown is the secondary
+                "user-menu-sidebar" variant. */}
             <div className="relative">
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-colors duration-200"
+                className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors duration-200 active:scale-95 ${
+                  userMenuOpen
+                    ? "ring-2 ring-brand/40 ring-offset-1 ring-offset-surface"
+                    : "ring-1 ring-border-subtle hover:ring-brand/30"
+                }`}
+                style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}
                 aria-haspopup="menu"
               >
-                <UserCircle className="h-5 w-5" />
+                {username ? (
+                  <span className="text-white text-[10px] font-semibold">
+                    {username.slice(0, 2).toUpperCase()}
+                  </span>
+                ) : (
+                  <UserCircle className="h-4 w-4 text-white" />
+                )}
               </button>
               {userMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-50 w-48 rounded-xl border border-border-subtle bg-surface shadow-xl py-1">
-                    <Link
-                      to="/settings"
-                      onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      <Settings className="h-3.5 w-3.5" />
-                      {t("nav.settings")}
-                    </Link>
-                    <button
-                      onClick={() => { setUserMenuOpen(false); setShowChangePassword(true); }}
-                      className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-                    >
-                      <Lock className="h-3.5 w-3.5" />
-                      {t("settings.change_password")}
-                    </button>
-                    {authMode !== "none" && (
-                      <button
-                        onClick={async () => { await dashboardLogout(); window.location.reload(); }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-xs font-medium text-text-dim hover:text-red-500 hover:bg-surface-hover transition-colors"
-                      >
-                        <LogOut className="h-3.5 w-3.5" />
-                        {t("nav.logout")}
-                      </button>
-                    )}
+                  <div className="fixed inset-0 z-[90]" onClick={() => setUserMenuOpen(false)} />
+                  {/* Use position:fixed so the menu is not clipped by the
+                      ancestor `overflow-hidden` flex column. Anchor to the
+                      topbar bottom (h-12 = 48px) + a 6px gap. */}
+                  <div className="fixed top-[54px] right-3 sm:right-4 z-[100]">
+                    <UserMenuPanel
+                      username={username}
+                      authMode={authMode}
+                      hostname={hostname}
+                      theme={theme}
+                      language={language}
+                      onToggleTheme={toggleTheme}
+                      onSwitchLanguage={(lang) => setLanguage(lang)}
+                      onOpenChangePassword={() => setShowChangePassword(true)}
+                      onOpenShortcuts={() => setShowShortcuts(true)}
+                      onLogout={async () => { await dashboardLogout(); window.location.reload(); }}
+                      onClose={() => setUserMenuOpen(false)}
+                      t={t}
+                    />
                   </div>
                 </>
               )}
@@ -870,6 +1247,7 @@ export function App() {
             )}
           </AnimatePresence>
         </main>
+        <MobileBottomTabs onMore={() => setMobileMenuOpen(true)} />
       </div>
 
       {!isNoAuthRoute && <OfflineBanner />}

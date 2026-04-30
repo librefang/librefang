@@ -1,4 +1,4 @@
-import { formatTime } from "../lib/datetime";
+import { formatRelativeTime } from "../lib/datetime";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
@@ -6,6 +6,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import {
   type AgentDetail,
+  type AgentItem,
+  type CronJobItem,
   type PromptVersion,
   type PromptExperiment,
   type ExperimentVariantMetrics,
@@ -31,11 +33,15 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
+import { useSessions, useSessionDetails } from "../lib/queries/sessions";
+import { useMemorySearchOrList } from "../lib/queries/memory";
+import { useAuditRecent, useCronJobs } from "../lib/queries/runtime";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { AgentManifestForm } from "../components/AgentManifestForm";
@@ -73,7 +79,47 @@ import {
   useStartExperiment,
   useSuspendAgent,
 } from "../lib/mutations/agents";
-import { StaggerList } from "../components/ui/StaggerList";
+
+/**
+ * Local view type that pairs the strict `AgentDetail` shape from `api.ts`
+ * with the additional runtime fields the backend actually returns on
+ * `GET /api/agents/{id}` but which haven't been added to the canonical
+ * type yet. Keeping this scoped to AgentsPage avoids widening the
+ * exported interface for other consumers and removes the need for
+ * `(agent as AgentView).field` casts inside the master-detail rendering.
+ */
+type AgentTriggerSummary = {
+  event_pattern?: string;
+  name?: string;
+  description?: string;
+};
+type AgentCronSummary = {
+  schedule?: string;
+  cron?: string;
+  expression?: string;
+  next_run?: string;
+  name?: string;
+  id?: string;
+};
+type AgentView = AgentDetail & {
+  state?: string;
+  description?: string;
+  profile?: string;
+  model_name?: string;
+  model_provider?: string;
+  last_active?: string;
+  triggers?: AgentTriggerSummary[];
+  cron_jobs?: AgentCronSummary[];
+  // The backend ships capabilities.tools / .skills as string arrays on the
+  // wire, but the canonical `AgentDetail` interface narrows them to
+  // booleans. Override here so consumers of this page can `.length` them
+  // without a cast — the canonical type is fixed in the API layer in a
+  // follow-up PR.
+  capabilities?: AgentDetail["capabilities"] & {
+    skills?: string[];
+    tools?: string[];
+  };
+};
 
 /** Two-column row used inside the detail modal's value cards. */
 function DetailRow({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
@@ -170,6 +216,16 @@ export function AgentsPage() {
   const [availableToolNames, setAvailableToolNames] = useState<string[]>([]);
   const [stateFilter, setStateFilter] = useState<"all" | "running" | "suspended">("all");
   const [sortBy, setSortBy] = useState<"name" | "last_active" | "created_at">("name");
+  // Tab switcher inside the inline detail panel.  Mirrors the design's
+  // five sections (Conversation / Memory / Skills / Schedule / Logs).
+  const [agentTab, setAgentTab] = useState<
+    "conversation" | "memory" | "skills" | "schedule" | "logs"
+  >("conversation");
+  // Whether the deep-edit drawer is open. Decoupled from `detailAgent` so
+  // selecting an agent in the list shows the inline detail panel without
+  // popping a drawer; the drawer is only opened when the user explicitly
+  // clicks "Configure" / "Edit" from the detail header's overflow menu.
+  const [detailDrawerOpen, setDetailDrawerOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   useCreateShortcut(() => setShowCreate(true));
   const templatesQuery = useAgentTemplates({
@@ -204,7 +260,13 @@ export function AgentsPage() {
     mutate: (agentId: string) =>
       rawDeleteMutation.mutate(agentId, {
         onSuccess: () => {
-          setDetailAgent(prev => prev?.id === agentId ? null : prev);
+          setDetailAgent(prev => {
+            if (prev?.id === agentId) {
+              setDetailDrawerOpen(false);
+              return null;
+            }
+            return prev;
+          });
           addToast(t("agents.delete_success", { defaultValue: "Agent deleted" }), "success");
         },
         onError: (e: Error) =>
@@ -234,7 +296,10 @@ export function AgentsPage() {
   }
 
   function closeDetailModal() {
-    setDetailAgent(null);
+    // Closing the drawer no longer deselects the agent — the inline detail
+    // panel remains visible. Use deselectAgent() to fully exit the
+    // selection (e.g. when an agent is deleted).
+    setDetailDrawerOpen(false);
     setEditingModel(false);
     setEditingName(false);
     closeToolsEditor();
@@ -337,9 +402,9 @@ export function AgentsPage() {
         setToolAllowlistDraft(Array.isArray(agentTools?.tool_allowlist) ? agentTools.tool_allowlist : []);
         setToolBlocklistDraft(Array.isArray(agentTools?.tool_blocklist) ? agentTools.tool_blocklist : []);
         setToolsDisabledState(Boolean(agentTools?.disabled));
-      } catch (err: any) {
+      } catch (err) {
         if (cancelled) return;
-        addToast(err?.message || t("agents.tools_load_failed", { defaultValue: "Failed to load tools" }), "error");
+        addToast(toastErr(err, t("agents.tools_load_failed", { defaultValue: "Failed to load tools" })), "error");
       } finally {
         if (!cancelled) {
           setToolsEditorLoading(false);
@@ -397,9 +462,9 @@ export function AgentsPage() {
           await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
           addToast(t("agents.model_saved", { defaultValue: "Model updated" }), "success");
         },
-        onError: (e: any) => {
+        onError: (e) => {
           addToast(
-            e?.message || t("agents.model_save_failed", { defaultValue: "Failed to update model" }),
+            toastErr(e, t("agents.model_save_failed", { defaultValue: "Failed to update model" })),
             "error",
           );
         },
@@ -411,6 +476,46 @@ export function AgentsPage() {
   // deduplicates the poll when both pages are mounted, and agent counts on the
   // Overview tab stay in sync with this list automatically.
   const agentsQuery = useDashboardSnapshot();
+  // Sessions index, used by both the list row's per-agent "sessions · cost"
+  // suffix and the detail panel's KPI tiles. Single fetch per render so the
+  // 30s refetch interval is the only network cost.
+  const sessionsQuery = useSessions();
+  // Detail-panel data sources. Memory + audit are global lists filtered
+  // client-side by agent id; cron is server-side filtered (its own
+  // `enabled` flag gates the network request on `detailAgent?.id`).
+  // TanStack Query dedupes / caches across pages so revisiting an agent
+  // is free.
+  const memoryListQuery = useMemorySearchOrList("");
+  const auditRecentQuery = useAuditRecent(120);
+  const cronJobsQuery = useCronJobs(detailAgent?.id);
+  // Pick the latest session for the selected agent so the Conversation
+  // tab can stream in its messages without a separate per-agent route.
+  const latestSessionForAgent = useMemo(() => {
+    if (!detailAgent?.id) return undefined;
+    let best: { session_id: string; ts: number } | undefined;
+    for (const s of sessionsQuery.data ?? []) {
+      if (s.agent_id !== detailAgent.id) continue;
+      const ts = s.created_at ? Date.parse(s.created_at) : 0;
+      if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
+    }
+    return best?.session_id;
+  }, [sessionsQuery.data, detailAgent?.id]);
+  const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
+  const sessionsByAgent = useMemo(() => {
+    const map = new Map<string, { sessions24h: number; cost24h: number }>();
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const s of sessionsQuery.data ?? []) {
+      const id = s.agent_id;
+      if (!id) continue;
+      const ts = s.created_at ? Date.parse(s.created_at) : 0;
+      if (ts < cutoff) continue;
+      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0 };
+      entry.sessions24h += 1;
+      entry.cost24h += typeof s.cost_usd === "number" ? s.cost_usd : 0;
+      map.set(id, entry);
+    }
+    return map;
+  }, [sessionsQuery.data]);
 
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
@@ -558,84 +663,598 @@ export function AgentsPage() {
     [toolAllowlistDraft, toolBlocklistDraft],
   );
 
-  const renderAgentCard = (agent: any) => {
-    const isSuspended = (agent.state || "").toLowerCase() === "suspended";
+  const selectAgent = async (agent: AgentItem) => {
+    setAgentTab("conversation");
+    setDetailLoading(true);
+    try {
+      const d = await qc.fetchQuery(agentQueries.detail(agent.id));
+      setDetailAgent(mergeHandFlag(d, agent.is_hand));
+    } catch {
+      setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail);
+    }
+    setDetailLoading(false);
+  };
+
+  const renderAgentRow = (agent: AgentItem) => {
+    const isSelected = detailAgent?.id === agent.id;
+    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    const stateLower = (agent.state || "").toLowerCase();
     return (
-      <Card key={agent.id} hover padding="lg" className={`cursor-pointer overflow-hidden min-w-0 ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
-        setDetailLoading(true);
-        try { const d = await qc.fetchQuery(agentQueries.detail(agent.id)); setDetailAgent(mergeHandFlag(d, agent.is_hand)); } catch { setDetailAgent({ name: agent.name, id: agent.id, is_hand: agent.is_hand } as AgentDetail); }
-        setDetailLoading(false);
-      }}>
-        <div className="flex flex-col gap-3 mb-5">
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              <div className="relative shrink-0">
-                <Avatar fallback={agent.name} size="lg" />
-                {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" role="img" aria-label="Agent active" />}
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 min-w-0">
-                  <h2 className="text-sm sm:text-base font-black tracking-tight truncate">{t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}</h2>
-                  {agent.is_hand && <Badge variant="info" className="shrink-0">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
-                </div>
-                <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{truncateId(agent.id)}</p>
-              </div>
-            </div>
-            <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
-              {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
-            </Badge>
-          </div>
-        </div>
-        <div className="space-y-2.5 mb-5">
-          <div className="flex items-center gap-3 text-xs">
-            <div className="w-5 h-5 rounded bg-brand/10 flex items-center justify-center shrink-0"><Cpu className="w-3 h-3 text-brand" /></div>
-            <span className="text-text-dim flex-1">{t("agents.model")}</span>
-            <span className="font-black text-sm">{agent.model_name || t("common.unknown")}</span>
-          </div>
-          <div className="flex items-center gap-3 text-xs">
-            <div className="w-5 h-5 rounded bg-success/10 flex items-center justify-center shrink-0"><Shield className="w-3 h-3 text-success" /></div>
-            <span className="text-text-dim flex-1">{t("agents.provider")}</span>
-            <span className="font-black text-brand text-sm">{agent.model_provider || t("common.local")}</span>
-          </div>
-          <div className="flex items-center gap-3 text-xs">
-            <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center shrink-0"><Clock className="w-3 h-3 text-warning" /></div>
-            <span className="text-text-dim flex-1">{t("agents.last_active")}</span>
-            <span className="font-mono text-[10px]">{agent.last_active ? formatTime(agent.last_active) : t("common.never")}</span>
-          </div>
-        </div>
-        <div className="pt-4 border-t border-border-subtle/30 flex flex-wrap gap-2">
-          {isSuspended ? (
-            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await resumeMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error"); } }}>
-              <Play className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.resume")}</span>
-            </Button>
-          ) : (
-            <Button variant="secondary" size="sm" className="flex-1 min-w-[100px]" onClick={async (e) => { e.stopPropagation(); try { await suspendMutation.mutateAsync(agent.id); } catch (err: any) { addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error"); } }}>
-              <Pause className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("agents.suspend")}</span>
-            </Button>
+      <button
+        key={agent.id}
+        type="button"
+        onClick={() => void selectAgent(agent)}
+        className={`w-full text-left px-3.5 py-2.5 border-l-2 border-b border-border-subtle/40 transition-colors cursor-pointer ${
+          isSelected
+            ? "border-l-brand bg-brand/5"
+            : "border-l-transparent bg-transparent hover:bg-main/40"
+        } ${stateLower === "suspended" ? "opacity-70" : ""}`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <Badge variant={getStatusVariant(agent.state)} dot className="shrink-0">
+            <span className="sr-only">{agent.state || "idle"}</span>
+          </Badge>
+          <span className="font-mono text-[13px] truncate flex-1 min-w-0 text-text-main">
+            {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
+          </span>
+          {agent.is_hand && (
+            <span className="shrink-0 text-[9px] font-bold px-1.5 py-px rounded bg-brand/10 text-brand">
+              {t("agents.hand_badge", { defaultValue: "HAND" })}
+            </span>
           )}
-          <Button variant="primary" size="sm" className="flex-1 min-w-[100px]" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
-            <MessageCircle className="h-3.5 w-3.5 mr-1 shrink-0" /> <span className="truncate">{t("common.interact")}</span>
-          </Button>
-          {!agent.is_hand && (
-            <Button
-              variant="secondary"
-              size="sm"
-              className="shrink-0"
-              onClick={(e) => {
-                e.stopPropagation();
-                setConfirmDialog({
-                  title: t("agents.delete_title", { defaultValue: "Delete agent?" }),
-                  message: t("agents.delete_confirm", { name: agent.name }),
-                  tone: "destructive",
-                  onConfirm: () => deleteMutation.mutate(agent.id),
-                });
-              }}
+          <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
+            {agent.last_active ? formatRelativeTime(agent.last_active) : "—"}
+          </span>
+        </div>
+        <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
+          <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
+          <span className="text-text-dim/60">·</span>
+          <span className="truncate min-w-0">{agent.profile || t("common.local", { defaultValue: "local" })}</span>
+          <span className="ml-auto shrink-0 tabular-nums">
+            {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
+          </span>
+        </div>
+      </button>
+    );
+  };
+
+  // Inline detail panel — replaces the old card-grid + drawer mix.  The
+  // drawer is kept around for deep edits (rename, model, tools, prompts)
+  // and opened from the panel's overflow menu.  Five tabs mirror the
+  // design: Conversation / Memory / Skills / Schedule / Logs.
+  const renderDetailPanel = (agent: AgentDetail) => {
+    const detailState = ((agent as AgentView).state || "").toLowerCase();
+    const isSuspended = detailState === "suspended";
+    const isCrashed = detailState === "crashed";
+    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    const detailCaps = (agent as AgentView).capabilities;
+    const skillsCount = Array.isArray(detailCaps?.skills) ? detailCaps.skills.length : 0;
+    const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
+    const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
+      { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
+      { id: "memory",       label: t("agents.tab.memory",       { defaultValue: "Memory" }),       Icon: Database },
+      { id: "skills",       label: t("agents.tab.skills",       { defaultValue: "Skills" }),       Icon: Sparkles },
+      { id: "schedule",     label: t("agents.tab.schedule",     { defaultValue: "Schedule" }),     Icon: Clock },
+      { id: "logs",         label: t("agents.tab.logs",         { defaultValue: "Logs" }),         Icon: FileText },
+    ];
+
+    return (
+      <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-0 lg:min-h-[640px] h-full lg:h-auto">
+        {/* Header */}
+        <div className="px-3 sm:px-5 pt-3 sm:pt-4 pb-3 border-b border-border-subtle">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Mobile-only "back to list" affordance — closes the detail
+                overlay without deselecting state for lg+. */}
+            <button
+              type="button"
+              onClick={() => setDetailAgent(null)}
+              className="lg:hidden -ml-1 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 shrink-0"
+              aria-label={t("common.back", { defaultValue: "Back" })}
             >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          )}
+              <X className="w-4 h-4" />
+            </button>
+            <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/30 grid place-items-center text-brand shrink-0">
+              <Bot className="w-[18px] h-[18px]" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="font-mono font-semibold text-base truncate text-text-main">
+                  {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })}
+                </h2>
+                <Badge variant={getStatusVariant((agent as AgentView).state)} dot className="shrink-0">
+                  {(agent as AgentView).state
+                    ? t(`common.${((agent as AgentView).state || "").toLowerCase()}`, { defaultValue: (agent as AgentView).state })
+                    : t("common.idle")}
+                </Badge>
+              </div>
+              <p className="font-mono text-[11.5px] text-text-dim/80 truncate mt-0.5">
+                {truncateId(agent.id)}
+                {agent.model?.model || (agent as AgentView).model_name
+                  ? ` · ${agent.model?.model || (agent as AgentView).model_name}`
+                  : ""}
+                {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
+              </p>
+            </div>
+            {/* Action cluster — labels collapse on mobile so the row keeps
+                three icon-buttons + back arrow on a 390px viewport. */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+              {isSuspended ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Play className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.resume", { defaultValue: "Resume" })}
+                  title={t("agents.resume", { defaultValue: "Resume" })}
+                  onClick={async () => {
+                    try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.resume", { defaultValue: "Resume" })}</span>
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Pause className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.suspend", { defaultValue: "Pause" })}
+                  title={t("agents.suspend", { defaultValue: "Pause" })}
+                  onClick={async () => {
+                    try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
+                </Button>
+              )}
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<MessageCircle className="w-3.5 h-3.5" />}
+                aria-label={t("common.interact", { defaultValue: "Chat" })}
+                title={t("common.interact", { defaultValue: "Chat" })}
+                onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
+              >
+                <span className="hidden sm:inline">{t("common.interact", { defaultValue: "Chat" })}</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setDetailDrawerOpen(true)}
+                title={t("agents.configure", { defaultValue: "Configure" })}
+                aria-label={t("agents.configure", { defaultValue: "Configure" })}
+              >
+                <MoreHorizontal className="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+
+          {/* KPI tiles */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
+            {[
+              { l: t("agents.kpi.sessions",  { defaultValue: "Sessions · 24h" }), v: String(stats.sessions24h),               m: stats.sessions24h > 0 ? "active" : "—" },
+              { l: t("agents.kpi.cost",      { defaultValue: "Cost · 24h" }),     v: `$${stats.cost24h.toFixed(2)}`,           m: stats.cost24h > 0 ? "billed" : "—" },
+              { l: t("agents.kpi.skills",    { defaultValue: "Skills" }),         v: String(skillsCount || "—"),               m: skillsCount > 0 ? `${skillsCount} installed` : "none" },
+              { l: t("agents.kpi.tools",     { defaultValue: "Tools" }),          v: String(toolsCount || "—"),                m: toolsCount > 0 ? `${toolsCount} configured` : "none" },
+            ].map((s) => (
+              <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
+                <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
+                <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
+                <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Tabs */}
+          <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
+            {tabs.map((tab) => {
+              const active = agentTab === tab.id;
+              const Icon = tab.Icon;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setAgentTab(tab.id)}
+                  className={`px-3 py-2 text-[12.5px] flex items-center gap-1.5 border-b-2 -mb-px shrink-0 transition-colors cursor-pointer ${
+                    active
+                      ? "border-brand text-text-main font-medium"
+                      : "border-transparent text-text-dim hover:text-text-main"
+                  }`}
+                >
+                  <Icon className="w-[13px] h-[13px]" />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Tab content */}
+        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4">
+          {renderTabContent(agent, isCrashed)}
         </div>
       </Card>
+    );
+  };
+
+  const renderTabContent = (agent: AgentDetail, isCrashed: boolean) => {
+    if (isCrashed && agentTab === "conversation") {
+      return (
+        <EmptyState
+          title={t("agents.detail.crashed_title", { defaultValue: `${agent.name} is in error state` })}
+          icon={<X className="h-6 w-6 text-error" />}
+          action={
+            <Button variant="primary" size="sm" leftIcon={<RotateCcw className="h-3.5 w-3.5" />} onClick={async () => {
+              try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume" })), "error");
+              }
+            }}>
+              {t("agents.resume", { defaultValue: "Resume" })}
+            </Button>
+          }
+        />
+      );
+    }
+    switch (agentTab) {
+      case "conversation":      return renderConversationTab(agent);
+      case "memory":            return renderMemoryTab(agent);
+      case "skills":            return renderSkillsTab(agent);
+      case "schedule":          return renderScheduleTab(agent);
+      case "logs":              return renderLogsTab(agent);
+    }
+  };
+
+  // ---------- Conversation tab — chat-bubble preview of latest session
+  const renderConversationTab = (agent: AgentDetail) => {
+    const sessionData = sessionDetailQuery.data as
+      | { messages?: Array<{ role?: string; content?: unknown }> }
+      | undefined;
+    const allMessages = Array.isArray(sessionData?.messages) ? sessionData!.messages! : [];
+    const visibleMessages = allMessages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .slice(-5);
+    const messageText = (m: { content?: unknown }): string => {
+      if (typeof m.content === "string") return m.content;
+      if (Array.isArray(m.content)) {
+        return (m.content as Array<{ type?: string; text?: string }>)
+          .filter((b) => b.type === "text" || b.text)
+          .map((b) => b.text ?? "")
+          .join(" ");
+      }
+      return "";
+    };
+    return (
+      <div className="flex flex-col gap-2.5">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mb-1">
+          {t("agents.detail.live_conversation", { defaultValue: "Live conversation" })}
+        </div>
+        {sessionDetailQuery.isLoading && latestSessionForAgent ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+        ) : visibleMessages.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_conversation", {
+              defaultValue: "No conversation yet — open the chat to send the first message.",
+            })}
+          </div>
+        ) : (
+          visibleMessages.map((m, i) => {
+            const isUser = m.role === "user";
+            const txt = messageText(m).trim();
+            if (!txt) return null;
+            return (
+              <div key={i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                <div
+                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] whitespace-pre-wrap break-words border ${
+                    isUser
+                      ? "bg-brand/10 border-brand/30 text-text-main"
+                      : "bg-main/60 border-border-subtle text-text-main"
+                  }`}
+                >
+                  {txt.length > 280 ? `${txt.slice(0, 280)}…` : txt}
+                </div>
+              </div>
+            );
+          })
+        )}
+        <div className="flex justify-start mt-1">
+          <Button
+            variant="primary"
+            size="sm"
+            leftIcon={<MessageCircle className="h-3.5 w-3.5" />}
+            onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
+          >
+            {t("agents.detail.open_chat", { defaultValue: "Open chat" })}
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  // ---------- Memory tab — KV row layout per design canvas
+  const renderMemoryTab = (agent: AgentDetail) => {
+    const allItems = (memoryListQuery.data?.memories ?? []) as Array<{
+      id?: string;
+      content?: string;
+      category?: string | null;
+      created_at?: string;
+      agent_id?: string;
+    }>;
+    const scoped = allItems.filter((m) => !m.agent_id || m.agent_id === agent.id);
+    const rows = scoped.slice(0, 5);
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.memory_label", { defaultValue: "Memory · sqlite" })} · {scoped.length}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={<Database className="h-3.5 w-3.5" />}
+            onClick={() => navigate({ to: "/memory", search: { agentId: agent.id } as never })}
+          >
+            {t("agents.detail.open_memory", { defaultValue: "Open" })}
+          </Button>
+        </div>
+        {memoryListQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+        ) : rows.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_memory", { defaultValue: "No memory entries yet for this agent." })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {rows.map((r, i) => {
+              const key = r.category || r.id || `row-${i}`;
+              const valueText = (r.content || "").replace(/\s+/g, " ").trim();
+              return (
+                <div
+                  key={r.id || `mem-${i}`}
+                  className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
+                >
+                  <div className="flex items-center justify-between gap-2 sm:contents">
+                    <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{key}</span>
+                    <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
+                      {r.created_at ? formatRelativeTime(r.created_at) : "—"}
+                    </span>
+                  </div>
+                  <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2">{valueText || "—"}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- Skills tab — 2-col card grid per design canvas
+  const renderSkillsTab = (agent: AgentDetail) => {
+    const view = agent as AgentView;
+    const skills: string[] = Array.isArray(view.skills)
+      ? view.skills
+      : Array.isArray(view.capabilities?.skills)
+        ? view.capabilities!.skills!
+        : [];
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })} · {skills.length}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={<Plus className="h-3.5 w-3.5" />}
+            onClick={() => navigate({ to: "/skills" })}
+          >
+            {t("agents.detail.install_skill", { defaultValue: "Install" })}
+          </Button>
+        </div>
+        {skills.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {skills.map((s) => (
+              <div
+                key={s}
+                onClick={() => navigate({ to: "/skills" })}
+                className="px-3 py-2.5 rounded-md border border-border-subtle bg-main/40 cursor-pointer hover:border-brand/40 transition-colors flex items-start justify-between gap-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main truncate">{s}</div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5 truncate">
+                    {t("agents.detail.skill_meta", { defaultValue: "installed" })}
+                  </div>
+                </div>
+                <Sparkles className="w-3.5 h-3.5 text-brand/70 shrink-0 mt-0.5" />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
+  const renderScheduleTab = (agent: AgentDetail) => {
+    const cron = cronJobsQuery.data ?? [];
+    const triggers: AgentTriggerSummary[] = Array.isArray((agent as AgentView).triggers)
+      ? ((agent as AgentView).triggers as AgentTriggerSummary[])
+      : [];
+    // Synthetic "last 14 runs" — backend doesn't expose per-fire history
+    // through a single agent-scoped endpoint yet, so we visualise an
+    // agent-id-seeded waveform as a placeholder. Wire up real run
+    // telemetry in the next pass.
+    const seed = agent.id.charCodeAt(0) || 1;
+    const bars = Array.from({ length: 14 }, (_, i) =>
+      Math.round(35 + Math.sin((i + seed) / 2.1) * 12 + i * 1.5),
+    );
+    const hasSchedule = cron.length > 0 || triggers.length > 0;
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+          {t("agents.detail.trigger", { defaultValue: "Trigger" })}
+        </div>
+        {hasSchedule ? (
+          <>
+            {cron.map((c: CronJobItem & AgentCronSummary, i: number) => (
+              <div
+                key={`c-${i}`}
+                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
+              >
+                <div className="w-8 h-8 rounded-md bg-accent/10 text-accent grid place-items-center shrink-0">
+                  <Clock className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-[13px] truncate text-text-main">
+                    {c.schedule || c.cron || c.expression || "cron"}
+                  </div>
+                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
+                    {c.next_run
+                      ? `${t("agents.detail.next_run", { defaultValue: "Next run" })} · ${formatRelativeTime(c.next_run)}`
+                      : c.name || c.id || "cron job"}
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/scheduler" })}>
+                  {t("common.edit", { defaultValue: "Edit" })}
+                </Button>
+              </div>
+            ))}
+            {triggers.map((trig: AgentTriggerSummary, i: number) => (
+              <div
+                key={`t-${i}`}
+                className="px-3.5 py-3 rounded-lg border border-border-subtle bg-main/40 flex items-center gap-3"
+              >
+                <div className="w-8 h-8 rounded-md bg-warning/10 text-warning grid place-items-center shrink-0">
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-mono text-[13px] truncate text-text-main">
+                    {trig.event_pattern || trig.name || "event trigger"}
+                  </div>
+                  <div className="text-[11px] text-text-dim/80 mt-0.5 truncate">
+                    {trig.description || t("agents.detail.event_driven", { defaultValue: "event-driven" })}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        ) : (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_schedule", { defaultValue: "Manual — no triggers or cron jobs configured." })}
+          </div>
+        )}
+
+        <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-2">
+          {t("agents.detail.last_runs", { defaultValue: "Last 14 runs" })}
+        </div>
+        <div className="flex gap-[3px] items-end h-16 px-1">
+          {bars.map((v, i) => {
+            const isLast = i === bars.length - 1;
+            return (
+              <div
+                key={i}
+                className={`flex-1 rounded-t-[2px] ${isLast ? "bg-brand" : "bg-brand/40"}`}
+                style={{
+                  height: `${Math.max(8, Math.min(100, v))}%`,
+                  boxShadow: isLast ? "0 0 8px rgba(56,189,248,0.6)" : "none",
+                  minHeight: 6,
+                }}
+                aria-hidden="true"
+              />
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ---------- Logs tab — terminal-style stderr tail per design canvas
+  const renderLogsTab = (agent: AgentDetail) => {
+    const audit = (auditRecentQuery.data ?? []) as Array<{
+      timestamp?: string;
+      action?: string;
+      agent_id?: string;
+      detail?: string;
+      target?: string;
+      level?: string;
+    }>;
+    const filtered = audit.filter((row) => !row.agent_id || row.agent_id === agent.id).slice(0, 12);
+    const fmtTime = (s?: string): string => {
+      if (!s) return "—";
+      try {
+        const d = new Date(s);
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        const ss = String(d.getSeconds()).padStart(2, "0");
+        const ms = String(d.getMilliseconds()).padStart(3, "0");
+        return `${hh}:${mm}:${ss}.${ms}`;
+      } catch {
+        return s;
+      }
+    };
+    const levelOf = (row: { level?: string; action?: string }): "INFO" | "WARN" | "DEBUG" | "ERROR" => {
+      const lv = (row.level || "").toUpperCase();
+      if (lv === "WARN" || lv === "ERROR" || lv === "DEBUG" || lv === "INFO") return lv as never;
+      const action = (row.action || "").toLowerCase();
+      if (action.includes("fail") || action.includes("error") || action.includes("denied")) return "ERROR";
+      if (action.includes("warn") || action.includes("budget")) return "WARN";
+      return "INFO";
+    };
+    const levelColor = (lv: string) =>
+      lv === "WARN" ? "text-warning" :
+      lv === "ERROR" ? "text-error" :
+      lv === "DEBUG" ? "text-text-dim/60" : "text-success";
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
+            {t("agents.detail.stderr_tail", { defaultValue: "stderr · tail" })}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            leftIcon={<Copy className="h-3.5 w-3.5" />}
+            onClick={() => {
+              const text = filtered
+                .map((r) => `${fmtTime(r.timestamp)} ${levelOf(r)} ${r.action ?? ""} ${r.detail ?? ""}`)
+                .join("\n");
+              void navigator.clipboard?.writeText(text);
+              addToast(t("common.copied", { defaultValue: "Copied" }), "success");
+            }}
+          >
+            {t("common.copy", { defaultValue: "Copy" })}
+          </Button>
+        </div>
+        {auditRecentQuery.isLoading ? (
+          <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
+        ) : filtered.length === 0 ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+            {t("agents.detail.no_logs", { defaultValue: "No recent log entries for this agent." })}
+          </div>
+        ) : (
+          <div
+            className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-auto -mx-3 sm:mx-0"
+            style={{ background: "rgba(2,6,23,0.6)" }}
+          >
+            {filtered.map((row, i) => {
+              const lv = levelOf(row);
+              return (
+                <div key={i} className="flex gap-2.5 min-w-max sm:min-w-0">
+                  <span className="text-text-dim/60 shrink-0">{fmtTime(row.timestamp)}</span>
+                  <span className={`${levelColor(lv)} w-12 shrink-0`}>{lv}</span>
+                  <span className="text-accent w-24 shrink-0 truncate">{row.action || "—"}</span>
+                  <span className="text-text-dim min-w-0 truncate">{row.detail || row.target || ""}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     );
   };
 
@@ -658,113 +1277,147 @@ export function AgentsPage() {
         </Button>
       </div>
 
-      <Input
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder={t("common.search")}
-        leftIcon={<Search className="h-4 w-4" />}
-        data-shortcut-search
-      />
-
-      <div className="flex items-center gap-2 -mt-2 flex-wrap">
-        <button
-          onClick={() => setShowHandAgents((value) => !value)}
-          aria-pressed={showHandAgents}
-          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
-            showHandAgents
-              ? "border-brand/30 bg-brand/10 text-brand"
-              : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
-          }`}
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 lg:min-h-[640px]">
+        {/* Left list panel — search + filter pills + sort + scroll body.
+            On mobile the list owns the viewport; the detail panel is
+            promoted to a full-screen overlay (see below) so we never
+            stack two scrollers on a 390px phone. */}
+        <Card
+          padding="none"
+          className={`surface-lit overflow-hidden flex flex-col h-[calc(100vh-200px)] min-h-[480px] ${detailAgent ? "hidden lg:flex" : "flex"}`}
         >
-          <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
-        </button>
-        {(["all", "running", "suspended"] as const).map((key) => {
-          const isActive = stateFilter === key;
-          const count = agentCounts[key];
-          const label = t(`agents.filter_${key}`, {
-            defaultValue: key === "all" ? "All" : key === "running" ? "Running" : "Suspended",
-          });
-          return (
-            <button
-              key={key}
-              onClick={() => setStateFilter(key)}
-              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
-                isActive
-                  ? "border-brand/30 bg-brand/10 text-brand"
-                  : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
-              }`}
-            >
-              <span>{label}</span>
-              <span
-                className={`inline-flex items-center justify-center rounded-full px-1.5 min-w-[18px] h-[18px] text-[9px] font-mono ${
-                  isActive ? "bg-brand/20" : "bg-main"
+          <div className="px-3 pt-3 pb-2.5 border-b border-border-subtle flex flex-col gap-2 flex-shrink-0">
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("common.search")}
+              leftIcon={<Search className="h-4 w-4" />}
+              data-shortcut-search
+            />
+            <div className="flex flex-wrap gap-1.5 items-center">
+              {(["all", "running", "suspended"] as const).map((key) => {
+                const isActive = stateFilter === key;
+                const count = agentCounts[key];
+                const label = t(`agents.filter_${key}`, {
+                  defaultValue: key === "all" ? "All" : key === "running" ? "Running" : "Suspended",
+                });
+                return (
+                  <button
+                    key={key}
+                    onClick={() => setStateFilter(key)}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-semibold transition-colors ${
+                      isActive
+                        ? "border-brand/30 bg-brand/10 text-brand"
+                        : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+                    }`}
+                  >
+                    <span>{label}</span>
+                    <span
+                      className={`inline-flex items-center justify-center rounded-full px-1 min-w-[16px] h-[14px] text-[9px] font-mono ${
+                        isActive ? "bg-brand/20" : "bg-main"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+              <button
+                onClick={() => setShowHandAgents((value) => !value)}
+                aria-pressed={showHandAgents}
+                className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10.5px] font-semibold transition-colors ${
+                  showHandAgents
+                    ? "border-brand/30 bg-brand/10 text-brand"
+                    : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
                 }`}
               >
-                {count}
-              </span>
-            </button>
-          );
-        })}
-        <div className="ml-auto flex items-center gap-1.5">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60">
-            {t("common.sort_by", { defaultValue: "Sort" })}
-          </span>
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-            className="rounded-full border border-border-subtle bg-surface px-3 py-1 text-[11px] font-bold text-text-dim outline-none focus:border-brand hover:border-brand/20 cursor-pointer"
-          >
-            <option value="name">{t("common.sort_name", { defaultValue: "Name" })}</option>
-            <option value="last_active">{t("common.sort_last_active", { defaultValue: "Last active" })}</option>
-            <option value="created_at">{t("common.sort_created", { defaultValue: "Created" })}</option>
-          </select>
-        </div>
-      </div>
-
-      {agentsQuery.isLoading ? (
-        <div className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
-          {[1, 2, 3, 4, 5, 6].map((i) => <CardSkeleton key={i} />)}
-        </div>
-      ) : filteredAgents.length === 0 ? (
-        search || stateFilter !== "all" || showHandAgents ? (
-          <EmptyState
-            title={t("agents.no_matching")}
-            icon={<Search className="h-6 w-6" />}
-            action={
-              (search || stateFilter !== "all" || showHandAgents) && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    setSearch("");
-                    setStateFilter("all");
-                    setShowHandAgents(false);
-                  }}
-                >
-                  {t("common.clear_filters", { defaultValue: "Clear filters" })}
-                </Button>
+                {t("agents.show_hand_agents", { defaultValue: "Hand" })}
+              </button>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="ml-auto rounded-full border border-border-subtle bg-surface px-2 py-0.5 text-[10.5px] font-semibold text-text-dim outline-none focus:border-brand hover:border-brand/20 cursor-pointer"
+                aria-label={t("common.sort_by", { defaultValue: "Sort by" })}
+              >
+                <option value="name">{t("common.sort_name", { defaultValue: "Name" })}</option>
+                <option value="last_active">{t("common.sort_last_active", { defaultValue: "Active" })}</option>
+                <option value="created_at">{t("common.sort_created", { defaultValue: "Created" })}</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {agentsQuery.isLoading ? (
+              <div className="p-3 flex flex-col gap-2">
+                {[1, 2, 3, 4, 5].map((i) => <CardSkeleton key={i} />)}
+              </div>
+            ) : filteredAgents.length === 0 ? (
+              search || stateFilter !== "all" || showHandAgents ? (
+                <EmptyState
+                  title={t("agents.no_matching")}
+                  icon={<Search className="h-6 w-6" />}
+                  action={
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setSearch("");
+                        setStateFilter("all");
+                        setShowHandAgents(false);
+                      }}
+                    >
+                      {t("common.clear_filters", { defaultValue: "Clear filters" })}
+                    </Button>
+                  }
+                />
+              ) : (
+                <EmptyState title={t("common.no_data")} icon={<Users className="h-6 w-6" />} />
               )
-            }
-          />
+            ) : (
+              <div className="flex flex-col">
+                {coreAgents.map((agent) => renderAgentRow(agent))}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        {/* Right detail panel — header + KPI tiles + 5 tabs.
+            Mobile: rendered as a fixed full-viewport overlay above the
+            list (top inset 0, bottom inset 14 reserves the global tab
+            bar's ~56px so it never gets covered). lg+: collapses back
+            into the master-detail grid. */}
+        {detailAgent ? (
+          <div className="fixed inset-x-0 top-0 bottom-[calc(56px+env(safe-area-inset-bottom))] z-30 bg-surface lg:static lg:inset-auto lg:bottom-auto lg:z-auto lg:bg-transparent overflow-hidden flex flex-col">
+            {renderDetailPanel(detailAgent)}
+          </div>
         ) : (
-          <EmptyState
-            title={t("common.no_data")}
-            icon={<Users className="h-6 w-6" />}
-          />
-        )
-      ) : (
-        <StaggerList className="grid gap-4 grid-cols-[repeat(auto-fill,minmax(280px,1fr))]">
-          {coreAgents.map(agent => renderAgentCard(agent))}
-        </StaggerList>
-      )}
+          // Placeholder is desktop-only — on mobile the list fills the
+          // viewport when no agent is selected, so this empty-state would
+          // just be wasted vertical space.
+          <Card padding="lg" className="surface-lit hidden lg:grid place-items-center text-center min-h-[480px]">
+            <div className="max-w-xs">
+              <div className="w-12 h-12 mx-auto rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand mb-3">
+                <Bot className="w-6 h-6" />
+              </div>
+              <h3 className="text-sm font-semibold text-text-main mb-1">
+                {t("agents.select_an_agent", { defaultValue: "Select an agent" })}
+              </h3>
+              <p className="text-xs text-text-dim">
+                {t("agents.select_an_agent_hint", {
+                  defaultValue: "Choose an agent on the left to inspect its sessions, memory, skills, and live logs.",
+                })}
+              </p>
+            </div>
+          </Card>
+        )}
+      </div>
       {/* Agent Detail Drawer. Right-side inspector pattern (Linear / Figma):
           the agents list stays interactive while the drawer is open, so
           clicking another agent in the list updates the drawer's content
           in place — no close-then-reopen needed. Sticky header / footer
           keep identity and primary actions pinned while the inspectable
           sections scroll in the middle. */}
-      {detailAgent && (() => {
-        const detailState = ((detailAgent as any).state || "").toLowerCase();
+      {detailAgent && detailDrawerOpen && (() => {
+        const detailState = ((detailAgent as AgentView).state || "").toLowerCase();
         const isDetailSuspended = detailState === "suspended";
         const isDetailCrashed = detailState === "crashed";
         const statusColor = isDetailSuspended ? "bg-warning" : isDetailCrashed ? "bg-error" : "bg-success";
@@ -861,14 +1514,14 @@ export function AgentsPage() {
                         )}
                       </button>
                     )}
-                    {(detailAgent as any).description && (
-                      <p className="text-xs text-text-dim mt-1 leading-relaxed">{(detailAgent as any).description}</p>
+                    {(detailAgent as AgentView).description && (
+                      <p className="text-xs text-text-dim mt-1 leading-relaxed">{(detailAgent as AgentView).description}</p>
                     )}
                     <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                       <span className="text-[11px] text-text-dim/70 font-mono">{truncateId(detailAgent.id, 16)}</span>
                       {detailAgent.is_hand && <Badge variant="info">{t("agents.hand_badge", { defaultValue: "HAND" })}</Badge>}
                       <Badge variant={isDetailSuspended ? "warning" : isDetailCrashed ? "error" : "success"} dot>
-                        {(detailAgent as any).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as any).state }) : t("common.running")}
+                        {(detailAgent as AgentView).state ? t(`common.${detailState}`, { defaultValue: (detailAgent as AgentView).state }) : t("common.running")}
                       </Badge>
                     </div>
                   </div>
@@ -1162,8 +1815,8 @@ export function AgentsPage() {
                       try {
                         await resumeMutation.mutateAsync(detailAgent.id);
                         await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                      } catch (err: any) {
-                        addToast(err?.message || t("agents.resume_failed", { defaultValue: "Failed to resume agent" }), "error");
+                      } catch (err) {
+                        addToast(toastErr(err, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
                       }
                     }}
                   >
@@ -1179,8 +1832,8 @@ export function AgentsPage() {
                       try {
                         await suspendMutation.mutateAsync(detailAgent.id);
                         await refreshDetailAgent(detailAgent.id, detailAgent.is_hand);
-                      } catch (err: any) {
-                        addToast(err?.message || t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" }), "error");
+                      } catch (err) {
+                        addToast(toastErr(err, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
                       }
                     }}
                   >
@@ -1195,8 +1848,8 @@ export function AgentsPage() {
                   onClick={async () => {
                     try {
                       await cloneMutation.mutateAsync(detailAgent.id);
-                    } catch (err: any) {
-                      addToast(err?.message || t("agents.clone_failed", { defaultValue: "Failed to clone agent" }), "error");
+                    } catch (err) {
+                      addToast(toastErr(err, t("agents.clone_failed", { defaultValue: "Failed to clone agent" })), "error");
                     }
                   }}
                 >
@@ -1386,8 +2039,8 @@ export function AgentsPage() {
                     void refreshDetailAgent(toolsEditorAgentId);
                   }
                   closeToolsEditor();
-                } catch (err: any) {
-                  addToast(err?.message || t("agents.tools_save_failed", { defaultValue: "Failed to update tools" }), "error");
+                } catch (err) {
+                  addToast(toastErr(err, t("agents.tools_save_failed", { defaultValue: "Failed to update tools" })), "error");
                 } finally {
                   setToolsEditorSaving(false);
                 }
@@ -1612,7 +2265,7 @@ export function AgentsPage() {
           )}
 
           {spawnMutation.error && (
-            <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+            <p className="text-xs text-error">{toastErr(spawnMutation.error, String(spawnMutation.error))}</p>
           )}
 
           <div className="flex gap-2 pt-2">

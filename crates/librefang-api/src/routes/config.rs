@@ -1968,15 +1968,44 @@ pub async fn config_set(
     // Serialize concurrent writes to prevent read-modify-write races
     let _config_guard = state.config_write_lock.lock().await;
 
-    // Read existing config — use toml_edit to preserve comments and formatting
+    // Read existing config — use toml_edit to preserve comments and formatting.
+    // A read failure on an existing file (permission denied, hardware fault,
+    // …) MUST abort — falling back to "" would silently drop every other
+    // section in `config.toml` (agents, providers, taint rules, …) on the
+    // next write. Same protection as `users::persist_users` (#3368).
     let raw_content = if config_path.exists() {
-        std::fs::read_to_string(&config_path).unwrap_or_default()
+        match std::fs::read_to_string(&config_path) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "error": format!("could not read existing config.toml: {e}")
+                    })),
+                );
+            }
+        }
     } else {
         String::new()
     };
+    // Parse failure means the on-disk file is already corrupt — refuse to
+    // write rather than overwriting with an empty document, which would
+    // clobber every other section the operator is hand-editing (#3368).
     let mut doc: toml_edit::DocumentMut = match raw_content.parse() {
         Ok(d) => d,
-        Err(_) => toml_edit::DocumentMut::new(),
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!(
+                        "config.toml has a syntax error and cannot be safely edited \
+                         from the dashboard. Fix the file manually first: {e}"
+                    )
+                })),
+            );
+        }
     };
 
     // null → remove key instead of writing empty string

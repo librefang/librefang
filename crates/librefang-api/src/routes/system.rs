@@ -4534,14 +4534,21 @@ pub async fn test_webhook(
         }
     };
 
-    // Re-validate the URL against SSRF rules before sending
-    if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
-        let err_msg = {
-            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-            t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
-        };
-        return ApiErrorResponse::bad_request(err_msg).into_json_tuple();
-    }
+    // Re-validate the URL against SSRF rules before sending. Use the
+    // DNS-resolving variant so a hostname that flips to a private IP after
+    // registration (DNS rebind, metadata IMDS, ec2 internal records) is
+    // caught at fire-time, not just at registration (issue #3701).
+    let pinned_host = match crate::webhook_store::validate_webhook_url_resolved(&webhook.url).await
+    {
+        Ok(host) => host,
+        Err(e) => {
+            let err_msg = {
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
+            };
+            return ApiErrorResponse::bad_request(err_msg).into_json_tuple();
+        }
+    };
 
     let test_payload = serde_json::json!({
         "event": "test",
@@ -4552,11 +4559,19 @@ pub async fn test_webhook(
 
     let payload_bytes = serde_json::to_vec(&test_payload).unwrap_or_default();
 
-    let client = librefang_runtime::http_client::proxied_client_builder()
+    // Pin reqwest's DNS resolver to the address we validated above. Without
+    // this, reqwest does its own DNS lookup before connecting; a low-TTL
+    // record can flip between our validate call and reqwest's resolve call
+    // (DNS rebind), bypassing the SSRF check (#3701). `.resolve(host, addr)`
+    // forces the connection to go to `addr` and skips reqwest's resolver
+    // for that hostname.
+    let mut builder = librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("HTTP client build");
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some((ref host, addr)) = pinned_host {
+        builder = builder.resolve(host, addr);
+    }
+    let client = builder.build().expect("HTTP client build");
 
     let mut request = client
         .post(&webhook.url)
