@@ -17,12 +17,15 @@ use std::time::Duration;
 static TEST_ZERO_BACKOFF: AtomicBool = AtomicBool::new(false);
 
 /// Enable zero-delay backoff for integration tests. Returns a guard that
-/// disables it on drop.
+/// disables it on drop. Exported for integration tests in `tests/`; not
+/// intended for use in production code.
+#[doc(hidden)]
 pub fn enable_test_zero_backoff() -> ZeroBackoffGuard {
     TEST_ZERO_BACKOFF.store(true, Ordering::Relaxed);
     ZeroBackoffGuard(())
 }
 
+#[doc(hidden)]
 pub struct ZeroBackoffGuard(());
 
 impl Drop for ZeroBackoffGuard {
