@@ -1607,6 +1607,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Some(self.kernel.event_bus_ref().subscribe_all())
     }
 
+    fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        self.kernel.event_bus_ref().record_consumer_lag(n, context);
+    }
+
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .reset_session(agent_id)

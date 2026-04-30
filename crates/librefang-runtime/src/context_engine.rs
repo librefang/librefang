@@ -143,12 +143,22 @@ pub struct PluginEvent {
 /// receive the same event without coordination.
 pub struct PluginEventBus {
     tx: tokio::sync::broadcast::Sender<PluginEvent>,
+    /// Total events dropped by consumers due to broadcast lag. Mirrors
+    /// the kernel `EventBus` counter so plugin-side `on_event` misses
+    /// stop being silently swallowed (issue #3630).
+    dropped_count: std::sync::atomic::AtomicU64,
+    /// Rate-limit timestamp for the lag warning log.
+    last_drop_warn: std::sync::Mutex<std::time::Instant>,
 }
 
 impl PluginEventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            dropped_count: std::sync::atomic::AtomicU64::new(0),
+            last_drop_warn: std::sync::Mutex::new(std::time::Instant::now()),
+        }
     }
 
     /// Publish an event to all subscribers.
@@ -159,6 +169,34 @@ impl PluginEventBus {
     /// Subscribe to the event stream.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PluginEvent> {
         self.tx.subscribe()
+    }
+
+    /// Total events that consumers dropped due to broadcast lag.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that a consumer lagged and dropped `n` events. Bumps
+    /// `dropped_count` and emits a rate-limited `error!` log. Mirrors
+    /// `librefang_kernel::event_bus::EventBus::record_consumer_lag`.
+    pub fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        let total = self
+            .dropped_count
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
+            + n;
+        if let Ok(mut last) = self.last_drop_warn.lock() {
+            if last.elapsed() >= std::time::Duration::from_secs(10) {
+                tracing::error!(
+                    lagged = n,
+                    total_dropped = total,
+                    context = context,
+                    "Plugin event bus: consumer lagged behind broadcast queue, events dropped — \
+                     receiver should be drained faster or buffer increased",
+                );
+                *last = std::time::Instant::now();
+            }
+        }
     }
 }
 
@@ -1244,7 +1282,12 @@ impl ScriptableContextEngine {
                             });
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(plugin = %plugin_name, skipped = n, "on_event: broadcast lagged, some events skipped");
+                            // Route through the bus's lag counter so plugin
+                            // on_event misses are observable in
+                            // `dropped_count()` and emit a rate-limited
+                            // error! log (#3630). The previous per-listener
+                            // warn! was silent in aggregate metrics.
+                            bus.record_consumer_lag(n, "plugin.on_event");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
