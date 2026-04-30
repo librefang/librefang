@@ -2,6 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { formatTime, formatDateTime } from "../lib/datetime";
 import { useMemo, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
 import { createRegistryContent } from "../api";
@@ -109,7 +110,7 @@ function SetDefaultModelSection({ providerId, currentDefault, onSetDefault, t }:
   providerId: string;
   currentDefault?: string;
   onSetDefault: (id: string, model?: string) => Promise<void>;
-  t: (key: string, opts?: any) => string;
+  t: TFunction;
 }) {
   const [selectedModel, setSelectedModel] = useState("");
   const [setting, setSetting] = useState(false);
@@ -186,7 +187,7 @@ function useProviderConfig(
   deleteKeyMutation: ReturnType<typeof useMutation<unknown, unknown, string>>,
   setUrlMutation: ReturnType<typeof useMutation<unknown, unknown, { id: string; baseUrl: string; proxyUrl?: string }>>,
   addToast: (msg: string, type?: "success" | "error" | "info") => void,
-  t: (key: string, opts?: any) => string,
+  t: TFunction,
   activeTab: string,
   setActiveTab: (tab: "configured" | "unconfigured") => void,
 ) {
@@ -580,7 +581,7 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
   onClose: () => void;
   onTest: (id: string) => void;
   pendingId: string | null;
-  t: (key: string, opts?: any) => string;
+  t: TFunction;
 }) {
   const isConfigured = isProviderAvailable(provider.auth_status);
   const authBadge = getAuthBadge(provider.auth_status);
