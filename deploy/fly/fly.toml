@@ -7,6 +7,11 @@ image = "ghcr.io/librefang/librefang:latest"
 [env]
   LIBREFANG_HOME = "/data"
   LIBREFANG_LISTEN = "0.0.0.0:4545"
+  # Allow unauthenticated access for the public live demo. The daemon logs a
+  # warning at startup when this flag is set so the intent is visible in ops
+  # tooling. Remove this and set LIBREFANG_API_KEY (or configure api_key in
+  # config.toml) for any deployment that should not be publicly accessible.
+  LIBREFANG_ALLOW_NO_AUTH = "1"
 
 [http_service]
   internal_port = 4545
