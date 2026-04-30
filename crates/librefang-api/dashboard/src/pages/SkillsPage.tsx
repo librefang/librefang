@@ -40,6 +40,14 @@ import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
 import {
+  SkillHubBar,
+  SkillHubHeadline,
+  HubBadge,
+  type HubFilter as SkillHubFilter,
+  type HubCounts,
+  type HubHealthMap,
+} from "../components/SkillHubBar";
+import {
   Wrench,
   Search,
   CheckCircle2,
@@ -78,6 +86,8 @@ import {
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 type ViewMode = "installed" | "browse";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
+/** Browse hub filter — `"all"` aggregates every configured hub. */
+type HubFilter = "all" | MarketplaceSource;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -155,6 +165,9 @@ interface SkillCardProps {
   variant: SkillCardVariant;
   installPending?: boolean;
   source?: MarketplaceSource;
+  /** Optional hub origin badge rendered top-right (used by the unified
+   *  "all hubs" view to make every card's source obvious). */
+  hubBadge?: React.ReactNode;
   onInstall?: () => void;
   onUninstall?: () => void;
   onViewDetail?: () => void;
@@ -175,6 +188,7 @@ function SkillCard({
   variant,
   installPending,
   source,
+  hubBadge,
   onInstall,
   onUninstall,
   onViewDetail,
@@ -244,15 +258,18 @@ function SkillCard({
               </p>
             </div>
           </div>
-          {variant === "installed" && (
-            <Badge variant="success">{t("skills.installed")}</Badge>
-          )}
-          {variant !== "installed" && isInstalled && (
-            <Badge variant="success">
-              <CheckCircle2 className="w-2.5 h-2.5" />
-              {t("skills.installed")}
-            </Badge>
-          )}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {hubBadge}
+            {variant === "installed" && (
+              <Badge variant="success">{t("skills.installed")}</Badge>
+            )}
+            {variant !== "installed" && isInstalled && (
+              <Badge variant="success">
+                <CheckCircle2 className="w-2.5 h-2.5" />
+                {t("skills.installed")}
+              </Badge>
+            )}
+          </div>
         </div>
 
         {/* Description */}
@@ -1459,9 +1476,20 @@ export function SkillsPage() {
   const addToast = useUIStore((s) => s.addToast);
 
   const [viewMode, setViewMode] = useState<ViewMode>("browse");
-  const [source, setSource] = useState<MarketplaceSource>("fanghub");
+  /**
+   * Which federated hub the browse grid pulls from. `"all"` aggregates
+   * every configured hub — clawhub / clawhub-cn / skillhub queries are
+   * gated behind a search keyword to avoid hammering the network on
+   * every visit.
+   */
+  const [hubFilter, setHubFilter] = useState<HubFilter>("all");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+
+  const isHubActive = useCallback(
+    (id: MarketplaceSource) => hubFilter === "all" || hubFilter === id,
+    [hubFilter],
+  );
 
   const [uninstalling, setUninstalling] = useState<string | null>(null);
   const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
@@ -1485,29 +1513,36 @@ export function SkillsPage() {
     ? (CATEGORIES.find((c) => c.id === selectedCategory)?.keyword ?? "")
     : search;
 
+  // Remote hub queries (clawhub / clawhub-cn) only fire when the user
+  // narrows to that hub OR types a keyword in "all hubs" — otherwise
+  // every Skills page mount would trigger a wide network search.
+  const remoteEligible = viewMode === "browse" && (hubFilter !== "all" || !!keyword);
+
   const clawhubQuery = useQuery({
     ...skillQueries.clawhubSearch(keyword || "python"),
-    enabled: viewMode === "browse" && source === "clawhub",
+    enabled: remoteEligible && isHubActive("clawhub"),
   });
 
   const clawhubCnQuery = useQuery({
     ...skillQueries.clawhubCnSearch(keyword || "python"),
-    enabled: viewMode === "browse" && source === "clawhub-cn",
+    enabled: remoteEligible && isHubActive("clawhub-cn"),
   });
 
   const skillhubBrowseQuery = useQuery({
     ...skillQueries.skillhubBrowse(),
-    enabled: viewMode === "browse" && source === "skillhub" && !keyword,
+    enabled: viewMode === "browse" && isHubActive("skillhub") && !keyword,
   });
   const skillhubSearchQuery = useQuery({
     ...skillQueries.skillhubSearch(keyword),
-    enabled: viewMode === "browse" && source === "skillhub" && !!keyword,
+    enabled: viewMode === "browse" && isHubActive("skillhub") && !!keyword,
   });
   const activeSkillhubQuery = keyword ? skillhubSearchQuery : skillhubBrowseQuery;
 
+  // FangHub is the LibreFang first-party registry — local cache, cheap
+  // enough to keep enabled whenever browsing, regardless of hub filter.
   const fanghubQuery = useQuery({
     ...skillQueries.fanghubList(),
-    enabled: viewMode === "browse" && source === "fanghub",
+    enabled: viewMode === "browse" && isHubActive("fanghub"),
   });
 
   const clawhubDetailQuery = useQuery({
@@ -1555,27 +1590,85 @@ export function SkillsPage() {
     [installedSkills],
   );
 
-  const browseItems = useMemo(() => {
-    if (source === "fanghub") return filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory);
-    if (source === "clawhub") {
-      return (clawhubQuery.data?.items ?? [])
-        .map((s) => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "clawhub") }))
-        .filter((s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
-    }
-    if (source === "clawhub-cn") {
-      return (clawhubCnQuery.data?.items ?? [])
-        .map((s) => ({ ...s, is_installed: isInstalledFromMarketplace(s.slug, "clawhub-cn") }))
-        .filter((s) => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
-    }
-    // skillhub
-    return filterByCategory(
-      (activeSkillhubQuery.data?.items ?? []).map((s) => ({
+  /** Items from a non-fanghub remote registry, normalized with
+   *  `is_installed` and a `_hub` discriminator the unified card renderer
+   *  reads. Filtering on text match here so the per-hub list and the
+   *  merged "all" list stay in sync without repeating the predicate. */
+  const buildRemoteItems = useCallback(
+    (items: ClawHubBrowseItem[] | undefined, src: MarketplaceSource) =>
+      (items ?? [])
+        .map((s) => ({
+          ...s,
+          is_installed: isInstalledFromMarketplace(s.slug, src),
+          _hub: src,
+        }))
+        .filter(
+          (s) =>
+            !search ||
+            s.name.toLowerCase().includes(search.toLowerCase()) ||
+            (s.description?.toLowerCase().includes(search.toLowerCase()) ?? false),
+        ),
+    [isInstalledFromMarketplace, search],
+  );
+
+  const fanghubItems = useMemo(
+    () =>
+      filterByCategory(fanghubQuery.data?.skills ?? [], selectedCategory).map((s) => ({
         ...s,
-        is_installed: isInstalledFromMarketplace(s.slug, "skillhub"),
+        _hub: "fanghub" as const,
       })),
-      selectedCategory,
-    );
-  }, [source, fanghubQuery.data, clawhubQuery.data, clawhubCnQuery.data, activeSkillhubQuery.data, isInstalledFromMarketplace, search, selectedCategory]);
+    [fanghubQuery.data, selectedCategory],
+  );
+  const clawhubItems = useMemo(
+    () => buildRemoteItems(clawhubQuery.data?.items, "clawhub"),
+    [buildRemoteItems, clawhubQuery.data],
+  );
+  const clawhubCnItems = useMemo(
+    () => buildRemoteItems(clawhubCnQuery.data?.items, "clawhub-cn"),
+    [buildRemoteItems, clawhubCnQuery.data],
+  );
+  const skillhubItems = useMemo(
+    () =>
+      filterByCategory(
+        buildRemoteItems(activeSkillhubQuery.data?.items, "skillhub"),
+        selectedCategory,
+      ),
+    [buildRemoteItems, activeSkillhubQuery.data, selectedCategory],
+  );
+
+  /** What the grid actually renders, narrowed to the active hub or
+   *  merged across all hubs when `hubFilter === "all"`. */
+  const browseItems = useMemo(() => {
+    if (hubFilter === "fanghub") return fanghubItems;
+    if (hubFilter === "clawhub") return clawhubItems;
+    if (hubFilter === "clawhub-cn") return clawhubCnItems;
+    if (hubFilter === "skillhub") return skillhubItems;
+    // "all" — merge. FangHub first (curated), then clawhub/clawhub-cn,
+    // then skillhub. Only includes hubs that actually returned data this
+    // render (clawhub etc. are search-gated).
+    return [...fanghubItems, ...clawhubItems, ...clawhubCnItems, ...skillhubItems];
+  }, [hubFilter, fanghubItems, clawhubItems, clawhubCnItems, skillhubItems]);
+
+  const hubCounts: HubCounts = useMemo(
+    () => ({
+      fanghub: fanghubItems.length,
+      clawhub: clawhubItems.length,
+      "clawhub-cn": clawhubCnItems.length,
+      skillhub: skillhubItems.length,
+    }),
+    [fanghubItems.length, clawhubItems.length, clawhubCnItems.length, skillhubItems.length],
+  );
+
+  const hubHealth: HubHealthMap = useMemo(() => {
+    const flag = (q: { isFetching: boolean; isError: boolean }) =>
+      q.isError ? ("down" as const) : q.isFetching ? ("checking" as const) : ("live" as const);
+    return {
+      fanghub: flag(fanghubQuery),
+      clawhub: flag(clawhubQuery),
+      "clawhub-cn": flag(clawhubCnQuery),
+      skillhub: flag(activeSkillhubQuery),
+    };
+  }, [fanghubQuery, clawhubQuery, clawhubCnQuery, activeSkillhubQuery]);
 
   const isAnyFetching =
     skillsQuery.isFetching ||
@@ -1595,7 +1688,7 @@ export function SkillsPage() {
 
   const handleInstall = (
     slug: string,
-    src: MarketplaceSource | "fanghub" = source,
+    src: MarketplaceSource,
   ) => {
     setInstallingId(slug);
     const hand = targetHand || undefined;
@@ -1669,22 +1762,6 @@ export function SkillsPage() {
             <span className="hidden sm:inline-block px-2.5 py-1 rounded-full border border-border-subtle bg-surface text-[10px] font-bold uppercase text-text-dim">
               {t("skills.installed_count", { count: installedSkills.length })}
             </span>
-            <select
-              value={source}
-              onChange={(e) => {
-                setSource(e.target.value as MarketplaceSource);
-                setSearch("");
-                setSelectedCategory(null);
-                setViewMode("browse");
-              }}
-              disabled={viewMode === "installed"}
-              className="h-8 rounded-xl border border-border-subtle bg-surface px-2 text-xs font-bold text-text-main cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <option value="fanghub">{t("skills.source_fanghub", { defaultValue: "FangHub" })}</option>
-              <option value="clawhub">{t("skills.source_clawhub", { defaultValue: "ClawHub" })}</option>
-              <option value="clawhub-cn">{t("skills.source_clawhub_cn", { defaultValue: "ClawHub CN" })}</option>
-              <option value="skillhub">{t("skills.source_skillhub", { defaultValue: "SkillHub" })}</option>
-            </select>
             <a
               href="https://librefang.ai/skills"
               target="_blank"
@@ -1755,6 +1832,27 @@ export function SkillsPage() {
         })}
       </div>
 
+      {/* Federated hub source bar (browse only). Replaces the old
+       *  4-option <select> with a horizontal pill row that exposes
+       *  health, latency hint (via tooltip), and per-hub counts. */}
+      {viewMode === "browse" && (
+        <SkillHubBar
+          hubFilter={hubFilter as SkillHubFilter}
+          onChange={(next) => {
+            setHubFilter(next as HubFilter);
+          }}
+          counts={hubCounts}
+          health={hubHealth}
+          totalCount={browseItems.length}
+        />
+      )}
+
+      {/* When a single hub is selected, surface its domain + tagline so
+       *  operators know exactly where they're searching. */}
+      {viewMode === "browse" && hubFilter !== "all" && (
+        <SkillHubHeadline hub={hubFilter} />
+      )}
+
       {/* Hand target selector */}
       {viewMode === "browse" && hands.length > 0 && (
         <div className="flex items-center gap-2">
@@ -1788,8 +1886,11 @@ export function SkillsPage() {
         />
       )}
 
-      {/* Search */}
-      {viewMode === "browse" && source !== "fanghub" && (
+      {/* Search — applies to every hub. FangHub items get prefix-matched
+       *  client-side, the remote hubs treat the keyword as their search
+       *  query (gated so we don't fan it out across all hubs without a
+       *  user-typed term). */}
+      {viewMode === "browse" && (
         <Input
           value={search}
           onChange={(e) => { setSearch(e.target.value); setSelectedCategory(null); }}
@@ -1836,68 +1937,88 @@ export function SkillsPage() {
 
       {/* ── Browse ── */}
       {viewMode === "browse" && (() => {
+        // Pick the "primary" query state for skeleton / error rendering.
+        // For "all", showing a single skeleton when *any* hub is fetching
+        // would be misleading; only block when nothing is rendered yet.
         const activeQuery =
-          source === "clawhub" ? clawhubQuery :
-          source === "clawhub-cn" ? clawhubCnQuery :
-          source === "skillhub" ? activeSkillhubQuery :
-          fanghubQuery;
+          hubFilter === "clawhub" ? clawhubQuery :
+          hubFilter === "clawhub-cn" ? clawhubCnQuery :
+          hubFilter === "skillhub" ? activeSkillhubQuery :
+          hubFilter === "fanghub" ? fanghubQuery :
+          null;
 
-        return activeQuery.isLoading ? (
-          <SkillGridSkeleton count={source === "fanghub" ? 4 : 6} />
-        ) : isRateLimitError(activeQuery.error) ? (
+        const isLoading = activeQuery
+          ? activeQuery.isLoading
+          : fanghubQuery.isLoading && browseItems.length === 0;
+        const queryError = activeQuery?.error ?? null;
+
+        return isLoading ? (
+          <SkillGridSkeleton count={hubFilter === "fanghub" ? 4 : 6} />
+        ) : queryError && isRateLimitError(queryError) ? (
           <EmptyState
             title={t("skills.rate_limited")}
             description={t("skills.rate_limited_desc")}
             icon={<Loader2 className="h-6 w-6 animate-spin" />}
           />
-        ) : activeQuery.error ? (
+        ) : queryError ? (
           <EmptyState
             title={t("skills.load_error")}
-            description={(activeQuery.error as Error).message}
+            description={(queryError as Error).message}
             icon={<Search className="h-6 w-6" />}
           />
         ) : browseItems.length === 0 ? (
           <EmptyState
-            title={t("skills.no_results")}
+            title={
+              hubFilter === "all" && !search
+                ? t("skills.search_to_explore", {
+                    defaultValue: "Type to search across hubs",
+                  })
+                : t("skills.no_results")
+            }
             icon={<Search className="h-6 w-6" />}
           />
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {source === "fanghub"
-              ? (browseItems as FangHubSkill[]).map((skill) => (
-                  <SkillCard
-                    key={skill.name}
-                    variant="fanghub"
-                    name={skill.name}
-                    version={skill.version}
-                    description={skill.description}
-                    tags={skill.tags}
-                    isInstalled={skill.is_installed}
-                    installPending={installingId === skill.name}
-                    onInstall={() => handleInstall(skill.name, "fanghub")}
-                    onViewDetail={() => setDetailsFangHub(skill)}
-                    t={t}
-                  />
-                ))
-              : (browseItems as ClawHubSkillWithStatus[]).map((s) => (
-                  <SkillCard
-                    key={s.slug}
-                    variant="marketplace"
-                    name={s.name}
-                    version={s.version}
-                    description={s.description}
-                    tags={s.tags}
-                    stars={s.stars}
-                    downloads={s.downloads}
-                    isInstalled={s.is_installed}
-                    installPending={installingId === s.slug}
-                    source={source as MarketplaceSource}
-                    onInstall={() => handleInstall(s.slug, source)}
-                    onViewDetail={() => { setDetailsSkill(s); setDetailsSource(source as MarketplaceSource); }}
-                    t={t}
-                  />
-                ))
-            }
+            {browseItems.map((entry) =>
+              entry._hub === "fanghub" ? (
+                <SkillCard
+                  key={`fanghub:${entry.name}`}
+                  variant="fanghub"
+                  name={entry.name}
+                  version={entry.version}
+                  description={entry.description}
+                  tags={entry.tags}
+                  isInstalled={entry.is_installed}
+                  installPending={installingId === entry.name}
+                  source="fanghub"
+                  hubBadge={<HubBadge hub="fanghub" />}
+                  onInstall={() => handleInstall(entry.name, "fanghub")}
+                  onViewDetail={() => setDetailsFangHub(entry as FangHubSkill)}
+                  t={t}
+                />
+              ) : (
+                <SkillCard
+                  key={`${entry._hub}:${entry.slug}`}
+                  variant="marketplace"
+                  name={entry.name}
+                  version={entry.version}
+                  description={entry.description}
+                  tags={entry.tags}
+                  stars={entry.stars}
+                  downloads={entry.downloads}
+                  isInstalled={entry.is_installed}
+                  installPending={installingId === entry.slug}
+                  source={entry._hub}
+                  hubBadge={<HubBadge hub={entry._hub} />}
+                  onInstall={() => handleInstall(entry.slug, entry._hub)}
+                  onViewDetail={() => {
+                    setDetailsSkill(entry as ClawHubSkillWithStatus);
+                    setDetailsSource(entry._hub);
+                  }}
+                  t={t}
+                />
+              ),
+            )}
           </div>
         );
       })()}
