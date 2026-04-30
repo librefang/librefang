@@ -71,6 +71,17 @@ pub enum AuditAction {
     /// most recent at the moment it is written and therefore survives
     /// every future trim.
     RetentionTrim,
+    /// Bug #3786: an external A2A agent card was fetched into the pending
+    /// list via `POST /api/a2a/discover`. Detail carries the discovery URL
+    /// and the card's self-declared name (which is unverified at this
+    /// point). The agent cannot receive tasks until promoted via
+    /// `A2aTrusted`.
+    A2aDiscovered,
+    /// Bug #3786: a pending A2A agent was promoted into the trusted list
+    /// by an operator via `POST /api/a2a/agents/{id}/approve`. Detail
+    /// carries the URL and agent name. Subsequent `/api/a2a/send` and
+    /// `/api/a2a/tasks/.../status` calls to that URL are now permitted.
+    A2aTrusted,
 }
 
 impl std::fmt::Display for AuditAction {
