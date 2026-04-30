@@ -9686,13 +9686,9 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.get(agent_id) {
             if let Err(e) = self.memory.save_agent(&entry) {
                 if let Some((p_caps, p_allow, p_block, p_disabled)) = prev_tool_state {
-                    let _ = self.registry.restore_tool_state(
-                        agent_id,
-                        p_caps,
-                        p_allow,
-                        p_block,
-                        p_disabled,
-                    );
+                    let _ = self
+                        .registry
+                        .restore_tool_state(agent_id, p_caps, p_allow, p_block, p_disabled);
                 }
                 return Err(KernelError::LibreFang(e));
             }

@@ -120,17 +120,20 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ["react", "react-dom"],
-          router: ["@tanstack/react-router", "@tanstack/react-query"],
-          charts: ["recharts"],
-          flow: ["@xyflow/react"],
+        // Vite 8 uses Rolldown, which only accepts the function form of
+        // manualChunks. Mirrors the previous Rollup object grouping.
+        manualChunks: (id) => {
+          if (!id.includes("node_modules")) return;
+          if (/[\\/]node_modules[\\/](react|react-dom)[\\/]/.test(id)) return "vendor";
+          if (id.includes("@tanstack/react-router") || id.includes("@tanstack/react-query")) return "router";
+          if (id.includes("recharts")) return "charts";
+          if (id.includes("@xyflow/react")) return "flow";
           // Isolate lucide-react named imports into their own chunk so adding
           // a single icon to a route doesn't bloat its first-load bundle.
           // See issue #3768.
-          icons: ["lucide-react"],
-        }
-      }
-    }
+          if (id.includes("lucide-react")) return "icons";
+        },
+      },
+    },
   }
 });
