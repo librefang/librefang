@@ -7,6 +7,11 @@ account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
 binding = "KV"
 id = "5d12c668469a4dd39f3b2b378cc20036"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "librefang-marketplace"
+database_id = "REPLACE_WITH_ACTUAL_D1_ID"
+
 # Daily registry refresh at UTC 02:00 (after stats worker at 00:00)
 [triggers]
 crons = ["0 2 * * *"]

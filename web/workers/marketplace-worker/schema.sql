@@ -56,7 +56,16 @@ CREATE TABLE IF NOT EXISTS download_counts_pending (
   PRIMARY KEY (package_id, version_id, week)
 );
 
+-- Registry item click counts (replaces KV shard pattern)
+CREATE TABLE IF NOT EXISTS registry_clicks (
+  category   TEXT NOT NULL,
+  item_id    TEXT NOT NULL,
+  count      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (category, item_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_packages_kind ON packages(kind);
 CREATE INDEX IF NOT EXISTS idx_packages_downloads ON packages(total_downloads DESC);
 CREATE INDEX IF NOT EXISTS idx_packages_updated ON packages(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_versions_package ON package_versions(package_id);
+CREATE INDEX IF NOT EXISTS idx_clicks_category ON registry_clicks(category, count DESC);

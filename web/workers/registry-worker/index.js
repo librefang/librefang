@@ -22,7 +22,6 @@ const CATEGORIES = ['hands', 'channels', 'providers', 'workflows', 'agents', 'pl
 const CATEGORY_RE = /^(hands|channels|providers|workflows|agents|plugins|skills|mcp)\//
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i
 
-const CLICK_SHARDS = 8
 const ERROR_SHARDS = 4
 const ERRORS_MAX_PER_SHARD = 25
 
@@ -187,30 +186,16 @@ async function handleClick(request, env, ctx) {
   if (!CATEGORIES.includes(category) || !ID_RE.test(id))
     return new Response('invalid payload', { status: 400, headers: CORS })
 
-  const shard = Math.floor(Math.random() * CLICK_SHARDS)
-  const key = `registry_clicks:${category}:${shard}`
-
-  ctx.waitUntil((async () => {
-    let counts = {}
-    try {
-      const raw = await env.KV.get(key)
-      if (raw) counts = JSON.parse(raw)
-    } catch (_) { counts = {} }
-
-    counts[id] = (counts[id] || 0) + 1
-
-    const entries = Object.entries(counts)
-    if (entries.length > 500) {
-      entries.sort((a, b) => b[1] - a[1])
-      counts = Object.fromEntries(entries.slice(0, 500))
-    }
-    await env.KV.put(key, JSON.stringify(counts))
-  })())
+  ctx.waitUntil(
+    env.DB.prepare(
+      `INSERT INTO registry_clicks (category, item_id, count) VALUES (?, ?, 1)
+       ON CONFLICT(category, item_id) DO UPDATE SET count = count + 1`,
+    ).bind(category, id).run(),
+  )
 
   return new Response('{"ok":true}', { headers: { 'Content-Type': 'application/json', ...CORS } })
 }
 
-// Trending uses Cache API with short TTL to avoid 8 KV reads per request.
 async function handleTrending(request, env, ctx, category) {
   if (!CATEGORIES.includes(category)) return errorResponse('invalid category', 400)
 
@@ -218,57 +203,40 @@ async function handleTrending(request, env, ctx, category) {
   const cached = await caches.default.match(cacheKey)
   if (cached) return addCors(cached)
 
-  const counts = await loadClickTotals(env, category)
-  const top = Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([id, clicks]) => ({ id, clicks }))
+  const rows = await env.DB.prepare(
+    `SELECT item_id as id, count as clicks FROM registry_clicks
+     WHERE category = ? ORDER BY count DESC LIMIT 10`,
+  ).bind(category).all()
 
-  const response = jsonResponse(JSON.stringify({ category, top }), 600) // 10 min
+  const response = jsonResponse(JSON.stringify({ category, top: rows.results }), 600)
   ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
   return response
 }
 
 async function handleMetrics(env) {
+  const [perCatRows, topRows, totalRow] = await Promise.all([
+    env.DB.prepare(
+      `SELECT category, SUM(count) as total, COUNT(*) as items
+       FROM registry_clicks GROUP BY category`,
+    ).all(),
+    env.DB.prepare(
+      `SELECT category, item_id as id, count as clicks
+       FROM registry_clicks ORDER BY count DESC LIMIT 10`,
+    ).all(),
+    env.DB.prepare(`SELECT SUM(count) as total FROM registry_clicks`).first(),
+  ])
+
   const perCategory = {}
-  const allItems = []
-
-  for (const cat of CATEGORIES) {
-    const counts = await loadClickTotals(env, cat)
-    let total = 0
-    for (const [id, n] of Object.entries(counts)) {
-      total += n
-      allItems.push({ category: cat, id, clicks: n })
-    }
-    perCategory[cat] = { total, items: Object.keys(counts).length }
+  for (const row of perCatRows.results) {
+    perCategory[row.category] = { total: row.total, items: row.items }
   }
-
-  allItems.sort((a, b) => b.clicks - a.clicks)
 
   return jsonResponse(JSON.stringify({
     generatedAt: new Date().toISOString(),
     perCategory,
-    topOverall: allItems.slice(0, 10),
-    totalClicks: allItems.reduce((s, x) => s + x.clicks, 0),
+    topOverall: topRows.results,
+    totalClicks: totalRow?.total ?? 0,
   }), 300)
-}
-
-async function loadClickTotals(env, category) {
-  const shards = await Promise.all(
-    Array.from({ length: CLICK_SHARDS }, (_, i) =>
-      env.KV.get(`registry_clicks:${category}:${i}`).catch(() => null),
-    ),
-  )
-  const totals = {}
-  for (const raw of shards) {
-    if (!raw) continue
-    let counts = {}
-    try { counts = JSON.parse(raw) } catch (_) { continue }
-    for (const [id, n] of Object.entries(counts)) {
-      totals[id] = (totals[id] || 0) + (typeof n === 'number' ? n : 0)
-    }
-  }
-  return totals
 }
 
 // ---------------------------------------------------------------------------
