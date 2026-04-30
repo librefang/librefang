@@ -137,6 +137,11 @@ pub struct PluginEvent {
     pub source_plugin: String,
 }
 
+/// Rate-limit window between consecutive `error!` logs from
+/// [`PluginEventBus::record_consumer_lag`]. Mirrors the kernel
+/// `EventBus`'s 10 s cadence so the two buses behave the same.
+const LAG_WARN_INTERVAL_SECS: u64 = 10;
+
 /// A simple in-process event bus for plugin events.
 ///
 /// Backed by a `tokio::sync::broadcast` channel so multiple engines can
@@ -154,10 +159,17 @@ pub struct PluginEventBus {
 impl PluginEventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(capacity);
+        // Initialise the rate-limit timestamp far enough in the past that
+        // the FIRST lag burst after startup is always logged. Without this,
+        // a fresh process that immediately sees lag would only bump the
+        // counter and stay silent for the first 10 s — defeating the
+        // "make lag visible" goal of #3630.
+        let warmup =
+            std::time::Instant::now() - std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS + 1);
         Self {
             tx,
             dropped_count: std::sync::atomic::AtomicU64::new(0),
-            last_drop_warn: std::sync::Mutex::new(std::time::Instant::now()),
+            last_drop_warn: std::sync::Mutex::new(warmup),
         }
     }
 
@@ -186,7 +198,7 @@ impl PluginEventBus {
             .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
             + n;
         if let Ok(mut last) = self.last_drop_warn.lock() {
-            if last.elapsed() >= std::time::Duration::from_secs(10) {
+            if last.elapsed() >= std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS) {
                 tracing::error!(
                     lagged = n,
                     total_dropped = total,
@@ -4602,6 +4614,20 @@ mod tests {
         let config = ContextEngineConfig::default();
         let engine = DefaultContextEngine::new(config.clone(), make_memory(), None);
         assert!(engine.bootstrap(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn plugin_bus_record_consumer_lag_increments_dropped_count() {
+        // Mirrors `EventBus::record_consumer_lag_increments_dropped_count`
+        // from librefang-kernel — the two impls drift apart silently
+        // unless both are tested. Counter accounting only; the rate-
+        // limited error! log is exercised but not asserted on.
+        let bus = PluginEventBus::new(8);
+        assert_eq!(bus.dropped_count(), 0);
+        bus.record_consumer_lag(7, "test");
+        assert_eq!(bus.dropped_count(), 7);
+        bus.record_consumer_lag(3, "test");
+        assert_eq!(bus.dropped_count(), 10);
     }
 
     #[tokio::test]

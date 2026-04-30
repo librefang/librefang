@@ -49,12 +49,18 @@ impl EventBus {
         // above 1 024 events between scheduler ticks, causing RecvError::Lagged
         // and silently dropping trigger-driving events (issue #3630).
         let (sender, _) = broadcast::channel(4096);
+        // Backdate the rate-limit timestamp so the FIRST lag burst after
+        // process start is always logged. Initialising to `Instant::now()`
+        // would silence the first 10 s of lag — a fresh process that
+        // immediately sees backlog would only bump dropped_count and stay
+        // quiet, defeating the "make lag visible" goal of #3630.
+        let warmup = std::time::Instant::now() - std::time::Duration::from_secs(11);
         Self {
             sender,
             agent_channels: DashMap::new(),
             history: Arc::new(RwLock::new(VecDeque::with_capacity(HISTORY_SIZE))),
             dropped_count: AtomicU64::new(0),
-            last_drop_warn: std::sync::Mutex::new(std::time::Instant::now()),
+            last_drop_warn: std::sync::Mutex::new(warmup),
         }
     }
 

@@ -373,8 +373,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// they observe `RecvError::Lagged(n)`. The production impl forwards
     /// to `EventBus::record_consumer_lag` so lag drops show up in the
     /// kernel's `dropped_count` metric and trigger a rate-limited
-    /// `error!` log (issue #3630). Default is a no-op so test mocks
-    /// without an event bus don't need to thread one in.
+    /// `error!` log (issue #3630).
+    ///
+    /// **Production implementations MUST override this.** The default is
+    /// a no-op convenience for test mocks that do not have an event bus
+    /// to forward to; a production handle that inherits the default would
+    /// silently swallow lag drops, defeating #3630. There is no compiler
+    /// signal for this — please remember to override when adding a new
+    /// non-test impl.
     fn record_consumer_lag(&self, _n: u64, _context: &'static str) {}
 
     // ── Budget, Network, A2A ──
