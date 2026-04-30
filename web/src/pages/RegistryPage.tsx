@@ -12,8 +12,7 @@ import SiteHeader from '../components/SiteHeader'
 import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
-import { useMarketplace } from '../lib/useMarketplace'
-import type { MarketplacePkg } from '../lib/useMarketplace'
+import { useMarketplace, type MarketplacePkg } from '../lib/useMarketplace'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -164,7 +163,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
           || (i.category || '').toLowerCase().includes(q)
           || (i.tags || []).some(tag => tag.toLowerCase().includes(q))
     })
-  }, [items, query, lang, sortBy, trendingIds, isFavorite, category])
+  }, [items, query, lang, sortBy, trendingIds, isFavorite, category, marketplace])
 
   const categories = useMemo(() => {
     const set = new Set<string>()
