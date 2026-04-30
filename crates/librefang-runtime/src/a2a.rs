@@ -743,8 +743,12 @@ pub async fn discover_external_agents(
                 // Bug #3786: store by URL so the trust gate in `/api/a2a/send`
                 // can match on the same key callers pass. Statically-seeded
                 // agents are operator-authored (config.toml) and therefore
-                // legitimately trusted at boot.
-                discovered.push((agent.url.clone(), card));
+                // legitimately trusted at boot. Canonicalize first so the
+                // gate's input (also canonicalized) matches regardless of
+                // trailing-slash / case / default-port variations between
+                // config.toml and the API caller.
+                let key = canonicalize_a2a_url(&agent.url).unwrap_or_else(|| agent.url.clone());
+                discovered.push((key, card));
             }
             Err(e) => {
                 warn!(
@@ -817,6 +821,54 @@ const MAX_AGENT_CARD_BYTES: usize = 256 * 1024;
 /// via `tasks/send` or `tasks/get`.
 const MAX_A2A_TASK_BYTES: usize = 1024 * 1024;
 
+/// Canonicalize an A2A peer URL for trust-list comparison (Bug #3786
+/// follow-up).
+///
+/// Trust insertion (`approve`, static seeding) and the gate at
+/// `/api/a2a/send` / `tasks/{id}/status` / `tool_a2a_send` MUST run user
+/// input through the same canonicalizer so accidental cosmetic variations
+/// (trailing slash, default port, host case) don't deny legitimate calls,
+/// and so an attacker can't sneak past a naive string match by appending
+/// `#`, `?`, or capitalising the host.
+///
+/// Returns `None` for input that doesn't parse as a URL with a host.
+pub fn canonicalize_a2a_url(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    parsed.set_fragment(None);
+    if parsed.query() == Some("") {
+        parsed.set_query(None);
+    }
+    // Lowercase the scheme + host (URLs are case-insensitive in those parts).
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let _ = parsed.set_scheme(&scheme);
+    // Own the host string before calling the mutable `set_host`, otherwise
+    // `host_str()`'s borrow of `parsed` would still be live when we reach
+    // `&mut parsed`. Url already lowercases the host of "special" schemes
+    // (http/https/ws/wss/ftp/file) on parse, so this is mostly a no-op,
+    // but it stays correct if a future url crate version stops doing that
+    // and is the right pattern for non-special schemes.
+    let host_owned = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return None,
+    };
+    let _ = parsed.set_host(Some(&host_owned));
+    // Drop default ports so `https://x.com` and `https://x.com:443` collapse.
+    if let Some(port) = parsed.port() {
+        let default = match parsed.scheme() {
+            "https" => Some(443),
+            "http" => Some(80),
+            _ => None,
+        };
+        if Some(port) == default {
+            let _ = parsed.set_port(None);
+        }
+    }
+    // Normalize trailing slash on path-only URLs: `https://x.com` →
+    // `https://x.com/`. `Url` already does this on parse, but a path of
+    // `/` is canonical so leave it alone otherwise.
+    Some(parsed.into())
+}
+
 /// Read at most `max_bytes` from a `reqwest::Response`, rejecting upfront
 /// when `Content-Length` already exceeds the cap and aborting mid-stream
 /// once the running total trips it (Bug #3785).
@@ -884,6 +936,16 @@ impl A2aClient {
             client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(redirect_policy)
+                // Bug #3785: disable transport-layer decompression. Otherwise
+                // `Response::content_length()` is the *encoded* size and
+                // `Response::chunk()` yields *decoded* bytes, so a 10 KB gzip
+                // bomb that decompresses to 1 GB would slip past the upfront
+                // check and start filling the buffer before the per-chunk
+                // cap fires. Reading the wire bytes directly keeps the cap
+                // honest.
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
                 .build()
                 .expect("HTTP client build"),
         }
