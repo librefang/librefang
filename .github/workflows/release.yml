@@ -1363,7 +1363,7 @@ jobs:
             mobile-android-
 
       - name: Cache Gradle
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.gradle/caches
@@ -1373,7 +1373,7 @@ jobs:
 
       # See mobile-smoke.yml for why this cache is paired with the install.
       - name: Cache tauri-cli binary
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -1587,7 +1587,7 @@ jobs:
             mobile-ios-
 
       - name: Cache tauri-cli binary
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
