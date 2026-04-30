@@ -126,9 +126,7 @@ pub struct ServerHandleHolder(pub std::sync::Mutex<Option<server::ServerHandle>>
 /// logs rather than a silent `warn!` on a per-listener counter (issue #3630).
 pub async fn forward_kernel_events(
     app_handle: tauri::AppHandle,
-    event_rx: &mut tokio::sync::broadcast::Receiver<
-        std::sync::Arc<librefang_types::event::Event>,
-    >,
+    event_rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>,
     kernel: &Arc<LibreFangKernel>,
 ) {
     while let Some(event) =
