@@ -41,9 +41,7 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
     // Persist the seed config so persist_users round-trips through a real
     // file on disk (mirrors how the daemon runs in production).
     let config_path = test.tmp_path().join("config.toml");
-    let config_str =
-        toml::to_string_pretty(&*test.state.kernel.config_ref()).expect("serialize config");
-    std::fs::write(&config_path, config_str).unwrap();
+    let test = test.with_config_path(config_path);
 
     let state = test.state.clone();
     let app = Router::new()

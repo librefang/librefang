@@ -206,8 +206,8 @@ async fn test_server_immediate_responsiveness() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    // Drop test to release TempDir ownership — the server is already running.
-    drop(test);
+    // Keep TempDir alive while the server task can still access kernel paths.
+    let (_state, _tmp, _) = test.into_parts();
 
     // Hit health endpoint immediately — should respond fast
     let client = librefang_runtime::http_client::new_client();

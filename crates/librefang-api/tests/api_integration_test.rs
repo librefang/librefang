@@ -2679,8 +2679,9 @@ async fn start_test_server_with_rbac_users(
     .with_api_key(api_key)
     .with_user_api_keys(api_user_records);
 
-    let (state, tmp, config_path) = test.into_parts();
-    let config_path = config_path.unwrap_or_else(|| tmp.path().join("config.toml"));
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, tmp, _) = test.into_parts();
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
@@ -2934,8 +2935,9 @@ async fn start_test_server_with_full_user_configs(
     .with_api_key(api_key)
     .with_user_api_keys(api_user_records);
 
-    let (state, tmp, config_path) = test.into_parts();
-    let config_path = config_path.unwrap_or_else(|| tmp.path().join("config.toml"));
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, tmp, _) = test.into_parts();
 
     let api_key_state = middleware::AuthState {
         api_key_lock: state.api_key_lock.clone(),
