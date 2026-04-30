@@ -1361,16 +1361,14 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
 
 /// #3798 — Compute the sibling staging directory used during atomic migration.
 fn staging_dir_for(target: &Path) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    // Fixed name (no timestamp) so a stale staging dir from a previous failed
+    // run is detectable via staging.exists() (#3798).
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let leaf = target
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(".librefang");
-    parent.join(format!("{leaf}.migrate-staging-{stamp}"))
+    parent.join(format!("{leaf}.migrate-staging"))
 }
 
 /// #3798 — Recursively move entries from `staging` into `target`, never
@@ -1384,11 +1382,11 @@ fn promote_staging(
     std::fs::create_dir_all(target)?;
     promote_dir(staging, target, target, report)?;
 
-    let staging_str = staging.display().to_string();
-    let target_str = target.display().to_string();
     for item in &mut report.imported {
-        if item.destination.starts_with(&staging_str) {
-            item.destination = item.destination.replacen(&staging_str, &target_str, 1);
+        // Use Path::strip_prefix so path separators are handled correctly on
+        // all platforms (avoids string-based prefix replacement).
+        if let Ok(rel) = Path::new(&item.destination).strip_prefix(staging) {
+            item.destination = target.join(rel).display().to_string();
         }
     }
 
@@ -1425,10 +1423,21 @@ fn promote_dir(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // Same-filesystem rename — atomic per-entry. If for some reason
-            // the rename fails (e.g. cross-device), fall back to copy+remove.
+            // Same-filesystem rename — atomic per-entry. If cross-device,
+            // stage to a tmp file beside the destination first, then rename
+            // so the destination is never left partially written.
             if std::fs::rename(&from, &to).is_err() {
-                std::fs::copy(&from, &to)?;
+                let tmp = to.with_extension("migrate-tmp");
+                if let Err(e) = std::fs::copy(&from, &tmp) {
+                    // Clean up and propagate so the caller leaves staging in
+                    // place for inspection.
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(MigrateError::Io(e));
+                }
+                if let Err(e) = std::fs::rename(&tmp, &to) {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(MigrateError::Io(e));
+                }
                 let _ = std::fs::remove_file(&from);
             }
         }
@@ -4979,6 +4988,33 @@ mod tests {
             backups.is_empty(),
             "no backup expected (never-clobber semantics), got {} backup(s)",
             backups.len()
+        );
+    }
+
+    /// #3798 — A stale staging directory from a previous failed run must cause
+    /// migrate() to return StagingExists rather than silently overwriting it.
+    #[test]
+    fn test_staging_exists_is_refused() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+
+        create_json5_workspace(source.path());
+
+        // Simulate a leftover staging dir from a previous failed run.
+        let staging = staging_dir_for(target.path());
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let options = MigrateOptions {
+            source: crate::MigrateSource::OpenClaw,
+            source_dir: source.path().to_path_buf(),
+            target_dir: target.path().to_path_buf(),
+            dry_run: false,
+        };
+
+        let err = migrate(&options).unwrap_err();
+        assert!(
+            matches!(err, MigrateError::StagingExists(_)),
+            "expected StagingExists, got {err:?}"
         );
     }
 
