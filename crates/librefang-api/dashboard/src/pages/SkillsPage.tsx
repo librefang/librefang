@@ -43,7 +43,7 @@ import {
   SkillHubBar,
   SkillHubHeadline,
   HubBadge,
-  type HubFilter as SkillHubFilter,
+  type HubFilter,
   type HubCounts,
   type HubHealthMap,
 } from "../components/SkillHubBar";
@@ -86,8 +86,6 @@ import {
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 type ViewMode = "installed" | "browse";
 type MarketplaceSource = "fanghub" | "clawhub" | "clawhub-cn" | "skillhub";
-/** Browse hub filter — `"all"` aggregates every configured hub. */
-type HubFilter = "all" | MarketplaceSource;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1837,10 +1835,8 @@ export function SkillsPage() {
        *  health, latency hint (via tooltip), and per-hub counts. */}
       {viewMode === "browse" && (
         <SkillHubBar
-          hubFilter={hubFilter as SkillHubFilter}
-          onChange={(next) => {
-            setHubFilter(next as HubFilter);
-          }}
+          hubFilter={hubFilter}
+          onChange={setHubFilter}
           counts={hubCounts}
           health={hubHealth}
           totalCount={browseItems.length}
