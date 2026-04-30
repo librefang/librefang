@@ -4,6 +4,7 @@ import { wechatQrStart, wechatQrStatus, whatsappQrStart, whatsappQrStatus, type 
 import { useChannels } from "../lib/queries/channels";
 import { useConfigureChannel, useTestChannel, useReloadChannels } from "../lib/mutations/channels";
 import { useUIStore } from "../lib/store";
+import { toastErr } from "../lib/errors";
 import { copyToClipboard } from "../lib/clipboard";
 import QRCode from "qrcode";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -402,7 +403,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
           addToast(t("channels.config_success") || `${channel.display_name || channel.name} configured`, "success");
           onClose();
         },
-        onError: (err: any) => addToast(err.message || t("channels.config_failed") || "Failed to configure channel", "error"),
+        onError: (err) => addToast(toastErr(err, t("channels.config_failed") || "Failed to configure channel"), "error"),
       },
     );
   };
@@ -653,13 +654,13 @@ export function ChannelsPage() {
   const handleTest = (name: string) => {
     testMut.mutate(name, {
       onSuccess: () => addToast(t("channels.test_success", { defaultValue: `Channel "${name}" test passed` }), "success"),
-      onError: (err: any) => addToast(err.message || t("channels.test_failed", { defaultValue: `Channel "${name}" test failed` }), "error"),
+      onError: (err) => addToast(toastErr(err, t("channels.test_failed", { defaultValue: `Channel "${name}" test failed` })), "error"),
     });
   };
   const handleReload = () => {
     reloadMut.mutate(undefined, {
       onSuccess: () => addToast(t("channels.reload_success", { defaultValue: "Channels reloaded" }), "success"),
-      onError: (err: any) => addToast(err.message || t("common.error"), "error"),
+      onError: (err) => addToast(toastErr(err, t("common.error")), "error"),
     });
   };
 

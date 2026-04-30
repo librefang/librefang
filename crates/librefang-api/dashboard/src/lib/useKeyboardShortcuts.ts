@@ -113,7 +113,7 @@ export function useKeyboardShortcuts({ onShowHelp }: KeyboardShortcutsOptions) {
         const target = G_NAV_SHORTCUTS[e.key.toLowerCase()];
         if (target) {
           e.preventDefault();
-          navigate({ to: target.to } as any);
+          navigate({ to: target.to } as never);
         }
         return;
       }
