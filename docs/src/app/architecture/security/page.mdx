@@ -1436,6 +1436,10 @@ dashboard_pass = "vault:dashboard_password"
 
 The vault uses AES-256-GCM encryption with a master key stored in the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service) or via the `LIBREFANG_VAULT_KEY` environment variable.
 
+**Keyring fallback in containers and headless servers**: When the OS keyring is unavailable (Docker, CI, headless Linux), the daemon falls back to a file-based AES-256-GCM wrapped store. The wrapping key is derived via Argon2id from two independent entropy sources: a randomly-generated 32-byte machine-id persisted to `~/.local/share/librefang/.machine-id` (mode 0600) and available OS machine-identity material (`/etc/machine-id` on Linux, the IOPlatformUUID blob on macOS). Both sources are mixed with SHA-512 before the Argon2id KDF step.
+
+**Container deployments should always set `LIBREFANG_VAULT_KEY`**: In environments where the `~/.local/share/librefang/.machine-id` file does not survive container restarts (e.g. ephemeral rootfs), the file-based fallback cannot provide strong security guarantees. Set `LIBREFANG_VAULT_KEY` to a 32-byte base64-encoded secret (generate with `openssl rand -base64 32`) and inject it via your secrets manager. The daemon emits a `WARN`-level log on startup whenever the OS keyring is unavailable, whether `LIBREFANG_VAULT_KEY` is set or not.
+
 ### 18.4 Security Properties
 
 - **Constant-time comparison**: Credentials are compared using `subtle::ConstantTimeEq` to prevent timing attacks.
