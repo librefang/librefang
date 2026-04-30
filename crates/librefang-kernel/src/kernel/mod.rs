@@ -9892,10 +9892,15 @@ system_prompt = "You are a helpful assistant."
             .entry(agent_id)
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
             .clone();
+        // The trailing `;` matters: without it the if-let is the function's
+        // tail expression, which keeps the LockResult's temporaries borrowing
+        // `slot` until function exit — and `slot` itself drops at the same
+        // point, tripping E0597. The semicolon ends the statement so the
+        // temporaries (and the guard) drop before `slot` does.
         if let Ok(mut guard) = slot.lock() {
             guard.retain(|h| !h.is_finished());
             guard.push(handle);
-        }
+        };
     }
 
     /// Abort and drop every tracked watcher task for `agent_id`.
