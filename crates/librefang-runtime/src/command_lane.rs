@@ -157,6 +157,12 @@ impl CommandQueue {
     }
 
     /// Get current occupancy for all lanes.
+    ///
+    /// Note: `active` may transiently undercount during a [`resize_lane`]
+    /// call. In-flight permits hold a reference to the *old* semaphore and
+    /// release into it; the new semaphore starts with a fresh counter, so
+    /// until the old permits drain, `active` for the resized lane will
+    /// read lower than the true number of in-flight tasks.
     pub fn occupancy(&self) -> Vec<LaneOccupancy> {
         let mk = |lane: Lane| {
             let g = self.slot(lane).read().unwrap_or_else(|e| e.into_inner());

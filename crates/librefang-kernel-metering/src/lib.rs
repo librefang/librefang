@@ -226,6 +226,12 @@ impl MeteringEngine {
     /// [`Self::reserve_global_budget`] so concurrent trigger fires don't
     /// all see the same pre-call total and collectively overshoot the
     /// configured cap (#3616).
+    ///
+    /// Uses `>=` (reject at limit) rather than `>` (reject past limit).
+    /// [`reserve_global_budget`] uses `>` so a single call that exactly
+    /// reaches the cap is still allowed through; this post-call check
+    /// uses `>=` so once the limit is fully consumed no further calls
+    /// are dispatched. The asymmetry is intentional.
     pub fn check_global_budget(
         &self,
         budget: &librefang_types::config::BudgetConfig,

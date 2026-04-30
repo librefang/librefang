@@ -198,9 +198,9 @@ impl KernelConfig {
             let Some(toml::Value::Table(tbl)) = node else {
                 continue;
             };
-            let known_set: std::collections::HashSet<&&str> = known.iter().collect();
+            let known_set: std::collections::HashSet<&str> = known.iter().copied().collect();
             for key in tbl.keys() {
-                if !known_set.contains(&key.as_str()) {
+                if !known_set.contains(key.as_str()) {
                     unknown.push(format!("{path}.{key}"));
                 }
             }
