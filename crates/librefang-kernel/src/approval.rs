@@ -1123,7 +1123,7 @@ impl ApprovalManager {
             let is_first_match = eq & !found;
             let mask = (is_first_match.unwrap_u8() as usize).wrapping_neg();
             matched_idx = (matched_idx & !mask) | (i & mask);
-            found = found | eq;
+            found |= eq;
         }
 
         if bool::from(found) {
