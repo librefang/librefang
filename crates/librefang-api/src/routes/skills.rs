@@ -561,7 +561,7 @@ fn parse_yaml_inline_list(raw: &str) -> Vec<String> {
         .unwrap_or(trimmed);
     inner
         .split(',')
-        .map(|s| strip_yaml_value(s))
+        .map(strip_yaml_value)
         .filter(|s| !s.is_empty())
         .collect()
 }
