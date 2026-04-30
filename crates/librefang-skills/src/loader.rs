@@ -171,9 +171,19 @@ async fn drain_child_with_caps(
             }
         }
         if truncated {
-            // Kill immediately so the still-open pipe doesn't block child.wait().
+            // We've stopped reading; kill the child so it doesn't keep
+            // producing output we'll never drain. start_kill() queues SIGKILL
+            // on Linux/macOS / TerminateProcess on Windows; it does not block.
             let _ = child.start_kill();
         }
+        // Drop the owned pipe handles before wait(). On Windows, child.wait()
+        // waits on the process handle alone, but on Linux/macOS keeping the
+        // reader end open after we've stopped polling can leave kernel buffers
+        // referenced; freeing them ASAP is just hygiene. tokio::process::Child
+        // does not require pipes drained for wait() to return (unlike the
+        // sync wait_with_output) so this is correct, not a workaround.
+        drop(stdout_pipe);
+        drop(stderr_pipe);
         let status = child.wait().await?;
         Ok::<_, std::io::Error>((status, stdout_buf, stderr_buf, truncated))
     };
@@ -191,6 +201,27 @@ async fn drain_child_with_caps(
             timeout_secs: timeout_dur.as_secs(),
         }),
     }
+}
+
+/// Build the JSON payload returned when a skill's output trips
+/// `SKILL_MAX_OUTPUT_BYTES` and the child gets killed (#3455). Includes
+/// the first ~64 KiB of stdout/stderr so operators investigating a runaway
+/// skill can see what it was trying to print before being severed.
+const SKILL_TRUNCATED_HEAD_BYTES: usize = 64 * 1024;
+
+fn truncated_skill_payload(runtime: &str, stdout: &[u8], stderr: &[u8]) -> serde_json::Value {
+    let head = |buf: &[u8]| -> String {
+        let take = buf.len().min(SKILL_TRUNCATED_HEAD_BYTES);
+        String::from_utf8_lossy(&buf[..take]).into_owned()
+    };
+    serde_json::json!({
+        "error": format!(
+            "{runtime} skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
+        ),
+        "stdout_head": head(stdout),
+        "stderr_head": head(stderr),
+        "truncated": true,
+    })
 }
 
 /// Lightweight JSON Schema check for skill tool inputs (#3453).
@@ -254,6 +285,29 @@ fn validate_input_against_schema(
                 };
                 if let Some(type_node) = prop_schema.get("type") {
                     check_type(val, type_node).map_err(|e| format!("property '{key}': {e}"))?;
+                }
+            }
+        }
+        // `additionalProperties: false` — Draft-07 default is `true` (extras
+        // allowed). When the manifest opts in to strict validation, extra
+        // keys not declared in `properties` are rejected so a hostile LLM
+        // can't sneak unchecked fields past the spawn (#3453 follow-up).
+        if let (Some(input_obj), Some(false)) = (
+            input_obj,
+            schema_obj
+                .get("additionalProperties")
+                .and_then(|v| v.as_bool()),
+        ) {
+            let declared: std::collections::HashSet<&str> = schema_obj
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .map(|o| o.keys().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            for key in input_obj.keys() {
+                if !declared.contains(key.as_str()) {
+                    return Err(format!(
+                        "unexpected property '{key}' (additionalProperties: false)"
+                    ));
                 }
             }
         }
@@ -609,7 +663,10 @@ async fn execute_python(
             });
         }
         DrainOutcome::Completed {
-            truncated: true, ..
+            truncated: true,
+            stdout,
+            stderr,
+            ..
         } => {
             error!(
                 script = %script_path.display(),
@@ -617,11 +674,7 @@ async fn execute_python(
                 "Python skill output exceeded cap; child killed (#3455)"
             );
             return Ok(SkillToolResult {
-                output: serde_json::json!({
-                    "error": format!(
-                        "Python skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                    ),
-                }),
+                output: truncated_skill_payload("Python", &stdout, &stderr),
                 is_error: true,
             });
         }
@@ -764,7 +817,10 @@ async fn execute_node(
             });
         }
         DrainOutcome::Completed {
-            truncated: true, ..
+            truncated: true,
+            stdout,
+            stderr,
+            ..
         } => {
             error!(
                 script = %script_path.display(),
@@ -772,11 +828,7 @@ async fn execute_node(
                 "Node.js skill output exceeded cap; child killed (#3455)"
             );
             return Ok(SkillToolResult {
-                output: serde_json::json!({
-                    "error": format!(
-                        "Node.js skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                    ),
-                }),
+                output: truncated_skill_payload("Node.js", &stdout, &stderr),
                 is_error: true,
             });
         }
@@ -918,7 +970,10 @@ async fn execute_shell(
             });
         }
         DrainOutcome::Completed {
-            truncated: true, ..
+            truncated: true,
+            stdout,
+            stderr,
+            ..
         } => {
             error!(
                 script = %script_path.display(),
@@ -926,11 +981,7 @@ async fn execute_shell(
                 "Shell skill output exceeded cap; child killed (#3455)"
             );
             return Ok(SkillToolResult {
-                output: serde_json::json!({
-                    "error": format!(
-                        "Shell skill output exceeded {SKILL_MAX_OUTPUT_BYTES} bytes; child killed"
-                    ),
-                }),
+                output: truncated_skill_payload("Shell", &stdout, &stderr),
                 is_error: true,
             });
         }
@@ -1827,6 +1878,38 @@ echo '{"greeting": "hello from shell"}'
             &schema
         )
         .is_ok());
+    }
+
+    #[test]
+    fn test_validate_input_additional_properties_false_rejects_extras() {
+        // Manifests that opt in to strict mode must reject undeclared keys
+        // so a hostile LLM can't sneak unchecked fields past the spawn.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "additionalProperties": false,
+        });
+        let err = validate_input_against_schema(
+            &serde_json::json!({"url": "http://x", "extra": 7}),
+            &schema,
+        )
+        .expect_err("extra property must be rejected when additionalProperties is false");
+        assert!(
+            err.contains("'extra'") && err.contains("additionalProperties"),
+            "error message should name the offending property and explain why: got {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_input_additional_properties_false_passes_declared() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "url": { "type": "string" } },
+            "additionalProperties": false,
+        });
+        assert!(
+            validate_input_against_schema(&serde_json::json!({"url": "http://x"}), &schema).is_ok()
+        );
     }
 
     // ---- #3453 / #3454 end-to-end via execute_skill_tool ----
