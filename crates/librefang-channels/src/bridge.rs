@@ -376,13 +376,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// kernel's `dropped_count` metric and trigger a rate-limited
     /// `error!` log (issue #3630).
     ///
-    /// **Production implementations MUST override this.** The default is
-    /// a no-op convenience for test mocks that do not have an event bus
-    /// to forward to; a production handle that inherits the default would
-    /// silently swallow lag drops, defeating #3630. There is no compiler
-    /// signal for this — please remember to override when adding a new
-    /// non-test impl.
-    fn record_consumer_lag(&self, _n: u64, _context: &'static str) {}
+    /// No default impl on purpose: a default no-op would let any future
+    /// production handle silently inherit the no-op and swallow lag
+    /// drops, re-defeating #3630 with no compiler signal. Test mocks
+    /// that have no event bus to forward to should write an explicit
+    /// `fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}`
+    /// to acknowledge the requirement; that one line is cheaper than
+    /// chasing another silent-drop regression.
+    fn record_consumer_lag(&self, n: u64, context: &'static str);
 
     // ── Budget, Network, A2A ──
 
@@ -4951,6 +4952,9 @@ mod tests {
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
         }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+            // Test mock: no event bus to forward to.
+        }
     }
 
     /// Helper: replicate the metadata read + key build the bridge does, then
@@ -6739,6 +6743,9 @@ mod tests {
                 *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
                 true
             }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+                // Test mock: no event bus to forward to.
+            }
         }
 
         #[tokio::test]
@@ -6757,6 +6764,9 @@ mod tests {
                 }
                 async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
                     Err("not used in test".into())
+                }
+                fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+                    // Test mock: no event bus to forward to.
                 }
             }
 
