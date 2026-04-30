@@ -58,7 +58,7 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
   const markerX = markerIndex * stepX;
   const markerY = height - (data[markerIndex] / max) * (height - 16);
   return (
-    <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className="block w-full" style={{ height }} aria-hidden="true">
+    <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className="block w-full h-[130px] lg:h-[170px]" aria-hidden="true">
       <defs>
         <linearGradient id="cc-1" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.3" />
@@ -464,16 +464,16 @@ export function OverviewPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3 lg:gap-4 p-3 lg:p-6">
       {/* Hero strip */}
-      <header className="flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-text-dim flex items-center gap-1.5">
-            <span className="font-mono">{snapshot?.status?.hostname ?? versionInfo?.hostname ?? "node-01"}</span>
+      <header className="flex items-end justify-between gap-3 lg:gap-4 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10.5px] lg:text-[11px] font-semibold uppercase tracking-[0.08em] text-text-dim flex items-center gap-1.5">
+            <span className="font-mono truncate">{snapshot?.status?.hostname ?? versionInfo?.hostname ?? "node-01"}</span>
             <span>·</span>
-            <span>{new Date().toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+            <span className="truncate">{new Date().toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
           </div>
-          <h1 className="mt-1.5 text-xl sm:text-2xl font-semibold tracking-[-0.02em] text-text-main flex items-center gap-2 flex-wrap">
+          <h1 className="mt-1.5 text-lg sm:text-xl lg:text-2xl font-semibold tracking-[-0.02em] text-text-main flex items-center gap-2 flex-wrap">
             {isLoading ? (
               <span className="text-text-dim font-normal">{t("overview.loading_runtime", { defaultValue: "Loading runtime…" })}</span>
             ) : agentsTotal === 0 ? (
@@ -520,6 +520,36 @@ export function OverviewPage() {
             {t("overview.new_agent", { defaultValue: "New agent" })}
           </Button>
         </div>
+        {/* Mobile action bar — compact icon-only buttons */}
+        <div className="flex sm:hidden items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={refresh}
+            aria-label={t("overview.refresh", { defaultValue: "Refresh" })}
+            className="w-9 h-9 rounded-md border border-border-subtle bg-surface text-text-dim hover:text-text-main hover:border-brand/30 grid place-items-center transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 ${snapshotQuery.isFetching ? "animate-spin" : ""}`} />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const next: Range = range === "30d" ? "7d" : range === "7d" ? "90d" : "30d";
+              setRange(next);
+            }}
+            className="h-9 px-2.5 rounded-md border border-border-subtle bg-surface text-text-dim hover:text-text-main hover:border-brand/30 inline-flex items-center gap-1 text-[11px] font-mono transition-colors"
+          >
+            <Filter className="w-3.5 h-3.5" />
+            <span>{range}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate({ to: "/agents" })}
+            aria-label={t("overview.new_agent", { defaultValue: "New agent" })}
+            className="w-9 h-9 rounded-md bg-brand/15 border border-brand/30 text-brand hover:bg-brand/25 grid place-items-center transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+        </div>
       </header>
 
       {/* Setup banner */}
@@ -551,7 +581,7 @@ export function OverviewPage() {
       ) : null}
 
       {/* KPI grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 lg:gap-3">
         <Kpi
           label={t("overview.kpi.active_agents", { defaultValue: "Active agents" })}
           value={agentsRunning}
@@ -595,26 +625,26 @@ export function OverviewPage() {
       {/* Cost trend chart + Health column */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <Card padding="none" className="surface-lit lg:col-span-2 overflow-hidden">
-          <div className="px-4 pt-3.5 pb-2 flex items-start justify-between">
-            <div>
+          <div className="px-3 lg:px-4 pt-3 lg:pt-3.5 pb-2 flex items-start justify-between gap-2">
+            <div className="min-w-0">
               <SectionLabel className="!mb-0.5">
                 {t("overview.cost.title", { defaultValue: "Cost" })} · {t(rangeData.labelKey, { defaultValue: range })}
               </SectionLabel>
-              <div className="flex items-baseline gap-2">
-                <span className="font-mono font-semibold text-[22px] tracking-[-0.02em] tabular-nums">${rangeData.cost.toFixed(2)}</span>
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <span className="font-mono font-semibold text-lg lg:text-[22px] tracking-[-0.02em] tabular-nums">${rangeData.cost.toFixed(2)}</span>
                 <span className={`text-[11px] font-mono tabular-nums ${costTrendDir === "up" ? "text-rose-400" : "text-emerald-400"}`}>
                   {costTrendDir === "up" ? "+" : "−"}${Math.abs(costDelta).toFixed(0)} {t("overview.cost.vs_prior", { defaultValue: "vs prior" })}
                 </span>
               </div>
             </div>
-            <div className="flex gap-1.5">
+            <div className="flex gap-1 lg:gap-1.5 shrink-0">
               {(["7d", "30d", "90d"] as const).map((p) => {
                 const active = p === range;
                 return (
                   <button
                     key={p}
                     onClick={() => setRange(p)}
-                    className={`px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
+                    className={`px-2 lg:px-2.5 py-0.5 text-[11px] rounded-md font-mono cursor-pointer transition-colors ${
                       active
                         ? "bg-brand/10 border border-brand/30 text-brand"
                         : "bg-transparent border border-border-subtle text-text-dim hover:border-brand/20"
@@ -629,7 +659,7 @@ export function OverviewPage() {
           <div className="px-2 pb-2">
             <CostChart data={rangeData.trend} height={170} />
           </div>
-          <div className="flex gap-4 px-4 pb-3 text-[11px] text-text-dim">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 lg:gap-4 px-3 lg:px-4 pb-3 text-[10.5px] lg:text-[11px] text-text-dim">
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2 h-0.5 bg-sky-400 rounded-sm" /> Anthropic · 64%
             </span>
@@ -645,7 +675,7 @@ export function OverviewPage() {
         {/* Alerts — derived from agents/MCP/approvals. Mirrors the design's
             sidebar Alerts panel; dismissible items, View all / Show less. */}
         <Card padding="none" className="surface-lit">
-          <div className="px-4 pt-3.5">
+          <div className="px-3 lg:px-4 pt-3 lg:pt-3.5">
             <SectionLabel
               action={
                 visibleAlerts.length > 3 ? (
@@ -710,7 +740,7 @@ export function OverviewPage() {
                     if (alert.page) navigate({ to: alert.page as never });
                     dismissAlert(alert.id);
                   }}
-                  className="px-4 py-2.5 flex items-start gap-2.5 border-t border-border-subtle bg-transparent text-left cursor-pointer hover:bg-main/30 transition-colors"
+                  className="px-3 lg:px-4 py-2.5 flex items-start gap-2.5 border-t border-border-subtle bg-transparent text-left cursor-pointer hover:bg-main/30 transition-colors"
                 >
                   <div
                     className="w-6 h-6 rounded-md grid place-items-center shrink-0"
@@ -743,14 +773,14 @@ export function OverviewPage() {
           recent-agents view when the daemon hasn't surfaced any sessions yet
           (e.g. fresh install) so the row never goes empty. */}
       <Card padding="none" className="surface-lit">
-        <div className="px-4 pt-3.5 pb-2 flex items-center justify-between">
+        <div className="px-3 lg:px-4 pt-3 lg:pt-3.5 pb-2 flex items-center justify-between gap-2">
           <SectionLabel className="!mb-0">
             {recentSessions.length > 0
               ? t("overview.recent_sessions", { defaultValue: "Recent sessions" })
               : t("overview.recent_agents", { defaultValue: "Recent agents" })}
           </SectionLabel>
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-[11px] text-text-dim/80">
+          <div className="flex items-center gap-2 lg:gap-3 shrink-0">
+            <span className="font-mono text-[10.5px] lg:text-[11px] text-text-dim/80 hidden sm:inline">
               {t("overview.updated", { defaultValue: "updated" })} · {updatedAgo}
             </span>
             <button
@@ -763,7 +793,86 @@ export function OverviewPage() {
             </button>
           </div>
         </div>
-        <div className="overflow-hidden">
+
+        {/* Mobile card list (sessions) */}
+        {recentSessions.length > 0 ? (
+          <ul className="md:hidden flex flex-col">
+            {recentSessions.slice(0, 4).map((session) => {
+              const agentName = session.agent_id
+                ? agentNameById.get(session.agent_id) ?? session.agent_id
+                : "—";
+              const status = session.active ? "running" : "ok";
+              const tokens = sessionTokens(session);
+              return (
+                <li key={session.session_id}>
+                  <button
+                    onClick={() => navigate({ to: "/sessions" } as never)}
+                    className="w-full text-left px-3 py-2.5 border-t border-border-subtle hover:bg-main/30 transition-colors flex items-start gap-2.5"
+                  >
+                    <Pill kind={pillKindForSessionStatus(status)} dot size="sm">
+                      <span className="sr-only">{status}</span>
+                    </Pill>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[12px] truncate">{agentName}</span>
+                        <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
+                          {session.created_at ? formatRelativeTime(session.created_at) : "-"}
+                        </span>
+                      </div>
+                      <div className="text-[12px] text-text-main mt-0.5 truncate">
+                        {session.label ? (
+                          session.label
+                        ) : (
+                          <span className="font-mono text-text-dim">#{session.session_id.slice(0, 8)}</span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex items-center gap-3 text-[10.5px] text-text-dim font-mono tabular-nums">
+                        <span>{tokens == null ? "-" : `${formatCompact(tokens)} tok`}</span>
+                        <span>{typeof session.cost_usd === "number" ? formatCost(session.cost_usd) : "-"}</span>
+                        <span>{formatDuration(session.duration_ms)}</span>
+                      </div>
+                    </div>
+                    <ChevronRight className="w-3.5 h-3.5 mt-0.5 text-text-dim/60 shrink-0" />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <ul className="md:hidden flex flex-col">
+            {recentAgents.length === 0 && !isLoading ? (
+              <li className="px-3 py-5 text-center text-text-dim text-xs border-t border-border-subtle">
+                {t("overview.no_active_agents", { defaultValue: "No agents yet" })}
+              </li>
+            ) : null}
+            {recentAgents.slice(0, 4).map((agent) => (
+              <li key={agent.id}>
+                <button
+                  onClick={() => navigate({ to: "/agents" })}
+                  className="w-full text-left px-3 py-2.5 border-t border-border-subtle hover:bg-main/30 transition-colors flex items-start gap-2.5"
+                >
+                  <Pill kind={pillKindForState(agent.state)} dot size="sm">
+                    <span className="sr-only">{agent.state}</span>
+                  </Pill>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-[12px] truncate">{agent.name}</span>
+                      <span className="font-mono text-[10.5px] text-text-dim/80 shrink-0 tabular-nums">
+                        {agent.last_active ? formatRelativeTime(agent.last_active) : "-"}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
+                      {agent.model_name ?? "-"}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 mt-0.5 text-text-dim/60 shrink-0" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="overflow-hidden hidden md:block">
           {recentSessions.length > 0 ? (
             <table className="w-full border-collapse text-[12.5px]">
               <thead>

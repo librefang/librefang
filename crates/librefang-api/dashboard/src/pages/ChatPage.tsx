@@ -21,7 +21,7 @@ import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
 import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
-import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText } from "lucide-react";
+import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { useUIStore } from "../lib/store";
@@ -1827,7 +1827,7 @@ function ChatInput({ agentId, onSend, onStop, isStreaming, disabled, inputDisabl
 }
 
 // Connection status bar with session dropdown
-function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount }: {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, wsConnected, modelName, modelProvider, sessions, activeSessionId, onSwitchSession, onNewSession, onDeleteSession, agentId, isHand, onModelChange, webSearchAugmentation, onWebSearchChange, webSearchAvailable, onOpenConfig, attached, attachedEventCount, onOpenMobileSheet }: {
   agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; onExport: () => void; wsConnected?: boolean; modelName?: string; modelProvider?: string;
   sessions?: SessionListItem[]; activeSessionId?: string;
   onSwitchSession?: (sessionId: string) => void; onNewSession?: () => void; onDeleteSession?: (sessionId: string) => void;
@@ -1846,6 +1846,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   attached?: boolean;
   /** Number of SSE events received on the attach stream (for operator visibility). */
   attachedEventCount?: number;
+  /** Mobile-only — opens the agent/session picker sheet. */
+  onOpenMobileSheet?: () => void;
 }) {
   const { t } = useTranslation();
   const [sessionOpen, setSessionOpen] = useState(false);
@@ -1975,11 +1977,21 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
   return (
     <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-linear-to-r from-surface to-transparent flex items-center justify-between">
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
-        <div className="relative">
+        {onOpenMobileSheet && (
+          <button
+            type="button"
+            onClick={onOpenMobileSheet}
+            className="lg:hidden -ml-0.5 inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-colors shrink-0"
+            aria-label={t("chat.open_agent_picker", { defaultValue: "Open agent picker" })}
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+        )}
+        <div className="relative hidden lg:block">
           <Wifi className="h-3.5 w-3.5 text-success" />
           <span className="absolute inset-0 rounded-full bg-success/30 animate-pulse" />
         </div>
-        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
+        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden lg:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
@@ -1995,8 +2007,8 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, onExport, 
               : ""}
           </Badge>
         )}
-        <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
-        <span className="text-xs font-medium text-text-dim truncate">{agentName}</span>
+        <span className="text-text-dim/30 hidden lg:inline">&bull;</span>
+        <span className="text-xs font-semibold text-text-main truncate">{agentName}</span>
         {isLoading && (
           <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
             {wsConnected ? t("chat.ws_streaming") : t("chat.generating")}
@@ -2399,6 +2411,8 @@ export function ChatPage() {
   // Message windowing: render only the last N messages to avoid DOM bloat in
   // long sessions. The user can load earlier messages with the button above.
   const [visibleCount, setVisibleCount] = useState(50);
+  // Mobile-only: agent picker / session list slide-in sheet visibility.
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const addToast = useUIStore((s) => s.addToast);
   const createSessionMutation = useCreateAgentSession();
   // NOTE: switch_agent_session is no longer called from ChatPage — see issue
@@ -2413,6 +2427,7 @@ export function ChatPage() {
   const selectAgent = useCallback((id: string) => {
     setSelectedAgentId(id);
     setVisibleCount(50);
+    setMobileSheetOpen(false);
     navigate({ to: "/chat", search: { agentId: id }, replace: true });
   }, [navigate]);
 
@@ -2761,27 +2776,28 @@ export function ChatPage() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
+    <div className="flex h-[calc(100dvh-180px)] lg:h-[calc(100vh-140px)] flex-col min-h-0">
       {/* Bug #3849: two separate aria-live regions so WS state changes and
           new-message announcements are each surfaced independently — a single
           region with `||` would silence msgAriaAnnouncement whenever the WS
           connection string is non-empty. */}
       <div key={ariaNonce} aria-live="polite" aria-atomic="true" className="sr-only">{ariaAnnouncement}</div>
       <div aria-live="polite" aria-atomic="true" className="sr-only">{msgAriaAnnouncement}</div>
-      {/* Header */}
-      <header className="pb-2 sm:pb-4">
+      {/* Header — hidden on mobile to maximize chat real estate above the BottomTabs */}
+      <header className="hidden lg:block pb-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-3">
-            <div className="relative hidden sm:block">
+          <div className="flex items-center gap-3">
+            <div className="relative">
               <Sparkles className="h-5 w-5 text-brand" />
               <span className="absolute inset-0 bg-brand/30 animate-pulse" />
             </div>
-            <span className="text-brand font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
-            <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
+            <span className="text-brand font-bold uppercase tracking-widest text-[10px]">{t("chat.neural_terminal")}</span>
+            <h1 className="text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
             onClick={() => void agentsQuery.refetch()}
-            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
+            className="p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-colors"
+            aria-label={t("common.refresh", { defaultValue: "Refresh" })}
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
@@ -2789,9 +2805,9 @@ export function ChatPage() {
       </header>
 
       {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
-        {/* Left sidebar - Agent list */}
-        <aside className="hidden md:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
+      <div className="flex flex-1 min-h-0 overflow-hidden rounded-none lg:rounded-2xl border-y lg:border border-border-subtle bg-surface lg:shadow-xl lg:ring-1 lg:ring-black/5 dark:lg:ring-white/5">
+        {/* Left sidebar - Agent list (desktop only; mobile uses a sheet) */}
+        <aside className="hidden lg:flex w-64 shrink-0 border-r border-border-subtle bg-main flex-col">
           <div className="p-4 border-b border-border-subtle space-y-2">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
             <button
@@ -2838,46 +2854,99 @@ export function ChatPage() {
         </aside>
 
         {/* Right side - Chat area */}
-        <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
+        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden bg-main/10 relative">
           {/* Background decoration */}
           <div className="absolute inset-0 pointer-events-none opacity-30">
             <div className="absolute top-0 left-0 w-64 h-64 bg-brand/5 rounded-full blur-3xl" />
             <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
           </div>
 
-          {/* Mobile agent selector */}
-          <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
-            <select
-              value={selectedAgentId}
-              onChange={(e) => selectAgent(e.target.value)}
-              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
-            >
-              <option value="">{t("chat.select_agent")}</option>
-              {picker.standalone.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {t(`agents.builtin.${agent.name}.name`, { defaultValue: agent.name })} ({agent.state || "unknown"})
-                </option>
-              ))}
-              {picker.handGroups.map((group) => (
-                <optgroup
-                  key={group.hand_id}
-                  label={`${group.hand_icon ?? ""} ${group.hand_name}`.trim()}
-                >
-                  {group.agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.role}
-                      {agent.isCoordinator
-                        ? ` (${t("chat.hand_coordinator", { defaultValue: "coordinator" })})`
-                        : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
+          {/* Mobile agent picker — slide-in sheet from the left. The backing
+              <aside> is desktop-only (`hidden lg:flex`), so on mobile we mount
+              an absolutely-positioned drawer over the chat area instead of
+              consuming a fixed width. */}
+          {mobileSheetOpen && (
+            <div className="lg:hidden absolute inset-0 z-40">
+              <div
+                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                onClick={() => setMobileSheetOpen(false)}
+                aria-hidden="true"
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={t("nav.agents")}
+                className="absolute inset-y-0 left-0 w-[80%] max-w-xs bg-main border-r border-border-subtle flex flex-col shadow-xl"
+              >
+                <div className="p-3 border-b border-border-subtle flex items-center justify-between">
+                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">{t("nav.agents")}</h3>
+                  <button
+                    type="button"
+                    onClick={() => setMobileSheetOpen(false)}
+                    className="h-8 w-8 rounded-lg flex items-center justify-center text-text-dim hover:text-brand hover:bg-surface-hover"
+                    aria-label={t("common.close", { defaultValue: "Close" })}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="px-3 pt-3">
+                  <button
+                    onClick={() => setShowHandAgents((value) => !value)}
+                    aria-pressed={showHandAgents}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-bold transition-colors ${
+                      showHandAgents
+                        ? "border-brand/30 bg-brand/10 text-brand"
+                        : "border-border-subtle bg-surface text-text-dim hover:border-brand/20 hover:text-brand"
+                    }`}
+                  >
+                    <span>{t("agents.show_hand_agents", { defaultValue: "Show hand agents" })}</span>
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
+                  {picker.standalone.length === 0 && picker.handGroups.length === 0 ? (
+                    <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+                  ) : (
+                    <>
+                      {picker.standalone.length > 0 && (
+                        <div className="space-y-2">
+                          {picker.handGroups.length > 0 && (
+                            <h4 className="px-1 pt-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim">
+                              {t("chat.group_standalone", { defaultValue: "Standalone" })}
+                            </h4>
+                          )}
+                          {picker.standalone.map((agent) => renderAgentButton(agent))}
+                        </div>
+                      )}
+                      {picker.handGroups.map((group) => (
+                        <div key={group.hand_id} className="space-y-2 pt-3">
+                          <h4 className="px-1 text-[10px] font-black uppercase tracking-[0.2em] text-text-dim flex items-center gap-1.5">
+                            {group.hand_icon && <span aria-hidden="true">{group.hand_icon}</span>}
+                            <span>{group.hand_name}</span>
+                          </h4>
+                          {group.agents.map((agent) =>
+                            renderAgentButton(agent, agent.role, agent.isCoordinator),
+                          )}
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+                <div className="p-3 border-t border-border-subtle">
+                  <button
+                    onClick={() => { void agentsQuery.refetch(); }}
+                    className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
+                    <span>{t("common.refresh", { defaultValue: "Refresh" })}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {selectedAgentId && (
             <ConnectionBar
+              onOpenMobileSheet={() => setMobileSheetOpen(true)}
               agentName={selectedAgent?.name || ""}
               isLoading={isLoading}
               messageCount={messages.length}
@@ -2917,7 +2986,7 @@ export function ChatPage() {
           )}
 
           {/* Message area */}
-          <div className="flex-1 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
+          <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-6 scrollbar-thin">
             <div className="w-full space-y-4 sm:space-y-6">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
@@ -2973,8 +3042,11 @@ export function ChatPage() {
             </div>
           </div>
 
-          {/* Input area */}
-          <div className={`pt-2 px-2 pb-safe-2 sm:pt-4 sm:px-4 sm:pb-safe-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          {/* Input area — sticks to the bottom of the chat column. The
+              app-shell's <main> already keeps this row above the
+              MobileBottomTabs (lg:hidden, ~56px + safe-area), so we don't
+              need a separate fixed bar here. */}
+          <div className={`shrink-0 pt-2 px-2 pb-2 sm:pt-4 sm:px-4 sm:pb-4 border-t border-border-subtle bg-surface transition-opacity ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               agentId={selectedAgentId ?? ""}
               onSend={sendMessage}
