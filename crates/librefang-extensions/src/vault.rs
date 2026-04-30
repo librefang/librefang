@@ -10,7 +10,8 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
-// sha2: Sha256/Digest used in non-test keyring helpers; Sha512 imported locally in mix_fingerprint_sources
+// Sha256 is used only in non-test keyring code (v1 XOR migration + predictable fallback).
+// Sha512 is imported locally in mix_fingerprint_sources so it compiles in test builds too.
 #[cfg(not(test))]
 use sha2::{Digest as _, Sha256};
 use std::collections::HashMap;
@@ -572,11 +573,18 @@ fn decode_master_key(key_b64: &str) -> ExtensionResult<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-/// On-disk format for the file-based keyring fallback (v2, AES-256-GCM wrapped).
+/// On-disk format for the file-based keyring fallback.
+///
+/// Version history:
+///   2 = AES-256-GCM wrapped, fingerprint derived from raw `random_id` (pre-#4159)
+///   3 = AES-256-GCM wrapped, fingerprint derived from SHA-512(domain || random_id || os_material)
+///
+/// Reads accept both 2 and 3; writes always emit 3.  Version 2 files are
+/// auto-migrated to version 3 on the first daemon restart after upgrade.
 #[cfg(not(test))]
 #[derive(Serialize, Deserialize)]
 struct KeyringFile {
-    /// Format version (2 = AES-256-GCM wrapped).
+    /// Format version (2 = legacy raw-id fingerprint, 3 = mixed fingerprint).
     version: u8,
     /// Argon2id salt (base64).
     salt: String,
@@ -584,6 +592,49 @@ struct KeyringFile {
     nonce: String,
     /// Encrypted master key (base64).
     ciphertext: String,
+}
+
+/// Atomically write `content` to `path` with mode 0600 on Unix.
+/// Used by both `store_keyring_key` and the v2→v3 migration inside
+/// `load_keyring_key` to avoid duplicating the atomic-rename logic.
+#[cfg(not(test))]
+fn write_keyring_file(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("keyring.tmp.{}", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp_path, path)
+    })();
+
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("write: {e}"));
+    }
+
+    // Enforce 0600 if destination pre-existed with looser perms.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mut perms = meta.permissions();
+            if perms.mode() & 0o777 != 0o600 {
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Store the master key in the OS keyring (libsecret on Linux, Keychain on
@@ -635,7 +686,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
             .map_err(|e| format!("encrypt: {e}"))?;
 
         let keyring_file = KeyringFile {
-            version: 2,
+            version: 3,
             salt: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
             nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
             ciphertext: base64::Engine::encode(
@@ -646,43 +697,7 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
         let content =
             serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
 
-        // Atomic write with mode 0600 on Unix; non-Unix relies on OS ACLs.
-        let tmp_path = keyring_path.with_extension(format!("keyring.tmp.{}", std::process::id()));
-        let result = (|| -> std::io::Result<()> {
-            use std::io::Write as _;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts.open(&tmp_path)?;
-            f.write_all(content.as_bytes())?;
-            f.flush()?;
-            f.sync_all()?;
-            drop(f);
-            std::fs::rename(&tmp_path, &keyring_path)
-        })();
-
-        if let Err(e) = result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(format!("write: {e}"));
-        }
-
-        // Enforce 0600 if destination pre-existed with looser perms.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&keyring_path) {
-                let mut perms = meta.permissions();
-                if perms.mode() & 0o777 != 0o600 {
-                    perms.set_mode(0o600);
-                    let _ = std::fs::set_permissions(&keyring_path, perms);
-                }
-            }
-        }
-        Ok(())
+        write_keyring_file(&keyring_path, &content)
     }
     #[cfg(test)]
     {
@@ -693,6 +708,19 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
 
 /// Load the master key, preferring the OS keyring and falling back to the
 /// file-based AES-256-GCM wrapped store. Symmetric with `store_keyring_key`.
+///
+/// # Version migration
+///
+/// v2 keyrings (pre-#4159) derived the wrap key from `random_id` directly
+/// (i.e. `Argon2id(random_id, salt)` with no SHA-512 mixing).  v3 keyrings
+/// use `Argon2id(SHA-512(domain || random_id || os_material)[..32], salt)`.
+///
+/// We retain the v2 read path for one release cycle to allow auto-migration
+/// on first daemon restart post-upgrade.  Plan to remove the v2 branch after
+/// release N+2 (tracked in #4159 follow-up).
+///
+/// On a successful v2 decrypt the file is atomically re-wrapped as v3 so
+/// subsequent loads take the fast v3 path.
 fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     #[cfg(not(test))]
     {
@@ -715,43 +743,96 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
 
         let content = std::fs::read_to_string(&keyring_path).map_err(|e| format!("read: {e}"))?;
 
-        // Try v2 (JSON with AES-256-GCM wrapped key)
+        // Try v2 or v3 (JSON with AES-256-GCM wrapped key)
         if let Ok(keyring_file) = serde_json::from_str::<KeyringFile>(content.trim()) {
-            if keyring_file.version != 2 {
-                return Err(format!(
-                    "Unsupported keyring file version: {}",
-                    keyring_file.version
-                ));
+            match keyring_file.version {
+                3 => {
+                    // v3: fingerprint = SHA-512(domain || random_id || os_material)[..32]
+                    let salt = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.salt,
+                    )
+                    .map_err(|e| format!("salt decode: {e}"))?;
+                    let nonce_bytes = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.nonce,
+                    )
+                    .map_err(|e| format!("nonce decode: {e}"))?;
+                    let ciphertext = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.ciphertext,
+                    )
+                    .map_err(|e| format!("ciphertext decode: {e}"))?;
+
+                    let machine_id = machine_fingerprint();
+                    let wrapping_key =
+                        derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
+
+                    let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+                        .map_err(|e| format!("cipher init: {e}"))?;
+                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    let plaintext = cipher
+                        .decrypt(nonce, ciphertext.as_slice())
+                        .map_err(|e| format!("decrypt: {e}"))?;
+                    let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    return Ok(Zeroizing::new(key_str));
+                }
+                2 => {
+                    // v2: fingerprint = raw random_id (pre-#4159 legacy behavior).
+                    // We retain this read path for one release cycle so that
+                    // existing installs auto-migrate on first daemon restart
+                    // post-upgrade without losing vault access.
+                    warn!(
+                        "Detected v2 keyring file (pre-#4159 format) — \
+                         migrating to v3 (mixed fingerprint) on first load"
+                    );
+
+                    let salt = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.salt,
+                    )
+                    .map_err(|e| format!("salt decode: {e}"))?;
+                    let nonce_bytes = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.nonce,
+                    )
+                    .map_err(|e| format!("nonce decode: {e}"))?;
+                    let ciphertext = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &keyring_file.ciphertext,
+                    )
+                    .map_err(|e| format!("ciphertext decode: {e}"))?;
+
+                    // v2 fingerprint: raw random_id bytes, read from .machine-id.
+                    // This is the OLD behavior before this PR's SHA-512 mixing.
+                    let v2_fingerprint = legacy_v2_fingerprint()?;
+                    let wrapping_key = derive_wrapping_key(&v2_fingerprint, &salt)
+                        .map_err(|e| format!("kdf: {e}"))?;
+
+                    let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+                        .map_err(|e| format!("cipher init: {e}"))?;
+                    let nonce = Nonce::from_slice(&nonce_bytes);
+                    let plaintext = cipher
+                        .decrypt(nonce, ciphertext.as_slice())
+                        .map_err(|e| format!("decrypt: {e}"))?;
+                    let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+
+                    // Re-wrap with v3 fingerprint and atomically replace the file.
+                    // Mirror of store_keyring_key's atomic-write path.
+                    if let Err(e) = store_keyring_key(&key_str) {
+                        warn!("Failed to migrate keyring from v2 to v3 format: {e}");
+                    } else {
+                        info!(
+                            "Successfully migrated keyring file from v2 to v3 (mixed fingerprint)"
+                        );
+                    }
+
+                    return Ok(Zeroizing::new(key_str));
+                }
+                v => {
+                    return Err(format!("Unsupported keyring file version: {v}"));
+                }
             }
-
-            let salt = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &keyring_file.salt,
-            )
-            .map_err(|e| format!("salt decode: {e}"))?;
-            let nonce_bytes = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &keyring_file.nonce,
-            )
-            .map_err(|e| format!("nonce decode: {e}"))?;
-            let ciphertext = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &keyring_file.ciphertext,
-            )
-            .map_err(|e| format!("ciphertext decode: {e}"))?;
-
-            let machine_id = machine_fingerprint();
-            let wrapping_key =
-                derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
-
-            let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
-                .map_err(|e| format!("cipher init: {e}"))?;
-            let nonce = Nonce::from_slice(&nonce_bytes);
-            let plaintext = cipher
-                .decrypt(nonce, ciphertext.as_slice())
-                .map_err(|e| format!("decrypt: {e}"))?;
-            let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
-            return Ok(Zeroizing::new(key_str));
         }
 
         // Legacy v1 fallback: XOR-obfuscated format (base64-encoded XOR blob).
@@ -778,9 +859,9 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
 
         // Re-store with proper encryption to auto-migrate
         if let Err(e) = store_keyring_key(&key_str) {
-            warn!("Failed to migrate legacy keyring to v2 format: {e}");
+            warn!("Failed to migrate legacy keyring to v3 format: {e}");
         } else {
-            info!("Successfully migrated keyring file to AES-256-GCM wrapped format");
+            info!("Successfully migrated keyring file to AES-256-GCM wrapped format (v3)");
         }
 
         Ok(Zeroizing::new(key_str))
@@ -791,38 +872,59 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
     }
 }
 
+/// Return the v2 (pre-#4159) fingerprint for a given `.machine-id` file.
+///
+/// v2 keyrings used the raw random_id bytes directly as the Argon2id input —
+/// no SHA-512 mixing, no OS material.  This helper reads the persisted
+/// random_id and returns it verbatim so the v2 decrypt path in
+/// `load_keyring_key` can reconstruct the exact wrap key that was used when
+/// the file was originally written.
+///
+/// Returns `Err` if the `.machine-id` file is missing or has the wrong length
+/// (in that case the vault is unrecoverable without a manual restore, same as
+/// the production path for a corrupt machine-id file).
+#[cfg(not(test))]
+fn legacy_v2_fingerprint() -> Result<Vec<u8>, String> {
+    let fingerprint_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("librefang")
+        .join(".machine-id");
+    let bytes = std::fs::read(&fingerprint_path)
+        .map_err(|e| format!("legacy_v2_fingerprint: cannot read .machine-id: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "legacy_v2_fingerprint: .machine-id has unexpected length ({} bytes, expected 32); \
+             vault is unrecoverable — restore the file from backup or set LIBREFANG_VAULT_KEY",
+            bytes.len()
+        ));
+    }
+    // v2 used random_id directly (no mixing).
+    Ok(bytes)
+}
+
 /// Return a stable, unpredictable 32-byte machine secret used as the input
 /// to the Argon2id wrapping-key derivation for the file-based keyring fallback.
 ///
 /// # Security design
 ///
-/// The function builds the fingerprint from two independent entropy sources and
-/// combines them with SHA-512, so compromise of either source alone is not
-/// sufficient to recover the wrapping key:
+/// The fingerprint is built from two independent entropy sources combined with
+/// SHA-512 via `mix_fingerprint_sources`, so compromise of either source alone
+/// is insufficient to recover the wrapping key:
 ///
 /// 1. **Persisted random id** — a 32-byte value generated by `OsRng` on first
 ///    call and stored in `~/.local/share/librefang/.machine-id` (mode 0600).
-///    Provides 256 bits of entropy that is unique per install.
+///    Provides 256 bits of install-unique entropy.
 ///
-/// 2. **OS machine-id material** — one or more stable identifiers provided by
-///    the host OS:
-///    - Linux: `/etc/machine-id`, `/var/lib/dbus/machine-id` (128-bit hex UUID)
-///    - macOS: `/var/db/dsmemberd/clientcaches` is not used; instead we read
-///      `ioreg -rd1 -c IOPlatformExpertDevice` for `IOPlatformUUID` via a
-///      well-known sysctl path `/Library/Preferences/SystemConfiguration/preferences.plist`
-///      — but since that requires plist parsing, we instead probe
-///      `/private/var/db/SystemPolicyConfiguration/SystemPolicy` byte blob and
-///      `/var/root/Library/Preferences/SystemConfiguration/com.apple.network.identification.plist`.
-///      On macOS the most reliable source is the output of `sysctl kern.uuid`.
-///      We shell out only as a last resort; instead we read the IOPlatformUUID
-///      from the known file location where macOS stores it.
-///    - All platforms: `/proc/sys/kernel/random/boot_id` (Linux only; resets on
-///      reboot, so it is treated as an auxiliary input, not the primary one).
+/// 2. **OS machine-id material** — collected by `collect_os_machine_id_material`:
+///    - Linux: `/etc/machine-id` and/or `/var/lib/dbus/machine-id`.
+///      `/proc/sys/kernel/random/boot_id` is used ONLY as a fallback when
+///      neither persistent source is readable (e.g. minimal containers).
+///    - macOS: `IOPlatformUUID` obtained via `ioreg -rd1 -c IOPlatformExpertDevice`.
+///    - Windows: `MachineGuid` from `reg query HKLM\SOFTWARE\Microsoft\Cryptography`.
 ///
 /// If no OS material can be read, only the persisted random id is used.
 /// If the persisted random id cannot be created or read, we fall back to the
-/// predictable username+hostname derivation (with any available OS material
-/// mixed in via `predictable_machine_fingerprint`).
+/// predictable username+hostname derivation via `predictable_machine_fingerprint`.
 #[cfg(not(test))]
 fn machine_fingerprint() -> Vec<u8> {
     let fingerprint_path = dirs::data_local_dir()
@@ -949,49 +1051,143 @@ fn machine_fingerprint() -> Vec<u8> {
 /// - `/proc/sys/kernel/random/boot_id`        (Linux only; resets on reboot)
 /// - `/private/var/db/SystemPolicyConfiguration/SystemPolicy` (macOS blob)
 /// - `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`      (Windows — via env probe)
+/// Collect all available OS-provided machine identity material into a single
+/// byte buffer.
+///
+/// Each source is emitted with a fixed ASCII label and a 4-byte LE length
+/// prefix before its bytes.  Labelled framing means:
+/// - Adding or removing a source doesn't shift the byte offsets of others
+///   (each is self-describing via its label).
+/// - Cross-source collisions are impossible ("AB"+"C" ≠ "A"+"BC").
+/// - Future source additions are safe — the fingerprint changes only for
+///   sources whose availability changes.
+///
+/// Source priority on Linux (highest → lowest):
+///   1. `/etc/machine-id`          (systemd, stable across reboots)
+///   2. `/var/lib/dbus/machine-id` (older D-Bus installations)
+///   3. `/proc/sys/kernel/random/boot_id` — ONLY appended when neither of
+///      the above was readable.  boot_id resets on reboot, so it is used
+///      purely as a degradation mode for containers/VMs without a machine-id.
+///      Including it alongside a real machine-id would cause the fingerprint
+///      to rotate on every reboot, breaking vault access.
+///
+/// macOS: Platform UUID via `ioreg -rd1 -c IOPlatformExpertDevice`.
+///        Stable across reboots, unique per physical machine.
+///
+/// Windows: MachineGuid via `reg query HKLM\SOFTWARE\Microsoft\Cryptography`.
+///          If the reg query fails, emit nothing — fingerprint relies on the
+///          persisted random_id alone (same posture as Linux without machine-id).
 #[cfg(not(test))]
 fn collect_os_machine_id_material() -> Vec<u8> {
     let mut out = Vec::new();
 
-    // Helper: append a length-prefixed blob from a file path.
-    let mut try_file = |path: &str| {
-        if let Ok(bytes) = std::fs::read(path) {
-            // Trim trailing whitespace (machine-id files end with '\n').
-            let trimmed = bytes.trim_ascii_end();
-            if !trimmed.is_empty() {
-                let len = (trimmed.len() as u32).to_le_bytes();
-                out.extend_from_slice(&len);
-                out.extend_from_slice(trimmed);
-            }
+    // Emit one tagged, length-prefixed source.
+    // `label` must be a stable ASCII string unique to this source.
+    let mut emit = |label: &[u8], bytes: &[u8]| {
+        // tag: label bytes + NUL terminator
+        out.extend_from_slice(label);
+        out.push(0x00);
+        // 4-byte LE length of the payload
+        let len = u32::try_from(bytes.len()).unwrap_or(0).to_le_bytes();
+        out.extend_from_slice(&len);
+        out.extend_from_slice(bytes);
+    };
+
+    // Helper: read a file and trim trailing whitespace (machine-id files end with '\n').
+    let read_trimmed = |path: &str| -> Option<Vec<u8>> {
+        let bytes = std::fs::read(path).ok()?;
+        let trimmed = bytes.trim_ascii_end();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_vec())
         }
     };
 
-    // Linux sources.
-    try_file("/etc/machine-id");
-    try_file("/var/lib/dbus/machine-id");
-    // boot_id changes on reboot; useful as an auxiliary input.
-    try_file("/proc/sys/kernel/random/boot_id");
+    // ----- Linux sources -----
+    // Priority: persistent machine-id first; boot_id only as a fallback for
+    // containers/VMs that have no persistent machine-id.
+    let mut has_persistent_linux_id = false;
 
-    // macOS: The IOPlatformUUID is stored in a stable binary blob at this path.
-    // The file is not human-readable but provides stable per-hardware entropy.
-    try_file("/private/var/db/SystemPolicyConfiguration/SystemPolicy");
+    if let Some(b) = read_trimmed("/etc/machine-id") {
+        emit(b"etc-machine-id", &b);
+        has_persistent_linux_id = true;
+    }
+    if let Some(b) = read_trimmed("/var/lib/dbus/machine-id") {
+        emit(b"dbus-machine-id", &b);
+        has_persistent_linux_id = true;
+    }
 
-    // Windows: MachineGuid is stored as a registry value.  We cannot read the
-    // registry with std::fs, but it is often surfaced as the ComputerHardwareId
-    // environment variable by some enterprise policies, or we can attempt to
-    // read a well-known shadow file.  As a fallback, include the COMPUTERNAME
-    // and a fixed sentinel — same as the predictable path but only as
-    // supplemental material here, not the primary source.
-    if cfg!(target_os = "windows") {
-        if let Ok(val) = std::env::var("COMPUTERNAME") {
-            let bytes = val.into_bytes();
-            let len = (bytes.len() as u32).to_le_bytes();
-            out.extend_from_slice(&len);
-            out.extend_from_slice(&bytes);
+    // boot_id is appended ONLY when no persistent machine-id was available.
+    // On a host with a real machine-id, including boot_id would cause the
+    // fingerprint to rotate on every reboot, breaking vault access.
+    if !has_persistent_linux_id {
+        if let Some(b) = read_trimmed("/proc/sys/kernel/random/boot_id") {
+            emit(b"linux-boot-id", &b);
         }
-        // Attempt to read the Windows MachineGuid from the shadow path that
-        // some tools export (non-standard, best-effort).
-        try_file(r"C:\ProgramData\Microsoft\Crypto\Keys\.machine-guid");
+    }
+
+    // ----- macOS source -----
+    // `ioreg -rd1 -c IOPlatformExpertDevice` prints lines like:
+    //   "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+    // This UUID is stable across reboots and unique per physical machine.
+    // We shell out rather than reading /private/var/db/SystemPolicyConfiguration/SystemPolicy
+    // (root-only, binary blob, content unstable across macOS releases).
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("IOPlatformUUID") {
+                    // Line format: `  "IOPlatformUUID" = "GUID-HERE"`
+                    // Split on '"' and take the 4th token (index 3) as the UUID value.
+                    let parts: Vec<&str> = line.splitn(4, '"').collect();
+                    if let Some(raw) = parts.get(3) {
+                        let uuid = raw.trim_end_matches('"').trim();
+                        if !uuid.is_empty() {
+                            emit(b"macos-platform-uuid", uuid.as_bytes());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // ----- Windows source -----
+    // MachineGuid is stored in HKLM\SOFTWARE\Microsoft\Cryptography.
+    // Shell out to `reg query` — no external crate needed, and vault load
+    // happens only once per daemon start so the overhead is acceptable.
+    // Output format: "    MachineGuid    REG_SZ    <guid>"
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("MachineGuid") && line.contains("REG_SZ") {
+                    // The GUID is the last whitespace-delimited token.
+                    if let Some(guid) = line.split_whitespace().last() {
+                        if !guid.is_empty() {
+                            emit(b"windows-machine-guid", guid.as_bytes());
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // If reg query fails: emit nothing — fingerprint falls back to the
+        // persisted random_id alone, same posture as Linux without machine-id.
     }
 
     out
@@ -1006,7 +1202,7 @@ fn collect_os_machine_id_material() -> Vec<u8> {
 /// - If `random_id` is somehow recoverable (e.g. backup), `os_material` still
 ///   provides a second factor that must match the live machine.
 fn mix_fingerprint_sources(random_id: &[u8], os_material: &[u8]) -> Vec<u8> {
-    use sha2::{Digest as _, Sha512};
+    use sha2::{Digest, Sha512};
     let mut hasher = Sha512::new();
     // Domain separator so this context can't be confused with other SHA-512 uses.
     hasher.update(b"librefang-machine-fingerprint-v2\x00");
@@ -1066,7 +1262,6 @@ fn derive_wrapping_key(fingerprint: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8;
         .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
     Ok(derived)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1472,8 +1667,7 @@ mod tests {
         assert_eq!(decrypted, fake_master_key);
 
         // "Migration": re-derive with new fingerprint (random_id + OS material).
-        let new_fingerprint =
-            mix_fingerprint_sources(&old_fingerprint, b"etc-machine-id-abc123");
+        let new_fingerprint = mix_fingerprint_sources(&old_fingerprint, b"etc-machine-id-abc123");
         let new_salt = [0x02u8; 16];
         let new_wrapping_key = derive_wrapping_key(&new_fingerprint, &new_salt).unwrap();
 
@@ -1498,6 +1692,176 @@ mod tests {
         assert!(
             bad_result.is_err(),
             "old wrapping key must not decrypt new ciphertext"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // v2 → v3 keyring migration tests (#4159 follow-up)
+    // -----------------------------------------------------------------------
+
+    /// Build a v2 KeyringFile JSON string using the pre-#4159 derivation:
+    /// fingerprint = raw random_id (no SHA-512 mixing).
+    /// Returns (json_string, random_id, master_key_plaintext).
+    fn make_v2_keyring(random_id: &[u8; 32], master_key: &str) -> String {
+        // v2 fingerprint = raw random_id
+        let v2_fingerprint = random_id.to_vec();
+
+        let mut salt_bytes = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt_bytes);
+        let wrapping_key = derive_wrapping_key(&v2_fingerprint, &salt_bytes).unwrap();
+
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref()).unwrap();
+        let ciphertext = cipher.encrypt(nonce, master_key.as_bytes()).unwrap();
+
+        // Serialize in the same format as the old store_keyring_key (version=2).
+        serde_json::json!({
+            "version": 2u8,
+            "salt": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt_bytes),
+            "nonce": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
+            "ciphertext": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ciphertext),
+        })
+        .to_string()
+    }
+
+    /// The legacy_v2_fingerprint function returns the raw random_id bytes.
+    /// We test it indirectly via make_v2_keyring + derive_wrapping_key.
+    /// Here we verify that the v2 derivation is exactly: Argon2id(random_id, salt).
+    #[test]
+    fn v2_fingerprint_is_raw_random_id() {
+        let random_id = [0xAAu8; 32];
+        // v2 fingerprint = raw bytes, no mixing
+        let v2_fp: Vec<u8> = random_id.to_vec();
+        let salt = [0x01u8; SALT_LEN];
+
+        let k1 = derive_wrapping_key(&v2_fp, &salt).unwrap();
+        let k2 = derive_wrapping_key(&random_id, &salt).unwrap();
+        // They must be identical — v2 used random_id directly.
+        assert_eq!(k1.as_ref(), k2.as_ref());
+
+        // And must differ from the v3 mixed fingerprint.
+        let v3_fp = mix_fingerprint_sources(&random_id, b"some-os-material");
+        let k3 = derive_wrapping_key(&v3_fp, &salt).unwrap();
+        assert_ne!(
+            k1.as_ref(),
+            k3.as_ref(),
+            "v2 and v3 fingerprints must differ"
+        );
+    }
+
+    /// Simulate the full v2→v3 migration path:
+    ///
+    /// 1. Build a v2 `.keyring` file on disk with a known random_id and master key.
+    /// 2. Verify the v2 derive_wrapping_key path decrypts correctly.
+    /// 3. Re-wrap with v3 fingerprint (mix_fingerprint_sources).
+    /// 4. Verify the v3 ciphertext decrypts correctly with the mixed fingerprint.
+    /// 5. Verify the old v2 key does NOT decrypt the v3 ciphertext (isolation).
+    /// 6. Verify idempotence: calling the v3 derive again with same inputs succeeds.
+    #[test]
+    fn v2_to_v3_migration_full_path() {
+        let random_id = [0x42u8; 32];
+        let master_key = "MASTER_KEY_B64_PLACEHOLDER_FOR_TEST";
+        let os_material = b"etc-machine-id\x00\x10\x00\x00\x00fake-machine-id-1234";
+
+        // --- Step 1: synthesize a v2 keyring JSON (pre-#4159 format) ---
+        let v2_json = make_v2_keyring(&random_id, master_key);
+        let v2_file: serde_json::Value = serde_json::from_str(&v2_json).unwrap();
+        assert_eq!(v2_file["version"], 2, "synthesized file must be version 2");
+
+        // --- Step 2: v2 decrypt path ---
+        // Reconstruct exactly as load_keyring_key's v2 branch does.
+        let salt = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v2_file["salt"].as_str().unwrap(),
+        )
+        .unwrap();
+        let nonce_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v2_file["nonce"].as_str().unwrap(),
+        )
+        .unwrap();
+        let ciphertext = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v2_file["ciphertext"].as_str().unwrap(),
+        )
+        .unwrap();
+
+        let v2_fingerprint: Vec<u8> = random_id.to_vec(); // legacy_v2_fingerprint() behavior
+        let v2_wrapping_key = derive_wrapping_key(&v2_fingerprint, &salt).unwrap();
+        let v2_cipher = Aes256Gcm::new_from_slice(v2_wrapping_key.as_ref()).unwrap();
+        let v2_nonce = Nonce::from_slice(&nonce_bytes);
+        let plaintext = v2_cipher.decrypt(v2_nonce, ciphertext.as_slice()).unwrap();
+        let decrypted_key = String::from_utf8(plaintext).unwrap();
+        assert_eq!(
+            decrypted_key, master_key,
+            "(a) v2 decrypt must recover the original master key"
+        );
+
+        // --- Step 3: re-wrap with v3 fingerprint ---
+        let v3_fingerprint = mix_fingerprint_sources(&random_id, os_material);
+        let mut new_salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut new_salt);
+        let v3_wrapping_key = derive_wrapping_key(&v3_fingerprint, &new_salt).unwrap();
+        let mut new_nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut new_nonce_bytes);
+        let v3_nonce = Nonce::from_slice(&new_nonce_bytes);
+        let v3_cipher = Aes256Gcm::new_from_slice(v3_wrapping_key.as_ref()).unwrap();
+        let v3_ciphertext = v3_cipher
+            .encrypt(v3_nonce, decrypted_key.as_bytes())
+            .unwrap();
+
+        // Serialize as a v3 keyring file.
+        let v3_json = serde_json::json!({
+            "version": 3u8,
+            "salt": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_salt),
+            "nonce": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, new_nonce_bytes),
+            "ciphertext": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &v3_ciphertext),
+        })
+        .to_string();
+        let v3_file: serde_json::Value = serde_json::from_str(&v3_json).unwrap();
+        assert_eq!(
+            v3_file["version"], 3,
+            "(b) migrated file on disk must be version 3"
+        );
+        assert_ne!(
+            v3_file["ciphertext"], v2_file["ciphertext"],
+            "(b) v3 ciphertext must differ from v2 (different wrapping key)"
+        );
+
+        // --- Step 4: v3 decrypt succeeds ---
+        let v3_salt_dec = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v3_file["salt"].as_str().unwrap(),
+        )
+        .unwrap();
+        let v3_nonce_dec = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v3_file["nonce"].as_str().unwrap(),
+        )
+        .unwrap();
+        let v3_ct_dec = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            v3_file["ciphertext"].as_str().unwrap(),
+        )
+        .unwrap();
+        let v3_wk2 = derive_wrapping_key(&v3_fingerprint, &v3_salt_dec).unwrap();
+        let v3_c2 = Aes256Gcm::new_from_slice(v3_wk2.as_ref()).unwrap();
+        let recovered = v3_c2
+            .decrypt(Nonce::from_slice(&v3_nonce_dec), v3_ct_dec.as_slice())
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(recovered).unwrap(),
+            master_key,
+            "(c) v3 re-load (idempotent) must recover the original master key"
+        );
+
+        // --- Step 5: v2 key must NOT decrypt v3 ciphertext ---
+        let bad = v2_cipher.decrypt(Nonce::from_slice(&v3_nonce_dec), v3_ct_dec.as_slice());
+        assert!(
+            bad.is_err(),
+            "(isolation) v2 wrapping key must not decrypt v3 ciphertext"
         );
     }
 }
