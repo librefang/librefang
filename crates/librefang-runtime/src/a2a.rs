@@ -740,7 +740,15 @@ pub async fn discover_external_agents(
                     skills = card.skills.len(),
                     "Discovered external A2A agent"
                 );
-                discovered.push((agent.name.clone(), card));
+                // Bug #3786: store by URL so the trust gate in `/api/a2a/send`
+                // can match on the same key callers pass. Statically-seeded
+                // agents are operator-authored (config.toml) and therefore
+                // legitimately trusted at boot. Canonicalize first so the
+                // gate's input (also canonicalized) matches regardless of
+                // trailing-slash / case / default-port variations between
+                // config.toml and the API caller.
+                let key = canonicalize_a2a_url(&agent.url).unwrap_or_else(|| agent.url.clone());
+                discovered.push((key, card));
             }
             Err(e) => {
                 warn!(
@@ -800,6 +808,103 @@ pub fn build_agent_card(manifest: &AgentManifest, base_url: &str) -> AgentCard {
 // A2A Client — discover and interact with external A2A agents
 // ---------------------------------------------------------------------------
 
+/// Hard cap on Agent Card responses (Bug #3785).
+///
+/// Agent Cards are tiny JSON manifests; 256 KiB is generous and still
+/// bounds the daemon's memory exposure to a single hostile remote.
+const MAX_AGENT_CARD_BYTES: usize = 256 * 1024;
+
+/// Hard cap on A2A task RPC responses (Bug #3785).
+///
+/// Task payloads can carry larger transcripts/artifacts than agent cards,
+/// but must still be bounded so a hostile remote cannot OOM the daemon
+/// via `tasks/send` or `tasks/get`.
+const MAX_A2A_TASK_BYTES: usize = 1024 * 1024;
+
+/// Canonicalize an A2A peer URL for trust-list comparison (Bug #3786
+/// follow-up).
+///
+/// Trust insertion (`approve`, static seeding) and the gate at
+/// `/api/a2a/send` / `tasks/{id}/status` / `tool_a2a_send` MUST run user
+/// input through the same canonicalizer so accidental cosmetic variations
+/// (trailing slash, default port, host case) don't deny legitimate calls,
+/// and so an attacker can't sneak past a naive string match by appending
+/// `#`, `?`, or capitalising the host.
+///
+/// Returns `None` for input that doesn't parse as a URL with a host.
+pub fn canonicalize_a2a_url(url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(url.trim()).ok()?;
+    parsed.set_fragment(None);
+    if parsed.query() == Some("") {
+        parsed.set_query(None);
+    }
+    // Lowercase the scheme + host (URLs are case-insensitive in those parts).
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    let _ = parsed.set_scheme(&scheme);
+    // Own the host string before calling the mutable `set_host`, otherwise
+    // `host_str()`'s borrow of `parsed` would still be live when we reach
+    // `&mut parsed`. Url already lowercases the host of "special" schemes
+    // (http/https/ws/wss/ftp/file) on parse, so this is mostly a no-op,
+    // but it stays correct if a future url crate version stops doing that
+    // and is the right pattern for non-special schemes.
+    let host_owned = match parsed.host_str() {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return None,
+    };
+    let _ = parsed.set_host(Some(&host_owned));
+    // Drop default ports so `https://x.com` and `https://x.com:443` collapse.
+    if let Some(port) = parsed.port() {
+        let default = match parsed.scheme() {
+            "https" => Some(443),
+            "http" => Some(80),
+            _ => None,
+        };
+        if Some(port) == default {
+            let _ = parsed.set_port(None);
+        }
+    }
+    // Normalize trailing slash on path-only URLs: `https://x.com` →
+    // `https://x.com/`. `Url` already does this on parse, but a path of
+    // `/` is canonical so leave it alone otherwise.
+    Some(parsed.into())
+}
+
+/// Read at most `max_bytes` from a `reqwest::Response`, rejecting upfront
+/// when `Content-Length` already exceeds the cap and aborting mid-stream
+/// once the running total trips it (Bug #3785).
+///
+/// `reqwest::Response::json()` / `bytes()` read the entire body into memory
+/// with no limit, so a hostile A2A peer can blow up the daemon by streaming
+/// gigabytes within the 30 s timeout. We stream chunks instead and bail.
+async fn read_capped_body(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    what: &str,
+) -> Result<Vec<u8>, String> {
+    if let Some(len) = response.content_length() {
+        if (len as usize) > max_bytes {
+            return Err(format!(
+                "{what} response Content-Length {len} exceeds cap of {max_bytes} bytes"
+            ));
+        }
+    }
+
+    let mut buf = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{what} body read failed: {e}"))?
+    {
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(format!(
+                "{what} response body exceeds cap of {max_bytes} bytes"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Client for discovering and interacting with external A2A agents.
 pub struct A2aClient {
     client: reqwest::Client,
@@ -831,6 +936,16 @@ impl A2aClient {
             client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .redirect(redirect_policy)
+                // Bug #3785: disable transport-layer decompression. Otherwise
+                // `Response::content_length()` is the *encoded* size and
+                // `Response::chunk()` yields *decoded* bytes, so a 10 KB gzip
+                // bomb that decompresses to 1 GB would slip past the upfront
+                // check and start filling the buffer before the per-chunk
+                // cap fires. Reading the wire bytes directly keeps the cap
+                // honest.
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
                 .build()
                 .expect("HTTP client build"),
         }
@@ -860,10 +975,10 @@ impl A2aClient {
             return Err(format!("A2A discovery returned {}", response.status()));
         }
 
-        let card: AgentCard = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid Agent Card: {e}"))?;
+        // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
+        let bytes = read_capped_body(response, MAX_AGENT_CARD_BYTES, "A2A discovery").await?;
+        let card: AgentCard =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid Agent Card: {e}"))?;
 
         info!(agent = %card.name, skills = card.skills.len(), "Discovered A2A agent");
         Ok(card)
@@ -901,10 +1016,10 @@ impl A2aClient {
             return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid A2A response: {e}"))?;
+        // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
+        let bytes = read_capped_body(response, MAX_A2A_TASK_BYTES, "A2A send_task").await?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid A2A response: {e}"))?;
 
         if let Some(result) = body.get("result") {
             serde_json::from_value(result.clone())
@@ -939,10 +1054,10 @@ impl A2aClient {
             return Err("A2A request redirect not followed (SSRF prevention)".to_string());
         }
 
-        let body: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid A2A response: {e}"))?;
+        // Bug #3785: cap remote body size — reqwest::Response::json() is unbounded.
+        let bytes = read_capped_body(response, MAX_A2A_TASK_BYTES, "A2A get_task").await?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid A2A response: {e}"))?;
 
         if let Some(result) = body.get("result") {
             serde_json::from_value(result.clone()).map_err(|e| format!("Invalid A2A task: {e}"))
@@ -1501,6 +1616,106 @@ mod tests {
         assert!(
             err.starts_with("A2A discovery failed:") || err.contains("redirect"),
             "expected an A2A request failure, got: {err}"
+        );
+    }
+
+    /// Bug #3785: a hostile peer that advertises an oversized Content-Length on
+    /// `/.well-known/agent.json` must be rejected upfront, before the daemon
+    /// allocates the body. Without the cap, `reqwest::Response::json()` would
+    /// happily read multi-GB into memory.
+    #[tokio::test]
+    async fn discover_rejects_oversized_content_length() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                // Advertise a huge body; we never actually send it. The cap is
+                // enforced from Content-Length alone, so the daemon must bail
+                // before allocating.
+                let oversize = MAX_AGENT_CARD_BYTES + 1;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {oversize}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let url = format!("http://{addr}");
+        let result = client.discover(&url).await;
+        let _ = server.await;
+
+        let err = result.expect_err("discover() must reject oversized Content-Length");
+        // Either cap-explicit ("exceeds cap") or a transport failure that
+        // followed our pre-flight rejection are acceptable; both prove the
+        // hostile body was NOT silently fetched. Windows runners drop the
+        // half-read connection differently than Linux which surfaces as
+        // "error sending request" instead of the cap-error string.
+        assert!(
+            err.contains("exceeds cap")
+                || err.contains("error sending request")
+                || err.contains("body read failed"),
+            "expected cap rejection or transport failure, got: {err}"
+        );
+    }
+
+    /// Bug #3785: a peer that under-reports Content-Length (or omits it) and
+    /// then streams more bytes than the cap allows must still be cut off
+    /// mid-stream. Guards against the chunked-transfer evasion of the
+    /// upfront Content-Length check.
+    #[tokio::test]
+    async fn discover_rejects_oversized_streamed_body() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes()).await;
+                // 64 KiB of garbage per chunk; loop until we definitely
+                // exceed MAX_AGENT_CARD_BYTES.
+                let payload = vec![b'x'; 65_536];
+                let chunk_header = format!("{:x}\r\n", payload.len());
+                for _ in 0..((MAX_AGENT_CARD_BYTES / payload.len()) + 4) {
+                    if stream.write_all(chunk_header.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if stream.write_all(&payload).await.is_err() {
+                        break;
+                    }
+                    if stream.write_all(b"\r\n").await.is_err() {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let url = format!("http://{addr}");
+        let result = tokio::time::timeout(Duration::from_secs(10), client.discover(&url))
+            .await
+            .expect("client must terminate, not hang");
+        let _ = server.await;
+
+        let err = result.expect_err("discover() must abort once streamed body exceeds cap");
+        // Either branch is acceptable: cap-explicit ("exceeds cap") fires when
+        // the streaming reader observes accumulated bytes > MAX. body-read
+        // failure fires when reqwest's chunked decoder errors on the connection
+        // close that follows our cap rejection. Both paths prove the hostile
+        // oversized stream did NOT silently complete.
+        assert!(
+            err.contains("exceeds cap") || err.contains("body read failed"),
+            "expected streaming cap rejection or body-read failure, got: {err}"
         );
     }
 }

@@ -36,7 +36,7 @@ type Tab = "pending" | "audit";
 type PendingTarget = { kind: "item"; id: string } | { kind: "batch" } | null;
 
 function tabClass(_tab: Tab, isActive: boolean) {
-  return `px-4 py-2 text-sm font-bold rounded-lg transition-colors ${
+  return `flex-1 lg:flex-initial min-h-[44px] lg:min-h-0 px-4 py-2 text-sm font-bold rounded-lg transition-colors ${
     isActive
       ? "bg-brand/10 text-brand border border-brand/20"
       : "text-text-dim hover:text-text-main hover:bg-surface-hover border border-transparent"
@@ -132,13 +132,19 @@ function ModifyForm({
         rows={3}
         className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors resize-none"
       />
-      <div className="flex gap-2 justify-end">
-        <Button variant="ghost" size="sm" onClick={onDone}>
+      <div className="flex gap-2 lg:justify-end">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0 justify-center"
+          onClick={onDone}
+        >
           {t("common.cancel", "Cancel")}
         </Button>
         <Button
           variant="primary"
           size="sm"
+          className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0 justify-center"
           onClick={handleSubmit}
           disabled={modifyAndRetry.isPending || !feedback.trim()}
           isLoading={modifyAndRetry.isPending}
@@ -229,14 +235,15 @@ function AuditLogTab() {
       />
 
       {/* Pagination */}
-      <div className="flex items-center justify-between text-sm text-text-dim">
-        <span>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between text-sm text-text-dim">
+        <span className="text-center sm:text-left">
           {t("approvals.auditLog.showing", { from, to, total })}
         </span>
         <div className="flex gap-2">
           <Button
             variant="secondary"
             size="sm"
+            className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-0"
             disabled={offset === 0}
             onClick={() => setOffset(Math.max(0, offset - AUDIT_PAGE_SIZE))}
             leftIcon={<ChevronLeft className="h-4 w-4" />}
@@ -246,6 +253,7 @@ function AuditLogTab() {
           <Button
             variant="secondary"
             size="sm"
+            className="flex-1 sm:flex-initial min-h-[44px] sm:min-h-0"
             disabled={offset + AUDIT_PAGE_SIZE >= total}
             onClick={() => setOffset(offset + AUDIT_PAGE_SIZE)}
             rightIcon={<ChevronRight className="h-4 w-4" />}
@@ -408,40 +416,51 @@ export function ApprovalsPage() {
         <div id="approvals-panel-pending" role="tabpanel" aria-labelledby="approvals-tab-pending">
           {/* Batch action bar */}
           {pendingApprovals.length > 0 && (
-            <div className="flex items-center gap-3 flex-wrap">
-              <label className="flex items-center gap-2 text-sm text-text-dim cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={selected.size === pendingApprovals.length && pendingApprovals.length > 0}
-                  onChange={toggleSelectAll}
-                  className="h-4 w-4 rounded border-border-subtle text-brand focus:ring-brand/30 accent-[var(--color-brand)]"
-                />
-                {t("approvals.selectAll")}
-              </label>
-              {selected.size > 0 && (
-                <>
-                  <span className="text-xs text-text-dim">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:gap-3 lg:flex-wrap mb-4 lg:mb-0">
+              <div className="flex items-center justify-between gap-2">
+                <label className="flex items-center gap-2 text-sm text-text-dim cursor-pointer select-none min-h-[44px] lg:min-h-0">
+                  <input
+                    type="checkbox"
+                    checked={selected.size === pendingApprovals.length && pendingApprovals.length > 0}
+                    onChange={toggleSelectAll}
+                    className="h-5 w-5 lg:h-4 lg:w-4 rounded border-border-subtle text-brand focus:ring-brand/30 accent-[var(--color-brand)]"
+                  />
+                  {t("approvals.selectAll")}
+                </label>
+                {selected.size > 0 && (
+                  <span className="text-xs text-text-dim lg:hidden">
                     {t("approvals.selected", { count: selected.size })}
                   </span>
-                  <Button
-                    variant="success"
-                    size="sm"
-                    onClick={() => handleBatchAction("approve")}
-                    disabled={pendingTarget?.kind === "batch" || totpEnforced}
-                    isLoading={pendingTarget?.kind === "batch"}
-                    title={totpEnforced ? t("approvals.batch_disabled_totp") : undefined}
-                  >
-                    {t("approvals.approveSelected")}
-                  </Button>
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onClick={() => handleBatchAction("reject")}
-                    disabled={pendingTarget?.kind === "batch"}
-                    isLoading={pendingTarget?.kind === "batch"}
-                  >
-                    {t("approvals.rejectSelected")}
-                  </Button>
+                )}
+              </div>
+              {selected.size > 0 && (
+                <>
+                  <span className="hidden lg:inline text-xs text-text-dim">
+                    {t("approvals.selected", { count: selected.size })}
+                  </span>
+                  <div className="flex gap-2 lg:contents">
+                    <Button
+                      variant="success"
+                      size="sm"
+                      className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0"
+                      onClick={() => handleBatchAction("approve")}
+                      disabled={pendingTarget?.kind === "batch" || totpEnforced}
+                      isLoading={pendingTarget?.kind === "batch"}
+                      title={totpEnforced ? t("approvals.batch_disabled_totp") : undefined}
+                    >
+                      {t("approvals.approveSelected")}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0"
+                      onClick={() => handleBatchAction("reject")}
+                      disabled={pendingTarget?.kind === "batch"}
+                      isLoading={pendingTarget?.kind === "batch"}
+                    >
+                      {t("approvals.rejectSelected")}
+                    </Button>
+                  </div>
                 </>
               )}
             </div>
@@ -461,83 +480,103 @@ export function ApprovalsPage() {
               description={t("approvals.queue_clear_desc")}
             />
           ) : (
-            <div className="grid gap-4">
+            <div className="grid gap-3 lg:gap-4">
               {approvals.map((a) => {
                 const isPending = !a.status || a.status === "pending";
                 return (
-                  <Card key={a.id} hover padding="lg">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-                      <div className="min-w-0 flex-1 flex items-center gap-3">
+                  <Card key={a.id} hover padding="md">
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 lg:gap-6">
+                      <div className="min-w-0 flex-1 flex items-start lg:items-center gap-3">
                         {/* Checkbox for pending items */}
                         {isPending && (
                           <input
                             type="checkbox"
                             checked={selected.has(a.id)}
                             onChange={() => toggleSelect(a.id)}
-                            className="h-4 w-4 rounded border-border-subtle text-brand focus:ring-brand/30 shrink-0 accent-[var(--color-brand)]"
+                            className="h-5 w-5 lg:h-4 lg:w-4 mt-1 lg:mt-0 rounded border-border-subtle text-brand focus:ring-brand/30 shrink-0 accent-[var(--color-brand)]"
                           />
                         )}
                         <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${statusIconBg(a.status)}`}>
                           {statusIcon(a.status)}
                         </div>
-                        <div>
+                        <div className="min-w-0 flex-1">
                           {statusBadge(a.status, t)}
-                          <p className="mt-1 text-sm font-medium leading-relaxed">{a.action_summary || a.description || t("common.actions")}</p>
+                          <p className="mt-1 text-sm font-medium leading-relaxed break-words">{a.action_summary || a.description || t("common.actions")}</p>
                         </div>
                       </div>
                       {isPending ? (
-                        <div className="flex gap-2 shrink-0">
+                        <div className="grid grid-cols-2 gap-2 lg:flex lg:gap-2 lg:shrink-0">
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="col-span-2 lg:col-auto min-h-[44px] lg:min-h-0 justify-center"
                             onClick={() => setModifyingId(modifyingId === a.id ? null : a.id)}
                             leftIcon={<MessageSquare className="h-3.5 w-3.5" />}
                           >
                             {t("approvals.modify")}
                           </Button>
-                          <Button variant="danger" size="sm" onClick={() => handleDecision(a.id, "reject")} disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}>
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            className="min-h-[44px] lg:min-h-0 justify-center"
+                            onClick={() => handleDecision(a.id, "reject")}
+                            disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}
+                          >
                             {t("approvals.reject")}
                           </Button>
-                          <Button variant="success" size="sm" onClick={() => handleDecision(a.id, "approve")} disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}>
+                          <Button
+                            variant="success"
+                            size="sm"
+                            className="min-h-[44px] lg:min-h-0 justify-center"
+                            onClick={() => handleDecision(a.id, "approve")}
+                            disabled={pendingTarget?.kind === "item" && pendingTarget.id === a.id}
+                          >
                             {t("approvals.approve")}
                           </Button>
                         </div>
                       ) : (
-                        <div className="text-sm text-text-dim shrink-0">
+                        <div className="text-sm text-text-dim lg:shrink-0">
                           {t(`approvals.status.${a.status}`)}
                         </div>
                       )}
                     </div>
                     {/* TOTP prompt */}
                     {totpPromptId === a.id && isPending && (
-                      <div className="mt-3 flex items-center gap-2">
-                        <input
-                          type="text"
-                          maxLength={9}
-                          value={totpInput}
-                          onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
-                          placeholder={t("approvals.totpPlaceholder", { defaultValue: "000000 / 0000-0000" })}
-                          className="w-40 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                          autoFocus
-                          onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
-                        />
-                        <Button
-                          variant="success"
-                          size="sm"
-                          onClick={handleTotpSubmit}
-                          disabled={!isValidTotpOrRecovery(totpInput) || (pendingTarget?.kind === "item" && pendingTarget.id === a.id)}
-                          isLoading={pendingTarget?.kind === "item" && pendingTarget.id === a.id}
-                        >
-                          {t("approvals.approve")}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => { setTotpPromptId(null); setTotpInput(""); }}
-                        >
-                          {t("common.cancel", "Cancel")}
-                        </Button>
-                        <span className="text-xs text-text-dim">{t("approvals.totpLabel", { defaultValue: "TOTP" })}</span>
+                      <div className="mt-3 flex flex-col lg:flex-row lg:items-center gap-2">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            maxLength={9}
+                            value={totpInput}
+                            onChange={(e) => setTotpInput(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))}
+                            placeholder={t("approvals.totpPlaceholder", { defaultValue: "000000 / 0000-0000" })}
+                            className="flex-1 lg:flex-initial lg:w-40 min-h-[44px] lg:min-h-0 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                            autoFocus
+                            onKeyDown={(e) => e.key === "Enter" && handleTotpSubmit()}
+                          />
+                          <span className="text-xs text-text-dim lg:hidden">{t("approvals.totpLabel", { defaultValue: "TOTP" })}</span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="success"
+                            size="sm"
+                            className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0 justify-center"
+                            onClick={handleTotpSubmit}
+                            disabled={!isValidTotpOrRecovery(totpInput) || (pendingTarget?.kind === "item" && pendingTarget.id === a.id)}
+                            isLoading={pendingTarget?.kind === "item" && pendingTarget.id === a.id}
+                          >
+                            {t("approvals.approve")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="flex-1 lg:flex-initial min-h-[44px] lg:min-h-0 justify-center"
+                            onClick={() => { setTotpPromptId(null); setTotpInput(""); }}
+                          >
+                            {t("common.cancel", "Cancel")}
+                          </Button>
+                        </div>
+                        <span className="hidden lg:inline text-xs text-text-dim">{t("approvals.totpLabel", { defaultValue: "TOTP" })}</span>
                       </div>
                     )}
                     {/* Modify form */}
