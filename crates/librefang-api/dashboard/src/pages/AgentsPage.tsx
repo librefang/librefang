@@ -1386,7 +1386,7 @@ export function AgentsPage() {
             bar's ~56px so it never gets covered). lg+: collapses back
             into the master-detail grid. */}
         {detailAgent ? (
-          <div className="fixed inset-x-0 top-0 bottom-14 z-30 bg-surface lg:static lg:inset-auto lg:bottom-auto lg:z-auto lg:bg-transparent overflow-hidden flex flex-col">
+          <div className="fixed inset-x-0 top-0 bottom-[calc(56px+env(safe-area-inset-bottom))] z-30 bg-surface lg:static lg:inset-auto lg:bottom-auto lg:z-auto lg:bg-transparent overflow-hidden flex flex-col">
             {renderDetailPanel(detailAgent)}
           </div>
         ) : (
