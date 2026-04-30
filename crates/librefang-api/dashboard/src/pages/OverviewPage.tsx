@@ -162,18 +162,33 @@ function sessionTokens(session: {
 
 function budgetUsageRatio(budget?: Record<string, unknown>): { ratio: number; used?: number; cap?: number } | null {
   if (!budget) return null;
+  // Backend `/api/budget` (BudgetStatus) ships `daily_spend` / `daily_limit`
+  // / `daily_pct`. The legacy `*_usd`-suffixed names below are kept as a
+  // fallback so older builds and any wrapper layer that re-shapes the
+  // payload still resolve.
   const usedCandidates = [
+    budget.daily_spend,
     budget.spend_today_usd,
     budget.today_spend_usd,
     budget.daily_spend_usd,
     budget.current_daily_usd,
     budget.today_cost_usd,
   ];
-  const capCandidates = [budget.max_daily_usd, budget.daily_cap_usd, budget.daily_budget_usd];
+  const capCandidates = [
+    budget.daily_limit,
+    budget.max_daily_usd,
+    budget.daily_cap_usd,
+    budget.daily_budget_usd,
+  ];
   const used = usedCandidates.find((v): v is number => typeof v === "number" && Number.isFinite(v));
   const cap = capCandidates.find((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0);
   if (used == null || cap == null) return null;
-  return { ratio: used / cap, used, cap };
+  // Backend pre-computes `daily_pct` as a 0..1 fraction — prefer it when
+  // present so a future change to the formula doesn't drift.
+  const pct = typeof budget.daily_pct === "number" && Number.isFinite(budget.daily_pct as number)
+    ? (budget.daily_pct as number)
+    : used / cap;
+  return { ratio: pct, used, cap };
 }
 
 type AlertKind = "error" | "warning" | "pending";
@@ -257,7 +272,22 @@ export function OverviewPage() {
   const pendingApprovals = approvalCountQuery.data ?? 0;
   const budgetUsage = budgetUsageRatio(budgetStatusQuery.data as Record<string, unknown> | undefined);
 
-  const sessionsCount = snapshot?.status?.session_count ?? 0;
+  // 24h session count — derived from the sessions list (sorted DESC by
+  // created_at, default page size 100). `snapshot.status.session_count` is
+  // an all-time tally so it overstates the KPI by an order of magnitude on
+  // long-lived installs. If the list is a full page we may undercount when
+  // traffic is >100/24h — that's acceptable for the dashboard headline; the
+  // Sessions page paginates if the user wants a full roster.
+  const sessionsCount = useMemo(() => {
+    const list = sessionsQuery.data ?? [];
+    if (list.length === 0) return 0;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return list.filter((s) => {
+      if (!s.created_at) return false;
+      const t = Date.parse(s.created_at);
+      return Number.isFinite(t) && t >= cutoff;
+    }).length;
+  }, [sessionsQuery.data]);
   const defaultModel = agents.find((a) => a.model_name)?.model_name ?? "-";
 
   const rangeData = RANGE_DATA[range];
@@ -427,16 +457,14 @@ export function OverviewPage() {
 
   if (isError) {
     return (
-      <div className="max-w-[1380px] mx-auto">
-        <Card padding="lg" className="surface-lit">
-          <ErrorState onRetry={refresh} />
-        </Card>
-      </div>
+      <Card padding="lg" className="surface-lit">
+        <ErrorState onRetry={refresh} />
+      </Card>
     );
   }
 
   return (
-    <div className="flex flex-col gap-4 max-w-[1380px] mx-auto">
+    <div className="flex flex-col gap-4">
       {/* Hero strip */}
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
