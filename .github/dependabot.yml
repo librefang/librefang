@@ -102,7 +102,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "friday"
-    versioning-strategy: increase
+    versioning-strategy: increase-if-necessary
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
