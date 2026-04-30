@@ -11,7 +11,7 @@ const CORS = {
 const JSON_HEADERS = { ...CORS, 'Content-Type': 'application/json' }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: CORS })
     }
@@ -49,7 +49,7 @@ export default {
 
       const downloadMatch = path.match(/^\/v1\/download\/([^/]+)\/([^/]+)$/)
       if (downloadMatch) {
-        return handleDownload(downloadMatch[1], downloadMatch[2], env)
+        return handleDownload(downloadMatch[1], downloadMatch[2], env, ctx)
       }
 
       const starMatch = path.match(/^\/v1\/packages\/([^/]+)\/star$/)
@@ -333,7 +333,7 @@ async function handlePublishVersion(slug, request, env) {
 // Download (redirect + async count)
 // ---------------------------------------------------------------------------
 
-async function handleDownload(slug, version, env) {
+async function handleDownload(slug, version, env, ctx) {
   const versionId = version === 'latest' ? null : `${slug}@${version}`
 
   let row
@@ -349,11 +349,13 @@ async function handleDownload(slug, version, env) {
 
   // Async count increment (upsert into pending table, flushed weekly by cron)
   const week = getIsoWeek()
-  env.DB.prepare(
-    `INSERT INTO download_counts_pending (package_id, version_id, count, week)
-     VALUES (?, ?, 1, ?)
-     ON CONFLICT(package_id, version_id, week) DO UPDATE SET count = count + 1`
-  ).bind(slug, row.id, week).run()  // fire-and-forget
+  ctx.waitUntil(
+    env.DB.prepare(
+      `INSERT INTO download_counts_pending (package_id, version_id, count, week)
+       VALUES (?, ?, 1, ?)
+       ON CONFLICT(package_id, version_id, week) DO UPDATE SET count = count + 1`
+    ).bind(slug, row.id, week).run()
+  )
 
   return Response.redirect(row.bundle_url, 302)
 }
@@ -400,6 +402,10 @@ async function flushDownloadCounts(env) {
   const rows = await env.DB.prepare('SELECT * FROM download_counts_pending').all()
   if (!rows.results.length) return
 
+  // Reset weekly_downloads first so the per-row increments below reflect only
+  // this week's pending counts (not a cumulative total that gets overwritten).
+  await env.DB.prepare('UPDATE packages SET weekly_downloads = 0').run()
+
   for (const row of rows.results) {
     await env.DB.prepare(
       'UPDATE packages SET total_downloads = total_downloads + ?, weekly_downloads = weekly_downloads + ? WHERE id = ?'
@@ -411,9 +417,6 @@ async function flushDownloadCounts(env) {
   }
 
   await env.DB.prepare('DELETE FROM download_counts_pending').run()
-
-  // Reset weekly_downloads for the new week
-  await env.DB.prepare('UPDATE packages SET weekly_downloads = 0').run()
 }
 
 // ---------------------------------------------------------------------------
