@@ -13189,17 +13189,18 @@ system_prompt = "You are a helpful assistant."
                                     };
 
                                     // Resolve workflow by UUID first, then by name
-                                    let resolved_id =
-                                        if let Ok(uuid) = uuid::Uuid::parse_str(&workflow_id_owned) {
-                                            Some(crate::workflow::WorkflowId(uuid))
-                                        } else {
-                                            // Search by name
-                                            let workflows = kernel_job.workflows.list_workflows().await;
-                                            workflows
-                                                .iter()
-                                                .find(|w| w.name == workflow_id_owned)
-                                                .map(|w| w.id)
-                                        };
+                                    let resolved_id = if let Ok(uuid) =
+                                        uuid::Uuid::parse_str(&workflow_id_owned)
+                                    {
+                                        Some(crate::workflow::WorkflowId(uuid))
+                                    } else {
+                                        // Search by name
+                                        let workflows = kernel_job.workflows.list_workflows().await;
+                                        workflows
+                                            .iter()
+                                            .find(|w| w.name == workflow_id_owned)
+                                            .map(|w| w.id)
+                                    };
 
                                     match resolved_id {
                                         Some(wf_id) => {
@@ -13211,12 +13212,19 @@ system_prompt = "You are a helpful assistant."
                                             {
                                                 Ok(Ok((_run_id, output))) => {
                                                     tracing::info!(job = %job_name, "Cron workflow completed successfully");
-                                                    kernel_job.cron_scheduler.record_success(job_id);
-                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                    kernel_job
+                                                        .cron_scheduler
+                                                        .record_success(job_id);
+                                                    if let Err(e) =
+                                                        kernel_job.cron_scheduler.persist()
+                                                    {
                                                         tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                                     }
                                                     cron_deliver_response(
-                                                        &kernel_job, agent_id, &output, &delivery,
+                                                        &kernel_job,
+                                                        agent_id,
+                                                        &output,
+                                                        &delivery,
                                                     )
                                                     .await;
                                                     cron_fan_out_targets(
@@ -13233,7 +13241,9 @@ system_prompt = "You are a helpful assistant."
                                                     kernel_job
                                                         .cron_scheduler
                                                         .record_failure(job_id, &err_msg);
-                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                    if let Err(e) =
+                                                        kernel_job.cron_scheduler.persist()
+                                                    {
                                                         tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                                     }
                                                 }
@@ -13245,16 +13255,21 @@ system_prompt = "You are a helpful assistant."
                                                             "workflow timed out after {timeout_s}s"
                                                         ),
                                                     );
-                                                    if let Err(e) = kernel_job.cron_scheduler.persist() {
+                                                    if let Err(e) =
+                                                        kernel_job.cron_scheduler.persist()
+                                                    {
                                                         tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                                     }
                                                 }
                                             }
                                         }
                                         None => {
-                                            let err_msg = format!("workflow not found: {workflow_id_owned}");
+                                            let err_msg =
+                                                format!("workflow not found: {workflow_id_owned}");
                                             tracing::warn!(job = %job_name, error = %err_msg, "Cron workflow lookup failed");
-                                            kernel_job.cron_scheduler.record_failure(job_id, &err_msg);
+                                            kernel_job
+                                                .cron_scheduler
+                                                .record_failure(job_id, &err_msg);
                                             if let Err(e) = kernel_job.cron_scheduler.persist() {
                                                 tracing::warn!(job = %job_name, "Cron post-run persist failed: {e}");
                                             }
@@ -16821,8 +16836,7 @@ impl KernelHandle for LibreFangKernel {
                 // a triggered agent would publish into a fresh top-level
                 // depth=0 scope, defeating the depth cap on chains that
                 // travel through memory updates.
-                let parent_depth =
-                    PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
+                let parent_depth = PUBLISH_EVENT_DEPTH.try_with(|c| c.get()).unwrap_or(0);
                 tokio::spawn(PUBLISH_EVENT_DEPTH.scope(
                     std::cell::Cell::new(parent_depth),
                     async move {

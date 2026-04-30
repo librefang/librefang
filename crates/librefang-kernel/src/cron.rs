@@ -1907,7 +1907,8 @@ mod tests {
         // Final file must parse cleanly — no torn JSON.
         let path = tmp.path().join("data").join("cron_jobs.json");
         let raw = std::fs::read_to_string(&path).unwrap();
-        let _: Vec<JobMeta> = serde_json::from_str(&raw).expect("torn JSON after concurrent persist");
+        let _: Vec<JobMeta> =
+            serde_json::from_str(&raw).expect("torn JSON after concurrent persist");
 
         // No leftover .tmp staging files in the parent dir.
         let parent = path.parent().unwrap();
