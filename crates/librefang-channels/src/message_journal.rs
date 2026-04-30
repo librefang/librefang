@@ -285,12 +285,19 @@ impl MessageJournal {
     /// inside `spawn_blocking` so they cannot stall the async runtime while
     /// we still hold the inner mutex (issue #3646 — every channel intake
     /// awaits this same `tokio::Mutex`, so a slow `sync_all` would serialize
-    /// all incoming messages behind the compactor).
+    /// all incoming messages behind the compactor). Path + entries are
+    /// cloned out and `inner` is `drop`ped *before* the await, otherwise
+    /// the lock would still span the entire fsync window and intake would
+    /// block on the blocking thread instead of the runtime — same stall,
+    /// different scheduler.
     pub async fn compact(&self) {
-        let inner = self.inner.lock().await;
-        let path = inner.path.clone();
+        let (path, entries) = {
+            let inner = self.inner.lock().await;
+            let path = inner.path.clone();
+            let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
+            (path, entries)
+        };
         let tmp_path = path.with_extension(format!("jsonl.tmp.{}", std::process::id()));
-        let entries: Vec<JournalEntry> = inner.pending.values().cloned().collect();
         let remaining = entries.len();
 
         let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {

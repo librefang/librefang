@@ -114,7 +114,22 @@ pub fn compute_hmac_signature(secret: &str, payload: &[u8]) -> String {
 /// Falls through to [`validate_webhook_url`] for the cheap scheme + literal
 /// checks first, so a malformed or obviously-private URL is rejected without
 /// touching the resolver.
-pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<(), String> {
+/// Result of [`validate_webhook_url_resolved`].
+///
+/// `Some((host, addr))` when the URL had a hostname that we resolved and
+/// validated — callers MUST pin reqwest to `addr` (e.g. via
+/// [`reqwest::ClientBuilder::resolve`]) so the eventual HTTP connection
+/// goes to exactly that IP. Without pinning, reqwest performs its own
+/// independent DNS lookup before connecting and a low-TTL record can flip
+/// to a private address between our validation and that second lookup —
+/// the canonical DNS-rebind exploit (#3701).
+///
+/// `None` means the URL was an IP literal; the cheap literal check in
+/// [`validate_webhook_url`] is authoritative and reqwest can't be tricked
+/// into resolving it elsewhere.
+pub type ValidatedHost = Option<(String, std::net::SocketAddr)>;
+
+pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<ValidatedHost, String> {
     // Cheap literal/scheme guard first — also covers IP-literal URLs that
     // the resolver wouldn't see.
     validate_webhook_url(url_str)?;
@@ -123,20 +138,22 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<(), String> 
     let host = match parsed.host() {
         Some(url::Host::Domain(d)) => d.to_string(),
         // IP literals already handled by validate_webhook_url.
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
     // Default to port 443 for https, 80 for http when none is given —
     // tokio's resolver requires a port.
     let port = parsed.port_or_known_default().unwrap_or(80);
     let lookup_target = format!("{host}:{port}");
 
-    let addrs = tokio::net::lookup_host(&lookup_target)
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&lookup_target)
         .await
-        .map_err(|e| format!("dns lookup failed for {host}: {e}"))?;
+        .map_err(|e| format!("dns lookup failed for {host}: {e}"))?
+        .collect();
 
-    let mut any = false;
-    for sa in addrs {
-        any = true;
+    if addrs.is_empty() {
+        return Err(format!("dns lookup for {host} returned no addresses"));
+    }
+    for sa in &addrs {
         let ip = canonical_ip(sa.ip());
         if ip.is_loopback() || is_private_ip(ip) || is_link_local(ip) {
             return Err(format!(
@@ -144,10 +161,11 @@ pub async fn validate_webhook_url_resolved(url_str: &str) -> Result<(), String> 
             ));
         }
     }
-    if !any {
-        return Err(format!("dns lookup for {host} returned no addresses"));
-    }
-    Ok(())
+    // Return the first validated address so the caller can pin reqwest to
+    // it. We've already proven every entry in `addrs` is safe, so picking
+    // the first is fine — reqwest will only try `addr` and won't fall back
+    // to its own resolver.
+    Ok(Some((host, addrs[0])))
 }
 
 /// Validate that a URL is safe to send webhooks to (mitigate SSRF).
