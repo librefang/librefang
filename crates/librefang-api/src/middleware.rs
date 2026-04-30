@@ -389,6 +389,168 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
     response
 }
 
+// ---------------------------------------------------------------------------
+// Public route catalog
+//
+// These typed constants are the single source of truth for which routes the
+// auth middleware treats as publicly reachable.  They are intentionally
+// `pub` so that integration tests can enumerate them and assert that every
+// path either lives here or requires an Authorization header.
+//
+// Sorted alphabetically by path within each slice for deterministic ordering.
+// ---------------------------------------------------------------------------
+
+/// Whether a public route is reachable on any HTTP method or GET only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicMethod {
+    /// Any HTTP method is public (no token required).
+    Any,
+    /// Only GET requests are public; other methods require auth.
+    GetOnly,
+}
+
+/// Whether the path must match exactly or may be a prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicMatch {
+    /// The normalised request path must equal `path` exactly.
+    Exact,
+    /// The normalised request path must start with `path`.
+    Prefix,
+}
+
+/// A single entry in the public-route allowlist.
+#[derive(Debug, Clone, Copy)]
+pub struct PublicRoute {
+    pub method: PublicMethod,
+    pub path: &'static str,
+    pub match_kind: PublicMatch,
+}
+
+impl PublicRoute {
+    const fn exact_any(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::Any,
+            path,
+            match_kind: PublicMatch::Exact,
+        }
+    }
+    const fn exact_get(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::GetOnly,
+            path,
+            match_kind: PublicMatch::Exact,
+        }
+    }
+    const fn prefix_any(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::Any,
+            path,
+            match_kind: PublicMatch::Prefix,
+        }
+    }
+    const fn prefix_get(path: &'static str) -> Self {
+        Self {
+            method: PublicMethod::GetOnly,
+            path,
+            match_kind: PublicMatch::Prefix,
+        }
+    }
+}
+
+/// Routes that are public on **any** HTTP method, regardless of auth config.
+///
+/// These are either static assets needed to render the login screen, auth
+/// flow entry points, or minimal liveness probes that leak nothing sensitive.
+pub const PUBLIC_ROUTES_ALWAYS: &[PublicRoute] = &[
+    // Static assets / shell
+    PublicRoute::exact_any("/"),
+    PublicRoute::exact_any("/favicon.ico"),
+    PublicRoute::exact_any("/logo.png"),
+    // Auth flow entry points (method-free so POST also works)
+    PublicRoute::exact_any("/api/auth/callback"),
+    PublicRoute::exact_any("/api/auth/dashboard-check"),
+    PublicRoute::exact_any("/api/auth/dashboard-login"),
+    // Mobile pairing — phone has no API key yet
+    PublicRoute::exact_any("/api/pairing/complete"),
+    // Minimal liveness probes
+    PublicRoute::exact_any("/api/health"),
+    PublicRoute::exact_any("/api/version"),
+    PublicRoute::exact_any("/api/versions"),
+    // GitHub Copilot OAuth — prefix, any method
+    PublicRoute::prefix_any("/api/providers/github-copilot/oauth/"),
+];
+
+/// Routes that are public on **GET only**, regardless of auth config.
+pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
+    PublicRoute::exact_get("/.well-known/agent.json"),
+    // A2A: agent listing is public so external callers can discover agents
+    // without a bearer token (A2A spec intent). All other /a2a/* paths require
+    // auth (Bug #3781).
+    PublicRoute::exact_get("/a2a/agents"),
+    PublicRoute::exact_get("/api/auth/providers"),
+    // Auth login prefix
+    PublicRoute::prefix_get("/api/auth/login"),
+    // Config schema
+    PublicRoute::exact_get("/api/config/schema"),
+    // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
+    PublicRoute::prefix_get("/dashboard/assets/"),
+    // i18n locale bundles — static, fetched before auth flow
+    PublicRoute::prefix_get("/locales/"),
+    // MCP OAuth callback: /api/mcp/servers/{name}/auth/callback
+    PublicRoute::prefix_get("/api/mcp/servers/"),
+];
+
+/// Routes in the "dashboard reads" group — public when `require_auth_for_reads`
+/// is NOT enabled (or no auth is configured), authenticated otherwise.
+///
+/// All entries are GET-only. Prefix entries are marked `PublicMatch::Prefix`.
+pub const PUBLIC_ROUTES_DASHBOARD_READS: &[PublicRoute] = &[
+    PublicRoute::exact_get("/api/a2a/agents"),
+    PublicRoute::exact_get("/api/agents"),
+    PublicRoute::exact_get("/api/auto-dream/status"),
+    PublicRoute::exact_get("/api/budget"),
+    PublicRoute::exact_get("/api/budget/agents"),
+    PublicRoute::prefix_get("/api/budget/agents/"),
+    PublicRoute::exact_get("/api/channels"),
+    PublicRoute::prefix_get("/api/cron/"),
+    PublicRoute::exact_get("/api/hands"),
+    PublicRoute::exact_get("/api/hands/active"),
+    PublicRoute::prefix_get("/api/hands/"),
+    PublicRoute::exact_get("/api/mcp/catalog"),
+    PublicRoute::exact_get("/api/mcp/health"),
+    PublicRoute::exact_get("/api/mcp/servers"),
+    PublicRoute::exact_get("/api/models"),
+    PublicRoute::exact_get("/api/models/aliases"),
+    PublicRoute::exact_get("/api/network/status"),
+    PublicRoute::exact_get("/api/profiles"),
+    PublicRoute::exact_get("/api/providers"),
+    PublicRoute::exact_get("/api/sessions"),
+    PublicRoute::exact_get("/api/skills"),
+    PublicRoute::exact_get("/api/status"),
+    PublicRoute::exact_get("/api/workflows"),
+];
+
+/// Check whether a normalised path matches a [`PublicRoute`] entry.
+///
+/// For MCP OAuth callbacks (`/api/mcp/servers/*/auth/callback`) the prefix
+/// match on `/api/mcp/servers/` is intentionally broad — the caller must
+/// additionally check that the path ends with `/auth/callback` when needed.
+/// The auth middleware applies that extra guard; the constant just records the
+/// prefix so the test can enumerate it.
+fn matches_route(route: &PublicRoute, path: &str, is_get: bool) -> bool {
+    let method_ok = match route.method {
+        PublicMethod::Any => true,
+        PublicMethod::GetOnly => is_get,
+    };
+    if !method_ok {
+        return false;
+    }
+    match route.match_kind {
+        PublicMatch::Exact => path == route.path,
+        PublicMatch::Prefix => path.starts_with(route.path),
+    }
+}
+
 /// Bearer token authentication middleware.
 ///
 /// When `api_key` is non-empty (after trimming), requests to non-public
@@ -560,24 +722,18 @@ pub async fn auth(
     // `/api/health` stays public because its payload is genuinely minimal
     // (status + version + a two-item checks array) and load balancers /
     // orchestrators need it for probing.
-    let always_public_method_free = matches!(
-        path,
-        "/" | "/logo.png"
-            | "/favicon.ico"
-            | "/api/versions"
-            | "/api/health"
-            | "/api/version"
-            | "/api/auth/callback"
-            | "/api/auth/dashboard-login"
-            | "/api/auth/dashboard-check"
-            // Mobile pairing — phone has no API key yet, needs to exchange
-            // the one-time QR token for the daemon's api_key.
-            | "/api/pairing/complete"
-    ) || path.starts_with("/api/providers/github-copilot/oauth/");
+    // Walk PUBLIC_ROUTES_ALWAYS: public on any HTTP method regardless of auth config.
+    let always_public_method_free = PUBLIC_ROUTES_ALWAYS
+        .iter()
+        .any(|r| matches_route(r, path, is_get));
+
     // MCP OAuth callback — browser redirect from OAuth provider, no API key.
     // Pattern: /api/mcp/servers/{name}/auth/callback — GET only.
+    // The prefix "/api/mcp/servers/" is in PUBLIC_ROUTES_GET_ONLY; apply the
+    // extra `/auth/callback` suffix guard here to avoid widening the allowlist.
     let is_mcp_oauth_callback =
         is_get && path.starts_with("/api/mcp/servers/") && path.ends_with("/auth/callback");
+
     // Path has been trimmed of trailing slashes above, so `/dashboard/` is
     // normalized to `/dashboard`. Match the bare root as well as any
     // descendant so the login gate (and cookie session lookup below) don't
@@ -599,30 +755,20 @@ pub async fn auth(
     // entry UI; the individual `/api/*` endpoints still require a Bearer
     // token, which is the real security boundary.
     //
-    // Dashboard assets (JS/CSS/font chunks) are always public — they contain
-    // no sensitive data and the SPA shell needs them to render even the
-    // inline login page returned for unauthenticated browsers. The same
-    // applies to `/locales/*.json` — translation bundles are static i18n
-    // resources fetched by the SPA shell before any auth flow runs.
-    let is_dashboard_asset = path.starts_with("/dashboard/assets/");
-    let is_locale_bundle = path.starts_with("/locales/");
-    let dashboard_shell_public = (!auth_state.dashboard_auth_enabled && is_dashboard_path)
-        || is_dashboard_asset
-        || is_locale_bundle;
+    // Dashboard assets (JS/CSS/font chunks) and locale bundles are in
+    // PUBLIC_ROUTES_GET_ONLY; the dashboard shell is conditionally public
+    // based on dashboard_auth_enabled (handled below).
+    let dashboard_shell_public = !auth_state.dashboard_auth_enabled && is_dashboard_path;
 
+    // Walk PUBLIC_ROUTES_GET_ONLY: public on GET only regardless of auth config.
+    // For /api/mcp/servers/* the prefix match is intentionally broad — the
+    // is_mcp_oauth_callback guard above applies the extra suffix check.
     let always_public_get_only = is_get
-        && (matches!(
-            path,
-            "/.well-known/agent.json" | "/api/config/schema" | "/api/auth/providers"
-        ) || dashboard_shell_public
-            // The /a2a/agents listing is public so external callers can discover
-            // local agents without a bearer token (matches the A2A spec intent).
-            // All other /a2a/* paths — including /a2a/tasks/{id} which returns full
-            // task transcripts — require authentication (Bug #3781).
-            || path == "/a2a/agents"
-            // /api/uploads/* is intentionally NOT in the public list — uploads
-            // require authentication, UUID guessing is not access control (#3361).
-            || path.starts_with("/api/auth/login"));
+        && (PUBLIC_ROUTES_GET_ONLY
+            .iter()
+            .any(|r| matches_route(r, path, is_get))
+            || dashboard_shell_public);
+
     let always_public =
         always_public_method_free || always_public_get_only || is_mcp_oauth_callback;
 
@@ -631,51 +777,19 @@ pub async fn auth(
     // when `require_auth_for_reads` is enabled AND an `api_key` is configured,
     // so a remote attacker can no longer enumerate agents, config, budget,
     // sessions, approvals, hands, skills, or workflows.
-    let dashboard_read_exact = matches!(
-        path,
-        "/api/agents"
-            | "/api/profiles"
-            | "/api/config"
-            | "/api/status"
-            | "/api/models"
-            | "/api/models/aliases"
-            | "/api/providers"
-            | "/api/budget"
-            | "/api/budget/agents"
-            | "/api/network/status"
-            | "/api/a2a/agents"
-            // /api/approvals removed — list_approvals returns the same
-            // action_summary (pending shell command) the prefix carve
-            // protects against.  See the matching change to
-            // dashboard_read_prefix below.
-            | "/api/channels"
-            | "/api/hands"
-            | "/api/hands/active"
-            | "/api/skills"
-            | "/api/sessions"
-            | "/api/mcp/servers"
-            | "/api/mcp/catalog"
-            | "/api/mcp/health"
-            | "/api/workflows"
-            | "/api/auto-dream/status"
-    );
-    // SECURITY #3367 + post-merge audit of #3941: every read path under
-    // /api/approvals/* exposes the same `action_summary` field (the
-    // pending shell command and arguments) — it is reachable through
-    // GET /approvals (list), GET /approvals/{id}, GET /approvals/audit,
-    // and the previously-carved /approvals/session/* tree.  #3941 only
-    // gated /api/approvals/session/, leaving the same payload
-    // unauthenticated through the sister endpoints.  Drop the prefix
-    // from the public allowlist entirely so the auth gate covers every
-    // approvals route; the dashboard already attaches credentials on
-    // every request via its api helper, so this is not a UX regression.
-    let dashboard_read_prefix = path.starts_with("/api/budget/agents/")
-        || path.starts_with("/api/hands/")
-        || path.starts_with("/api/cron/");
-    // NOTE: /api/logs/stream (SSE) is intentionally excluded from the public
-    // allowlist. It streams real-time audit/log events and must require auth
-    // the same way every other sensitive read endpoint does. (#3593/#3680)
-    let dashboard_read_public = is_get && (dashboard_read_exact || dashboard_read_prefix);
+    //
+    // SECURITY #3367 + post-merge audit of #3941: /api/approvals/* is
+    // intentionally absent — every read path there exposes `action_summary`
+    // (the pending shell command). The dashboard attaches credentials on every
+    // request via its api helper, so this is not a UX regression.
+    //
+    // NOTE: /api/logs/stream (SSE) is also intentionally excluded — it
+    // streams real-time audit/log events and must require auth the same way
+    // every other sensitive read endpoint does. (#3593/#3680)
+    let dashboard_read_public = is_get
+        && PUBLIC_ROUTES_DASHBOARD_READS
+            .iter()
+            .any(|r| matches_route(r, path, is_get));
 
     let enforce_auth_on_reads = auth_state.require_auth_for_reads && auth_configured;
 
