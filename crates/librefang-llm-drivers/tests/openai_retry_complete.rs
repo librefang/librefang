@@ -7,10 +7,6 @@ use std::time::{Duration, SystemTime};
 use wiremock::matchers::{method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
-fn request_json(request: &Request) -> serde_json::Value {
-    serde_json::from_slice(&request.body).expect("request body should be valid JSON")
-}
-
 struct BodyContains(&'static str);
 
 impl Match for BodyContains {

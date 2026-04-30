@@ -1,33 +1,9 @@
 mod common;
 
 use common::*;
-use librefang_llm_driver::{LlmDriver, LlmError, StreamEvent};
+use librefang_llm_driver::{LlmError, StreamEvent};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-
-fn request_json(request: &Request) -> serde_json::Value {
-    serde_json::from_slice(&request.body).expect("request body should be valid JSON")
-}
-
-async fn collect_stream(
-    driver: &librefang_llm_drivers::drivers::openai::OpenAIDriver,
-    request: librefang_llm_driver::CompletionRequest,
-) -> (
-    Result<librefang_llm_driver::CompletionResponse, LlmError>,
-    Vec<StreamEvent>,
-) {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let handle = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    });
-    let result = driver.stream(request, tx).await;
-    let events = handle.await.unwrap();
-    (result, events)
-}
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn openai_400_stream_options_rejected() -> ResponseTemplate {
     ResponseTemplate::new(400).set_body_json(serde_json::json!({

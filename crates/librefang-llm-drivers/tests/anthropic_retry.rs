@@ -1,9 +1,10 @@
 mod common;
 
 use common::{
-    anthropic_200_body, anthropic_sse_body, isolated_env, lockout_file_exists, simple_request,
+    anthropic_200_body, anthropic_sse_body, collect_stream, isolated_env, lockout_file_exists,
+    simple_request,
 };
-use librefang_llm_driver::{LlmDriver, LlmError, StreamEvent};
+use librefang_llm_driver::{LlmDriver, LlmError};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -23,27 +24,7 @@ fn driver_with_key(server: &MockServer) -> DriverWithKey {
     DriverWithKey { driver, api_key }
 }
 
-async fn collect_stream(
-    driver: &librefang_llm_drivers::drivers::anthropic::AnthropicDriver,
-    request: librefang_llm_driver::CompletionRequest,
-) -> (
-    Result<librefang_llm_driver::CompletionResponse, LlmError>,
-    Vec<StreamEvent>,
-) {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let handle = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    });
-    let result = driver.stream(request, tx).await;
-    let events = handle.await.unwrap();
-    (result, events)
-}
-
-fn anthropic_429_no_retry_after() -> ResponseTemplate {
+fn anthropic_429_fast_retry() -> ResponseTemplate {
     ResponseTemplate::new(429)
         .insert_header("retry-after", "1")
         .insert_header("anthropic-ratelimit-requests-limit", "1000")
@@ -55,7 +36,7 @@ fn anthropic_429_no_retry_after() -> ResponseTemplate {
         }))
 }
 
-fn anthropic_529_no_retry_after() -> ResponseTemplate {
+fn anthropic_529_overloaded() -> ResponseTemplate {
     ResponseTemplate::new(529).set_body_json(serde_json::json!({
         "type": "error",
         "error": {"type": "overloaded_error", "message": "Overloaded"}
@@ -71,7 +52,7 @@ async fn aa1_429_retry_then_success() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(anthropic_429_no_retry_after())
+        .respond_with(anthropic_429_fast_retry())
         .up_to_n_times(2)
         .with_priority(1)
         .mount(&server)
@@ -102,7 +83,7 @@ async fn aa2_429_exhaustion() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(anthropic_429_no_retry_after())
+        .respond_with(anthropic_429_fast_retry())
         .up_to_n_times(4)
         .mount(&server)
         .await;
@@ -129,7 +110,7 @@ async fn aa3_529_retry_then_success_no_lockout() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(anthropic_529_no_retry_after())
+        .respond_with(anthropic_529_overloaded())
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&server)
@@ -160,7 +141,7 @@ async fn aa4_529_exhaustion_overloaded() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(anthropic_529_no_retry_after())
+        .respond_with(anthropic_529_overloaded())
         .up_to_n_times(4)
         .mount(&server)
         .await;
@@ -183,7 +164,7 @@ async fn aa5_stream_429_retry() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(anthropic_429_no_retry_after())
+        .respond_with(anthropic_429_fast_retry())
         .up_to_n_times(2)
         .with_priority(1)
         .mount(&server)

@@ -3,12 +3,15 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use librefang_llm_driver::{CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use librefang_llm_driver::{LlmDriver, LlmError};
 use librefang_llm_drivers::drivers::gemini::GeminiDriver;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-use common::{gemini_200_body, gemini_sse_body, isolated_env, lockout_file_exists, simple_request};
+use common::{
+    collect_stream, gemini_200_body, gemini_sse_body, isolated_env, lockout_file_exists,
+    simple_request,
+};
 
 struct SequencedResponder {
     responses: Vec<ResponseTemplate>,
@@ -68,28 +71,9 @@ fn gemini_403() -> ResponseTemplate {
     }))
 }
 
-async fn collect_stream(
-    driver: &GeminiDriver,
-    request: librefang_llm_driver::CompletionRequest,
-) -> (Result<CompletionResponse, LlmError>, Vec<StreamEvent>) {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let handle = tokio::spawn(async move {
-        let mut events = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            events.push(ev);
-        }
-        events
-    });
-    let result = driver.stream(request, tx.clone()).await;
-    drop(tx);
-    let events = handle.await.unwrap();
-    (result, events)
-}
-
 #[tokio::test]
 #[serial_test::serial]
 async fn ag1_429_retry_then_success() {
-    let _env = isolated_env();
     let server = MockServer::start().await;
     let api_key = "test-ag1-key".to_string();
     let driver = GeminiDriver::with_proxy_and_timeout(api_key.clone(), server.uri(), None, Some(5));

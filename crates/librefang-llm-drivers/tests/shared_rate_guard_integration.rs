@@ -19,6 +19,7 @@
 //!     instances using only the file as shared state).
 
 use librefang_llm_driver::{CompletionRequest, LlmDriver, LlmError};
+use librefang_llm_drivers::backoff;
 use librefang_llm_drivers::drivers::openai::OpenAIDriver;
 use librefang_types::message::Message;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,15 +110,10 @@ async fn shared_rate_guard_short_circuits_second_client() {
     // Use a process-unique key so we don't collide with sibling tests that
     // share the same working dir.
     let api_key = format!("sk-itest-{}", std::process::id());
-    // SAFETY: integration tests run as separate processes (one binary per
-    // integration test file) so there is no concurrent thread racing on these
-    // vars within this process.
-    unsafe {
-        std::env::set_var("LIBREFANG_HOME", home.path());
-        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-        std::env::set_var("no_proxy", "127.0.0.1,localhost");
-        std::env::set_var("LIBREFANG_TEST_NO_BACKOFF", "1");
-    }
+    let _backoff_guard = backoff::enable_test_zero_backoff();
+    std::env::set_var("LIBREFANG_HOME", home.path());
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
 
     let (base_url, hits) = spawn_stub_429_server().await;
 
@@ -188,6 +184,4 @@ async fn shared_rate_guard_short_circuits_second_client() {
         "until_unix should be ~1h into the future, but it is now+{}s",
         until.saturating_sub(now)
     );
-
-    std::env::remove_var("LIBREFANG_HOME");
 }

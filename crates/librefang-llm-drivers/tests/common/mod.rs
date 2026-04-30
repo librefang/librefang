@@ -3,17 +3,35 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use librefang_llm_driver::CompletionRequest;
+use librefang_llm_driver::{CompletionRequest, LlmDriver, LlmError, StreamEvent};
 use librefang_types::message::Message;
 use librefang_types::tool::ToolDefinition;
 use tempfile::TempDir;
 use uuid::Uuid;
-use wiremock::{MockServer, ResponseTemplate};
+use wiremock::{MockServer, Request, ResponseTemplate};
 
+use librefang_llm_drivers::backoff;
 use librefang_llm_drivers::drivers::anthropic::AnthropicDriver;
 use librefang_llm_drivers::drivers::gemini::GeminiDriver;
 use librefang_llm_drivers::drivers::openai::OpenAIDriver;
 use librefang_llm_drivers::shared_rate_guard;
+
+pub struct TestEnv {
+    _tmp: TempDir,
+    _backoff_guard: backoff::ZeroBackoffGuard,
+}
+
+pub fn isolated_env() -> TestEnv {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("LIBREFANG_HOME", tmp.path());
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    std::env::set_var("no_proxy", "127.0.0.1,localhost");
+    let backoff_guard = backoff::enable_test_zero_backoff();
+    TestEnv {
+        _tmp: tmp,
+        _backoff_guard: backoff_guard,
+    }
+}
 
 pub fn mock_openai_driver(server: &MockServer) -> OpenAIDriver {
     OpenAIDriver::with_proxy_and_timeout(
@@ -40,17 +58,6 @@ pub fn mock_gemini_driver(server: &MockServer) -> GeminiDriver {
         None,
         Some(5),
     )
-}
-
-pub fn isolated_env() -> TempDir {
-    let dir = tempfile::tempdir().expect("tempdir");
-    unsafe {
-        std::env::set_var("LIBREFANG_HOME", dir.path());
-        std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
-        std::env::set_var("no_proxy", "127.0.0.1,localhost");
-        std::env::set_var("LIBREFANG_TEST_NO_BACKOFF", "1");
-    }
-    dir
 }
 
 pub fn simple_request(model: &str) -> CompletionRequest {
@@ -404,6 +411,31 @@ pub fn create_lockout_file(provider: &str, api_key: &str, until: SystemTime) {
 
 pub fn provider_for_openai_mock() -> &'static str {
     "openai-compat"
+}
+
+pub fn request_json(request: &Request) -> serde_json::Value {
+    serde_json::from_slice(&request.body).expect("request body should be valid JSON")
+}
+
+pub async fn collect_stream(
+    driver: &dyn LlmDriver,
+    request: CompletionRequest,
+) -> (
+    Result<librefang_llm_driver::CompletionResponse, LlmError>,
+    Vec<StreamEvent>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let handle = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        events
+    });
+    let result = driver.stream(request, tx.clone()).await;
+    drop(tx);
+    let events = handle.await.unwrap();
+    (result, events)
 }
 
 fn rate_limit_dir_path() -> PathBuf {

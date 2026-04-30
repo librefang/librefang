@@ -11,8 +11,25 @@
 //! process-global monotonic counter so that seeds remain diverse even when the
 //! OS clock has coarse granularity (e.g. 15 ms on Windows).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+
+static TEST_ZERO_BACKOFF: AtomicBool = AtomicBool::new(false);
+
+/// Enable zero-delay backoff for integration tests. Returns a guard that
+/// disables it on drop.
+pub fn enable_test_zero_backoff() -> ZeroBackoffGuard {
+    TEST_ZERO_BACKOFF.store(true, Ordering::Relaxed);
+    ZeroBackoffGuard(())
+}
+
+pub struct ZeroBackoffGuard(());
+
+impl Drop for ZeroBackoffGuard {
+    fn drop(&mut self) {
+        TEST_ZERO_BACKOFF.store(false, Ordering::Relaxed);
+    }
+}
 
 /// Process-global counter that advances on every `jittered_backoff` call.
 /// Combined with wall-clock nanoseconds it ensures seed diversity even when
@@ -57,7 +74,7 @@ pub fn jittered_backoff(
     // happens at exp ~34 for a 2 s base, well below the old cap of 62).
     // We clamp the f64 result against max_delay_secs before constructing a
     // Duration, so the Duration is always in range.
-    if std::env::var("LIBREFANG_TEST_NO_BACKOFF").is_ok() {
+    if TEST_ZERO_BACKOFF.load(Ordering::Relaxed) {
         return floor.min(Duration::from_secs(300));
     }
 
