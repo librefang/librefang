@@ -638,7 +638,12 @@ impl SessionStore {
                 let duration_ms: Option<i64> = {
                     let mut stamps = messages.iter().filter_map(|m| m.timestamp);
                     let first = stamps.next();
-                    let last = stamps.last().or(first);
+                    // next_back() on the same iterator instead of last(): the
+                    // adapter is DoubleEndedIterator (Vec::iter + filter_map),
+                    // so walking from the tail finds the latest stamped
+                    // message in O(k) rather than scanning every remaining
+                    // element. clippy::double_ended_iterator_last enforces.
+                    let last = stamps.next_back().or(first);
                     match (first, last) {
                         (Some(a), Some(b)) if b > a => Some((b - a).num_milliseconds()),
                         _ => None,
