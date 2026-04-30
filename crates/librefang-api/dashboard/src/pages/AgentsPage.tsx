@@ -739,10 +739,20 @@ export function AgentsPage() {
     ];
 
     return (
-      <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-[640px]">
+      <Card padding="none" className="surface-lit overflow-hidden flex flex-col min-h-0 lg:min-h-[640px] h-full lg:h-auto">
         {/* Header */}
-        <div className="px-5 pt-4 pb-3 border-b border-border-subtle">
-          <div className="flex items-center gap-3">
+        <div className="px-3 sm:px-5 pt-3 sm:pt-4 pb-3 border-b border-border-subtle">
+          <div className="flex items-center gap-2 sm:gap-3">
+            {/* Mobile-only "back to list" affordance — closes the detail
+                overlay without deselecting state for lg+. */}
+            <button
+              type="button"
+              onClick={() => setDetailAgent(null)}
+              className="lg:hidden -ml-1 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 shrink-0"
+              aria-label={t("common.back", { defaultValue: "Back" })}
+            >
+              <X className="w-4 h-4" />
+            </button>
             <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/30 grid place-items-center text-brand shrink-0">
               <Bot className="w-[18px] h-[18px]" />
             </div>
@@ -765,26 +775,49 @@ export function AgentsPage() {
                 {(agent as AgentView).profile ? ` · ${(agent as AgentView).profile}` : ""}
               </p>
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
+            {/* Action cluster — labels collapse on mobile so the row keeps
+                three icon-buttons + back arrow on a 390px viewport. */}
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               {isSuspended ? (
-                <Button variant="ghost" size="sm" leftIcon={<Play className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
-                    addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
-                  }
-                }}>
-                  {t("agents.resume", { defaultValue: "Resume" })}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Play className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.resume", { defaultValue: "Resume" })}
+                  title={t("agents.resume", { defaultValue: "Resume" })}
+                  onClick={async () => {
+                    try { await resumeMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.resume_failed", { defaultValue: "Failed to resume agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.resume", { defaultValue: "Resume" })}</span>
                 </Button>
               ) : (
-                <Button variant="ghost" size="sm" leftIcon={<Pause className="w-3.5 h-3.5" />} onClick={async () => {
-                  try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
-                    addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
-                  }
-                }}>
-                  {t("agents.suspend", { defaultValue: "Pause" })}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  leftIcon={<Pause className="w-3.5 h-3.5" />}
+                  aria-label={t("agents.suspend", { defaultValue: "Pause" })}
+                  title={t("agents.suspend", { defaultValue: "Pause" })}
+                  onClick={async () => {
+                    try { await suspendMutation.mutateAsync(agent.id); } catch (e) {
+                      addToast(toastErr(e, t("agents.suspend_failed", { defaultValue: "Failed to suspend agent" })), "error");
+                    }
+                  }}
+                >
+                  <span className="hidden sm:inline">{t("agents.suspend", { defaultValue: "Pause" })}</span>
                 </Button>
               )}
-              <Button variant="secondary" size="sm" leftIcon={<MessageCircle className="w-3.5 h-3.5" />} onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}>
-                {t("common.interact", { defaultValue: "Chat" })}
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<MessageCircle className="w-3.5 h-3.5" />}
+                aria-label={t("common.interact", { defaultValue: "Chat" })}
+                title={t("common.interact", { defaultValue: "Chat" })}
+                onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}
+              >
+                <span className="hidden sm:inline">{t("common.interact", { defaultValue: "Chat" })}</span>
               </Button>
               <Button
                 variant="ghost"
@@ -838,7 +871,7 @@ export function AgentsPage() {
         </div>
 
         {/* Tab content */}
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="flex-1 overflow-y-auto px-3 sm:px-5 py-3 sm:py-4">
           {renderTabContent(agent, isCrashed)}
         </div>
       </Card>
@@ -978,13 +1011,15 @@ export function AgentsPage() {
               return (
                 <div
                   key={r.id || `mem-${i}`}
-                  className="flex items-center gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
+                  className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
                 >
-                  <span className="font-mono text-[12px] text-brand min-w-[180px] truncate shrink-0">{key}</span>
-                  <span className="font-mono text-[12px] text-text-dim flex-1 min-w-0 truncate">{valueText || "—"}</span>
-                  <span className="font-mono text-[10.5px] text-text-dim/70 shrink-0 tabular-nums">
-                    {r.created_at ? formatRelativeTime(r.created_at) : "—"}
-                  </span>
+                  <div className="flex items-center justify-between gap-2 sm:contents">
+                    <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{key}</span>
+                    <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
+                      {r.created_at ? formatRelativeTime(r.created_at) : "—"}
+                    </span>
+                  </div>
+                  <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2">{valueText || "—"}</span>
                 </div>
               );
             })}
@@ -1203,13 +1238,13 @@ export function AgentsPage() {
           </div>
         ) : (
           <div
-            className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-y-auto"
+            className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-auto -mx-3 sm:mx-0"
             style={{ background: "rgba(2,6,23,0.6)" }}
           >
             {filtered.map((row, i) => {
               const lv = levelOf(row);
               return (
-                <div key={i} className="flex gap-2.5">
+                <div key={i} className="flex gap-2.5 min-w-max sm:min-w-0">
                   <span className="text-text-dim/60 shrink-0">{fmtTime(row.timestamp)}</span>
                   <span className={`${levelColor(lv)} w-12 shrink-0`}>{lv}</span>
                   <span className="text-accent w-24 shrink-0 truncate">{row.action || "—"}</span>
@@ -1242,9 +1277,15 @@ export function AgentsPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 min-h-[640px]">
-        {/* Left list panel — search + filter pills + sort + scroll body. */}
-        <Card padding="none" className="surface-lit overflow-hidden flex flex-col h-[calc(100vh-200px)] min-h-[480px]">
+      <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4 lg:min-h-[640px]">
+        {/* Left list panel — search + filter pills + sort + scroll body.
+            On mobile the list owns the viewport; the detail panel is
+            promoted to a full-screen overlay (see below) so we never
+            stack two scrollers on a 390px phone. */}
+        <Card
+          padding="none"
+          className={`surface-lit overflow-hidden flex flex-col h-[calc(100vh-200px)] min-h-[480px] ${detailAgent ? "hidden lg:flex" : "flex"}`}
+        >
           <div className="px-3 pt-3 pb-2.5 border-b border-border-subtle flex flex-col gap-2 flex-shrink-0">
             <Input
               value={search}
@@ -1339,11 +1380,20 @@ export function AgentsPage() {
           </div>
         </Card>
 
-        {/* Right detail panel — header + KPI tiles + 5 tabs. */}
+        {/* Right detail panel — header + KPI tiles + 5 tabs.
+            Mobile: rendered as a fixed full-viewport overlay above the
+            list (top inset 0, bottom inset 14 reserves the global tab
+            bar's ~56px so it never gets covered). lg+: collapses back
+            into the master-detail grid. */}
         {detailAgent ? (
-          renderDetailPanel(detailAgent)
+          <div className="fixed inset-x-0 top-0 bottom-14 z-30 bg-surface lg:static lg:inset-auto lg:bottom-auto lg:z-auto lg:bg-transparent overflow-hidden flex flex-col">
+            {renderDetailPanel(detailAgent)}
+          </div>
         ) : (
-          <Card padding="lg" className="surface-lit grid place-items-center text-center min-h-[480px]">
+          // Placeholder is desktop-only — on mobile the list fills the
+          // viewport when no agent is selected, so this empty-state would
+          // just be wasted vertical space.
+          <Card padding="lg" className="surface-lit hidden lg:grid place-items-center text-center min-h-[480px]">
             <div className="max-w-xs">
               <div className="w-12 h-12 mx-auto rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand mb-3">
                 <Bot className="w-6 h-6" />
