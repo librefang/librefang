@@ -72,7 +72,7 @@ impl Utf8StreamDecoder {
                         out.push('\u{FFFD}');
                         // Recurse to handle the rest (which may itself end
                         // in another partial codepoint).
-                        out.push_str(&self.decode(&buf[bad_end..].to_vec()));
+                        out.push_str(&self.decode(&buf[bad_end..]));
                         out
                     }
                 }
