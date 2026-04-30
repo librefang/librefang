@@ -3144,9 +3144,9 @@ pub async fn start_channel_bridge_with_config(
                             tracing::error!(
                                 env = %dt_config.secret_env,
                                 "DingTalk webhook adapter requires a non-empty signing secret \
-                                 ({} unset or empty); refusing to register adapter (default-deny). \
-                                 Set the env var or switch receive_mode to \"stream\".",
-                                dt_config.secret_env
+                                 (env var unset or empty); refusing to register adapter \
+                                 (default-deny). Set the env var or switch receive_mode \
+                                 to \"stream\".",
                             );
                             continue;
                         }

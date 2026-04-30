@@ -119,7 +119,7 @@ impl KernelOAuthProvider {
 
         let client_id = self.vault_get(&Self::vault_key(server_url, "client_id"));
 
-        let client = reqwest::Client::new();
+        let client = librefang_extensions::http_client::new_client();
         let mut params = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh_token.to_string()),
@@ -170,7 +170,7 @@ impl KernelOAuthProvider {
         {
             return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
         }
-        let client = reqwest::Client::new();
+        let client = librefang_extensions::http_client::new_client();
 
         let body = serde_json::json!({
             "client_name": "LibreFang",

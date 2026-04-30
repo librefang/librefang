@@ -653,9 +653,11 @@ impl ChannelAdapter for DingTalkAdapter {
                         // stale timestamp is treated as a possible replay,
                         // so we reject as unauthorized rather than forbidden —
                         // matching the missing/invalid-signature path.
-                        const REPLAY_WINDOW_MS: i64 = 5 * 60 * 1_000;
+                        const REPLAY_WINDOW_MS: u64 = 5 * 60 * 1_000;
                         let now = Utc::now().timestamp_millis();
-                        if (now - ts).unsigned_abs() > REPLAY_WINDOW_MS as u64 {
+                        // Use saturating_sub to avoid i64 overflow on a
+                        // forged extreme timestamp; treat overflow as stale.
+                        if now.saturating_sub(ts).unsigned_abs() > REPLAY_WINDOW_MS {
                             warn!("DingTalk: stale timestamp (outside ±5 min window)");
                             return axum::http::StatusCode::UNAUTHORIZED;
                         }
