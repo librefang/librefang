@@ -196,10 +196,6 @@ function SkillCard({
   // brand color so a grid view of mixed hubs is colour-coded by origin
   // (matches the design canvas). Installed cards stay green.
   const hub = variant !== "installed" && source ? getSkillHub(source) : null;
-  const accentClass =
-    variant === "installed"
-      ? "from-success via-success/60 to-success/30"
-      : "from-brand via-brand/60 to-brand/30";
   const iconClass =
     variant === "installed"
       ? "bg-success/10 border-success/20 text-success"
@@ -245,8 +241,10 @@ function SkillCard({
           {hubBadge}
         </div>
       )}
-      <div className={`h-1 bg-linear-to-r ${accentClass}`} />
-      <div className="p-4 flex-1 flex flex-col gap-3">
+      {/* `accentClass` was an experiment with a 1px gradient bar at the
+       *  top of every card; the canvas reference doesn't carry one and
+       *  it visually fights the abs hub badge, so it's gone now. */}
+      <div className="p-3.5 flex-1 flex flex-col gap-2.5">
         {/* Header — larger 38px icon, name row, author/version meta */}
         <div className="flex items-start gap-3 pr-20">
           <div
@@ -338,7 +336,7 @@ function SkillCard({
           ) : variant !== "installed" && onInstall ? (
             <div onClick={(e) => e.stopPropagation()}>
               <Button
-                variant="primary"
+                variant="secondary"
                 size="sm"
                 onClick={onInstall}
                 disabled={installPending}
@@ -1460,12 +1458,13 @@ export function SkillsPage() {
 
   const [viewMode, setViewMode] = useState<ViewMode>("browse");
   /**
-   * Which federated hub the browse grid pulls from. `"all"` aggregates
-   * every configured hub — clawhub / clawhub-cn / skillhub queries are
-   * gated behind a search keyword to avoid hammering the network on
-   * every visit.
+   * Which federated hub the browse grid pulls from. Defaults to
+   * `"fanghub"` so the page lands on a populated grid (FangHub is the
+   * always-warm local cache); switching to `"all"` aggregates every
+   * configured hub but gates the remote ones behind a search keyword
+   * to avoid wide network fan-outs on every page mount.
    */
-  const [hubFilter, setHubFilter] = useState<HubFilter>("all");
+  const [hubFilter, setHubFilter] = useState<HubFilter>("fanghub");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
