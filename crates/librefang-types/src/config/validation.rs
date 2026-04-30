@@ -175,6 +175,7 @@ impl KernelConfig {
                     "subagent_lane",
                     "trigger_lane",
                     "default_per_agent",
+                    "trigger_fire_timeout_secs",
                 ],
             ),
             (

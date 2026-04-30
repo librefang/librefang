@@ -11933,6 +11933,10 @@ system_prompt = "You are a helpful assistant."
                             let home_channel = kernel.resolve_agent_home_channel(aid);
                             // Bound permit-hold duration so a stuck LLM
                             // call cannot pin Lane::Trigger kernel-wide.
+                            // Note: timeout drops this future on expiry,
+                            // but any tokio::spawn'd child tasks inside
+                            // send_message_full are NOT cancelled — they
+                            // run to completion independently.
                             match tokio::time::timeout(
                                 fire_timeout,
                                 kernel.send_message_full(
