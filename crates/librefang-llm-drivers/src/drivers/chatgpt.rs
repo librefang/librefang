@@ -695,6 +695,11 @@ impl ChatGptDriver {
             }
         }
 
+        // Drain any partial codepoint left in the decoder. No-op in
+        // a well-formed stream; on a truncated connection the residue
+        // surfaces as U+FFFD instead of vanishing (#3448).
+        line_buf.push_str(&utf8.finish());
+
         // Build content blocks
         let mut content_blocks = Vec::new();
 

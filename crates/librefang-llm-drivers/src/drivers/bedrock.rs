@@ -644,6 +644,11 @@ fn convert_response(resp: ConverseResponse) -> Result<CompletionResponse, LlmErr
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
         // Bedrock Converse: guardrail-triggered refusals (#3450).
+        // `guardrail_intervened` is the documented value; `content_filtered`
+        // is included for forward-compat with future Bedrock surfaces or
+        // adapters that mirror the OpenAI/Azure naming. Either way, route
+        // to ContentFiltered so the agent loop stops instead of treating
+        // the empty turn as a successful EndTurn.
         "guardrail_intervened" | "content_filtered" => StopReason::ContentFiltered,
         _ if !tool_calls.is_empty() => StopReason::ToolUse,
         _ => StopReason::EndTurn,

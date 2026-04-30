@@ -28,6 +28,13 @@ fn sanitize_channel_error(err: &str) -> String {
         "I've hit my usage limit and need to rest. I'll be back soon!".to_string()
     } else if lower.contains("auth") || lower.contains("not logged in") || lower.contains("401") {
         "I'm having trouble with my credentials. Please let the admin know.".to_string()
+    } else if lower.contains("content filtered by provider") || lower.contains("content_filter") {
+        // Distinct branch for provider safety / refusal so the user sees a
+        // clear "your request was blocked" message instead of the generic
+        // "something went wrong" fallback. The kernel already routes the
+        // matching `content_filtered` operator notification separately
+        // (#3450) — this is the user-facing companion.
+        "I can't help with that — the request was blocked by the model's safety filter.".to_string()
     } else if lower.contains("exited with code") || lower.contains("llm driver") {
         "Sorry, something went wrong on my end. Please try again in a moment.".to_string()
     } else {
@@ -4332,6 +4339,27 @@ mod tests {
         assert!(
             msg.contains("ref:"),
             "expected ref in generic msg, got: {msg}"
+        );
+    }
+
+    /// Provider safety / content-filter refusals must surface as a clear
+    /// "blocked by safety filter" message to the user, not get swallowed
+    /// by the generic "something went wrong" fallback (#3450). Both the
+    /// `LibreFangError::ContentFiltered` Display string and the raw
+    /// upstream `content_filter` token must trigger the branch.
+    #[test]
+    fn test_sanitize_channel_error_content_filter() {
+        let msg =
+            sanitize_channel_error("Content filtered by provider: I cannot help with that request");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
+        );
+
+        let msg = sanitize_channel_error("API error: finish_reason=content_filter");
+        assert!(
+            msg.contains("safety filter"),
+            "expected safety-filter msg, got: {msg}"
         );
     }
 }

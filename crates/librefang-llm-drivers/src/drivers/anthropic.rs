@@ -766,6 +766,11 @@ impl LlmDriver for AnthropicDriver {
                 }
             }
 
+            // End-of-stream: drain any partial codepoint the decoder is
+            // still buffering so a CJK character truncated by the final
+            // chunk surfaces as U+FFFD instead of vanishing (#3448).
+            buffer.push_str(&utf8.finish());
+
             // Build CompletionResponse from accumulated blocks
             let mut content = Vec::new();
             let mut tool_calls = Vec::new();

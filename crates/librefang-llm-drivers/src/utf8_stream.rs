@@ -43,41 +43,64 @@ impl Utf8StreamDecoder {
         let mut buf = std::mem::take(&mut self.pending);
         buf.extend_from_slice(chunk);
 
-        match std::str::from_utf8(&buf) {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                // Safe: validated by from_utf8 above.
-                let head =
-                    unsafe { std::str::from_utf8_unchecked(&buf[..valid_up_to]) }.to_string();
+        let mut out = String::with_capacity(buf.len());
+        let mut cursor = 0usize;
 
-                match e.error_len() {
-                    // None = trailing partial codepoint — buffer it.
-                    None => {
-                        let tail_len = buf.len() - valid_up_to;
-                        if tail_len <= MAX_PARTIAL_LEN {
-                            self.pending = buf[valid_up_to..].to_vec();
-                            head
-                        } else {
-                            // Should never happen for well-formed UTF-8;
-                            // flush as replacement to avoid unbounded growth.
-                            head + &String::from_utf8_lossy(&buf[valid_up_to..])
-                        }
+        // Drain `buf` left-to-right one segment at a time. A segment is
+        // either a maximal valid UTF-8 run, a single replacement for a
+        // genuinely invalid sequence, or a trailing partial codepoint
+        // that we buffer for the next call. The loop avoids the
+        // recursion in the original implementation: each iteration
+        // advances `cursor` by ≥1 byte (or breaks), so adversarial
+        // input with many invalid bytes stays O(n) without growing the
+        // call stack.
+        while cursor < buf.len() {
+            match std::str::from_utf8(&buf[cursor..]) {
+                Ok(s) => {
+                    out.push_str(s);
+                    cursor = buf.len();
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to > 0 {
+                        // Validated by from_utf8 above; expect is preferred
+                        // over `unsafe { from_utf8_unchecked }` — the optimizer
+                        // elides the bounds check, and we keep the whole
+                        // module #![forbid(unsafe_code)]-clean.
+                        out.push_str(
+                            std::str::from_utf8(&buf[cursor..cursor + valid_up_to])
+                                .expect("valid_up_to range was just validated by from_utf8"),
+                        );
                     }
-                    // Some(n) = genuinely invalid n-byte sequence in the
-                    // middle. Replace it and recurse over the remainder.
-                    Some(n) => {
-                        let bad_end = valid_up_to + n;
-                        let mut out = head;
-                        out.push('\u{FFFD}');
-                        // Recurse to handle the rest (which may itself end
-                        // in another partial codepoint).
-                        out.push_str(&self.decode(&buf[bad_end..]));
-                        out
+                    let segment_start = cursor + valid_up_to;
+                    match e.error_len() {
+                        // None = trailing partial codepoint — buffer it
+                        // for the next decode() call.
+                        None => {
+                            let tail_len = buf.len() - segment_start;
+                            if tail_len <= MAX_PARTIAL_LEN {
+                                self.pending = buf[segment_start..].to_vec();
+                            } else {
+                                // Cannot happen for well-formed UTF-8 (no
+                                // codepoint exceeds 4 bytes), but guard
+                                // against unbounded buffer growth on hostile
+                                // input by flushing as replacement chars.
+                                out.push_str(&String::from_utf8_lossy(&buf[segment_start..]));
+                            }
+                            return out;
+                        }
+                        // Some(n) = genuinely invalid n-byte sequence;
+                        // emit one replacement char and continue past it.
+                        Some(n) => {
+                            out.push('\u{FFFD}');
+                            cursor = segment_start + n;
+                        }
                     }
                 }
             }
         }
+
+        out
     }
 
     /// Flush any buffered partial bytes as replacement characters.
@@ -188,5 +211,34 @@ mod tests {
         let tail = d.finish();
         assert!(!tail.is_empty());
         assert!(tail.contains('\u{FFFD}'));
+    }
+
+    /// Hostile input with many invalid bytes must stay O(n) and not
+    /// blow the stack. The pre-loop implementation recursed once per
+    /// invalid sequence; this stress-test would have been a depth bomb.
+    #[test]
+    fn many_invalid_bytes_do_not_overflow_stack() {
+        let mut d = Utf8StreamDecoder::new();
+        // 100k stray 0xFF bytes interleaved with ASCII.
+        let mut buf = Vec::with_capacity(200_000);
+        for _ in 0..100_000 {
+            buf.push(b'a');
+            buf.push(0xFF);
+        }
+        let out = d.decode(&buf);
+        // Every 0xFF maps to one U+FFFD; every 'a' passes through.
+        assert_eq!(out.chars().filter(|c| *c == '\u{FFFD}').count(), 100_000);
+        assert_eq!(out.chars().filter(|c| *c == 'a').count(), 100_000);
+    }
+
+    /// Multiple invalid sequences in one chunk must each get exactly one
+    /// replacement char and the tail must keep flowing.
+    #[test]
+    fn multiple_invalid_sequences_emit_separate_replacements() {
+        let mut d = Utf8StreamDecoder::new();
+        let out = d.decode(&[b'x', 0xFF, b'y', 0xFE, b'z']);
+        assert_eq!(out.chars().filter(|c| *c == '\u{FFFD}').count(), 2);
+        assert!(out.starts_with('x'));
+        assert!(out.ends_with('z'));
     }
 }

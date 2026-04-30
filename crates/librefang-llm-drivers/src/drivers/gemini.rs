@@ -725,6 +725,11 @@ pub(crate) async fn stream_gemini_sse(
         }
     }
 
+    // Drain any partial codepoint left in the decoder so a CJK
+    // character truncated by the final chunk surfaces explicitly
+    // rather than silently disappearing (#3448).
+    buffer.push_str(&utf8.finish());
+
     // Build final response
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
@@ -1186,6 +1191,11 @@ impl LlmDriver for GeminiDriver {
                     }
                 }
             }
+
+            // Drain any partial codepoint left in the decoder so a CJK
+            // character truncated by the final chunk surfaces explicitly
+            // rather than silently disappearing (#3448).
+            buffer.push_str(&utf8.finish());
 
             // Build final response
             let mut content = Vec::new();

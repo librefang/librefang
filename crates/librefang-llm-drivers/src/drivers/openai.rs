@@ -537,15 +537,11 @@ struct OaiUsage {
     /// DeepSeek-specific: prompt tokens served from the on-disk prompt
     /// cache. Billed at 1/10 of the input rate. Reported as a sibling to
     /// `prompt_tokens` rather than nested under `prompt_tokens_details`
-    /// (#3449).
+    /// (#3449). The companion `prompt_cache_miss_tokens` field is
+    /// derivable as `prompt_tokens - prompt_cache_hit_tokens`, so we
+    /// don't bother deserializing it.
     #[serde(default)]
     prompt_cache_hit_tokens: u64,
-    /// DeepSeek-specific: prompt tokens that missed the cache. Billed at
-    /// the regular input rate. We don't surface this directly — the
-    /// agent loop derives uncached input as `prompt_tokens - cache_read`.
-    #[serde(default)]
-    #[allow(dead_code)]
-    prompt_cache_miss_tokens: u64,
 }
 
 /// OpenAI prompt token details (includes cached token count).
@@ -554,6 +550,48 @@ struct OaiPromptTokensDetails {
     /// Number of prompt tokens served from cache.
     #[serde(default)]
     cached_tokens: u64,
+}
+
+/// Pick the cache-read token count from whichever of OpenAI's nested
+/// `prompt_tokens_details.cached_tokens` or DeepSeek's top-level
+/// `prompt_cache_hit_tokens` is non-zero.
+///
+/// Used by both the non-stream and stream code paths so they cannot
+/// silently diverge — see #3449. Real providers only ever populate
+/// one shape (OpenAI/Azure/Groq use the nested form, DeepSeek uses the
+/// top-level form), but accepting both keeps the driver future-proof
+/// against providers that mirror both for compatibility.
+fn pick_cache_read_tokens(nested_cached: u64, deepseek_cached: u64) -> u64 {
+    if nested_cached > 0 {
+        nested_cached
+    } else {
+        deepseek_cached
+    }
+}
+
+/// Convert an OpenAI-compatible `finish_reason` into a `StopReason`,
+/// honoring the safety/policy refusal path (#3450).
+///
+/// Lives outside the `complete()` body so unit tests can exercise the
+/// real mapping rather than replicating a copy. Used by both the
+/// non-stream and streaming paths.
+fn map_oai_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> StopReason {
+    match reason {
+        Some("stop") => StopReason::EndTurn,
+        Some("tool_calls") => StopReason::ToolUse,
+        Some("length") => StopReason::MaxTokens,
+        // OpenAI / Azure / DeepSeek refusals — never silently fold into
+        // EndTurn, otherwise the agent loop treats an empty refusal as a
+        // successful turn.
+        Some("content_filter") => StopReason::ContentFiltered,
+        _ => {
+            if has_tool_calls {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+    }
 }
 
 /// Strip trailing assistant messages that would trigger "prefill not supported"
@@ -1252,47 +1290,29 @@ impl LlmDriver for OpenAIDriver {
                 }
             }
 
-            let stop_reason = match choice.finish_reason.as_deref() {
-                Some("stop") => StopReason::EndTurn,
-                Some("tool_calls") => StopReason::ToolUse,
-                Some("length") => StopReason::MaxTokens,
-                // OpenAI / Azure / DeepSeek refusals — surface as filtered
-                // so the agent loop can stop instead of treating empty/refused
-                // text as a successful EndTurn (#3450).
-                Some("content_filter") => StopReason::ContentFiltered,
-                _ => {
-                    if !tool_calls.is_empty() {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    }
-                }
-            };
+            let stop_reason =
+                map_oai_finish_reason(choice.finish_reason.as_deref(), !tool_calls.is_empty());
 
             let usage = oai_response
                 .usage
                 .map(|u| {
-                    // DeepSeek reports cache hits via `prompt_cache_hit_tokens`
-                    // at the top level; OpenAI / Azure / Groq use the nested
-                    // `prompt_tokens_details.cached_tokens` field. Take whichever
-                    // is non-zero (#3449). The metering layer already discounts
-                    // `cache_read_input_tokens` to 10% of the input rate, which
-                    // matches DeepSeek's published 1/10 cache pricing.
-                    let nested_cached = u
+                    // Single source of truth shared with the streaming path
+                    // (see #3449). The metering layer already discounts
+                    // `cache_read_input_tokens` to 10% of the input rate,
+                    // which matches DeepSeek's published 1/10 cache pricing.
+                    let nested = u
                         .prompt_tokens_details
                         .as_ref()
                         .map(|d| d.cached_tokens)
                         .unwrap_or(0);
-                    let cached = if nested_cached > 0 {
-                        nested_cached
-                    } else {
-                        u.prompt_cache_hit_tokens
-                    };
                     TokenUsage {
                         input_tokens: u.prompt_tokens,
                         output_tokens: u.completion_tokens,
                         cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: cached,
+                        cache_read_input_tokens: pick_cache_read_tokens(
+                            nested,
+                            u.prompt_cache_hit_tokens,
+                        ),
                     }
                 })
                 .unwrap_or_default();
@@ -1599,19 +1619,22 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(pt) = u["prompt_tokens"].as_u64() {
                             usage.input_tokens = pt;
                         }
-                        // Prefer OpenAI's nested cache field; fall back to
-                        // DeepSeek's top-level `prompt_cache_hit_tokens` (#3449).
-                        let nested_cached = u
+                        // Cache-read accounting goes through the same helper
+                        // as the non-stream path so the two cannot diverge
+                        // when a new provider adds a third shape (#3449).
+                        let nested = u
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
-                            .and_then(|v| v.as_u64());
-                        let deepseek_cached =
-                            u.get("prompt_cache_hit_tokens").and_then(|v| v.as_u64());
-                        if let Some(cached) = nested_cached.or(deepseek_cached) {
-                            if cached > 0 {
-                                usage.cache_read_input_tokens = cached;
-                                cached_prompt_tokens = cached;
-                            }
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let deepseek = u
+                            .get("prompt_cache_hit_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cached = pick_cache_read_tokens(nested, deepseek);
+                        if cached > 0 {
+                            usage.cache_read_input_tokens = cached;
+                            cached_prompt_tokens = cached;
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
@@ -1750,6 +1773,12 @@ impl LlmDriver for OpenAIDriver {
                     }
                 }
             }
+
+            // Drain any partial codepoint left in the decoder. In a clean
+            // stream this is a no-op; only matters when the connection
+            // was truncated mid-codepoint, in which case the trailing
+            // bytes surface as U+FFFD instead of vanishing (#3448).
+            buffer.push_str(&utf8.finish());
 
             // Flush any remaining buffered content from the think filter
             // (e.g. partial tag at stream end, or unclosed think block).
@@ -1915,25 +1944,17 @@ impl LlmDriver for OpenAIDriver {
                     .await;
             }
 
-            let stop_reason = match finish_reason.as_deref() {
-                // If the upstream said "tool_calls" but we filtered them all
-                // out (e.g. Copilot proxy dropped function-name chunks),
-                // downgrade to EndTurn so the agent loop doesn't stage an
-                // empty tool-use turn that nothing can execute.
-                Some("tool_calls") if tool_calls.is_empty() => StopReason::EndTurn,
-                Some("stop") => StopReason::EndTurn,
-                Some("tool_calls") => StopReason::ToolUse,
-                Some("length") => StopReason::MaxTokens,
-                // Streaming refusal — same treatment as the non-streaming
-                // path (#3450).
-                Some("content_filter") => StopReason::ContentFiltered,
-                _ => {
-                    if !tool_calls.is_empty() {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    }
-                }
+            // If the upstream said "tool_calls" but we filtered them all
+            // out (e.g. Copilot proxy dropped function-name chunks),
+            // downgrade to EndTurn so the agent loop doesn't stage an
+            // empty tool-use turn that nothing can execute. This is
+            // streaming-specific — the non-stream path already filters
+            // earlier — so it stays out of `map_oai_finish_reason`.
+            let raw_finish = finish_reason.as_deref();
+            let stop_reason = if matches!(raw_finish, Some("tool_calls")) && tool_calls.is_empty() {
+                StopReason::EndTurn
+            } else {
+                map_oai_finish_reason(raw_finish, !tool_calls.is_empty())
             };
 
             debug!(
@@ -2956,19 +2977,70 @@ mod tests {
         assert_eq!(usage.prompt_cache_hit_tokens, 0);
     }
 
-    /// Refusal mapping: provider's `content_filter` finish reason must surface
-    /// as `StopReason::ContentFiltered`, not silently fold into `EndTurn` (#3450).
+    /// Refusal mapping: `map_oai_finish_reason` is the production
+    /// converter; both `complete()` and the streaming path delegate to
+    /// it. Driving it directly here ensures a refactor that loses the
+    /// `Some("content_filter")` arm cannot pass tests (#3450).
     #[test]
-    fn test_finish_reason_content_filter_maps_to_content_filtered() {
-        // The mapping lives inline in `complete()`; replicate it here so a
-        // future refactor can't silently regress to "EndTurn".
-        let stop_reason = match Some("content_filter") {
-            Some("stop") => StopReason::EndTurn,
-            Some("tool_calls") => StopReason::ToolUse,
-            Some("length") => StopReason::MaxTokens,
-            Some("content_filter") => StopReason::ContentFiltered,
-            _ => StopReason::EndTurn,
-        };
-        assert_eq!(stop_reason, StopReason::ContentFiltered);
+    fn map_oai_finish_reason_routes_content_filter_to_filtered() {
+        assert_eq!(
+            map_oai_finish_reason(Some("content_filter"), false),
+            StopReason::ContentFiltered
+        );
+        // Even when tool calls were emitted, a content_filter finish
+        // must outrank the tool_calls catch-all.
+        assert_eq!(
+            map_oai_finish_reason(Some("content_filter"), true),
+            StopReason::ContentFiltered
+        );
+    }
+
+    /// Sanity coverage for the rest of the mapping so a regression in
+    /// any branch is observable from this one place.
+    #[test]
+    fn map_oai_finish_reason_handles_known_finish_reasons() {
+        assert_eq!(
+            map_oai_finish_reason(Some("stop"), false),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            map_oai_finish_reason(Some("tool_calls"), true),
+            StopReason::ToolUse
+        );
+        assert_eq!(
+            map_oai_finish_reason(Some("length"), false),
+            StopReason::MaxTokens
+        );
+        // Unknown finish reasons fall back to tool-use vs end-turn
+        // based on whether tool calls were actually emitted.
+        assert_eq!(map_oai_finish_reason(None, false), StopReason::EndTurn);
+        assert_eq!(map_oai_finish_reason(None, true), StopReason::ToolUse);
+    }
+
+    /// Driving a real `OaiResponse` through `serde` and into the helper
+    /// gives end-to-end coverage from the wire format to the
+    /// `StopReason` the runtime reads — catches both serde drift
+    /// (renamed field, wrong type) and mapping regressions.
+    #[test]
+    fn deserialized_oai_response_with_content_filter_yields_filtered_stop() {
+        let raw = r#"{
+            "id": "chatcmpl-x",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "" },
+                "finish_reason": "content_filter"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 0 }
+        }"#;
+        let response: OaiResponse =
+            serde_json::from_str(raw).expect("parse content_filter response");
+        let choice = response.choices.into_iter().next().expect("one choice");
+        assert_eq!(
+            map_oai_finish_reason(choice.finish_reason.as_deref(), false),
+            StopReason::ContentFiltered
+        );
     }
 }
