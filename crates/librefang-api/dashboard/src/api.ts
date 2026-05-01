@@ -430,6 +430,13 @@ export interface WorkflowStep {
   depends_on?: string[];
 }
 
+export interface WorkflowLastRunSummary {
+  /** Run state: "pending" | "running" | "paused" | "completed" | "failed". */
+  state: string;
+  started_at: string;
+  completed_at: string | null;
+}
+
 export interface WorkflowItem {
   id: string;
   name: string;
@@ -437,6 +444,11 @@ export interface WorkflowItem {
   steps?: number | WorkflowStep[];
   created_at?: string;
   layout?: unknown;
+  /** Most recent run summary, null when the workflow has never been run. */
+  last_run?: WorkflowLastRunSummary | null;
+  /** Completed / (completed + failed) over terminal runs only.
+   * `null` until at least one run reaches a terminal state. */
+  success_rate?: number | null;
 }
 
 export interface WorkflowRunItem {

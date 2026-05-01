@@ -62,6 +62,21 @@ const categoryAccent: Record<string, { text: string; bg: string; border: string;
 const fallbackAccent = { text: "text-text-dim", bg: "bg-main", border: "border-border-subtle", bar: "from-brand/10" };
 const accentFor = (cat?: string) => (cat && categoryAccent[cat]) || fallbackAccent;
 
+// Visual mapping for the last-run state pill on workflow rows.
+// Mirrors WorkflowRunState from crates/librefang-kernel/src/workflow.rs —
+// "paused" is treated as in-flight (warning hue), terminal failures are
+// hard error.
+const lastRunBadge = (state?: string): { bg: string; text: string; dot: string } => {
+  switch (state) {
+    case "completed": return { bg: "bg-success/10",  text: "text-success",  dot: "bg-success" };
+    case "failed":    return { bg: "bg-error/10",    text: "text-error",    dot: "bg-error" };
+    case "running":   return { bg: "bg-brand/10",    text: "text-brand",    dot: "bg-brand" };
+    case "paused":    return { bg: "bg-warning/10",  text: "text-warning",  dot: "bg-warning" };
+    case "pending":   return { bg: "bg-main",        text: "text-text-dim", dot: "bg-text-dim/40" };
+    default:          return { bg: "bg-main",        text: "text-text-dim", dot: "bg-text-dim/40" };
+  }
+};
+
 type CanvasTemplate = {
   nodes: Array<{
     id: string;
@@ -580,13 +595,16 @@ export function WorkflowsPage() {
               const stepCount = Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0);
               const isSelected = selectedWorkflowId === wf.id;
               const confirming = confirmDeleteId === wf.id;
+              const lastRun = wf.last_run ?? null;
+              const successRate = typeof wf.success_rate === "number" ? wf.success_rate : null;
+              const lastRunStyle = lastRunBadge(lastRun?.state);
               return (
                 <div
                   key={wf.id}
                   onClick={() => setSelectedWorkflowId(wf.id)}
                   onDoubleClick={() => openWorkflow(wf.id)}
                   className={`group grid items-center gap-3 px-3.5 py-2.5 rounded-xl border cursor-pointer transition-colors
-                    grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_auto]
+                    grid-cols-[1fr_auto] sm:grid-cols-[1fr_110px_120px_90px_auto]
                     ${isSelected
                       ? "border-brand bg-brand/5"
                       : "border-border-subtle bg-surface hover:border-brand/30 hover:bg-main/40"}`}
@@ -601,6 +619,18 @@ export function WorkflowsPage() {
                     <p className="text-[11px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
                   </div>
 
+                  {/* Last-run state pill — desktop */}
+                  <div className="hidden sm:flex items-center min-w-0">
+                    {lastRun ? (
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono ${lastRunStyle.bg} ${lastRunStyle.text}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${lastRunStyle.dot} ${lastRun.state === "running" ? "animate-pulse" : ""}`} />
+                        {lastRun.state}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-[10px] text-text-dim/40">no runs</span>
+                    )}
+                  </div>
+
                   {/* Schedule pill — desktop */}
                   <div className="hidden sm:flex items-center min-w-0">
                     {schedule ? (
@@ -613,15 +643,16 @@ export function WorkflowsPage() {
                     )}
                   </div>
 
-                  {/* Run count + created — desktop */}
+                  {/* Success rate + last-run time / runs — desktop */}
                   <div className="hidden sm:block font-mono text-[10px] text-text-dim/70 leading-tight">
                     <div className="flex items-center gap-1">
-                      <Play className="w-2.5 h-2.5" />
-                      {runCount} {t("workflows.runs_label", { defaultValue: "runs" })}
+                      {successRate !== null
+                        ? <><span className="text-text">{Math.round(successRate * 100)}%</span><span className="text-text-dim/50">ok</span></>
+                        : <><Play className="w-2.5 h-2.5" />{runCount} {t("workflows.runs_label", { defaultValue: "runs" })}</>}
                     </div>
                     <div className="flex items-center gap-1 text-text-dim/50 mt-0.5">
                       <Clock className="w-2.5 h-2.5" />
-                      {formatDate(wf.created_at)}
+                      {lastRun ? formatDate(lastRun.started_at) : formatDate(wf.created_at)}
                     </div>
                   </div>
 
