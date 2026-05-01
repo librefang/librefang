@@ -732,6 +732,11 @@ fn resolve_region(config: &DriverConfig) -> String {
 
 #[async_trait]
 impl LlmDriver for VertexAiDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "vertex_ai", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, false);
 
@@ -810,6 +815,11 @@ impl LlmDriver for VertexAiDriver {
         Err(last_error.unwrap_or_else(|| LlmError::Http("Max retries exceeded".into())))
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "vertex_ai", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,

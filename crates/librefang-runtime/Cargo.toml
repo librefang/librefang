@@ -14,7 +14,7 @@ librefang-runtime-oauth = { path = "../librefang-runtime-oauth" }
 librefang-llm-drivers = { path = "../librefang-llm-drivers" }
 librefang-runtime-wasm = { path = "../librefang-runtime-wasm" }
 librefang-llm-driver = { path = "../librefang-llm-driver" }
-librefang-channels = { path = "../librefang-channels" }
+librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-memory = { path = "../librefang-memory" }
 librefang-skills = { path = "../librefang-skills" }
 tokio = { workspace = true }

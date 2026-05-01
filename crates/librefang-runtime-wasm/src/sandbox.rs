@@ -73,6 +73,38 @@ impl std::fmt::Display for WallClockTimeout {
 
 impl std::error::Error for WallClockTimeout {}
 
+/// Per-method fuel reservation for `host_call` (#3532).
+///
+/// Wasm fuel only meters guest instructions, so without these
+/// reservations a guest can fan out arbitrarily many host LLM calls,
+/// outbound fetches, or child agent spawns under a token budget meant
+/// to cap CPU. Each cost is an upper-bound estimate of the host-side
+/// resource the call may consume — the goal is to make the
+/// per-invocation `fuel_limit` a real ceiling on host cost, not just
+/// guest CPU.
+///
+/// Calibration: with the default `fuel_limit = 1_000_000` (sandbox
+/// default), the LLM-bearing path `agent_send` is bounded to ~10
+/// invocations per guest run, `agent_spawn` to ~5, and `net_fetch` to
+/// ~200 — sane upper bounds for skill-shaped workloads. Pure-host
+/// methods (`time_now`, `kv_*`, `env_read`, `fs_*`) charge nothing so
+/// existing benign skills stay within budget.
+pub(crate) fn host_call_fuel_cost(method: &str) -> u64 {
+    match method {
+        // LLM-bearing fanout — `send_to_agent` triggers a downstream
+        // agent loop that may itself call providers. Highest cost.
+        "agent_send" => 100_000,
+        // `spawn_agent_checked` registers a new agent and (depending on
+        // schedule) immediately runs it. Treat as an LLM-bearing call.
+        "agent_spawn" => 200_000,
+        // Outbound HTTP — bandwidth + provider rate-limit budget.
+        "net_fetch" => 5_000,
+        // Shell exec spawns a subprocess; CPU + audit volume.
+        "shell_exec" => 5_000,
+        _ => 0,
+    }
+}
+
 /// Configuration for a WASM sandbox instance.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -671,6 +703,48 @@ impl WasmSandbox {
             .get("params")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+
+        // SECURITY (#3532): every host call is a denial-of-wallet vector if
+        // it touches an external resource (LLM tokens, outbound HTTP,
+        // cross-agent fanout). Wasm guest fuel only meters guest
+        // instructions, so a tight loop of `agent_send` / `net_fetch` /
+        // `agent_spawn` consumes effectively zero fuel while burning real
+        // money. Charge a method-keyed fuel reservation BEFORE dispatch so
+        // the per-invocation `fuel_limit` actually caps host-side cost.
+        let cost = host_call_fuel_cost(&method);
+        if cost > 0 {
+            // Fail closed if fuel metering is disabled on this store —
+            // the reservation is the only thing standing between the
+            // guest and unbounded LLM/HTTP fanout.
+            let remaining = match caller.get_fuel() {
+                Ok(n) => n,
+                Err(e) => {
+                    let response = serde_json::json!({
+                        "error": format!(
+                            "host fuel meter unavailable for {method}: {e}; \
+                             denial-of-wallet guard requires fuel to be enabled"
+                        )
+                    });
+                    return Self::write_guest_json(caller, &response);
+                }
+            };
+            if remaining < cost {
+                let response = serde_json::json!({
+                    "error": format!(
+                        "host fuel exhausted for {method} (need {cost}, have {remaining}); \
+                         denial-of-wallet guard"
+                    )
+                });
+                return Self::write_guest_json(caller, &response);
+            }
+            if let Err(e) = caller.set_fuel(remaining - cost) {
+                let response = serde_json::json!({
+                    "error": format!("failed to reserve host fuel for {method}: {e}")
+                });
+                return Self::write_guest_json(caller, &response);
+            }
+        }
+
         let response = host_functions::dispatch(caller.data(), &method, &params);
 
         Self::write_guest_json(caller, &response)
@@ -811,6 +885,38 @@ mod tests {
         assert!(config.capabilities.is_empty());
     }
 
+    /// Regression for #3532: host calls that touch external resources
+    /// (LLM tokens, outbound HTTP, child agent spawn) must charge a
+    /// non-zero fuel cost so the sandbox `fuel_limit` is a real ceiling
+    /// on host-side spend, not just guest CPU. Pure-host calls remain
+    /// free so existing benign skills don't regress.
+    #[test]
+    fn test_host_call_fuel_cost_table_covers_dow_methods() {
+        assert!(host_call_fuel_cost("agent_send") > 0);
+        assert!(host_call_fuel_cost("agent_spawn") > 0);
+        assert!(host_call_fuel_cost("net_fetch") > 0);
+        assert!(host_call_fuel_cost("shell_exec") > 0);
+
+        // Pure-host methods stay free.
+        assert_eq!(host_call_fuel_cost("time_now"), 0);
+        assert_eq!(host_call_fuel_cost("kv_get"), 0);
+        assert_eq!(host_call_fuel_cost("kv_set"), 0);
+        assert_eq!(host_call_fuel_cost("env_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_read"), 0);
+        assert_eq!(host_call_fuel_cost("fs_write"), 0);
+        assert_eq!(host_call_fuel_cost("fs_list"), 0);
+        // Unknown method also free; capability check catches it.
+        assert_eq!(host_call_fuel_cost("unknown_method"), 0);
+
+        // Relative ordering: spawn (registers + may run a child agent)
+        // is the priciest, then send (single LLM-bearing fanout), then
+        // outbound network / shell.
+        assert!(host_call_fuel_cost("agent_spawn") > host_call_fuel_cost("agent_send"));
+        assert!(host_call_fuel_cost("agent_send") > host_call_fuel_cost("net_fetch"));
+        assert!(host_call_fuel_cost("net_fetch") >= host_call_fuel_cost("shell_exec"));
+        assert!(host_call_fuel_cost("shell_exec") > host_call_fuel_cost("kv_get"));
+    }
+
     #[test]
     fn test_sandbox_engine_creation() {
         // Constructing the sandbox eagerly validates the engine config; the
@@ -949,6 +1055,46 @@ mod tests {
         assert!(
             err_msg.contains("denied"),
             "Expected capability denied, got: {err_msg}"
+        );
+    }
+
+    /// Regression for #3532: when remaining fuel is below the per-method
+    /// reservation, the dispatch layer must reject the host call BEFORE
+    /// invoking the host function — otherwise the denial-of-wallet guard
+    /// is decorative. We pick `agent_send` (cost 100K) and a fuel limit
+    /// well below that so any remaining fuel after proxy startup still
+    /// can't cover the reservation, then assert the guest sees a
+    /// `host fuel exhausted` error rather than the call going through.
+    #[tokio::test]
+    async fn test_host_call_fuel_exhausted_blocks_dispatch() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let input = serde_json::json!({
+            "method": "agent_send",
+            "params": {"target": "anyone", "message": "hi"}
+        });
+        // 50_000 < host_call_fuel_cost("agent_send") = 100_000, so even
+        // if proxy startup consumed zero fuel the reservation can't be
+        // met and the guard must fire before dispatch.
+        let config = SandboxConfig {
+            fuel_limit: 50_000,
+            ..Default::default()
+        };
+
+        let result = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input,
+                config,
+                None,
+                "test-agent",
+            )
+            .await
+            .unwrap();
+
+        let err_msg = result.output["error"].as_str().unwrap_or("");
+        assert!(
+            err_msg.contains("host fuel exhausted"),
+            "expected denial-of-wallet guard to fire, got: {err_msg}"
         );
     }
 
