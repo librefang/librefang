@@ -16,29 +16,24 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig, PairingConfig};
+use librefang_testing::{MockKernelBuilder, TestAppState};
 use std::sync::Arc;
-use std::time::Instant;
 use tower::ServiceExt;
 
 struct Harness {
     app: Router,
     state: Arc<AppState>,
-    _tmp: tempfile::TempDir,
+    _test: TestAppState,
 }
 
 async fn boot_with_pairing(enabled: bool, public_base_url: Option<String>) -> Harness {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        pairing: PairingConfig {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.pairing = librefang_types::config::PairingConfig {
             enabled,
             public_base_url,
-            ..PairingConfig::default()
-        },
-        default_model: DefaultModelConfig {
+            ..librefang_types::config::PairingConfig::default()
+        };
+        cfg.default_model = librefang_types::config::DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
@@ -46,42 +41,10 @@ async fn boot_with_pairing(enabled: bool, public_base_url: Option<String>) -> Ha
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
             cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
+        };
+    }));
 
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-pairing-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
-
+    let state = test.state.clone();
     let app = Router::new()
         .nest("/api", routes::system::router())
         .with_state(state.clone());
@@ -89,7 +52,7 @@ async fn boot_with_pairing(enabled: bool, public_base_url: Option<String>) -> Ha
     Harness {
         app,
         state,
-        _tmp: tmp,
+        _test: test,
     }
 }
 
