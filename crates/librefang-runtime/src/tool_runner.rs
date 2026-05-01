@@ -508,7 +508,14 @@ pub async fn execute_tool_raw(
             // apply_patch needs write access — restrict to rw named workspaces only.
             let extra = named_ws_prefixes_writable(*kernel, *caller_agent_id);
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
-            tool_apply_patch(input, *workspace_root, &extra_refs).await
+            // SECURITY #3662 (defense-in-depth): also propagate the *canonical*
+            // read-only prefixes so `apply_patch_ext` can reject any resolved
+            // path that lands inside a read-only workspace, even if a future
+            // refactor of `additional_roots` accidentally widens the writable
+            // set.
+            let ro_prefixes = named_ws_prefixes_readonly(*kernel, *caller_agent_id);
+            let ro_refs: Vec<&Path> = ro_prefixes.iter().map(|p| p.as_path()).collect();
+            tool_apply_patch(input, *workspace_root, &extra_refs, &ro_refs).await
         }
 
         // Web tools (upgraded: multi-provider search, SSRF-protected fetch)
@@ -2447,6 +2454,19 @@ fn named_ws_prefixes_writable(
     }
 }
 
+/// Like [`named_ws_prefixes`] but only returns prefixes for read-only
+/// workspaces. Used by `apply_patch` (#3662) to enforce a deny-list at the
+/// write call site in addition to the dispatch-level path check.
+fn named_ws_prefixes_readonly(
+    kernel: Option<&Arc<dyn KernelHandle>>,
+    caller_agent_id: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    match (kernel, caller_agent_id) {
+        (Some(k), Some(aid)) => k.readonly_workspace_prefixes(aid),
+        _ => Vec::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint helper
 // ---------------------------------------------------------------------------
@@ -2578,11 +2598,17 @@ async fn tool_apply_patch(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
     additional_roots: &[&Path],
+    readonly_roots: &[&Path],
 ) -> Result<String, String> {
     let patch_str = input["patch"].as_str().ok_or("Missing 'patch' parameter")?;
     let root = workspace_root.ok_or("apply_patch requires a workspace root")?;
     let ops = crate::apply_patch::parse_patch(patch_str)?;
-    let result = crate::apply_patch::apply_patch(&ops, root, additional_roots).await;
+    // SECURITY #3662: defense-in-depth — pass readonly named-workspace prefixes
+    // through to `apply_patch_ext` so any resolved target path that lands
+    // inside a read-only workspace is rejected at the write site as well as
+    // at dispatch.
+    let result =
+        crate::apply_patch::apply_patch_ext(&ops, root, additional_roots, readonly_roots).await;
     if result.is_ok() {
         Ok(result.summary())
     } else {
