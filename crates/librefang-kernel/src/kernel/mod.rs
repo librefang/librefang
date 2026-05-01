@@ -8563,7 +8563,13 @@ system_prompt = "You are a helpful assistant."
 
     /// Session-aware variant of [`Self::inject_message`]; `None` fans out to all live sessions.
     ///
-    /// Returns `Ok(true)` if at least one channel accepted, `Ok(false)` if no loop was running.
+    /// Returns:
+    /// - `Ok(true)`  — at least one live session accepted the message.
+    /// - `Ok(false)` — no live loop is running for this agent (every target
+    ///   was closed, or there were zero targets).
+    /// - `Err(KernelError::Backpressure)` — every live target's bounded
+    ///   channel was full; the caller should retry. The API layer maps this
+    ///   to HTTP 503 (#3575).
     pub async fn inject_message_for_session(
         &self,
         agent_id: AgentId,

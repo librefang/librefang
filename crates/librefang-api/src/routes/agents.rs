@@ -6044,8 +6044,11 @@ pub async fn inject_message(
         )
             .into_response(),
         Err(librefang_kernel::error::KernelError::Backpressure(msg)) => {
+            // Stable machine-readable code so clients can distinguish this
+            // from other 503s without substring-matching the message body.
             ApiErrorResponse::internal(msg)
                 .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                .with_code("backpressure")
                 .into_response()
         }
         Err(e) => if e.to_string().contains("not found") {
