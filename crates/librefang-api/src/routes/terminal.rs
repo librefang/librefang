@@ -324,6 +324,20 @@ pub(super) async fn authorize_terminal_request(
         return Err(axum::http::StatusCode::FORBIDDEN.into_response());
     }
 
+    // SECURITY (#3610): Reject any caller still putting the bearer token in
+    // the URL query string. The legacy `?token=` form leaks the credential
+    // into proxy access logs and browser history; modern clients use the
+    // `Sec-WebSocket-Protocol: bearer.<token>` sub-protocol or the
+    // `Authorization` header instead.
+    if crate::ws::ws_query_param(uri, "token").is_some() {
+        warn!(
+            ip = %locality.source_ip,
+            "Terminal WebSocket rejected: ?token= query param removed in #3610 — \
+             use the Sec-WebSocket-Protocol bearer.<token> sub-protocol instead"
+        );
+        return Err(axum::http::StatusCode::UNAUTHORIZED.into_response());
+    }
+
     // Warn if terminal is enabled without any authentication configured.
     let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
     let user_api_keys = crate::server::configured_user_api_keys(state.kernel.as_ref());

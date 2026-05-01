@@ -398,6 +398,51 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Rollback helper for [`Self::update_skills`]: restores both the skill
+    /// allowlist AND the `skills_disabled` flag. `update_skills` always sets
+    /// `skills_disabled = false` (deliberate "re-enable on update" semantics),
+    /// so a rollback that only restored `skills` would silently leave the flag
+    /// flipped on a failed DB persist (#3499).
+    pub fn restore_skills_state(
+        &self,
+        id: AgentId,
+        skills: Vec<String>,
+        skills_disabled: bool,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.skills = skills;
+        entry.manifest.skills_disabled = skills_disabled;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
+    /// Rollback helper for [`Self::update_tool_config`]: restores tool fields
+    /// AND the `tools_disabled` flag. `update_tool_config` always sets
+    /// `tools_disabled = false`; a rollback that only restored the lists would
+    /// silently leave the flag flipped on a failed DB persist (#3499).
+    pub fn restore_tool_state(
+        &self,
+        id: AgentId,
+        capabilities_tools: Vec<String>,
+        allowlist: Vec<String>,
+        blocklist: Vec<String>,
+        tools_disabled: bool,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.manifest.capabilities.tools = capabilities_tools;
+        entry.manifest.tool_allowlist = allowlist;
+        entry.manifest.tool_blocklist = blocklist;
+        entry.manifest.tools_disabled = tools_disabled;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's system prompt (hot-swap, takes effect on next message).
     pub fn update_system_prompt(&self, id: AgentId, new_prompt: String) -> LibreFangResult<()> {
         let mut entry = self

@@ -364,14 +364,25 @@ fn safe_trim_messages(
             .filter(|&p| p > 0)
             .unwrap_or(desired);
 
+        let rescued: Vec<Message> = session_messages[..trim_point]
+            .iter()
+            .filter(|m| m.pinned)
+            .cloned()
+            .collect();
+
         info!(
             agent = %agent_name,
             total_messages = session_messages.len(),
             trimming = trim_point,
+            rescued_pinned = rescued.len(),
             "Trimming persistent session messages"
         );
 
         session_messages.drain(..trim_point);
+
+        for (i, msg) in rescued.into_iter().enumerate() {
+            session_messages.insert(i, msg);
+        }
     }
 
     if messages.len() <= max_history {
@@ -386,15 +397,30 @@ fn safe_trim_messages(
         .filter(|&p| p > 0)
         .unwrap_or(desired_trim);
 
+    // Rescue pinned messages (delegation results) from the drain range so they
+    // survive history trim. Without this, agent_send results from earlier in the
+    // conversation are silently dropped, causing the LLM to redo delegated work.
+    let rescued: Vec<Message> = messages[..trim_point]
+        .iter()
+        .filter(|m| m.pinned)
+        .cloned()
+        .collect();
+
     warn!(
         agent = %agent_name,
         total_messages = messages.len(),
         trimming = trim_point,
+        rescued_pinned = rescued.len(),
         desired = desired_trim,
         "Trimming old messages at safe turn boundary"
     );
 
     messages.drain(..trim_point);
+
+    // Re-insert rescued pinned messages at the beginning of the remaining history.
+    for (i, msg) in rescued.into_iter().enumerate() {
+        messages.insert(i, msg);
+    }
 
     // Re-validate after trim.
     *messages = crate::session_repair::validate_and_repair(messages);
@@ -1315,10 +1341,21 @@ fn finalize_tool_use_results(
     }
     append_tool_result_guidance_blocks(tool_result_blocks);
 
+    // Pin messages containing agent_send results so they survive history trim.
+    // Delegation results are authoritative work product that the LLM needs to
+    // see to avoid redoing delegated tasks. Cap: only pin if ≤ MAX_PINNED_DELEGATION
+    // pinned messages already exist in the session to prevent unbounded growth.
+    let has_delegation_result = tool_result_blocks.iter().any(
+        |b| matches!(b, ContentBlock::ToolResult { tool_name, .. } if tool_name == "agent_send"),
+    );
+    const MAX_PINNED_DELEGATION: usize = 10;
+    let existing_pinned = session.messages.iter().filter(|m| m.pinned).count();
+    let pin_this = has_delegation_result && existing_pinned < MAX_PINNED_DELEGATION;
+
     let tool_results_msg = Message {
         role: Role::User,
         content: MessageContent::Blocks(tool_result_blocks.clone()),
-        pinned: false,
+        pinned: pin_this,
         timestamp: Some(chrono::Utc::now()),
     };
     session.messages.push(tool_results_msg.clone());
@@ -2555,7 +2592,9 @@ async fn generate_search_queries(
 
     let request = CompletionRequest {
         model: strip_provider_prefix(&manifest.model.model, &manifest.model.provider),
-        messages: vec![Message::user(format!("{history}\nUser: {user_message}"))],
+        messages: std::sync::Arc::new(vec![Message::user(format!(
+            "{history}\nUser: {user_message}"
+        ))]),
         tools: vec![],
         max_tokens: 200,
         temperature: 0.0,
@@ -3478,9 +3517,11 @@ pub async fn run_agent_loop(
                 }
             });
 
+        // Wrap messages once per turn — call_with_retry's `request.clone()`
+        // becomes a refcount bump instead of a deep clone of the history (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
+            messages: std::sync::Arc::new(messages.clone()),
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
@@ -4024,6 +4065,29 @@ pub async fn run_agent_loop(
                 session.messages.push(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit, continuing");
+            }
+            StopReason::ContentFiltered => {
+                // Provider refused / safety-filtered the response (#3450).
+                // Persist any partial text and surface as a structured error
+                // — never fall through into the EndTurn success path.
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter"
+                );
+                session.messages.push(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                return Err(LibreFangError::ContentFiltered { message: partial });
             }
         }
     }
@@ -4854,9 +4918,10 @@ pub async fn run_agent_loop_streaming(
                 }
             });
 
+        // Same Arc-wrap as the non-streaming hot path (#3766).
         let request = CompletionRequest {
             model: api_model,
-            messages: messages.clone(),
+            messages: std::sync::Arc::new(messages.clone()),
             tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
@@ -5467,6 +5532,28 @@ pub async fn run_agent_loop_streaming(
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit (streaming), continuing");
             }
+            StopReason::ContentFiltered => {
+                // Streaming twin of the non-streaming refusal handler (#3450).
+                let text = response.text();
+                let partial = if text.trim().is_empty() {
+                    "[content filtered by provider]".to_string()
+                } else {
+                    text
+                };
+                warn!(
+                    agent = %manifest.name,
+                    iteration,
+                    "LLM response blocked by provider safety / content filter (streaming)"
+                );
+                session.messages.push(Message::assistant(&partial));
+                if !opts.is_fork {
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on content filter: {e}");
+                    }
+                }
+                signal_response_complete(&stream_tx).await;
+                return Err(LibreFangError::ContentFiltered { message: partial });
+            }
         }
     }
 
@@ -5909,9 +5996,11 @@ fn recover_text_tool_calls(text: &str, available_tools: &[ToolDefinition]) -> Ve
     // The parameters value is HTML-entity-escaped JSON (&quot; etc.).
     {
         use regex_lite::Regex;
-        // Match both self-closing <function ... /> and <function ...></function>
-        let re =
-            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap();
+        // Cached: this parser runs on every LLM response (#3491).
+        static FUNCTION_TAG_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+            Regex::new(r#"<function\s+name="([^"]+)"\s+parameters="([^"]*)"[^/]*/?>"#).unwrap()
+        });
+        let re = &*FUNCTION_TAG_RE;
         for caps in re.captures_iter(text) {
             let tool_name = caps.get(1).unwrap().as_str();
             let raw_params = caps.get(2).unwrap().as_str();

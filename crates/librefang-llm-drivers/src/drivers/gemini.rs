@@ -55,8 +55,14 @@ impl GeminiDriver {
     ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
-                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
-                librefang_http::proxied_client()
+                // Use the bounded fallback so a global client without a per-request
+                // total timeout cannot leave a request hanging indefinitely (#3756).
+                tracing::warn!(
+                    url,
+                    error = %e,
+                    "Invalid per-provider proxy URL; falling back to global proxy with bounded timeout"
+                );
+                librefang_http::proxied_client_fallback()
             }),
             None => librefang_http::proxied_client(),
         };
@@ -211,6 +217,11 @@ struct GeminiUsageMetadata {
     prompt_token_count: u64,
     #[serde(default)]
     candidates_token_count: u64,
+    // Thinking-model reasoning tokens (#3479). Gemini bills these as output
+    // tokens, but reports them in a separate field. Missing for non-thinking
+    // models — `#[serde(default)]` keeps it at 0 there.
+    #[serde(default)]
+    thoughts_token_count: u64,
 }
 
 /// Gemini API error response.
@@ -533,6 +544,14 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
     } else {
         match candidate.finish_reason.as_deref() {
             Some("MAX_TOKENS") => StopReason::MaxTokens,
+            // Safety / policy refusals — surface so caller can react (#3450).
+            Some("SAFETY")
+            | Some("RECITATION")
+            | Some("BLOCKLIST")
+            | Some("PROHIBITED_CONTENT")
+            | Some("SPII")
+            | Some("IMAGE_SAFETY")
+            | Some("LANGUAGE") => StopReason::ContentFiltered,
             _ => StopReason::EndTurn,
         }
     };
@@ -541,7 +560,9 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
         .usage_metadata
         .map(|u| TokenUsage {
             input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
+            // Thinking models bill thoughts as output (#3479); fold them in
+            // so metering doesn't undercount by 5-25x on reasoning runs.
+            output_tokens: u.candidates_token_count + u.thoughts_token_count,
             ..Default::default()
         })
         .unwrap_or_default();
@@ -598,11 +619,13 @@ pub(crate) async fn stream_gemini_sse(
     let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
     let mut finish_reason: Option<String> = None;
     let mut usage = TokenUsage::default();
+    // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+    let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
     let mut byte_stream = resp.bytes_stream();
     while let Some(chunk_result) = byte_stream.next().await {
         let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        buffer.push_str(&utf8.decode(&chunk));
 
         while let Some((pos, delim_len)) = buffer
             .find("\r\n\r\n")
@@ -634,7 +657,9 @@ pub(crate) async fn stream_gemini_sse(
 
             if let Some(ref u) = json.usage_metadata {
                 usage.input_tokens = u.prompt_token_count;
-                usage.output_tokens = u.candidates_token_count;
+                // #3479: include thinking tokens in output (Gemini bills them
+                // as output but reports them separately).
+                usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
             }
 
             for candidate in &json.candidates {
@@ -715,6 +740,11 @@ pub(crate) async fn stream_gemini_sse(
         }
     }
 
+    // Drain any partial codepoint left in the decoder so a CJK
+    // character truncated by the final chunk surfaces explicitly
+    // rather than silently disappearing (#3448).
+    buffer.push_str(&utf8.finish());
+
     // Build final response
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
@@ -759,7 +789,14 @@ pub(crate) async fn stream_gemini_sse(
     let stop_reason = match finish_reason.as_deref() {
         Some("STOP") => StopReason::EndTurn,
         Some("MAX_TOKENS") => StopReason::MaxTokens,
-        Some("SAFETY") => StopReason::EndTurn,
+        // Safety / policy refusals — surface so caller can react (#3450).
+        Some("SAFETY")
+        | Some("RECITATION")
+        | Some("BLOCKLIST")
+        | Some("PROHIBITED_CONTENT")
+        | Some("SPII")
+        | Some("IMAGE_SAFETY")
+        | Some("LANGUAGE") => StopReason::ContentFiltered,
         _ => {
             if !tool_calls.is_empty() {
                 StopReason::ToolUse
@@ -1020,6 +1057,8 @@ impl LlmDriver for GeminiDriver {
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
             let mut receiver_dropped = false;
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
@@ -1028,7 +1067,7 @@ impl LlmDriver for GeminiDriver {
                     break;
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 // Process complete SSE events (delimited by \n\n or \r\n\r\n)
                 while let Some((pos, delim_len)) = buffer
@@ -1063,7 +1102,8 @@ impl LlmDriver for GeminiDriver {
                     // Extract usage from each chunk (last one wins)
                     if let Some(ref u) = json.usage_metadata {
                         usage.input_tokens = u.prompt_token_count;
-                        usage.output_tokens = u.candidates_token_count;
+                        // #3479: thinking tokens are billed as output.
+                        usage.output_tokens = u.candidates_token_count + u.thoughts_token_count;
                     }
 
                     for candidate in &json.candidates {
@@ -1168,6 +1208,11 @@ impl LlmDriver for GeminiDriver {
                 }
             }
 
+            // Drain any partial codepoint left in the decoder so a CJK
+            // character truncated by the final chunk surfaces explicitly
+            // rather than silently disappearing (#3448).
+            buffer.push_str(&utf8.finish());
+
             // Build final response
             let mut content = Vec::new();
             let mut tool_calls = Vec::new();
@@ -1212,7 +1257,14 @@ impl LlmDriver for GeminiDriver {
             let stop_reason = match finish_reason.as_deref() {
                 Some("STOP") => StopReason::EndTurn,
                 Some("MAX_TOKENS") => StopReason::MaxTokens,
-                Some("SAFETY") => StopReason::EndTurn,
+                // Safety / policy refusals — surface so caller can react (#3450).
+                Some("SAFETY")
+                | Some("RECITATION")
+                | Some("BLOCKLIST")
+                | Some("PROHIBITED_CONTENT")
+                | Some("SPII")
+                | Some("IMAGE_SAFETY")
+                | Some("LANGUAGE") => StopReason::ContentFiltered,
                 _ => {
                     if !tool_calls.is_empty() {
                         StopReason::ToolUse
@@ -1302,6 +1354,28 @@ mod tests {
         assert_eq!(json["generationConfig"]["maxOutputTokens"], 1024);
     }
 
+    // #3479: thoughtsTokenCount must fold into output_tokens for thinking
+    // models, otherwise metering undercounts spend by 5-25x.
+    #[test]
+    fn test_gemini_thoughts_tokens_folded_into_output() {
+        let json = serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{"text": "answer"}] },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5,
+                "thoughtsTokenCount": 200
+            }
+        });
+        let resp: GeminiResponse = serde_json::from_value(json).unwrap();
+        let completion = convert_response(resp).unwrap();
+        // 5 visible + 200 thoughts = 205 billed output tokens.
+        assert_eq!(completion.usage.output_tokens, 205);
+        assert_eq!(completion.usage.input_tokens, 10);
+    }
+
     #[test]
     fn test_gemini_response_deserialization() {
         let json = serde_json::json!({
@@ -1388,7 +1462,7 @@ mod tests {
     fn test_convert_tools() {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![ToolDefinition {
                 name: "web_search".to_string(),
                 description: "Search the web".to_string(),
@@ -1421,7 +1495,7 @@ mod tests {
     fn test_convert_tools_empty() {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1456,6 +1530,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 5,
                 candidates_token_count: 3,
+                thoughts_token_count: 0,
             }),
         };
 
@@ -2099,6 +2174,7 @@ mod tests {
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: 10,
                 candidates_token_count: 8,
+                thoughts_token_count: 0,
             }),
         };
 

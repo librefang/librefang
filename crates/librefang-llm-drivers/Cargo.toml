@@ -27,4 +27,6 @@ dirs = { workspace = true }
 rand = { workspace = true }
 
 [dev-dependencies]
+serial_test = "3"
 tempfile = { workspace = true }
+wiremock = "0.6"

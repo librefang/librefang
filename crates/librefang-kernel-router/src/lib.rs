@@ -1093,11 +1093,13 @@ fn phrase_matches(message: &str, phrase: &str) -> bool {
     }
 
     if is_ascii_phrase(candidate) {
+        // Reuse the global REGEX_CACHE so the same phrase across many incoming
+        // messages compiles only once (#3491). The cache key already includes
+        // the same `(?i)` casing applied here, so we avoid double-compilation
+        // by using `regex_matches` with a pattern that mirrors that contract.
         let escaped = regex_lite::escape(&candidate.to_lowercase()).replace("\\ ", r"[\s_-]+");
-        let pattern = format!(r"(?i)(^|[^a-z0-9]){}([^a-z0-9]|$)", escaped);
-        return Regex::new(&pattern)
-            .map(|regex| regex.is_match(&message.to_lowercase()))
-            .unwrap_or(false);
+        let pattern = format!(r"(^|[^a-z0-9]){}([^a-z0-9]|$)", escaped);
+        return regex_matches(&message.to_lowercase(), &pattern);
     }
 
     message.to_lowercase().contains(&candidate.to_lowercase())

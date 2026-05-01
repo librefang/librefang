@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Unique identifier for a workflow definition.
@@ -578,7 +578,7 @@ impl WorkflowEngine {
                 return;
             }
         }
-        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp_path = crate::persist_tmp_path(path);
         {
             use std::io::Write as _;
             let write_result = (|| -> std::io::Result<()> {
@@ -602,14 +602,25 @@ impl WorkflowEngine {
     }
 
     /// Async wrapper for `persist_runs` — delegates to a blocking task.
-    async fn persist_runs_async(&self) {
+    ///
+    /// Returns `Err` when the spawn_blocking task itself panics so callers
+    /// can surface the failure instead of silently dropping it (#3753).
+    /// The inner `persist_runs` already logs and swallows IO/serde errors;
+    /// only a JoinError (panic / cancel) bubbles up here.
+    async fn persist_runs_async(&self) -> Result<(), String> {
         if self.persist_path.is_none() {
-            return;
+            return Ok(());
         }
         let engine = self.clone();
         match tokio::task::spawn_blocking(move || engine.persist_runs()).await {
-            Ok(()) => {}
-            Err(e) => warn!("workflow persist task panicked: {e}"),
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // JoinError = the blocking task panicked or was cancelled.
+                // Log loudly AND propagate so the workflow run reports the
+                // persistence failure instead of pretending to have saved.
+                error!("workflow persist task panicked: {e}");
+                Err(format!("workflow persist task panicked: {e}"))
+            }
         }
     }
 
@@ -1255,7 +1266,13 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
-        self.persist_runs_async().await;
+        // If persistence panicked, surface it instead of returning a fake Ok.
+        if let Err(persist_err) = self.persist_runs_async().await {
+            return Err(match result {
+                Ok(_) => persist_err,
+                Err(run_err) => format!("{run_err}; additionally: {persist_err}"),
+            });
+        }
         result
     }
 
@@ -1312,7 +1329,13 @@ impl WorkflowEngine {
                 .await
         };
         self.cleanup_terminal_pause_state(run_id).await;
-        self.persist_runs_async().await;
+        // Surface persist panics instead of swallowing them (#3753).
+        if let Err(persist_err) = self.persist_runs_async().await {
+            return Err(match result {
+                Ok(_) => persist_err,
+                Err(run_err) => format!("{run_err}; additionally: {persist_err}"),
+            });
+        }
         result
     }
 
@@ -1386,22 +1409,34 @@ impl WorkflowEngine {
             // iteration so an in-flight step is allowed to finish before
             // the run pauses — partial-step rollback would be a much
             // larger feature than #3335 requires.
-            let pending_pause = self.runs.get(&run_id).and_then(|r| r.pause_request.clone());
-            if let Some(pause) = pending_pause {
-                if let Some(mut run) = self.runs.get_mut(&run_id) {
+            //
+            // Atomically take pause_request AND apply the Paused state
+            // transition under a single get_mut shard lock. Splitting
+            // the take and the state-set across two get_mut calls would
+            // let a concurrent pause_run() lodge a fresh request between
+            // them, leaving state=Paused{token=A} but pause_request=
+            // Some{token=B} — a token mismatch that breaks resume (#3716).
+            let pending_pause = if let Some(mut run) = self.runs.get_mut(&run_id) {
+                if let Some(pause) = run.pause_request.take() {
                     run.paused_step_index = Some(i);
                     run.paused_variables = variables
                         .iter()
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     run.paused_current_input = Some(current_input.clone());
-                    run.pause_request = None;
                     run.state = WorkflowRunState::Paused {
                         resume_token: pause.resume_token,
                         reason: pause.reason.clone(),
                         paused_at: Utc::now(),
                     };
+                    Some(pause)
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            if let Some(pause) = pending_pause {
                 info!(
                     run_id = %run_id,
                     resume_step = i,
@@ -4756,5 +4791,77 @@ prompt_template = "do {{x}}"
             run.step_results.is_empty(),
             "no steps should have executed before the pause"
         );
+    }
+
+    /// Regression for #3716: the pause-gate must take pause_request and
+    /// transition state to Paused atomically under one shard lock. If a
+    /// concurrent pause_run() lodges a fresh request between the take and
+    /// the state-set, the state would carry the old token while
+    /// pause_request held a new token — breaking resume.
+    ///
+    /// We assert the simpler invariant after a single pause+honor cycle:
+    /// once execute_run returns having honored a pause, pause_request is
+    /// cleared AND the resume_token in state matches the token returned
+    /// by pause_run. Both must be true, simultaneously, on the same run.
+    #[tokio::test]
+    async fn pause_take_and_state_set_are_atomic() {
+        let engine = WorkflowEngine::new();
+        let wf_id = engine.register(test_workflow()).await;
+        let run_id = engine.create_run(wf_id, "x".to_string()).await.unwrap();
+        let token = engine.pause_run(run_id, "atomic-take").await.unwrap();
+        let sender =
+            |_id: AgentId, msg: String| async move { Ok((format!("R:{msg}"), 1_u64, 1_u64)) };
+        engine
+            .execute_run(run_id, mock_resolver, sender)
+            .await
+            .expect("pause must not error");
+
+        let run = engine.get_run(run_id).await.unwrap();
+        // pause_request was taken under the same lock as state set.
+        assert!(run.pause_request.is_none(), "pause_request must be taken");
+        // The token in state must match the one pause_run returned —
+        // not some stale value left from a split-lock race.
+        match run.state {
+            WorkflowRunState::Paused { resume_token, .. } => {
+                assert_eq!(resume_token, token, "token mismatch implies torn pause");
+            }
+            other => panic!("expected Paused, got {:?}", other),
+        }
+    }
+
+    /// Regression for #3717: writes to different runs must not block each
+    /// other. With the legacy `RwLock<HashMap>` design, two concurrent
+    /// writers would serialize even on different keys; with the current
+    /// `DashMap`-based `runs` field they hit independent shards. We spawn
+    /// many concurrent pause_run calls against distinct run_ids and
+    /// assert they all complete — a simple liveness check that fails
+    /// fast if a single global lock is reintroduced.
+    #[tokio::test]
+    async fn concurrent_pause_run_does_not_serialize_across_runs() {
+        let engine = std::sync::Arc::new(WorkflowEngine::new());
+        let wf_id = engine.register(test_workflow()).await;
+
+        let mut run_ids = Vec::with_capacity(32);
+        for _ in 0..32 {
+            run_ids.push(engine.create_run(wf_id, "data".to_string()).await.unwrap());
+        }
+
+        let mut handles = Vec::with_capacity(run_ids.len());
+        for rid in run_ids.iter().copied() {
+            let e = engine.clone();
+            handles.push(tokio::spawn(
+                async move { e.pause_run(rid, "concurrent").await },
+            ));
+        }
+        for h in handles {
+            h.await.unwrap().expect("pause_run must succeed");
+        }
+        for rid in &run_ids {
+            let r = engine.get_run(*rid).await.unwrap();
+            assert!(
+                r.pause_request.is_some(),
+                "every run should carry a pause_request"
+            );
+        }
     }
 }

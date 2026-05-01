@@ -50,7 +50,7 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           packages: "platforms;android-34 build-tools;34.0.0 ndk;${{ env.NDK_VERSION }}"
 
@@ -74,7 +74,7 @@ jobs:
           key: mobile-android-smoke
 
       - name: Cache Gradle
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.gradle/caches
@@ -87,7 +87,7 @@ jobs:
       # 1-2 minute `cargo install tauri-cli` recompile happens cold every
       # time without this. Cache hit = skip the install entirely.
       - name: Cache tauri-cli binary
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2
@@ -162,7 +162,7 @@ jobs:
           key: mobile-ios-smoke
 
       - name: Cache tauri-cli binary
-        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.cargo/bin/cargo-tauri
           key: tauri-cli-${{ runner.os }}-v2

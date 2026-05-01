@@ -867,6 +867,24 @@ pub async fn a2a_discover_external(
 
             let card_json = serde_json::to_value(&card).unwrap_or_default();
 
+            // SECURITY (Bug #3483): cap the pending registry to prevent unbounded
+            // growth. Updating an existing pending entry (same URL) is always
+            // allowed; only NEW URLs are blocked once the cap is reached.
+            const MAX_PENDING_A2A_AGENTS: usize = 1024;
+            if !state.pending_a2a_agents.contains_key(&url)
+                && state.pending_a2a_agents.len() >= MAX_PENDING_A2A_AGENTS
+            {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Pending A2A registry full ({} entries). Approve or remove existing entries first.",
+                            MAX_PENDING_A2A_AGENTS
+                        )
+                    })),
+                );
+            }
+
             // SECURITY (Bug #3786): Store in the PENDING list, not the trusted kernel
             // list. The agent cannot receive tasks until the operator explicitly
             // approves it via POST /api/a2a/agents/{url}/approve.

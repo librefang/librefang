@@ -1783,6 +1783,9 @@ pub async fn get_agent_session(
                                                     media_type.rsplit('/').next().unwrap_or("png")
                                                 ),
                                                 content_type: media_type.clone(),
+                                                // Generated content has no
+                                                // operator owner — leave None.
+                                                uploaded_by: None,
                                             },
                                         );
                                         msg_images.push(serde_json::json!({
@@ -5278,6 +5281,12 @@ pub(crate) struct UploadMeta {
     #[allow(dead_code)]
     pub(crate) filename: String,
     pub(crate) content_type: String,
+    /// User who uploaded the file (#3361). `None` means "anonymous /
+    /// pre-auth daemon" — readable by any authenticated caller for
+    /// backwards compatibility with content saved before owner-binding
+    /// was introduced. New uploads from authenticated users always set
+    /// this so `serve_upload` can reject cross-user UUID guessing.
+    pub(crate) uploaded_by: Option<librefang_types::agent::UserId>,
 }
 
 /// In-memory upload metadata registry.
@@ -5380,6 +5389,7 @@ pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
@@ -5471,11 +5481,13 @@ pub async fn upload_file(
     }
 
     let size = body.len();
+    let uploaded_by = api_user.as_ref().map(|u| u.0.user_id);
     UPLOAD_REGISTRY.insert(
         file_id.clone(),
         UploadMeta {
             filename: filename.clone(),
             content_type: content_type.clone(),
+            uploaded_by,
         },
     );
 
@@ -5525,7 +5537,10 @@ pub async fn upload_file(
         (status = 200, description = "Serve an uploaded file by ID", body = serde_json::Value)
     )
 )]
-pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
+pub async fn serve_upload(
+    Path(file_id): Path<String>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
     // Validate file_id is a UUID to prevent path traversal
     if uuid::Uuid::parse_str(&file_id).is_err() {
         return (
@@ -5544,8 +5559,8 @@ pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
 
     // Look up metadata from registry; fall back to disk probe for generated images
     // (image_generate saves files without registering in UPLOAD_REGISTRY).
-    let content_type = match UPLOAD_REGISTRY.get(&file_id) {
-        Some(m) => m.content_type.clone(),
+    let (content_type, owner) = match UPLOAD_REGISTRY.get(&file_id) {
+        Some(m) => (m.content_type.clone(), m.uploaded_by),
         None => {
             // Infer content type from file magic bytes
             if !file_path.exists() {
@@ -5558,9 +5573,37 @@ pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
                     b"{\"error\":\"File not found\"}".to_vec(),
                 );
             }
-            "image/png".to_string()
+            ("image/png".to_string(), None)
         }
     };
+
+    // SECURITY (#3361): Bind uploads to their uploader. A bare UUID is not
+    // access control — UUIDs leak through audit logs, dashboard responses,
+    // tracing output, and message history. Owner-bound files are readable
+    // only by the uploader or by Admin/Owner callers; un-owned entries (pre-
+    // #3361 uploads, generator output) stay readable for compatibility.
+    if let Some(owner_id) = owner {
+        use librefang_kernel::auth::UserRole;
+        let allowed = match api_user.as_ref().map(|u| &u.0) {
+            Some(u) => u.user_id == owner_id || u.role >= UserRole::Admin,
+            None => false,
+        };
+        if !allowed {
+            tracing::warn!(
+                file_id = %file_id,
+                caller = ?api_user.as_ref().map(|u| u.0.name.clone()),
+                "upload access denied: caller is not the uploader"
+            );
+            return (
+                StatusCode::FORBIDDEN,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "application/json".to_string(),
+                )],
+                b"{\"error\":\"You are not authorized to access this upload\"}".to_vec(),
+            );
+        }
+    }
 
     match std::fs::read(&file_path) {
         Ok(data) => (
@@ -5886,6 +5929,30 @@ mod tests {
         assert_eq!(req.new_name, "clone-2");
         assert!(!req.include_skills);
         assert!(!req.include_tools);
+    }
+
+    /// Issue #3361: UploadMeta carries the uploader's UserId so `serve_upload`
+    /// can reject cross-user UUID guessing. Pre-fix the struct had no owner
+    /// field at all and any caller knowing the UUID could fetch the file.
+    #[test]
+    fn issue_3361_upload_meta_carries_owner() {
+        use librefang_types::agent::UserId;
+        let owner = UserId::from_name("alice");
+        let meta = UploadMeta {
+            filename: "doc.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            uploaded_by: Some(owner),
+        };
+        assert_eq!(meta.uploaded_by, Some(owner));
+
+        // Daemon-generated content has no owner — None means "any
+        // authenticated caller may read" (e.g. image_generate output).
+        let generated = UploadMeta {
+            filename: "image.png".to_string(),
+            content_type: "image/png".to_string(),
+            uploaded_by: None,
+        };
+        assert!(generated.uploaded_by.is_none());
     }
 
     #[test]

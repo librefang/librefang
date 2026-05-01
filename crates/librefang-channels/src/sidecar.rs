@@ -527,7 +527,7 @@ mod tests {
         let config = librefang_types::config::SidecarChannelConfig {
             name: "test-echo".to_string(),
             command: python,
-            args: vec![adapter_path.to_string_lossy().to_string()],
+            args: vec!["-u".to_string(), adapter_path.to_string_lossy().to_string()],
             env: HashMap::new(),
             channel_type: None,
         };
@@ -555,8 +555,8 @@ mod tests {
             .await
             .expect("Failed to send message to sidecar — process may have exited early");
 
-        // Read the echo reply
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        // Read the echo reply (10s timeout for Windows cold start)
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), stream.next())
             .await
             .expect("Timed out waiting for echo reply")
             .expect("Stream ended unexpectedly");

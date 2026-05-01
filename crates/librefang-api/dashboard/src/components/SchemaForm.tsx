@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { type RegistrySchema, type RegistrySchemaField, type RegistrySchemaSection } from "../api";
 import { useRegistrySchema } from "../lib/queries/config";
@@ -556,14 +556,25 @@ export function SchemaForm({
 
   const [values, setValues] = useState<Record<string, unknown>>({});
 
-  // Sync defaults into values when schema first arrives
-  const [initialized, setInitialized] = useState(false);
+  // Sync defaults into values when schema arrives or when the caller passes
+  // structurally different initialValues (e.g. opening the form to edit a
+  // different record). Without re-seeding, the form would silently keep the
+  // previous record's values (#3540). We compare a stable JSON snapshot to
+  // avoid wiping user edits on every parent re-render that happens to pass
+  // a new object reference with identical content.
+  const initialValuesSnapshot = useMemo(
+    () => (initialValues ? JSON.stringify(initialValues) : ""),
+    [initialValues],
+  );
+  const lastSnapshot = useRef<string | null>(null);
   useEffect(() => {
-    if (schema && !initialized) {
-      setValues(defaultValues);
-      setInitialized(true);
-    }
-  }, [schema, initialized, defaultValues]);
+    if (!schema) return;
+    if (lastSnapshot.current === initialValuesSnapshot) return;
+    lastSnapshot.current = initialValuesSnapshot;
+    setValues(defaultValues);
+    setErrors([]);
+    setSubmitError(null);
+  }, [schema, defaultValues, initialValuesSnapshot]);
 
   const updateField = useCallback((key: string, value: unknown) => {
     setValues((prev) => ({ ...prev, [key]: value }));

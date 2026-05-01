@@ -55,3 +55,4 @@ path = "bin/purge_sentinels.rs"
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 serial_test = "3"
+librefang-kernel-handle = { path = "../librefang-kernel-handle" }

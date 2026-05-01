@@ -615,12 +615,19 @@ impl ClawHubClient {
             }
         }
 
-        // Install into a temporary directory first, then atomically rename to
-        // the final skill directory.  This prevents partial installs from being
-        // loaded on the next daemon start if extraction is interrupted.
+        // Install into a sibling staging directory first, then atomically
+        // rename to the final skill directory.  This prevents partial installs
+        // from being loaded on the next daemon start if extraction is
+        // interrupted.  #3719 — process-local AtomicU64 counter guarantees
+        // every install in this process gets a unique staging path even when
+        // two threads race within the OS clock resolution window (which a
+        // bare nanosecond timestamp can't promise).  The pid disambiguates
+        // across processes; the counter disambiguates within one process.
+        static STAGING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let skill_dir = resolve_skill_dir(target_dir, slug)?;
-        let tmp_dir = target_dir.join(format!(".installing-{}-{}", slug, std::process::id()));
-        // Clean up any leftover temp dir from a previous crashed install.
+        let tmp_dir = target_dir.join(format!(".staging-{}-{}-{}", slug, std::process::id(), seq));
+        // Defensive: clean up if a path collision somehow occurred.
         if tmp_dir.exists() {
             let _ = std::fs::remove_dir_all(&tmp_dir);
         }

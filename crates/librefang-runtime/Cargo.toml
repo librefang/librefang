@@ -61,5 +61,4 @@ serial_test = "3"
 [features]
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
-wasm-hooks = []
 

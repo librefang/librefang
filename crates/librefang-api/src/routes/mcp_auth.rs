@@ -592,6 +592,16 @@ pub async fn auth_callback(
             return auth_failed("Token endpoint missing from vault.");
         }
     };
+    // SSRF guard (#3623): re-validate the stored token_endpoint before the
+    // outbound code exchange.  The parser checks at discovery time, but the
+    // value sat in the vault between then and now and may predate a tightening
+    // of the SSRF policy — the kernel's `try_refresh` already does this; this
+    // is the matching guard for the auth-code path.
+    if let Err(reason) = mcp_oauth::is_ssrf_blocked_url(&token_endpoint) {
+        return auth_failed(format!(
+            "SSRF: token_endpoint rejected for code exchange: {reason}"
+        ));
+    }
 
     let client_id = load("client_id");
     let redirect_uri = match load("redirect_uri") {
@@ -618,6 +628,14 @@ pub async fn auth_callback(
         form_params.push(("client_id", cid.clone()));
     }
 
+    // #3730: user-visible errors must NOT leak the token endpoint URL or the
+    // raw response body — both can include internal hostnames, query
+    // parameters, or provider error payloads that contain sensitive context.
+    // Detailed diagnostics go to tracing (operator-only); the user/dashboard
+    // sees a generic message.
+    const GENERIC_TOKEN_EXCHANGE_FAILED: &str =
+        "Token exchange failed. Check the daemon logs for details.";
+
     let token_resp = match http_client
         .post(&token_endpoint)
         .form(&form_params)
@@ -626,63 +644,84 @@ pub async fn auth_callback(
     {
         Ok(resp) => resp,
         Err(e) => {
-            let msg = format!("Token exchange request failed: {e}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                "OAuth token exchange request failed"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 
     if !token_resp.status().is_success() {
         let status = token_resp.status();
         let body_raw = token_resp.text().await.unwrap_or_default();
-        // Truncate to guard against a malicious server sending a huge payload.
+        // Truncate operator-visible body for tracing; user gets generic msg.
         let body_preview: String = body_raw.chars().take(500).collect();
-        let msg = format!("Token exchange failed (HTTP {status}): {body_preview}");
+        tracing::error!(
+            server = %name,
+            token_endpoint = %token_endpoint,
+            status = %status,
+            body_preview = %body_preview,
+            "OAuth token exchange returned non-success status"
+        );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
             name.clone(),
             McpAuthState::Error {
-                message: msg.clone(),
+                message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
             },
         );
-        return auth_failed(msg);
+        return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
     }
 
     let body = match token_resp.text().await {
         Ok(b) => b,
         Err(e) => {
-            let msg = format!("Failed to read token response body: {e}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                "Failed to read OAuth token response body"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 
     let tokens: OAuthTokens = match serde_json::from_str(&body) {
         Ok(t) => t,
         Err(e) => {
-            // Truncate body preview to guard against a malicious server sending a huge payload.
             let body_preview: String = body.chars().take(500).collect();
-            let msg = format!("Failed to parse token response: {e}. Body: {body_preview}");
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                error = %e,
+                body_preview = %body_preview,
+                "Failed to parse OAuth token response"
+            );
             let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
             auth_states.insert(
                 name.clone(),
                 McpAuthState::Error {
-                    message: msg.clone(),
+                    message: GENERIC_TOKEN_EXCHANGE_FAILED.to_string(),
                 },
             );
-            return auth_failed(msg);
+            return auth_failed(GENERIC_TOKEN_EXCHANGE_FAILED);
         }
     };
 

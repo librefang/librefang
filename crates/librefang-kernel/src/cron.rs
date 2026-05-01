@@ -142,9 +142,7 @@ impl CronScheduler {
                 LibreFangError::Internal(format!("Failed to create cron jobs dir: {e}"))
             })?;
         }
-        let tmp_path = self
-            .persist_path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
+        let tmp_path = crate::persist_tmp_path(&self.persist_path);
         {
             use std::io::Write as _;
             let mut f = std::fs::File::create(&tmp_path).map_err(|e| {
@@ -1862,6 +1860,50 @@ mod tests {
         });
         let res = sched.update_job(id, &updates);
         assert!(res.is_err());
+    }
+
+    /// Regression for #3648: two concurrent persists must never share a
+    /// staging path, otherwise the second `O_CREAT|O_TRUNC` clobbers the
+    /// first writer's tmp file mid-flight and rename produces a torn
+    /// JSON.  The pid+seq+nanos suffix ensures uniqueness within a
+    /// process and across daemons sharing a home_dir.
+    #[test]
+    fn persist_tmp_paths_are_unique_under_concurrency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let sched = std::sync::Arc::new(CronScheduler::new(tmp.path(), 100));
+        sched.add_job(make_job(agent), false).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let s = sched.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..20 {
+                    s.persist().unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Final file must parse cleanly — no torn JSON.
+        let path = tmp.path().join("data").join("cron_jobs.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let _: Vec<JobMeta> =
+            serde_json::from_str(&raw).expect("torn JSON after concurrent persist");
+
+        // No leftover .tmp staging files in the parent dir.
+        let parent = path.parent().unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no .tmp.* staging files should remain after concurrent persist; found: {leftovers:?}"
+        );
     }
 
     #[test]

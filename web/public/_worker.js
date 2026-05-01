@@ -8,7 +8,7 @@ const SECURITY_HEADERS = {
   'X-XSS-Protection': '1; mode=block',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://static.cloudflareinsights.com https://librefang-counter.suzukaze-haduki.workers.dev https://counter.librefang.ai; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.github.com https://fonts.googleapis.com https://fonts.gstatic.com https://www.google-analytics.com https://librefang-counter.suzukaze-haduki.workers.dev https://counter.librefang.ai https://stats.librefang.ai; frame-src 'none'",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com https://static.cloudflareinsights.com https://librefang-counter.suzukaze-haduki.workers.dev https://counter.librefang.ai; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://api.github.com https://fonts.googleapis.com https://fonts.gstatic.com https://www.google-analytics.com https://librefang-counter.suzukaze-haduki.workers.dev https://counter.librefang.ai https://stats.librefang.ai https://marketplace.librefang.ai; frame-src 'none'",
 };
 
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';

@@ -61,6 +61,10 @@ impl OpenAIDriver {
             }),
             None => librefang_http::proxied_client(),
         };
+        // #3477: self-hosted OpenAI-compat endpoints (Ollama, etc.) often
+        // include a trailing slash; concatenating "/chat/completions" then
+        // produces "//chat/completions" which most servers 504 on.
+        let base_url = base_url.trim_end_matches('/').to_string();
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
@@ -221,7 +225,14 @@ impl OpenAIDriver {
         use base64::Engine;
         use sha2::{Digest, Sha256};
 
-        for msg in &mut request.messages {
+        // `request.messages` is `Arc<Vec<Message>>` (#3766). Get an exclusive
+        // `&mut Vec<Message>` via `Arc::make_mut` — when the refcount is 1
+        // (the common case: fresh `CompletionRequest` for this call) this is
+        // O(1); on a shared Arc it clones once, which is unavoidable since
+        // we must mutate. Without this, `for msg in &mut request.messages`
+        // doesn't compile because `Arc<Vec<_>>` only derefs to `&Vec<_>`.
+        let messages = std::sync::Arc::make_mut(&mut request.messages);
+        for msg in messages.iter_mut() {
             let blocks = match &mut msg.content {
                 MessageContent::Blocks(b) => b,
                 _ => continue,
@@ -534,6 +545,14 @@ struct OaiUsage {
     /// Detailed prompt token breakdown (includes cached token info).
     #[serde(default)]
     prompt_tokens_details: Option<OaiPromptTokensDetails>,
+    /// DeepSeek-specific: prompt tokens served from the on-disk prompt
+    /// cache. Billed at 1/10 of the input rate. Reported as a sibling to
+    /// `prompt_tokens` rather than nested under `prompt_tokens_details`
+    /// (#3449). The companion `prompt_cache_miss_tokens` field is
+    /// derivable as `prompt_tokens - prompt_cache_hit_tokens`, so we
+    /// don't bother deserializing it.
+    #[serde(default)]
+    prompt_cache_hit_tokens: u64,
 }
 
 /// OpenAI prompt token details (includes cached token count).
@@ -542,6 +561,48 @@ struct OaiPromptTokensDetails {
     /// Number of prompt tokens served from cache.
     #[serde(default)]
     cached_tokens: u64,
+}
+
+/// Pick the cache-read token count from whichever of OpenAI's nested
+/// `prompt_tokens_details.cached_tokens` or DeepSeek's top-level
+/// `prompt_cache_hit_tokens` is non-zero.
+///
+/// Used by both the non-stream and stream code paths so they cannot
+/// silently diverge — see #3449. Real providers only ever populate
+/// one shape (OpenAI/Azure/Groq use the nested form, DeepSeek uses the
+/// top-level form), but accepting both keeps the driver future-proof
+/// against providers that mirror both for compatibility.
+fn pick_cache_read_tokens(nested_cached: u64, deepseek_cached: u64) -> u64 {
+    if nested_cached > 0 {
+        nested_cached
+    } else {
+        deepseek_cached
+    }
+}
+
+/// Convert an OpenAI-compatible `finish_reason` into a `StopReason`,
+/// honoring the safety/policy refusal path (#3450).
+///
+/// Lives outside the `complete()` body so unit tests can exercise the
+/// real mapping rather than replicating a copy. Used by both the
+/// non-stream and streaming paths.
+fn map_oai_finish_reason(reason: Option<&str>, has_tool_calls: bool) -> StopReason {
+    match reason {
+        Some("stop") => StopReason::EndTurn,
+        Some("tool_calls") => StopReason::ToolUse,
+        Some("length") => StopReason::MaxTokens,
+        // OpenAI / Azure / DeepSeek refusals — never silently fold into
+        // EndTurn, otherwise the agent loop treats an empty refusal as a
+        // successful turn.
+        Some("content_filter") => StopReason::ContentFiltered,
+        _ => {
+            if has_tool_calls {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+    }
 }
 
 /// Strip trailing assistant messages that would trigger "prefill not supported"
@@ -591,7 +652,7 @@ impl OpenAIDriver {
         }
 
         // Convert messages
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             match (&msg.role, &msg.content) {
                 (Role::System, MessageContent::Text(text)) if request.system.is_none() => {
                     oai_messages.push(OaiMessage {
@@ -1240,23 +1301,17 @@ impl LlmDriver for OpenAIDriver {
                 }
             }
 
-            let stop_reason = match choice.finish_reason.as_deref() {
-                Some("stop") => StopReason::EndTurn,
-                Some("tool_calls") => StopReason::ToolUse,
-                Some("length") => StopReason::MaxTokens,
-                _ => {
-                    if !tool_calls.is_empty() {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    }
-                }
-            };
+            let stop_reason =
+                map_oai_finish_reason(choice.finish_reason.as_deref(), !tool_calls.is_empty());
 
             let usage = oai_response
                 .usage
                 .map(|u| {
-                    let cached = u
+                    // Single source of truth shared with the streaming path
+                    // (see #3449). The metering layer already discounts
+                    // `cache_read_input_tokens` to 10% of the input rate,
+                    // which matches DeepSeek's published 1/10 cache pricing.
+                    let nested = u
                         .prompt_tokens_details
                         .as_ref()
                         .map(|d| d.cached_tokens)
@@ -1265,7 +1320,10 @@ impl LlmDriver for OpenAIDriver {
                         input_tokens: u.prompt_tokens,
                         output_tokens: u.completion_tokens,
                         cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: cached,
+                        cache_read_input_tokens: pick_cache_read_tokens(
+                            nested,
+                            u.prompt_cache_hit_tokens,
+                        ),
                     }
                 })
                 .unwrap_or_default();
@@ -1422,10 +1480,15 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping temperature for this model (stream)");
                     oai_request.temperature = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
-                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens
+                // GPT-5 / o-series: switch from max_tokens to max_completion_tokens.
+                // Add a small backoff to avoid a tight retry loop (#3758).
                 if status == 400
                     && body.contains("max_tokens")
                     && (body.contains("unsupported_parameter")
@@ -1437,10 +1500,14 @@ impl LlmDriver for OpenAIDriver {
                     warn!(model = %oai_request.model, "Switching to max_completion_tokens for this model (stream)");
                     oai_request.max_tokens = None;
                     oai_request.max_completion_tokens = Some(val);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
-                // Auto-cap max_tokens when model rejects our value
+                // Auto-cap max_tokens when model rejects our value (#3758: add backoff).
                 if status == 400 && body.contains("max_tokens") && attempt < max_retries {
                     let current = oai_request
                         .max_tokens
@@ -1453,6 +1520,10 @@ impl LlmDriver for OpenAIDriver {
                     } else {
                         oai_request.max_tokens = Some(cap);
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1466,6 +1537,10 @@ impl LlmDriver for OpenAIDriver {
                 {
                     warn!(model = %oai_request.model, "Stripping stream_options (unsupported by provider)");
                     oai_request.stream_options = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1487,6 +1562,10 @@ impl LlmDriver for OpenAIDriver {
                     );
                     oai_request.tools.clear();
                     oai_request.tool_choice = None;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt + 1) as u64,
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -1528,6 +1607,8 @@ impl LlmDriver for OpenAIDriver {
             let mut chunk_count: u32 = 0;
             let mut sse_line_count: u32 = 0;
             let mut receiver_dropped = false;
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
@@ -1539,7 +1620,7 @@ impl LlmDriver for OpenAIDriver {
                 }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 chunk_count += 1;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 // Process complete lines
                 while let Some(pos) = buffer.find('\n') {
@@ -1570,11 +1651,20 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(pt) = u["prompt_tokens"].as_u64() {
                             usage.input_tokens = pt;
                         }
-                        if let Some(cached) = u
+                        // Cache-read accounting goes through the same helper
+                        // as the non-stream path so the two cannot diverge
+                        // when a new provider adds a third shape (#3449).
+                        let nested = u
                             .get("prompt_tokens_details")
                             .and_then(|d| d.get("cached_tokens"))
                             .and_then(|v| v.as_u64())
-                        {
+                            .unwrap_or(0);
+                        let deepseek = u
+                            .get("prompt_cache_hit_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cached = pick_cache_read_tokens(nested, deepseek);
+                        if cached > 0 {
                             usage.cache_read_input_tokens = cached;
                             cached_prompt_tokens = cached;
                         }
@@ -1715,6 +1805,12 @@ impl LlmDriver for OpenAIDriver {
                     }
                 }
             }
+
+            // Drain any partial codepoint left in the decoder. In a clean
+            // stream this is a no-op; only matters when the connection
+            // was truncated mid-codepoint, in which case the trailing
+            // bytes surface as U+FFFD instead of vanishing (#3448).
+            buffer.push_str(&utf8.finish());
 
             // Flush any remaining buffered content from the think filter
             // (e.g. partial tag at stream end, or unclosed think block).
@@ -1880,22 +1976,17 @@ impl LlmDriver for OpenAIDriver {
                     .await;
             }
 
-            let stop_reason = match finish_reason.as_deref() {
-                // If the upstream said "tool_calls" but we filtered them all
-                // out (e.g. Copilot proxy dropped function-name chunks),
-                // downgrade to EndTurn so the agent loop doesn't stage an
-                // empty tool-use turn that nothing can execute.
-                Some("tool_calls") if tool_calls.is_empty() => StopReason::EndTurn,
-                Some("stop") => StopReason::EndTurn,
-                Some("tool_calls") => StopReason::ToolUse,
-                Some("length") => StopReason::MaxTokens,
-                _ => {
-                    if !tool_calls.is_empty() {
-                        StopReason::ToolUse
-                    } else {
-                        StopReason::EndTurn
-                    }
-                }
+            // If the upstream said "tool_calls" but we filtered them all
+            // out (e.g. Copilot proxy dropped function-name chunks),
+            // downgrade to EndTurn so the agent loop doesn't stage an
+            // empty tool-use turn that nothing can execute. This is
+            // streaming-specific — the non-stream path already filters
+            // earlier — so it stays out of `map_oai_finish_reason`.
+            let raw_finish = finish_reason.as_deref();
+            let stop_reason = if matches!(raw_finish, Some("tool_calls")) && tool_calls.is_empty() {
+                StopReason::EndTurn
+            } else {
+                map_oai_finish_reason(raw_finish, !tool_calls.is_empty())
             };
 
             debug!(
@@ -2265,6 +2356,15 @@ mod tests {
         assert_eq!(driver.api_key.as_str(), "test-key");
     }
 
+    // #3477: trailing slash on base_url must not produce "//chat/completions".
+    #[test]
+    fn test_openai_base_url_strips_trailing_slash() {
+        let driver = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1/".to_string());
+        assert_eq!(driver.base_url, "http://localhost:11434/v1");
+        let multi = OpenAIDriver::new("k".to_string(), "http://localhost:11434/v1///".to_string());
+        assert_eq!(multi.base_url, "http://localhost:11434/v1");
+    }
+
     #[test]
     fn test_is_ollama_like_detects_default_port() {
         let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
@@ -2288,12 +2388,12 @@ mod tests {
         let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
         let request = CompletionRequest {
             model: "qwen3:8b".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,
@@ -2316,12 +2416,12 @@ mod tests {
         let driver = OpenAIDriver::new("".to_string(), "http://127.0.0.1:11434/v1".to_string());
         let request = CompletionRequest {
             model: "qwen3:8b".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,
@@ -2344,12 +2444,12 @@ mod tests {
         let driver = OpenAIDriver::new("k".to_string(), "https://api.openai.com/v1".to_string());
         let request = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![librefang_types::message::Message {
+            messages: std::sync::Arc::new(vec![librefang_types::message::Message {
                 role: librefang_types::message::Role::User,
                 content: librefang_types::message::MessageContent::Text("hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 256,
             temperature: 0.7,
@@ -2879,5 +2979,109 @@ mod tests {
         strip_trailing_empty_assistant(&mut msgs, "claude-3-opus");
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs.last().unwrap().role, "user");
+    }
+
+    /// DeepSeek reports cache hits as `usage.prompt_cache_hit_tokens` (a
+    /// sibling of `prompt_tokens`), not under `prompt_tokens_details`.
+    /// Without the explicit fallback the cache discount is silently dropped (#3449).
+    #[test]
+    fn test_oai_usage_parses_deepseek_prompt_cache_hit_tokens() {
+        let raw = r#"{
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 800,
+            "prompt_cache_miss_tokens": 200
+        }"#;
+        let usage: OaiUsage = serde_json::from_str(raw).expect("parse usage");
+        assert_eq!(usage.prompt_tokens, 1000);
+        assert_eq!(usage.prompt_cache_hit_tokens, 800);
+        // The driver routes `prompt_cache_hit_tokens` into
+        // `TokenUsage.cache_read_input_tokens`, which the metering layer
+        // already discounts to 10% of the input rate — matching DeepSeek's
+        // published 1/10 cache pricing.
+    }
+
+    /// OpenAI / Azure use the nested `prompt_tokens_details.cached_tokens`
+    /// path. Both forms must be parsed without one shadowing the other.
+    #[test]
+    fn test_oai_usage_parses_openai_nested_cached_tokens() {
+        let raw = r#"{
+            "prompt_tokens": 500,
+            "completion_tokens": 40,
+            "prompt_tokens_details": { "cached_tokens": 320 }
+        }"#;
+        let usage: OaiUsage = serde_json::from_str(raw).expect("parse usage");
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().unwrap().cached_tokens,
+            320
+        );
+        assert_eq!(usage.prompt_cache_hit_tokens, 0);
+    }
+
+    /// Refusal mapping: `map_oai_finish_reason` is the production
+    /// converter; both `complete()` and the streaming path delegate to
+    /// it. Driving it directly here ensures a refactor that loses the
+    /// `Some("content_filter")` arm cannot pass tests (#3450).
+    #[test]
+    fn map_oai_finish_reason_routes_content_filter_to_filtered() {
+        assert_eq!(
+            map_oai_finish_reason(Some("content_filter"), false),
+            StopReason::ContentFiltered
+        );
+        // Even when tool calls were emitted, a content_filter finish
+        // must outrank the tool_calls catch-all.
+        assert_eq!(
+            map_oai_finish_reason(Some("content_filter"), true),
+            StopReason::ContentFiltered
+        );
+    }
+
+    /// Sanity coverage for the rest of the mapping so a regression in
+    /// any branch is observable from this one place.
+    #[test]
+    fn map_oai_finish_reason_handles_known_finish_reasons() {
+        assert_eq!(
+            map_oai_finish_reason(Some("stop"), false),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            map_oai_finish_reason(Some("tool_calls"), true),
+            StopReason::ToolUse
+        );
+        assert_eq!(
+            map_oai_finish_reason(Some("length"), false),
+            StopReason::MaxTokens
+        );
+        // Unknown finish reasons fall back to tool-use vs end-turn
+        // based on whether tool calls were actually emitted.
+        assert_eq!(map_oai_finish_reason(None, false), StopReason::EndTurn);
+        assert_eq!(map_oai_finish_reason(None, true), StopReason::ToolUse);
+    }
+
+    /// Driving a real `OaiResponse` through `serde` and into the helper
+    /// gives end-to-end coverage from the wire format to the
+    /// `StopReason` the runtime reads — catches both serde drift
+    /// (renamed field, wrong type) and mapping regressions.
+    #[test]
+    fn deserialized_oai_response_with_content_filter_yields_filtered_stop() {
+        let raw = r#"{
+            "id": "chatcmpl-x",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "" },
+                "finish_reason": "content_filter"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 0 }
+        }"#;
+        let response: OaiResponse =
+            serde_json::from_str(raw).expect("parse content_filter response");
+        let choice = response.choices.into_iter().next().expect("one choice");
+        assert_eq!(
+            map_oai_finish_reason(choice.finish_reason.as_deref(), false),
+            StopReason::ContentFiltered
+        );
     }
 }

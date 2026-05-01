@@ -197,7 +197,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
     let kernel_weak = Arc::downgrade(kernel);
     let gateway_pid = Arc::clone(&kernel.whatsapp_gateway_pid);
 
-    tokio::spawn(async move {
+    crate::supervised_spawn::spawn_supervised("whatsapp_gateway_supervisor", async move {
         let mut restarts = 0u32;
 
         loop {

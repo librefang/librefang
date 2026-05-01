@@ -7,6 +7,8 @@ image = "ghcr.io/librefang/librefang:latest"
 [env]
   LIBREFANG_HOME = "/data"
   LIBREFANG_LISTEN = "0.0.0.0:4545"
+  # Public live demo: intentionally open. Replace with LIBREFANG_API_KEY for private deployments.
+  LIBREFANG_ALLOW_NO_AUTH = "1"
 
 [http_service]
   internal_port = 4545
