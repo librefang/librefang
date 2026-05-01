@@ -1143,6 +1143,29 @@ export async function getAgentStats(agentId: string): Promise<AgentStats24h> {
   return get<AgentStats24h>(`/api/agents/${encodeURIComponent(agentId)}/stats`);
 }
 
+/** Per-agent turn-level events row from `usage_events`, surfaced via
+ *  `GET /api/agents/{id}/events`. Powers the agent-detail Logs tab. */
+export interface AgentEventRow {
+  timestamp: string;
+  model: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  tool_calls: number;
+  latency_ms: number;
+}
+
+export async function listAgentEvents(
+  agentId: string,
+  limit = 30,
+): Promise<AgentEventRow[]> {
+  const data = await get<{ events?: AgentEventRow[] }>(
+    `/api/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
+  );
+  return data.events ?? [];
+}
+
 export async function patchAgentConfig(
   agentId: string,
   config: {
