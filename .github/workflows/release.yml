@@ -865,17 +865,29 @@ jobs:
             exit 1
           fi
 
+          # Sanity check: keep this in sync with the cli_* entries in `needs:`
+          # above. A drift means a new platform was added without wiring its
+          # sibling into the manifest, or a job silently failed to upload its
+          # .sha256. Either way, refuse to publish a partial manifest.
+          EXPECTED_PLATFORMS=8
+          ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
+          if [ "$ACTUAL" -lt "$EXPECTED_PLATFORMS" ]; then
+            echo "::error::expected at least $EXPECTED_PLATFORMS .sha256 siblings (one per cli_* job in needs:), got $ACTUAL"
+            cat asset-list.txt
+            exit 1
+          fi
+
           while IFS= read -r name; do
             echo "Fetching $name"
             gh release download "$TAG" --pattern "$name" --clobber
           done < asset-list.txt
 
-          # Each sibling file already contains "<hash>  <filename>" — just
-          # concatenate (sorted for determinism).
-          : > ../SHA256SUMS
-          for f in $(ls *.sha256 | sort); do
-            cat "$f" >> ../SHA256SUMS
-          done
+          # Each sibling file already contains "<hash>  <filename>". Use
+          # `awk 1` to concatenate so a sibling missing its trailing newline
+          # cannot glue two records onto the same line and silently break
+          # `sha256sum -c SHA256SUMS` on the verifier side. Sorted input for
+          # deterministic ordering.
+          ls *.sha256 | sort | xargs awk 1 > ../SHA256SUMS
 
           cd ..
           echo "::group::SHA256SUMS"
