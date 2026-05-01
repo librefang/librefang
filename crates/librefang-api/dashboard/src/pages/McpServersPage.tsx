@@ -201,6 +201,21 @@ function getTransportDetail(server: McpServerConfigured): string {
   return server.transport.url ?? "\u2014";
 }
 
+// Kernel-side names tools as `mcp_<server>_<tool>` and prepends
+// `[MCP:<server>] ` to descriptions so the LLM can disambiguate
+// across servers. Both prefixes are noise once we already show the
+// server's name as the page header \u2014 strip them for display, keep
+// the full names in `title=` for copy/inspect.
+function stripMcpToolPrefix(toolName: string, serverName: string): string {
+  const prefix = `mcp_${serverName}_`;
+  return toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
+}
+
+function stripMcpDescPrefix(description: string, serverName: string): string {
+  const prefix = `[MCP:${serverName}] `;
+  return description.startsWith(prefix) ? description.slice(prefix.length) : description;
+}
+
 // ── ArgsEditor ──────────────────────────────────────────────────────
 
 function ArgsEditor({ items, onChange }: { items: LabeledItem[]; onChange: (items: LabeledItem[]) => void }) {
@@ -711,30 +726,42 @@ function ServerDetailBody({
               />
             ) : (
               <Card padding="none" className="overflow-hidden">
-                <div className="hidden sm:grid grid-cols-[1fr_2fr_70px_60px_70px] items-center px-3 py-2 border-b border-border-subtle bg-main/40 text-[10px] font-bold uppercase tracking-wider text-text-dim">
+                <div className="hidden sm:grid grid-cols-[minmax(160px,1.4fr)_2fr_60px_50px_60px] items-center gap-2 px-3 py-2 border-b border-border-subtle bg-main/40 text-[10px] font-bold uppercase tracking-wider text-text-dim">
                   <span>{t("mcp.col_name", { defaultValue: "name" })}</span>
                   <span>{t("mcp.col_description", { defaultValue: "description" })}</span>
                   <span className="text-right">{t("mcp.col_calls", { defaultValue: "calls" })}</span>
                   <span className="text-right">{t("mcp.col_ok", { defaultValue: "ok %" })}</span>
                   <span className="text-right">{t("mcp.col_last", { defaultValue: "last" })}</span>
                 </div>
-                {tools.map((tool, i) => (
-                  <div
-                    key={tool.name}
-                    className={`grid grid-cols-[1fr_60px] sm:grid-cols-[1fr_2fr_70px_60px_70px] items-center px-3 py-2 text-[12px] ${
-                      i < tools.length - 1 ? "border-b border-border-subtle" : ""
-                    }`}
-                  >
-                    <span className="font-mono font-medium truncate pr-2">{tool.name}</span>
-                    <span className="hidden sm:block text-text-dim text-[11.5px] truncate pr-2">
-                      {tool.description ?? ""}
-                    </span>
-                    {/* TODO: aggregate from /api/sessions to populate calls/ok%/last per tool */}
-                    <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
-                    <span className="hidden sm:inline font-mono text-text-dim/60 text-right text-[11px]">—</span>
-                    <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
-                  </div>
-                ))}
+                {tools.map((tool, i) => {
+                  const displayName = stripMcpToolPrefix(tool.name, server.name);
+                  const displayDesc = stripMcpDescPrefix(tool.description ?? "", server.name);
+                  return (
+                    <div
+                      key={tool.name}
+                      className={`grid grid-cols-[1fr_60px] sm:grid-cols-[minmax(160px,1.4fr)_2fr_60px_50px_60px] items-center gap-2 px-3 py-2 text-[12px] ${
+                        i < tools.length - 1 ? "border-b border-border-subtle" : ""
+                      }`}
+                    >
+                      <span
+                        className="font-mono font-medium truncate min-w-0"
+                        title={tool.name}
+                      >
+                        {displayName}
+                      </span>
+                      <span
+                        className="hidden sm:block text-text-dim text-[11.5px] truncate min-w-0"
+                        title={tool.description ?? ""}
+                      >
+                        {displayDesc}
+                      </span>
+                      {/* TODO: aggregate from /api/sessions to populate calls/ok%/last per tool */}
+                      <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                      <span className="hidden sm:inline font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                      <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                    </div>
+                  );
+                })}
               </Card>
             )}
           </>
