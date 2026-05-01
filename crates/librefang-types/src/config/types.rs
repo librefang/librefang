@@ -1486,6 +1486,19 @@ pub struct VaultConfig {
     pub enabled: bool,
     /// Custom vault file path (default: ~/.librefang/vault.enc).
     pub path: Option<PathBuf>,
+    /// Whether to store the vault master key in the OS keyring
+    /// (Linux Secret Service / macOS Keychain / Windows Credential Manager).
+    ///
+    /// `None` = use the platform default. macOS defaults to `false` because
+    /// the Keychain ACL is per-binary signature: every `cargo build` produces
+    /// a new signature and triggers a fresh "allow" prompt on daemon
+    /// restart. Linux and Windows default to `true`.
+    ///
+    /// The env var `LIBREFANG_VAULT_NO_KEYRING=1` overrides this setting and
+    /// forces the file-based fallback (`~/.librefang/.keyring`,
+    /// AES-256-GCM-wrapped, 0600) regardless of the config or platform
+    /// default.
+    pub use_os_keyring: Option<bool>,
 }
 
 impl Default for VaultConfig {
@@ -1493,6 +1506,7 @@ impl Default for VaultConfig {
         Self {
             enabled: true,
             path: None,
+            use_os_keyring: None,
         }
     }
 }
