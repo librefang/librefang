@@ -100,6 +100,8 @@
     "resume": "Resume",
     "close": "Close",
     "clear_search": "Clear search",
+    "select": "Select",
+    "deselect": "Deselect",
     "yes": "Yes",
     "no": "No",
     "details": "Details",
@@ -775,7 +777,14 @@
     "qr_failed": "Failed to get QR code",
     "login_success": "Login successful! Saving configuration...",
     "config_failed": "Configuration failed",
-    "config_success": "Configuration saved"
+    "config_success": "Configuration saved",
+    "add": "Add",
+    "all_configured": "All channels configured",
+    "msgs_24h": "msgs/24h",
+    "empty_title": "No channels yet",
+    "empty_body": "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
+    "connect_first": "Connect a channel",
+    "picker_title": "Add channel"
   },
   "skills": {
     "title": "Skills",
