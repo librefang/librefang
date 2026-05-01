@@ -746,6 +746,7 @@ pub(crate) fn enrich_agent_json(
     catalog: &Option<
         std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
     >,
+    bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
     {
@@ -790,6 +791,10 @@ pub(crate) fn enrich_agent_json(
         }
     };
 
+    let (sessions_24h, cost_24h) = bulk_stats
+        .and_then(|m| m.get(&e.id.to_string()).copied())
+        .unwrap_or((0, 0.0));
+
     serde_json::json!({
         "id": e.id.to_string(),
         "name": e.name,
@@ -806,6 +811,8 @@ pub(crate) fn enrich_agent_json(
         "ready": ready,
         "profile": e.manifest.profile,
         "schedule": schedule,
+        "sessions_24h": sessions_24h,
+        "cost_24h": cost_24h,
         "identity": {
             "emoji": e.identity.emoji,
             "avatar_url": e.identity.avatar_url,
@@ -960,9 +967,14 @@ pub async fn list_agents(
         agents.into_iter().skip(offset).collect()
     };
 
+    // Bulk-fetch 24h sessions/cost so each row carries its own KPI without
+    // forcing the dashboard to re-aggregate from /api/sessions (which is
+    // pagination-clipped).
+    let bulk_stats = state.kernel.memory_substrate().agents_stats_24h_bulk().ok();
+
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e, &dm, &catalog))
+        .map(|e| enrich_agent_json(e, &dm, &catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {

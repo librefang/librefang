@@ -273,6 +273,12 @@ export interface AgentItem {
    *  the cron expression for periodic agents, "proactive", or
    *  "continuous · Ns" for continuous agents. */
   schedule?: string;
+  /** Sessions whose `created_at` is within the last 24 hours. Computed
+   *  in a single grouped SQL pass on the list endpoint so row UIs can
+   *  render KPI without a global /api/sessions aggregation. */
+  sessions_24h?: number;
+  /** Sum of `usage_events.cost_usd` for the agent in the last 24 hours. */
+  cost_24h?: number;
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1079,6 +1085,13 @@ export interface AgentStats24h {
   p95_latency_ms: number;
   active_now: number;
   samples: number;
+  /** Same window-scoped fields, aggregated over the prior 24h (24-48h
+   *  ago). Used by the KPI tile subtext to render trend deltas. */
+  prev: {
+    sessions_24h: number;
+    cost_24h: number;
+    p95_latency_ms: number;
+  };
 }
 
 export async function getAgentStats(agentId: string): Promise<AgentStats24h> {

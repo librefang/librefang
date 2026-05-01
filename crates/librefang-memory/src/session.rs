@@ -101,6 +101,17 @@ pub struct AgentStats24h {
     pub active_now: u64,
     /// Number of latency samples backing `p95_latency_ms`.
     pub samples: u64,
+    /// Same fields aggregated over the prior 24-hour window (24-48h ago)
+    /// so the dashboard can render trend deltas without a second round trip.
+    pub prev: AgentStatsPrev,
+}
+
+/// Prior-period rollup mirroring [`AgentStats24h`]'s window-scoped fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStatsPrev {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
 }
 
 /// Contains everything needed to reconstruct a session on another instance
@@ -639,12 +650,22 @@ impl SessionStore {
 
         let now = chrono::Utc::now();
         let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+        let cutoff_48h = (now - chrono::Duration::hours(48)).to_rfc3339();
         let cutoff_active = (now - chrono::Duration::minutes(5)).to_rfc3339();
 
+        // Sessions in [now-24h, now] vs the prior period [now-48h, now-24h).
         let sessions_24h: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND created_at >= ?2",
                 rusqlite::params![agent_id, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let prev_sessions_24h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE agent_id = ?1 AND created_at >= ?2 AND created_at < ?3",
+                rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
                 |row| row.get(0),
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -666,38 +687,136 @@ impl SessionStore {
                 |row| row.get(0),
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT latency_ms FROM usage_events
-                 WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
-                 ORDER BY latency_ms ASC",
+        let prev_cost_24h: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3",
+                rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
+                |row| row.get(0),
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let mut latencies: Vec<i64> = Vec::new();
-        let rows = stmt
-            .query_map(rusqlite::params![agent_id, cutoff_24h], |row| row.get(0))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        for row in rows {
-            latencies.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+
+        // Pull latencies for both windows. Two prepared statements keep
+        // the index hits clean (agent_id, timestamp) and let us return
+        // the values pre-sorted ascending so P95 is just an indexed read.
+        let mut cur_lat: Vec<i64> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT latency_ms FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
+                     ORDER BY latency_ms ASC",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![agent_id, cutoff_24h], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            for row in rows {
+                cur_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            }
+        }
+        let mut prev_lat: Vec<i64> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT latency_ms FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3 AND latency_ms > 0
+                     ORDER BY latency_ms ASC",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![agent_id, cutoff_48h, cutoff_24h], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            for row in rows {
+                prev_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            }
         }
 
-        // Nearest-rank P95 over the sorted-ascending latency array.
-        let p95_latency_ms: i64 = if latencies.is_empty() {
-            0
-        } else {
-            let rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
-            let idx = rank.saturating_sub(1).min(latencies.len() - 1);
-            latencies[idx]
+        // Nearest-rank P95 over a sorted-ascending latency array.
+        let p95 = |latencies: &[i64]| -> i64 {
+            if latencies.is_empty() {
+                0
+            } else {
+                let rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
+                let idx = rank.saturating_sub(1).min(latencies.len() - 1);
+                latencies[idx]
+            }
         };
 
         Ok(AgentStats24h {
             sessions_24h: sessions_24h.max(0) as u64,
             cost_24h,
-            p95_latency_ms: p95_latency_ms.max(0) as u64,
+            p95_latency_ms: p95(&cur_lat).max(0) as u64,
             active_now: active_now.max(0) as u64,
-            samples: latencies.len() as u64,
+            samples: cur_lat.len() as u64,
+            prev: AgentStatsPrev {
+                sessions_24h: prev_sessions_24h.max(0) as u64,
+                cost_24h: prev_cost_24h,
+                p95_latency_ms: p95(&prev_lat).max(0) as u64,
+            },
         })
+    }
+
+    /// Bulk variant of `agent_stats_24h` covering only the cheap-to-aggregate
+    /// fields — `(sessions_24h, cost_24h)` — for every agent at once.
+    /// Used by the agent-list endpoint to embed row-level KPI without an
+    /// N+1 fan-out. P95 / active-now are intentionally excluded; row UI
+    /// only needs the two coarse counts and surfacing them via a single
+    /// query keeps the listing latency bounded.
+    pub fn agents_stats_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let now = chrono::Utc::now();
+        let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+
+        let mut out: std::collections::HashMap<String, (u64, f64)> =
+            std::collections::HashMap::new();
+
+        // Pass 1: sessions_24h grouped by agent_id (uses idx on agent_id+created_at).
+        let mut stmt_s = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*)
+                 FROM sessions WHERE created_at >= ?1
+                 GROUP BY agent_id",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows_s = stmt_s
+            .query_map(rusqlite::params![cutoff_24h], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for row in rows_s {
+            let (id, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.entry(id).or_insert((0, 0.0)).0 = n.max(0) as u64;
+        }
+
+        // Pass 2: cost_24h grouped by agent_id (uses idx on agent_id+timestamp).
+        let mut stmt_c = conn
+            .prepare(
+                "SELECT agent_id, COALESCE(SUM(cost_usd), 0.0)
+                 FROM usage_events WHERE timestamp >= ?1
+                 GROUP BY agent_id",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows_c = stmt_c
+            .query_map(rusqlite::params![cutoff_24h], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for row in rows_c {
+            let (id, c) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.entry(id).or_insert((0, 0.0)).1 = c;
+        }
+
+        Ok(out)
     }
 
     /// Paginated session listing. `limit = None` returns all rows from `offset` onward.

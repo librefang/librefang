@@ -314,6 +314,14 @@ impl MemorySubstrate {
         self.sessions.agent_stats_24h(agent_id)
     }
 
+    /// Bulk `(sessions_24h, cost_24h)` per agent. See
+    /// [`crate::session::SessionStore::agents_stats_24h_bulk`].
+    pub fn agents_stats_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
+        self.sessions.agents_stats_24h_bulk()
+    }
+
     /// Delete a session by ID.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         self.sessions.delete_session(session_id)

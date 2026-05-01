@@ -698,7 +698,16 @@ export function AgentsPage() {
 
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    // Prefer the row-embedded stats from /api/agents (single grouped SQL
+    // pass). Fall back to the global aggregation only if the backend is
+    // older and didn't ship the field.
+    const sessions24h = typeof agent.sessions_24h === "number"
+      ? agent.sessions_24h
+      : (sessionsByAgent.get(agent.id)?.sessions24h ?? 0);
+    const cost24h = typeof agent.cost_24h === "number"
+      ? agent.cost_24h
+      : (sessionsByAgent.get(agent.id)?.cost24h ?? 0);
+    const stats = { sessions24h, cost24h };
     const stateLower = (agent.state || "").toLowerCase();
     return (
       <button
@@ -862,7 +871,7 @@ export function AgentsPage() {
             const p95Ms = live?.p95_latency_ms ?? 0;
             const samples = live?.samples ?? 0;
             const activeNow = live?.active_now ?? 0;
-            const avgCost = sessions24h > 0 ? cost24h / sessions24h : 0;
+            const prev = live?.prev;
             const skillNames: string[] = Array.isArray((agent as AgentView).skills)
               ? ((agent as AgentView).skills as string[])
               : Array.isArray((agent as AgentView).capabilities?.skills)
@@ -873,22 +882,49 @@ export function AgentsPage() {
               : toolsCount > 0
                 ? `${toolsCount} configured`
                 : "—";
+
+            // Trend deltas vs the prior 24h. Percent change for counts,
+            // signed dollar for cost, signed milliseconds for latency.
+            // When the prior period is empty we surface "new" instead of
+            // a divide-by-zero-induced "+∞%".
+            const pctDelta = (cur: number, p: number): string => {
+              if (p === 0) return cur > 0 ? "new" : "—";
+              const d = ((cur - p) / p) * 100;
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}${Math.abs(d).toFixed(0)}%`;
+            };
+            const usdDelta = (cur: number, p: number): string => {
+              const d = cur - p;
+              if (Math.abs(d) < 0.005 && p === 0 && cur === 0) return "—";
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}$${Math.abs(d).toFixed(2)}`;
+            };
+            const msDelta = (cur: number, p: number): string => {
+              if (cur === 0 && p === 0) return "—";
+              if (p === 0) return "new";
+              const d = cur - p;
+              const sign = d >= 0 ? "+" : "−";
+              return Math.abs(d) >= 1000
+                ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
+                : `${sign}${Math.abs(Math.round(d))}ms`;
+            };
+
             return (
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
                 {[
                   {
                     l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
                     v: String(sessions24h),
-                    m: activeNow > 0
-                      ? `${activeNow} live`
-                      : sessions24h > 0
-                        ? t("agents.kpi.sessions_idle", { defaultValue: "idle" })
-                        : "—",
+                    m: prev
+                      ? activeNow > 0
+                        ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
+                        : pctDelta(sessions24h, prev.sessions_24h)
+                      : activeNow > 0 ? `${activeNow} live` : "—",
                   },
                   {
                     l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
                     v: `$${cost24h.toFixed(2)}`,
-                    m: avgCost > 0 ? `$${avgCost.toFixed(2)}/run` : "—",
+                    m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
                   },
                   {
                     l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
@@ -897,9 +933,11 @@ export function AgentsPage() {
                         ? `${(p95Ms / 1000).toFixed(2)}s`
                         : `${Math.round(p95Ms)}ms`
                       : "—",
-                    m: samples > 0
-                      ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
-                      : "—",
+                    m: prev && (samples > 0 || prev.p95_latency_ms > 0)
+                      ? msDelta(p95Ms, prev.p95_latency_ms)
+                      : samples > 0
+                        ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
+                        : "—",
                   },
                   {
                     l: t("agents.kpi.tools", { defaultValue: "Tools" }),
