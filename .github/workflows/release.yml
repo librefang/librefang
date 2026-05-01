@@ -355,7 +355,10 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+        # `--features all-channels`: the CLI default was trimmed to a small
+        # "core-channels" set (#3655, #3688) to speed up developer builds;
+        # published binaries opt back in to every adapter.
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
@@ -419,11 +422,14 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
+        # `--features all-channels`: the CLI default was trimmed to a small
+        # "core-channels" set (#3655, #3688) to speed up developer builds;
+        # published binaries opt back in to every adapter.
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin librefang
+            cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
           else
-            cargo build --release --target ${{ matrix.target }} --bin librefang
+            cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
           fi
       - name: Package
         run: |
@@ -575,7 +581,9 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build static CLI
-        run: cross build --release --target ${{ matrix.target }} --bin librefang
+        # `--features all-channels`: see other CLI build steps in this file —
+        # the default was trimmed to "core-channels" (#3655, #3688).
+        run: cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
       - name: Verify static linking
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
@@ -633,7 +641,10 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+        # `--features all-channels`: the CLI default was trimmed to a small
+        # "core-channels" set (#3655, #3688) to speed up developer builds;
+        # published binaries opt back in to every adapter.
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
       - name: Package
         shell: pwsh
         run: |
