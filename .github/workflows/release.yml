@@ -389,10 +389,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
@@ -456,14 +453,11 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+            cross build --release --target ${{ matrix.target }} --bin librefang
           else
-            cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+            cargo build --release --target ${{ matrix.target }} --bin librefang
           fi
       - name: Package
         run: |
@@ -615,9 +609,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build static CLI
-        # `--features all-channels`: see other CLI build steps in this file —
-        # the default was trimmed to "core-channels" (#3655, #3688).
-        run: cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Verify static linking
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
@@ -675,10 +667,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Package
         shell: pwsh
         run: |
@@ -871,16 +860,28 @@ jobs:
             exit 1
           fi
 
-          # Exact-match sanity check: must equal the count of cli_* entries
-          # in `needs:` above. Drift in either direction is a bug — adding a
-          # new cli_* job without bumping this constant would silently publish
-          # a manifest missing the new platform's hash; dropping a job without
-          # decrementing it would block all releases until corrected (which is
-          # the desired loud failure). Update both together.
-          EXPECTED_PLATFORMS=8
+          # Exact-match sanity check: must equal the total number of matrix
+          # targets across the cli_* jobs in `needs:` above (NOT the number of
+          # jobs — most cli_* are matrix jobs that emit one .sha256 per target).
+          # Current breakdown:
+          #   cli_mac          x86_64 + aarch64                       = 2
+          #   cli_linux        x86_64 + aarch64                       = 2
+          #   cli_android      aarch64                                = 1
+          #   cli_linux_mini   x86_64                                 = 1
+          #   cli_musl         x86_64 + aarch64                       = 2
+          #   cli_windows      x86_64 + aarch64                       = 2
+          #   cli_mac_mini     x86_64                                 = 1
+          #   cli_windows_mini x86_64                                 = 1
+          #                                                    total  = 12
+          # Drift in either direction is a bug — adding a new matrix target
+          # without bumping this constant would silently publish a manifest
+          # missing the new platform's hash; dropping a target without
+          # decrementing it blocks all releases until corrected (the desired
+          # loud failure). Update both together.
+          EXPECTED_PLATFORMS=12
           ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
           if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
-            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings (one per cli_* job in needs:), got $ACTUAL"
+            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings (one per matrix target across cli_* jobs), got $ACTUAL"
             cat asset-list.txt
             exit 1
           fi
