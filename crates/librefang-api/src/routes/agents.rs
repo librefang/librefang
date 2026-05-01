@@ -992,6 +992,45 @@ pub async fn list_agents(
     .into_response()
 }
 
+/// 24-hour KPI rollup view returned by `GET /api/agents/{id}/stats`.
+/// Mirrors [`librefang_memory::session::AgentStats24h`] — defined here as a
+/// view so we can derive `utoipa::ToSchema` without forcing utoipa into the
+/// memory crate. Generated SDKs and the OpenAPI spec pick up this shape.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentStats24hView {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
+    pub active_now: u64,
+    pub samples: u64,
+    pub prev: AgentStatsPrevView,
+}
+
+/// Prior 24-48h window scoped fields backing the KPI tile trend deltas.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentStatsPrevView {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
+}
+
+impl From<librefang_memory::session::AgentStats24h> for AgentStats24hView {
+    fn from(s: librefang_memory::session::AgentStats24h) -> Self {
+        Self {
+            sessions_24h: s.sessions_24h,
+            cost_24h: s.cost_24h,
+            p95_latency_ms: s.p95_latency_ms,
+            active_now: s.active_now,
+            samples: s.samples,
+            prev: AgentStatsPrevView {
+                sessions_24h: s.prev.sessions_24h,
+                cost_24h: s.prev.cost_24h,
+                p95_latency_ms: s.prev.p95_latency_ms,
+            },
+        }
+    }
+}
+
 /// GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.
 ///
 /// Returns sessions/cost/P95-latency/active-now in a single round trip so
@@ -1004,7 +1043,7 @@ pub async fn list_agents(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "24-hour stats rollup", body = serde_json::Value),
+        (status = 200, description = "24-hour stats rollup", body = AgentStats24hView),
         (status = 404, description = "Agent not found")
     )
 )]
@@ -1053,7 +1092,7 @@ pub async fn get_agent_stats(
 
     let substrate = state.kernel.memory_substrate();
     match substrate.agent_stats_24h(&id) {
-        Ok(stats) => Json(stats).into_response(),
+        Ok(stats) => Json(AgentStats24hView::from(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),

@@ -317,6 +317,15 @@
     "create_failed": "Failed to create agent",
     "manifest_toml": "Agent Manifest (TOML)",
     "thinking_toml_hint": "Add a [thinking] section in TOML to enable extended thinking",
+    "schedule_manual": "manual",
+    "kpi": {
+      "sessions": "Sessions · 24h",
+      "sessions_idle": "idle",
+      "cost": "Cost · 24h",
+      "p95": "P95 latency",
+      "samples": "{{count}} samples",
+      "tools": "Tools"
+    },
     "form": {
       "basics": "Basics",
       "model": "Model",

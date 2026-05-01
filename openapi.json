@@ -1973,7 +1973,9 @@
             "description": "24-hour stats rollup",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AgentStats24hView"
+                }
               }
             }
           },
@@ -8178,6 +8180,72 @@
   },
   "components": {
     "schemas": {
+      "AgentStats24hView": {
+        "type": "object",
+        "description": "24-hour KPI rollup view returned by `GET /api/agents/{id}/stats`.\nMirrors [`librefang_memory::session::AgentStats24h`] — defined here as a\nview so we can derive `utoipa::ToSchema` without forcing utoipa into the\nmemory crate. Generated SDKs and the OpenAPI spec pick up this shape.",
+        "required": [
+          "sessions_24h",
+          "cost_24h",
+          "p95_latency_ms",
+          "active_now",
+          "samples",
+          "prev"
+        ],
+        "properties": {
+          "active_now": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cost_24h": {
+            "type": "number",
+            "format": "double"
+          },
+          "p95_latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prev": {
+            "$ref": "#/components/schemas/AgentStatsPrevView"
+          },
+          "samples": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sessions_24h": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "AgentStatsPrevView": {
+        "type": "object",
+        "description": "Prior 24-48h window scoped fields backing the KPI tile trend deltas.",
+        "required": [
+          "sessions_24h",
+          "cost_24h",
+          "p95_latency_ms"
+        ],
+        "properties": {
+          "cost_24h": {
+            "type": "number",
+            "format": "double"
+          },
+          "p95_latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "sessions_24h": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "AgentUpdateRequest": {
         "type": "object",
         "description": "Request to update an agent's manifest.",

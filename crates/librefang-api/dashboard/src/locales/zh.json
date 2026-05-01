@@ -316,6 +316,15 @@
     "create_failed": "创建智能体失败",
     "manifest_toml": "智能体清单 (TOML)",
     "thinking_toml_hint": "在 TOML 中添加 [thinking] 段可启用扩展思考",
+    "schedule_manual": "手动触发",
+    "kpi": {
+      "sessions": "会话数 · 24h",
+      "sessions_idle": "空闲",
+      "cost": "费用 · 24h",
+      "p95": "P95 延迟",
+      "samples": "{{count}} 次采样",
+      "tools": "工具"
+    },
     "form": {
       "basics": "基本信息",
       "model": "模型配置",
