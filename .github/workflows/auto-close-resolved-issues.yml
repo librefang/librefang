@@ -1,0 +1,229 @@
+name: Auto-close Resolved Issues
+
+# Scan recent main commit messages for "Closes #N" / "Fixes #N" /
+# "Resolves #N" keywords, and close any referenced issue still OPEN.
+#
+# Why this exists: GitHub's auto-close-on-merge silently misses several
+# cases (refs in squash-commit but not PR body, dropped webhooks, etc.).
+# We've accumulated stale-open issues from this (#3602, #3770, #3774,
+# #3778, #3779 — all already fixed in code). This is the safety net.
+#
+# Safety:
+#  - Defaults to DRY_RUN: posts a comment ('🤖 looks resolved by <sha>')
+#    and marks the issue with the `auto-close-candidate` label, but does
+#    NOT close. Switch to live mode via workflow_dispatch input or
+#    repo variable AUTO_CLOSE_LIVE=true once dry-run output is trusted.
+#  - Skips issues that have ever been reopened (timeline contains a
+#    `reopened` event).
+#  - Hard cap of 25 closes/comments per run; aborts run if exceeded.
+#  - Skips refs to issues older than the lookback window unless their
+#    state is currently `open` (avoids re-touching ancient closed ones).
+#  - Skips PRs (issues API surfaces them with `pull_request` set).
+#  - Idempotent: skips issues already labeled `auto-close-candidate`
+#    in dry-run mode, and obviously skips already-closed issues.
+
+on:
+  schedule:
+    - cron: '15 7 * * *'  # Daily at 07:15 UTC
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'How many days of commit history to scan'
+        required: false
+        default: '14'
+      live:
+        description: 'Set to "true" to actually close issues (default: dry-run only)'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '14' }}
+          LIVE_INPUT: ${{ github.event.inputs.live || '' }}
+          LIVE_VAR: ${{ vars.AUTO_CLOSE_LIVE || '' }}
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const lookback = parseInt(process.env.LOOKBACK_DAYS, 10);
+            const live =
+              process.env.LIVE_INPUT.toLowerCase() === 'true' ||
+              process.env.LIVE_VAR.toLowerCase() === 'true';
+            const MAX_ACTIONS = 25;
+            const CANDIDATE_LABEL = 'auto-close-candidate';
+            // Marker tag in bot comments — used as the source of truth for
+            // "have we already flagged this issue?". A label is added on top
+            // for human discoverability, but the marker is what prevents
+            // re-spam if a maintainer removes the label without closing.
+            const MARKER = '<!-- auto-close-reconciler:flagged -->';
+            const since = new Date(Date.now() - lookback * 86400_000).toISOString();
+
+            core.info(`Mode: ${live ? 'LIVE (will close)' : 'DRY-RUN (comment + label only)'}`);
+            core.info(`Lookback: ${lookback} days (since ${since})`);
+
+            // 1. Collect issue refs from commit messages on main
+            const log = execSync(
+              `git log origin/main --since="${since}" --pretty=format:"%H%n%B%n---COMMIT-END---"`,
+              { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+            );
+
+            // Closing-keyword regex matching GitHub's set.
+            // Anchor to start-of-line OR after whitespace to skip prose like
+            // "doesn't fix #N" / "this does not close #N" — those start with
+            // 'not '/'doesn't '/'does not ' which we negative-look-behind for.
+            // (?<! not ) and (?<! n't ) handle the common negation forms.
+            const refRegex =
+              /(?<!\bnot )(?<!\bn't )(?<!\bnever )(?<!\bwon't )(?<!\bwouldn't )(?<!\bcannot )(?<!\bcan't )\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            const refs = new Map(); // issueNumber -> { sha, subject }
+
+            for (const block of log.split('---COMMIT-END---')) {
+              const trimmed = block.trim();
+              if (!trimmed) continue;
+              const lines = trimmed.split('\n');
+              const sha = lines[0];
+              const subject = lines[1] || '';
+              for (const m of trimmed.matchAll(refRegex)) {
+                const n = parseInt(m[2], 10);
+                if (!refs.has(n)) refs.set(n, { sha: sha.slice(0, 7), subject });
+              }
+            }
+
+            core.info(`Found ${refs.size} unique issue refs`);
+            if (refs.size === 0) {
+              core.summary.addRaw('No issue references found.').write();
+              return;
+            }
+
+            // Ensure label exists in dry-run mode
+            if (!live) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: CANDIDATE_LABEL,
+                  color: 'fbca04',
+                  description: 'Bot thinks this is resolved by a recent commit; awaiting confirmation',
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e;
+              }
+            }
+
+            // 2. Process each ref
+            let actions = 0;
+            const closed = [];
+            const flagged = [];
+            const skipped = [];
+
+            for (const [num, info] of refs) {
+              if (actions >= MAX_ACTIONS) {
+                core.warning(
+                  `Hit MAX_ACTIONS=${MAX_ACTIONS} cap; aborting run. ` +
+                  `${refs.size - actions} refs left unprocessed — investigate before re-running.`
+                );
+                core.setFailed(`Action cap hit (${MAX_ACTIONS}); aborted.`);
+                break;
+              }
+
+              let issue;
+              try {
+                const r = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                });
+                issue = r.data;
+              } catch (e) {
+                if (e.status === 404) { skipped.push(`#${num} (not found)`); continue; }
+                throw e;
+              }
+
+              if (issue.pull_request) { skipped.push(`#${num} (is PR)`); continue; }
+              if (issue.state !== 'open') { skipped.push(`#${num} (already closed)`); continue; }
+
+              // Skip if already flagged in a previous dry-run cycle.
+              // Source of truth is the MARKER in a bot comment, NOT the label
+              // — labels can be removed by humans without intent to dismiss
+              // re-flagging, and we must not spam if that happens.
+              if (!live) {
+                const comments = await github.paginate(
+                  github.rest.issues.listComments,
+                  { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+                );
+                if (comments.some((c) => typeof c.body === 'string' && c.body.includes(MARKER))) {
+                  skipped.push(`#${num} (already flagged)`);
+                  continue;
+                }
+              }
+
+              // Check timeline for reopened events — never auto-close something humans deliberately reopened
+              const events = await github.paginate(
+                github.rest.issues.listEvents,
+                { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+              );
+              if (events.some((ev) => ev.event === 'reopened')) {
+                skipped.push(`#${num} (was reopened — human override)`);
+                continue;
+              }
+
+              if (live) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  body:
+                    `Auto-closing: commit \`${info.sha}\` on \`main\` references this issue ` +
+                    `with a closing keyword (\`${info.subject}\`), but GitHub's auto-close ` +
+                    `did not fire. Reopen if this is in error.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  state: 'closed',
+                  state_reason: 'completed',
+                });
+                closed.push(`#${num} (by ${info.sha})`);
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  body:
+                    `${MARKER}\n` +
+                    `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${info.subject}\`).\n\n` +
+                    `Dry-run flag from the auto-close reconciliation workflow. ` +
+                    `Close manually if correct. The bot keys off the hidden marker in this ` +
+                    `comment to avoid re-flagging — delete this comment if you want the bot ` +
+                    `to consider this issue again.`,
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  labels: [CANDIDATE_LABEL],
+                });
+                flagged.push(`#${num} (by ${info.sha})`);
+              }
+              actions++;
+            }
+
+            const summary = core.summary
+              .addHeading('Auto-close reconciliation')
+              .addRaw(`Mode: **${live ? 'LIVE' : 'DRY-RUN'}**, lookback ${lookback}d, ${refs.size} refs scanned, ${actions} acted on.`)
+              .addBreak();
+            if (closed.length) summary.addHeading('Closed', 3).addList(closed);
+            if (flagged.length) summary.addHeading('Flagged (dry-run)', 3).addList(flagged);
+            if (skipped.length) summary.addHeading('Skipped', 3).addList(skipped.slice(0, 50));
+            summary.write();
