@@ -5998,7 +5998,8 @@ pub async fn get_agent_deliveries(
         (status = 200, description = "Injection result", body = crate::types::InjectMessageResponse),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found"),
-        (status = 413, description = "Message too large")
+        (status = 413, description = "Message too large"),
+        (status = 503, description = "All injection channels for the agent are full; retry shortly (#3575)")
     )
 )]
 pub async fn inject_message(
@@ -6042,6 +6043,14 @@ pub async fn inject_message(
             Json(serde_json::json!({"injected": injected})),
         )
             .into_response(),
+        Err(librefang_kernel::error::KernelError::Backpressure(msg)) => {
+            // Stable machine-readable code so clients can distinguish this
+            // from other 503s without substring-matching the message body.
+            ApiErrorResponse::internal(msg)
+                .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                .with_code("backpressure")
+                .into_response()
+        }
         Err(e) => if e.to_string().contains("not found") {
             ApiErrorResponse::not_found(e.to_string())
         } else {

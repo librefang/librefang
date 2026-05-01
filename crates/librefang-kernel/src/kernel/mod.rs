@@ -8563,7 +8563,13 @@ system_prompt = "You are a helpful assistant."
 
     /// Session-aware variant of [`Self::inject_message`]; `None` fans out to all live sessions.
     ///
-    /// Returns `Ok(true)` if at least one channel accepted, `Ok(false)` if no loop was running.
+    /// Returns:
+    /// - `Ok(true)`  — at least one live session accepted the message.
+    /// - `Ok(false)` — no live loop is running for this agent (every target
+    ///   was closed, or there were zero targets).
+    /// - `Err(KernelError::Backpressure)` — every live target's bounded
+    ///   channel was full; the caller should retry. The API layer maps this
+    ///   to HTTP 503 (#3575).
     pub async fn inject_message_for_session(
         &self,
         agent_id: AgentId,
@@ -8602,6 +8608,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         let mut delivered = false;
+        let mut full_keys: Vec<(AgentId, SessionId)> = Vec::new();
         let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
         for (key, tx) in targets {
             match tx.try_send(AgentLoopSignal::Message {
@@ -8619,8 +8626,9 @@ system_prompt = "You are a helpful assistant."
                     warn!(
                         agent_id = %agent_id,
                         session_id = %key.1,
-                        "Injection channel full — message dropped"
+                        "Injection channel full — applying backpressure"
                     );
+                    full_keys.push(key);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // Receiver dropped — loop is no longer running.
@@ -8628,9 +8636,22 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         }
-        for key in closed_keys {
-            self.injection_senders.remove(&key);
+        for key in &closed_keys {
+            self.injection_senders.remove(key);
         }
+        // If at least one live session accepted the message, the inject is a
+        // success from the caller's POV. If every live (non-closed) target
+        // was full, surface backpressure so the API can return 503 instead
+        // of pretending the message was queued.
+        if !delivered && !full_keys.is_empty() {
+            return Err(KernelError::Backpressure(format!(
+                "all {} injection channel(s) for agent {} are full; retry shortly",
+                full_keys.len(),
+                agent_id
+            )));
+        }
+        // No live loop at all (every target was closed, or zero targets after
+        // we filtered) — preserve the historical Ok(false) signal.
         Ok(delivered)
     }
 

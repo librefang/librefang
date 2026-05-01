@@ -13,6 +13,13 @@ pub enum KernelError {
     /// The kernel failed to boot.
     #[error("Boot failed: {0}")]
     BootFailed(String),
+
+    /// A bounded internal channel was full and the request could not be
+    /// enqueued. Callers (e.g. the API layer) should surface this as
+    /// HTTP 503 Service Unavailable so clients know to retry, rather
+    /// than silently dropping the request.
+    #[error("Backpressure: {0}")]
+    Backpressure(String),
 }
 
 /// Alias for kernel results.
