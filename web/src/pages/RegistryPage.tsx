@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star, Download } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star, Download, TrendingUp } from 'lucide-react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from './../i18n'
@@ -75,6 +75,12 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
         return a.name.localeCompare(b.name)
       })
   }
+}
+
+function fmtNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
 }
 
 const TRENDING_API = 'https://stats.librefang.ai/api/registry/trending'
@@ -411,7 +417,8 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                   >
                     <Star className="w-3.5 h-3.5" fill={starred ? 'currentColor' : 'none'} />
                   </button>
-                  <div className="flex items-start justify-between gap-2 mb-3 pr-6">
+                  {/* Header row: icon + name + arrow */}
+                  <div className="flex items-start justify-between gap-2 mb-2 pr-6">
                     <div className="flex items-center gap-2 min-w-0">
                       {item.icon && (
                         <span className="shrink-0 text-cyan-600 dark:text-cyan-400">
@@ -421,41 +428,71 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                       <h2 className="text-base font-bold text-slate-900 dark:text-white truncate">
                         {getLocalizedName(item, lang)}
                       </h2>
-                      {popular && <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />}
                     </div>
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 group-hover:text-cyan-500 transition-colors shrink-0 mt-1" />
                   </div>
-                  {item.category && (
-                    <div className="text-[10px] font-mono text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
-                      {item.category}
-                    </div>
-                  )}
+
+                  {/* Meta row: category · version · popular badge */}
+                  <div className="flex items-center gap-2 mb-2.5 flex-wrap">
+                    {item.category && (
+                      <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                        {item.category}
+                      </span>
+                    )}
+                    {mktPkg?.latest_version && (
+                      <>
+                        {item.category && <span className="text-gray-300 dark:text-gray-700 text-[10px]">·</span>}
+                        <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-500">
+                          v{mktPkg.latest_version}
+                        </span>
+                      </>
+                    )}
+                    {popular && (
+                      <>
+                        <span className="text-gray-300 dark:text-gray-700 text-[10px]">·</span>
+                        <span className="flex items-center gap-0.5 text-[10px] font-mono text-amber-500">
+                          <Sparkles className="w-2.5 h-2.5" /> popular
+                        </span>
+                      </>
+                    )}
+                  </div>
+
                   {desc && (
-                    <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed line-clamp-3">
+                    <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed line-clamp-2 mb-3">
                       {desc}
                     </p>
                   )}
-                  {item.tags && item.tags.length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-3">
+
+                  {/* Tags */}
+                  {item.tags && item.tags.filter(t => t !== 'popular').length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-3">
                       {item.tags.filter(tag => tag !== 'popular').slice(0, 4).map(tag => (
-                        <span key={tag} className="text-[10px] font-mono text-gray-500 border border-black/5 dark:border-white/5 px-1.5 py-0.5">
+                        <span key={tag} className="text-[10px] font-mono text-gray-400 dark:text-gray-500 border border-black/8 dark:border-white/8 px-1.5 py-0.5 rounded-sm">
                           {tag}
                         </span>
                       ))}
                     </div>
                   )}
+
+                  {/* Stats row */}
                   {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0) && (
-                    <div className="flex items-center gap-3 mt-3 pt-2.5 border-t border-black/5 dark:border-white/5">
+                    <div className="flex items-center gap-3 pt-2.5 border-t border-black/8 dark:border-white/8">
                       {mktPkg.total_downloads > 0 && (
-                        <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
-                          <Download className="w-2.5 h-2.5" />
-                          {mktPkg.total_downloads.toLocaleString()}
+                        <span className="flex items-center gap-1 text-[11px] font-mono text-gray-500 dark:text-gray-400">
+                          <Download className="w-3 h-3 text-cyan-500/70" />
+                          {fmtNum(mktPkg.total_downloads)}
+                        </span>
+                      )}
+                      {mktPkg.weekly_downloads > 0 && (
+                        <span className="flex items-center gap-1 text-[11px] font-mono text-green-600 dark:text-green-500">
+                          <TrendingUp className="w-3 h-3" />
+                          {fmtNum(mktPkg.weekly_downloads)}
                         </span>
                       )}
                       {mktPkg.stars > 0 && (
-                        <span className="flex items-center gap-1 text-[10px] font-mono text-gray-400">
-                          <Star className="w-2.5 h-2.5" />
-                          {mktPkg.stars.toLocaleString()}
+                        <span className="flex items-center gap-1 text-[11px] font-mono text-amber-500/80">
+                          <Star className="w-3 h-3" />
+                          {fmtNum(mktPkg.stars)}
                         </span>
                       )}
                     </div>
