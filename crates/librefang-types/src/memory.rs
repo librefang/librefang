@@ -419,7 +419,12 @@ pub trait MemoryExtractor: Send + Sync {
                     })
                     .filter(|e| !e.is_empty());
                 match new_emb {
-                    Some(ref ne) => cosine_similarity(ne, emb),
+                    // Fall back to text similarity if vectors are not
+                    // comparable (dim mismatch, zero magnitude). 0.0 would
+                    // mean "fully dissimilar" and incorrectly suppress
+                    // legitimate dedup candidates.
+                    Some(ref ne) => cosine_similarity(ne, emb)
+                        .unwrap_or_else(|| text_similarity(&new_lower, &old_lower)),
                     None => text_similarity(&new_lower, &old_lower),
                 }
             } else {
@@ -512,11 +517,15 @@ pub fn text_similarity(a: &str, b: &str) -> f32 {
 
 /// Compute cosine similarity between two embedding vectors.
 ///
-/// Returns a value in `[-1.0, 1.0]` where `1.0` means identical direction.
-/// Returns `0.0` for empty or mismatched-length vectors.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+/// Returns `Some(score)` in `[-1.0, 1.0]` where `1.0` means identical
+/// direction. Returns `None` when the vectors are not comparable:
+/// empty inputs, dimension mismatch, or either vector has zero
+/// magnitude. Callers MUST handle `None` explicitly — folding
+/// "not comparable" into a 0.0 score silently corrupts ranking
+/// because 0.0 means "fully dissimilar" (see #3536).
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
@@ -528,9 +537,9 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     let denom = norm_a.sqrt() * norm_b.sqrt();
     if denom < f32::EPSILON {
-        0.0
+        None
     } else {
-        dot / denom
+        Some(dot / denom)
     }
 }
 
@@ -1342,7 +1351,7 @@ mod tests {
     fn test_cosine_similarity_identical() {
         let a = vec![1.0, 0.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("identical vectors are comparable");
         assert!((sim - 1.0).abs() < 1e-6);
     }
 
@@ -1350,19 +1359,30 @@ mod tests {
     fn test_cosine_similarity_orthogonal() {
         let a = vec![1.0, 0.0];
         let b = vec![0.0, 1.0];
-        let sim = cosine_similarity(&a, &b);
+        let sim = cosine_similarity(&a, &b).expect("orthogonal vectors are comparable");
         assert!(sim.abs() < 1e-6);
     }
 
     #[test]
     fn test_cosine_similarity_empty() {
-        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+        // Empty vectors are not comparable — must return None, not 0.0.
+        assert_eq!(cosine_similarity(&[], &[]), None);
     }
 
     #[test]
     fn test_cosine_similarity_length_mismatch() {
+        // Dim mismatch is not comparable — must return None, not 0.0.
         let a = vec![1.0, 2.0];
         let b = vec![1.0, 2.0, 3.0];
-        assert_eq!(cosine_similarity(&a, &b), 0.0);
+        assert_eq!(cosine_similarity(&a, &b), None);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        // Zero magnitude → undefined direction → None (not 0.0).
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), None);
+        assert_eq!(cosine_similarity(&b, &a), None);
     }
 }
