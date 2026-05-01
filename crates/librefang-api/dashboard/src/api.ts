@@ -269,6 +269,16 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Human-readable schedule summary: "manual" for reactive agents,
+   *  the cron expression for periodic agents, "proactive", or
+   *  "continuous · Ns" for continuous agents. */
+  schedule?: string;
+  /** Sessions whose `created_at` is within the last 24 hours. Computed
+   *  in a single grouped SQL pass on the list endpoint so row UIs can
+   *  render KPI without a global /api/sessions aggregation. */
+  sessions_24h?: number;
+  /** Sum of `usage_events.cost_usd` for the agent in the last 24 hours. */
+  cost_24h?: number;
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
@@ -1065,6 +1075,29 @@ export interface AgentDetail {
 
 export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
+/** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
+ *  KPI tiles. See `GET /api/agents/{id}/stats`. */
+export interface AgentStats24h {
+  sessions_24h: number;
+  cost_24h: number;
+  p95_latency_ms: number;
+  active_now: number;
+  samples: number;
+  /** Same window-scoped fields, aggregated over the prior 24h (24-48h
+   *  ago). Optional so older backends that don't ship the field don't
+   *  break the type at runtime — the dashboard already gates on
+   *  `live?.prev` and falls back to non-delta subtext. */
+  prev?: {
+    sessions_24h: number;
+    cost_24h: number;
+    p95_latency_ms: number;
+  };
+}
+
+export async function getAgentStats(agentId: string): Promise<AgentStats24h> {
+  return get<AgentStats24h>(`/api/agents/${encodeURIComponent(agentId)}/stats`);
 }
 
 export async function patchAgentConfig(
@@ -2375,7 +2408,11 @@ export async function createAgentSession(
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions");
+  // Bump past the server's default page size (50) so list-row aggregates
+  // (sessions/cost in the agent row) don't silently clip when an agent's
+  // sessions aren't in the latest 50 globally. The detail-panel KPI uses
+  // GET /api/agents/{id}/stats which is unaffected by this.
+  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions?limit=500");
   return data.sessions ?? [];
 }
 
