@@ -13,6 +13,10 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource, VectorStore,
 };
+// Single canonical impl lives in librefang-types; re-exported here so
+// existing `librefang_memory::semantic::cosine_similarity` callers keep
+// working without three independently-edited copies drifting (see PR #4125).
+pub use librefang_types::memory::cosine_similarity;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -381,19 +385,25 @@ impl SemanticStore {
             });
         }
 
-        // If we have a query embedding, re-rank by cosine similarity
+        // If we have a query embedding, re-rank by cosine similarity.
+        // Non-comparable vectors (dim mismatch, zero magnitude) sort to
+        // the bottom (NEG_INFINITY sentinel) instead of being treated as
+        // 0.0, which would have ranked them above genuinely orthogonal
+        // hits. We deliberately do NOT use -1.0: that is a valid cosine
+        // result for anti-similar vectors and would tie with the
+        // "non-comparable" bucket.
         if let Some(qe) = query_embedding {
             fragments.sort_by(|a, b| {
                 let sim_a = a
                     .embedding
                     .as_deref()
-                    .map(|e| cosine_similarity(qe, e))
-                    .unwrap_or(-1.0);
+                    .and_then(|e| cosine_similarity(qe, e))
+                    .unwrap_or(f32::NEG_INFINITY);
                 let sim_b = b
                     .embedding
                     .as_deref()
-                    .map(|e| cosine_similarity(qe, e))
-                    .unwrap_or(-1.0);
+                    .and_then(|e| cosine_similarity(qe, e))
+                    .unwrap_or(f32::NEG_INFINITY);
                 sim_b
                     .partial_cmp(&sim_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -907,27 +917,6 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-/// Compute cosine similarity between two vectors.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom < f32::EPSILON {
-        0.0
-    } else {
-        dot / denom
-    }
-}
-
 /// Serialize embedding to bytes for SQLite BLOB storage.
 fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(embedding.len() * 4);
@@ -1045,11 +1034,25 @@ impl VectorStore for SqliteVectorStore {
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
+        let mut skipped_non_comparable: u64 = 0;
         for row_result in rows {
             let (id, content, meta_str, emb_bytes) =
                 row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
             let emb = embedding_from_bytes(&emb_bytes);
-            let score = cosine_similarity(query_embedding, &emb);
+            // Skip non-comparable rows (dim mismatch from re-embedding,
+            // zero vector). Including them with score=0.0 would let them
+            // outrank genuinely orthogonal hits and pollute the result set.
+            let Some(score) = cosine_similarity(query_embedding, &emb) else {
+                // Per-row stays at debug to avoid flooding logs during a
+                // re-embedding migration; the loop emits one aggregated
+                // warn at the end if any were skipped.
+                tracing::debug!(
+                    memory_id = %id,
+                    "skipping vector candidate: dim mismatch or zero magnitude"
+                );
+                skipped_non_comparable += 1;
+                continue;
+            };
             let metadata: HashMap<String, serde_json::Value> =
                 serde_json::from_str(&meta_str).unwrap_or_default();
             results.push(VectorSearchResult {
@@ -1058,6 +1061,13 @@ impl VectorStore for SqliteVectorStore {
                 score,
                 metadata,
             });
+        }
+        if skipped_non_comparable > 0 {
+            tracing::warn!(
+                count = skipped_non_comparable,
+                "vector search skipped non-comparable candidates (dim mismatch or zero magnitude); \
+                 likely a re-embedding migration is in progress"
+            );
         }
 
         // Sort by score descending, truncate to limit
