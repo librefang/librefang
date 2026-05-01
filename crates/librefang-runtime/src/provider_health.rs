@@ -199,9 +199,14 @@ pub fn probe_client() -> &'static reqwest::Client {
                 // failing every cycle with the same construction error.
                 tracing::warn!(
                     error = %e,
-                    "probe HTTP client build failed; falling back to default reqwest::Client"
+                    "probe HTTP client build with timeouts failed; falling back to default proxied client"
                 );
-                reqwest::Client::new()
+                // Retry without per-probe timeout overrides so we still pick up
+                // proxy/TLS config from librefang-http instead of an unconfigured
+                // reqwest::Client that bypasses the global proxy (#3577).
+                crate::http_client::proxied_client_builder()
+                    .build()
+                    .unwrap_or_default()
             })
     })
 }
