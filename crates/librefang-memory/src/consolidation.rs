@@ -111,26 +111,34 @@ impl ConsolidationEngine {
                 .filter_map(|r| r.ok())
                 .collect();
 
-            // Track which IDs have been absorbed into another memory.
-            let mut absorbed: std::collections::HashSet<String> = std::collections::HashSet::new();
-            // Per-keeper accumulated weight. Initialized lazily to the
-            // keeper's original confidence; each loser merged into a
-            // keeper grows its accumulated weight by the loser's
-            // confidence. This makes the running embedding a true
-            // confidence-weighted average over all losers absorbed by
-            // a keeper, not a chain of pairwise blends biased toward
-            // whichever loser arrived last.
-            let mut accum_weights: HashMap<String, f32> = HashMap::new();
+            // Pre-lowercase content once per row. The inner loop is O(N²)
+            // and `text_similarity` lowercases its inputs on every call —
+            // doing it up front collapses N² lowercase allocations to N.
+            let lowered: Vec<String> = rows.iter().map(|r| r.1.to_lowercase()).collect();
+
+            // Track which row indices have been absorbed into a keeper.
+            // Keyed by `usize` (row index in `rows`) rather than memory
+            // id String — the index is unique within an agent's batch and
+            // sidesteps the per-merge `String::clone` we'd otherwise pay.
+            let mut absorbed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            // Per-keeper accumulated weight, also keyed by row index.
+            // Initialized lazily to the keeper's original confidence;
+            // each loser merged into a keeper grows its accumulated
+            // weight by the loser's confidence. This makes the running
+            // embedding a true confidence-weighted average over all
+            // losers absorbed by a keeper, not a chain of pairwise
+            // blends biased toward whichever loser arrived last.
+            let mut accum_weights: HashMap<usize, f32> = HashMap::new();
 
             for i in 0..rows.len() {
-                if absorbed.contains(&rows[i].0) {
+                if absorbed.contains(&i) {
                     continue;
                 }
                 for j in (i + 1)..rows.len() {
-                    if absorbed.contains(&rows[j].0) {
+                    if absorbed.contains(&j) {
                         continue;
                     }
-                    let sim = text_similarity(&rows[i].1.to_lowercase(), &rows[j].1.to_lowercase());
+                    let sim = text_similarity(&lowered[i], &lowered[j]);
                     if sim > 0.9 {
                         // Keep rows[i] (sorted by confidence DESC). Merge:
                         //   - access_count: keeper + loser (sum)
@@ -141,13 +149,9 @@ impl ConsolidationEngine {
                         // Per-pair atomicity comes from the outer tx —
                         // both writes land in the same batch, and any
                         // mid-pair `?` aborts the whole consolidate run.
-                        let keeper_id = rows[i].0.clone();
-                        let loser_id = rows[j].0.clone();
                         let merged_access = rows[i].4.saturating_add(rows[j].4);
                         let merged_metadata = merge_metadata_json(&rows[i].3, &rows[j].3);
-                        let keeper_w = *accum_weights
-                            .entry(keeper_id.clone())
-                            .or_insert(rows[i].2 as f32);
+                        let keeper_w = *accum_weights.entry(i).or_insert(rows[i].2 as f32);
                         let loser_w = rows[j].2 as f32;
                         let merged_embedding = merge_embeddings_weighted(
                             rows[i].5.as_deref(),
@@ -160,7 +164,7 @@ impl ConsolidationEngine {
                         outer_tx
                             .execute(
                                 "UPDATE memories SET deleted = 1 WHERE id = ?1",
-                                rusqlite::params![loser_id],
+                                rusqlite::params![&rows[j].0],
                             )
                             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
@@ -176,7 +180,7 @@ impl ConsolidationEngine {
                                             merged_access,
                                             &merged_metadata,
                                             bytes,
-                                            keeper_id,
+                                            &rows[i].0,
                                         ],
                                     )
                                     .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -191,7 +195,7 @@ impl ConsolidationEngine {
                                             merged_confidence,
                                             merged_access,
                                             &merged_metadata,
-                                            keeper_id,
+                                            &rows[i].0,
                                         ],
                                     )
                                     .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -212,10 +216,10 @@ impl ConsolidationEngine {
                         // history (not just the most recent pair). The
                         // entry is guaranteed to exist — we read from it
                         // a few lines above via `or_insert(...)`.
-                        if let Some(w) = accum_weights.get_mut(&keeper_id) {
+                        if let Some(w) = accum_weights.get_mut(&i) {
                             *w += loser_w;
                         }
-                        absorbed.insert(loser_id);
+                        absorbed.insert(j);
                         memories_merged += 1;
 
                         if memories_merged >= MAX_MERGES_PER_RUN {
