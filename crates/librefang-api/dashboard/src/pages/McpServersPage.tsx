@@ -14,6 +14,7 @@ import {
   useUpdateMcpServer,
   useDeleteMcpServer,
   useReloadMcp,
+  useReconnectMcpServer,
   useStartMcpAuth,
   useRevokeMcpAuth,
 } from "../lib/mutations/mcp";
@@ -29,10 +30,10 @@ import { Input } from "../components/ui/Input";
 import { useUIStore } from "../lib/store";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import {
-  Plug, Plus, X, Trash2, Settings, ChevronDown, ChevronUp, Wrench, Terminal, Globe, Radio,
+  Plug, Plus, X, Trash2, Settings, Wrench, Terminal, Globe, Radio,
   Shield, ShieldCheck, ShieldAlert, ShieldX, Check, ExternalLink,
-  Search, Clock, Filter, Store, Key, Download, RefreshCw, Activity,
-  ShieldHalf,
+  Search, Filter, Store, Key, Download, RefreshCw, Activity,
+  ShieldHalf, Server, FileText, RotateCw,
 } from "lucide-react";
 import { TaintPolicyEditor } from "../components/TaintPolicyEditor";
 // Lazy-load individual lucide icons by name — avoids pulling the full
@@ -480,197 +481,349 @@ function AuthBadge({
   );
 }
 
-// ── Server Card ─────────────────────────────────────────────────────
+// ── Server Card (compact design) ────────────────────────────────────
 
 function ServerCard({
   server,
   conn,
-  isExpanded,
-  onToggleTools,
-  onEdit,
-  onEditTaintPolicy,
-  onDelete,
   onAuthSuccess,
   onViewDetail,
   t,
 }: {
   server: McpServerConfigured;
   conn?: McpServerConnected;
-  isExpanded: boolean;
-  onToggleTools: () => void;
-  onEdit: () => void;
-  onEditTaintPolicy: () => void;
-  onDelete: () => void;
   onAuthSuccess?: () => void;
   onViewDetail: () => void;
   t: TFunction;
 }) {
   const isConnected = conn?.connected ?? false;
   const toolsCount = conn?.tools_count ?? 0;
-  const [showAllTools, setShowAllTools] = useState(false);
-
-  // Cache transport info — computed once per render, not 3-4x
   const transportType = useMemo(() => getTransportType(server), [server]);
   const transportDetail = useMemo(() => getTransportDetail(server), [server]);
-
-  // Reset "show all" when tools section is collapsed
-  useEffect(() => {
-    if (!isExpanded) setShowAllTools(false);
-  }, [isExpanded]);
-
-  const visibleTools = useMemo(() => {
-    if (!conn?.tools) return [];
-    if (showAllTools || conn.tools.length <= 5) return conn.tools;
-    return conn.tools.slice(0, 5);
-  }, [conn?.tools, showAllTools]);
-
-  const hiddenCount = (conn?.tools?.length ?? 0) - visibleTools.length;
+  const authState = server.auth_state?.state ?? "not_required";
+  const authLabel =
+    authState === "authorized"
+      ? "oauth"
+      : authState === "not_required"
+        ? (server.env ?? []).length > 0
+          ? "token"
+          : "none"
+        : authState;
 
   return (
-    <Card hover padding="none" className="flex flex-col overflow-hidden group">
-      {/* Gradient top bar */}
-      <div className={`h-1.5 bg-linear-to-r ${
-        isConnected
-          ? "from-success via-success/60 to-success/30"
-          : "from-error via-error/60 to-error/30"
-      }`} />
-
-      <div
-        className="p-5 flex-1 flex flex-col cursor-pointer"
-        role="button"
-        tabIndex={0}
-        onClick={onViewDetail}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onViewDetail(); } }}
-        aria-label={t("mcp.view_detail", { defaultValue: "View server details" })}
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
-              isConnected
-                ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
-                : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
-            }`}>
-              <Plug className={`w-5 h-5 ${isConnected ? "text-success" : "text-brand"}`} />
-            </div>
-            <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${
-                isConnected ? "group-hover:text-success" : "group-hover:text-brand"
-              }`}>{server.name}</h2>
-              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
-                {transportType}
-              </p>
-            </div>
-          </div>
-          <Badge variant={isConnected ? "success" : "error"} dot>
-            {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
-          </Badge>
+    <Card
+      hover
+      padding="none"
+      className="overflow-hidden cursor-pointer group"
+      onClick={onViewDetail}
+      onKeyDown={(e: React.KeyboardEvent) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onViewDetail();
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={t("mcp.view_detail", { defaultValue: "View server details" })}
+    >
+      <div className="p-3.5 flex items-start gap-2.5">
+        <div className="grid place-items-center w-[30px] h-[30px] rounded-lg bg-brand/10 border border-brand/30 text-brand shrink-0">
+          <Server className="w-3.5 h-3.5" />
         </div>
-
-        {/* OAuth auth badge */}
-        <AuthBadge server={server} onAuthSuccess={onAuthSuccess} />
-
-        {/* Stats */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
-            <div className="flex items-center gap-1.5 mb-1">
-              <Wrench className={`w-3 h-3 ${isConnected ? "text-success" : "text-brand"}`} />
-              <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.tools")}</p>
-            </div>
-            <p className="text-xl font-black text-text-main">{toolsCount}</p>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[13px] font-medium truncate">{server.name}</span>
+            <Badge variant={isConnected ? "success" : "error"} dot>
+              {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
+            </Badge>
           </div>
-          <div className="p-3 rounded-xl bg-linear-to-br from-main/60 to-main/30 border border-border-subtle/50">
-            <div className="flex items-center gap-1.5 mb-1">
-              <Clock className="w-3 h-3 text-warning" />
-              <p className="text-[9px] font-black uppercase tracking-wider text-text-dim/70">{t("mcp.timeout")}</p>
-            </div>
-            <p className="text-xl font-black text-text-main">{server.timeout_secs ?? 30}s</p>
+          <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
+            {transportType === "stdio"
+              ? `mcp+stdio://${transportDetail || server.name}`
+              : transportDetail}
           </div>
-        </div>
-
-        {/* Transport badge + detail */}
-        <div className="flex items-center gap-2 mb-3">
-          <Badge variant="default">
-            <TransportIcon type={transportType} />
-            <span className="ml-1">{transportType.toUpperCase()}</span>
-          </Badge>
-        </div>
-        <div className="flex items-center gap-2 text-xs mb-2">
-          {transportType === "stdio" ? (
-            <Terminal className="w-3 h-3 text-text-dim/50 shrink-0" />
-          ) : (
-            <Globe className="w-3 h-3 text-text-dim/50 shrink-0" />
-          )}
-          <span className="text-text-dim font-mono text-[10px] truncate">{transportDetail}</span>
+          <div className="flex items-center gap-2.5 mt-2 text-[11px]">
+            <span className="font-mono text-text-dim">
+              {t("mcp.tools_count_short", { count: toolsCount, defaultValue: "{{count}} tools" })}
+            </span>
+            <span className="font-mono text-accent">{authLabel}</span>
+          </div>
         </div>
       </div>
-
-      {/* Tools expand */}
-      {toolsCount > 0 && (
-        <>
-          <button
-            onClick={onToggleTools}
-            className="flex items-center justify-center gap-1.5 py-2.5 border-t border-border-subtle text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-            aria-expanded={isExpanded}
-            aria-label={isExpanded ? t("mcp.hide_tools") : t("mcp.show_tools")}
-          >
-            {isExpanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-            {t("mcp.tools")} ({toolsCount})
-          </button>
-          {isExpanded && conn?.tools && (
-            <div className="border-t border-border-subtle px-4 py-3 space-y-2 max-h-64 overflow-y-auto scrollbar-thin">
-              {visibleTools.map((tool) => (
-                <div key={tool.name} className="p-2.5 rounded-lg bg-main/40 border border-border-subtle/50">
-                  <span className="text-xs font-mono font-bold text-text-main">{tool.name}</span>
-                  {tool.description && (
-                    <p className="text-[10px] text-text-dim leading-snug mt-0.5">{tool.description}</p>
-                  )}
-                </div>
-              ))}
-              {hiddenCount > 0 && (
-                <button
-                  onClick={() => setShowAllTools(true)}
-                  className="w-full text-center text-[10px] font-bold text-brand hover:text-brand/80 py-1.5 transition-colors"
-                >
-                  {t("mcp.show_more_tools", { count: hiddenCount })}
-                </button>
-              )}
-            </div>
-          )}
-        </>
+      {/* OAuth state — only renders when not "not_required". Stops the parent
+          click so the auth button doesn't accidentally open the detail. */}
+      {authState !== "not_required" && (
+        <div
+          className="px-3.5 pb-3 -mt-1"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <AuthBadge server={server} onAuthSuccess={onAuthSuccess} />
+        </div>
       )}
-
-      {/* Actions */}
-      <div className="flex border-t border-border-subtle">
-        <button
-          onClick={onEdit}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors rounded-bl-xl sm:rounded-bl-2xl"
-          aria-label={t("mcp.edit_server")}
-        >
-          <Settings className="h-3.5 w-3.5" />
-          {t("common.edit")}
-        </button>
-        <div className="w-px bg-border-subtle" />
-        <button
-          onClick={onEditTaintPolicy}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-brand hover:bg-surface-hover transition-colors"
-          aria-label={t("mcp.edit_taint_policy", "Taint policy")}
-          title={t("mcp.edit_taint_policy", "Taint policy")}
-        >
-          <ShieldHalf className="h-3.5 w-3.5" />
-          {t("mcp.taint_policy_short", "Taint")}
-        </button>
-        <div className="w-px bg-border-subtle" />
-        <button
-          onClick={onDelete}
-          className="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold text-text-dim hover:text-error hover:bg-error/5 transition-colors rounded-br-xl sm:rounded-br-2xl"
-          aria-label={t("mcp.delete_server")}
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-          {t("common.delete")}
-        </button>
-      </div>
     </Card>
+  );
+}
+
+// ── Server Detail Drawer Body (Tools / Logs / Config tabs) ─────────
+
+function Mini({ label, value, tone }: { label: string; value: string; tone?: "ok" | "bad" }) {
+  return (
+    <div className="rounded-lg border border-border-subtle bg-main/40 p-2.5">
+      <div className="text-[9px] font-bold uppercase tracking-wider text-text-dim mb-1">{label}</div>
+      <div
+        className={`font-mono text-[14px] font-semibold ${
+          tone === "ok" ? "text-success" : tone === "bad" ? "text-error" : ""
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+type DetailTab = "tools" | "logs" | "config";
+
+function ServerDetailBody({
+  server,
+  conn,
+  onClose,
+  onEdit,
+  onEditTaintPolicy,
+  onDelete,
+}: {
+  server: McpServerConfigured;
+  conn?: McpServerConnected;
+  onClose: () => void;
+  onEdit: () => void;
+  onEditTaintPolicy: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  const addToast = useUIStore((s) => s.addToast);
+  const reconnectMutation = useReconnectMcpServer();
+  const [tab, setTab] = useState<DetailTab>("tools");
+
+  const isConnected = conn?.connected ?? false;
+  const transportType = getTransportType(server);
+  const transportDetail = getTransportDetail(server);
+  const transportLabel =
+    transportType === "stdio"
+      ? `stdio · ${transportDetail || "—"}`
+      : `${transportType} · ${transportDetail || "—"}`;
+  const authStateStr = server.auth_state?.state ?? "not_required";
+  const tools = conn?.tools ?? [];
+
+  const handleReconnect = () => {
+    reconnectMutation.mutate(serverIdOf(server), {
+      onSuccess: () => addToast(t("mcp.reconnect_success", { defaultValue: "Reconnect requested" }), "success"),
+      onError: (e: unknown) =>
+        addToast(errorMessage(e, t("mcp.reconnect_failed", { defaultValue: "Reconnect failed" })), "error"),
+    });
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Hero */}
+      <div className="px-5 py-4 border-b border-border-subtle">
+        <div className="flex items-start gap-3">
+          <div className="grid place-items-center w-10 h-10 rounded-lg bg-brand/10 border border-brand/30 text-brand shrink-0">
+            <Server className="w-5 h-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-base font-semibold tracking-tight truncate">{server.name}</h2>
+              <Badge variant={isConnected ? "success" : "error"} dot>
+                {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
+              </Badge>
+            </div>
+            <p className="font-mono text-[11px] text-text-dim mt-1 break-all">{transportLabel}</p>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Button
+              size="sm"
+              variant="ghost"
+              leftIcon={<RotateCw className={`h-3.5 w-3.5 ${reconnectMutation.isPending ? "animate-spin" : ""}`} />}
+              onClick={handleReconnect}
+              disabled={reconnectMutation.isPending}
+            >
+              {t("mcp.reconnect", { defaultValue: "Reconnect" })}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-border-subtle px-5 bg-main/20">
+        {([
+          { id: "tools" as const, label: t("mcp.tab_tools", { defaultValue: "Tools" }), icon: Wrench, count: conn?.tools_count ?? 0 },
+          { id: "logs" as const, label: t("mcp.tab_logs", { defaultValue: "Logs" }), icon: FileText },
+          { id: "config" as const, label: t("mcp.tab_config", { defaultValue: "Config" }), icon: Settings },
+        ]).map((td) => {
+          const active = tab === td.id;
+          const Icon = td.icon;
+          return (
+            <button
+              key={td.id}
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(td.id)}
+              className={`inline-flex items-center gap-2 px-3 py-2.5 text-[12.5px] border-b-2 transition-colors ${
+                active
+                  ? "border-brand font-semibold"
+                  : "border-transparent text-text-dim font-medium hover:text-current"
+              }`}
+            >
+              <Icon className="w-3.5 h-3.5" />
+              {td.label}
+              {td.count !== undefined && (
+                <span
+                  className={`font-mono text-[10px] px-1.5 py-px rounded-full ${
+                    active ? "bg-brand/15 text-brand" : "bg-text-dim/10 text-text-dim"
+                  }`}
+                >
+                  {td.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tab body */}
+      <div className="flex-1 overflow-y-auto p-5">
+        {tab === "tools" && (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
+              <Mini label="tools_count" value={String(conn?.tools_count ?? 0)} />
+              <Mini label="connected" value={isConnected ? "true" : "false"} tone={isConnected ? "ok" : "bad"} />
+              <Mini label="auth_state" value={authStateStr} />
+              <Mini label="timeout_secs" value={String(server.timeout_secs ?? 30)} />
+            </div>
+
+            {tools.length === 0 ? (
+              <EmptyState
+                icon={<Wrench className="h-7 w-7" />}
+                title={t("mcp.tools_empty", { defaultValue: "No tools advertised" })}
+                description={t("mcp.tools_empty_desc", {
+                  defaultValue: "The server hasn't reported any tools yet — confirm it's connected.",
+                })}
+              />
+            ) : (
+              <Card padding="none" className="overflow-hidden">
+                <div className="hidden sm:grid grid-cols-[1fr_2fr_70px_60px_70px] items-center px-3 py-2 border-b border-border-subtle bg-main/40 text-[10px] font-bold uppercase tracking-wider text-text-dim">
+                  <span>{t("mcp.col_name", { defaultValue: "name" })}</span>
+                  <span>{t("mcp.col_description", { defaultValue: "description" })}</span>
+                  <span className="text-right">{t("mcp.col_calls", { defaultValue: "calls" })}</span>
+                  <span className="text-right">{t("mcp.col_ok", { defaultValue: "ok %" })}</span>
+                  <span className="text-right">{t("mcp.col_last", { defaultValue: "last" })}</span>
+                </div>
+                {tools.map((tool, i) => (
+                  <div
+                    key={tool.name}
+                    className={`grid grid-cols-[1fr_60px] sm:grid-cols-[1fr_2fr_70px_60px_70px] items-center px-3 py-2 text-[12px] ${
+                      i < tools.length - 1 ? "border-b border-border-subtle" : ""
+                    }`}
+                  >
+                    <span className="font-mono font-medium truncate pr-2">{tool.name}</span>
+                    <span className="hidden sm:block text-text-dim text-[11.5px] truncate pr-2">
+                      {tool.description ?? ""}
+                    </span>
+                    {/* TODO: aggregate from /api/sessions to populate calls/ok%/last per tool */}
+                    <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                    <span className="hidden sm:inline font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                    <span className="font-mono text-text-dim/60 text-right text-[11px]">—</span>
+                  </div>
+                ))}
+              </Card>
+            )}
+          </>
+        )}
+
+        {tab === "logs" && (
+          <EmptyState
+            icon={<FileText className="h-7 w-7" />}
+            title={t("mcp.logs_empty", { defaultValue: "Logs not available" })}
+            description={t("mcp.logs_empty_desc", {
+              defaultValue: "Per-server MCP logs aren't exposed yet — check the daemon's stdout for connection traces.",
+            })}
+          />
+        )}
+
+        {tab === "config" && (
+          <div className="flex flex-col gap-4">
+            {/* OAuth banner if non-ok */}
+            {server.auth_state && server.auth_state.state !== "ok" && server.auth_state.state !== "not_required" && (
+              <div className="rounded-lg border border-warning/30 bg-warning/5 p-3 text-[12px] text-warning">
+                <p className="font-bold mb-1">{server.auth_state.state}</p>
+                {server.auth_state.message && (
+                  <p className="text-text-dim">{server.auth_state.message}</p>
+                )}
+              </div>
+            )}
+
+            {/* Action row */}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                leftIcon={<Settings className="w-3.5 h-3.5" />}
+                onClick={() => {
+                  onClose();
+                  onEdit();
+                }}
+              >
+                {t("common.edit")}
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                leftIcon={<ShieldHalf className="w-3.5 h-3.5" />}
+                onClick={() => {
+                  onClose();
+                  onEditTaintPolicy();
+                }}
+              >
+                {t("mcp.taint_policy_short", { defaultValue: "Taint" })}
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                leftIcon={<Trash2 className="w-3.5 h-3.5" />}
+                onClick={() => {
+                  onClose();
+                  onDelete();
+                }}
+              >
+                {t("common.delete")}
+              </Button>
+            </div>
+
+            {/* JSON spec */}
+            <Card padding="none" className="overflow-hidden">
+              <div className="px-3 py-2 border-b border-border-subtle bg-main/40 flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-text-dim">
+                  McpServerConfigured
+                </span>
+                <span className="font-mono text-[10px] text-brand">
+                  PUT /api/mcp/servers/{serverIdOf(server)}
+                </span>
+              </div>
+              <pre className="font-mono text-[11px] leading-relaxed p-3 overflow-x-auto whitespace-pre">
+                {JSON.stringify(server, null, 2)}
+              </pre>
+            </Card>
+
+            <div className="rounded-lg border border-brand/25 bg-brand/5 p-3 text-[11.5px] text-text-dim font-mono leading-relaxed">
+              {t("mcp.config_env_notice", {
+                defaultValue:
+                  "env vars are referenced by name only; secrets resolved from the host environment at connect-time.",
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -687,7 +840,6 @@ export function McpServersPage() {
   const [deletingServer, setDeletingServer] = useState<McpServerConfigured | null>(null);
   const [detailsServer, setDetailsServer] = useState<McpServerConfigured | null>(null);
   const [detailsCatalog, setDetailsCatalog] = useState<McpCatalogEntry | null>(null);
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<ServerFormState>(defaultForm);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -746,16 +898,6 @@ export function McpServersPage() {
     }
     return result;
   }, [configured, searchQuery, statusFilter, connectedMap]);
-
-  const toggleTools = useCallback((server: McpServerConfigured) => {
-    const identity = serverIdentityOf(server);
-    setExpandedTools(prev => {
-      const next = new Set(prev);
-      if (next.has(identity)) next.delete(identity);
-      else next.add(identity);
-      return next;
-    });
-  }, []);
 
   function openAdd() {
     setForm(defaultForm);
@@ -1056,11 +1198,6 @@ export function McpServersPage() {
                     key={id}
                     server={server}
                     conn={connectedMap.get(id)}
-                    isExpanded={expandedTools.has(id)}
-                    onToggleTools={() => toggleTools(server)}
-                    onEdit={() => openEdit(server)}
-                    onEditTaintPolicy={() => setTaintEditingServer(server)}
-                    onDelete={() => deleteServer(server)}
                     onViewDetail={() => setDetailsServer(server)}
                     t={t}
                   />
@@ -1421,159 +1558,23 @@ export function McpServersPage() {
         />
       )}
 
-      {/* Server detail drawer */}
+      {/* Server detail drawer — tabbed Tools / Logs / Config */}
       <DrawerPanel
         isOpen={!!detailsServer}
         onClose={() => setDetailsServer(null)}
         title={detailsServer?.name ?? ""}
         size="lg"
       >
-        {detailsServer && (() => {
-          const conn = connectedMap.get(serverIdentityOf(detailsServer));
-          const isConnected = conn?.connected ?? false;
-          const transportType = getTransportType(detailsServer);
-          const transport = detailsServer.transport;
-          return (
-            <div className="p-5 space-y-5">
-              {/* Hero */}
-              <div className="flex items-start gap-3">
-                <div className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
-                  isConnected
-                    ? "bg-success/15 text-success"
-                    : "bg-brand/10 text-brand"
-                }`}>
-                  <Plug className="w-5 h-5" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-lg font-black tracking-tight truncate">{detailsServer.name}</h2>
-                    <Badge variant={isConnected ? "success" : "error"} dot>
-                      {isConnected ? t("mcp.connected") : t("mcp.disconnected")}
-                    </Badge>
-                    <Badge variant="default">{transportType.toUpperCase()}</Badge>
-                  </div>
-                  {detailsServer.template_id && (
-                    <p className="text-[11px] text-text-dim/70 mt-0.5 font-mono">{detailsServer.template_id}</p>
-                  )}
-                </div>
-              </div>
-
-              {/* OAuth state */}
-              {detailsServer.auth_state && detailsServer.auth_state.state !== "ok" && (
-                <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs text-warning">
-                  <p className="font-bold mb-1">{detailsServer.auth_state.state}</p>
-                  {detailsServer.auth_state.message && (
-                    <p className="text-text-dim">{detailsServer.auth_state.message}</p>
-                  )}
-                </div>
-              )}
-
-              {/* Transport */}
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
-                  {t("mcp.transport", { defaultValue: "Transport" })}
-                </p>
-                {transportType === "stdio" ? (
-                  <div className="space-y-1.5">
-                    <div className="flex items-start gap-2 text-xs">
-                      <Terminal className="w-3.5 h-3.5 text-text-dim/60 shrink-0 mt-0.5" />
-                      <code className="font-mono text-[11px] break-all">{transport?.command ?? "-"}</code>
-                    </div>
-                    {(transport?.args ?? []).length > 0 && (
-                      <div className="ml-5 flex flex-wrap gap-1">
-                        {(transport?.args ?? []).map((a, i) => (
-                          <code key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-main/60 text-text-dim">{a}</code>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-xs">
-                    <Globe className="w-3.5 h-3.5 text-text-dim/60 shrink-0" />
-                    <code className="font-mono text-[11px] break-all">{transport?.url ?? "-"}</code>
-                  </div>
-                )}
-                <div className="mt-2 flex items-center gap-2 text-[11px] text-text-dim/70">
-                  <Clock className="w-3 h-3" />
-                  {t("mcp.timeout")}: {detailsServer.timeout_secs ?? 30}s
-                </div>
-              </div>
-
-              {/* Env */}
-              {(detailsServer.env ?? []).length > 0 && (
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
-                    {t("mcp.env", { defaultValue: "Environment" })}
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {(detailsServer.env ?? []).map((e, i) => (
-                      <code key={i} className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-main/60 text-text-dim">{e}</code>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Headers */}
-              {(detailsServer.headers ?? []).length > 0 && (
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
-                    {t("mcp.headers", { defaultValue: "Headers" })}
-                  </p>
-                  <div className="space-y-1">
-                    {(detailsServer.headers ?? []).map((h, i) => (
-                      <code key={i} className="block font-mono text-[10px] px-2 py-1 rounded bg-main/60 text-text-dim break-all">{h}</code>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Tools */}
-              {conn?.tools && conn.tools.length > 0 && (
-                <div>
-                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mb-2">
-                    {t("mcp.tools")} ({conn.tools.length})
-                  </p>
-                  <div className="space-y-1.5 max-h-80 overflow-y-auto scrollbar-thin">
-                    {conn.tools.map((tool) => (
-                      <div key={tool.name} className="p-2.5 rounded-lg bg-main/40 border border-border-subtle/50">
-                        <span className="text-xs font-mono font-bold text-text-main">{tool.name}</span>
-                        {tool.description && (
-                          <p className="text-[10px] text-text-dim leading-snug mt-0.5">{tool.description}</p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Actions */}
-              <div className="flex flex-wrap gap-2 pt-3 border-t border-border-subtle/50">
-                <Button
-                  variant="secondary" size="sm"
-                  leftIcon={<Settings className="w-3.5 h-3.5" />}
-                  onClick={() => { const s = detailsServer; setDetailsServer(null); openEdit(s); }}
-                >
-                  {t("common.edit")}
-                </Button>
-                <Button
-                  variant="secondary" size="sm"
-                  leftIcon={<ShieldHalf className="w-3.5 h-3.5" />}
-                  onClick={() => { const s = detailsServer; setDetailsServer(null); setTaintEditingServer(s); }}
-                >
-                  {t("mcp.taint_policy_short", "Taint")}
-                </Button>
-                <Button
-                  variant="secondary" size="sm"
-                  leftIcon={<Trash2 className="w-3.5 h-3.5" />}
-                  className="!text-error hover:!bg-error/10"
-                  onClick={() => { const s = detailsServer; setDetailsServer(null); deleteServer(s); }}
-                >
-                  {t("common.delete")}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
+        {detailsServer && (
+          <ServerDetailBody
+            server={detailsServer}
+            conn={connectedMap.get(serverIdentityOf(detailsServer))}
+            onClose={() => setDetailsServer(null)}
+            onEdit={() => openEdit(detailsServer)}
+            onEditTaintPolicy={() => setTaintEditingServer(detailsServer)}
+            onDelete={() => deleteServer(detailsServer)}
+          />
+        )}
       </DrawerPanel>
 
       {/* Catalog template detail drawer */}
