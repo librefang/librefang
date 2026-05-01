@@ -191,3 +191,4 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
 librefang-testing = { path = "../librefang-testing" }
+totp-rs = { workspace = true }
