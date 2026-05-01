@@ -24,8 +24,8 @@ importers:
         specifier: 3.1.1
         version: 3.1.1(@types/react@19.1.12)(react@19.1.1)
       '@next/mdx':
-        specifier: 15.5.14
-        version: 15.5.14(@mdx-js/loader@3.1.1)(@mdx-js/react@3.1.1(@types/react@19.1.12)(react@19.1.1))
+        specifier: 16.2.4
+        version: 16.2.4(@mdx-js/loader@3.1.1)(@mdx-js/react@3.1.1(@types/react@19.1.12)(react@19.1.1))
       '@sindresorhus/slugify':
         specifier: ^2.2.1
         version: 2.2.1
@@ -437,8 +437,8 @@ packages:
   '@next/env@15.5.14':
     resolution: {integrity: sha512-aXeirLYuASxEgi4X4WhfXsShCFxWDfNn/8ZeC5YXAS2BB4A8FJi1kwwGL6nvMVboE7fZCzmJPNdMvVHc8JpaiA==}
 
-  '@next/mdx@15.5.14':
-    resolution: {integrity: sha512-AZc3EHUfsQeKEEZoN+5GW0dvekIHLZ8nOBw2emT5GHs6KJlUYqg53a0bl62wH2lvmMbnsLh1lpZljOObwXekGQ==}
+  '@next/mdx@16.2.4':
+    resolution: {integrity: sha512-e/3bgla+/oF3vDlndI0eFPa0bnP47HPVA0InsAJi7Jr3DwV8WpEGuOcm/3PdI5/93FfNiBhMVeVHZpm1sFlmJw==}
     peerDependencies:
       '@mdx-js/loader': '>=0.15.0'
       '@mdx-js/react': '>=0.15.0'
@@ -1954,7 +1954,7 @@ snapshots:
 
   '@next/env@15.5.14': {}
 
-  '@next/mdx@15.5.14(@mdx-js/loader@3.1.1)(@mdx-js/react@3.1.1(@types/react@19.1.12)(react@19.1.1))':
+  '@next/mdx@16.2.4(@mdx-js/loader@3.1.1)(@mdx-js/react@3.1.1(@types/react@19.1.12)(react@19.1.1))':
     dependencies:
       source-map: 0.7.6
     optionalDependencies:
