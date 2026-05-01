@@ -222,14 +222,36 @@ const PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30)
 /// the behaviour the inline read previously had on `read_to_string` /
 /// `from_str` errors.
 fn load_raw_config_toml(config_path: &Path) -> toml::Value {
+    let empty = || toml::Value::Table(toml::map::Map::new());
     if !config_path.exists() {
-        return toml::Value::Table(toml::map::Map::new());
+        return empty();
     }
-    match std::fs::read_to_string(config_path) {
-        Ok(contents) => {
-            toml::from_str(&contents).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Not on the hot path — surface the failure so a misconfigured
+            // file doesn't silently disable `[skills.config.*]` injection
+            // for the whole process lifetime.
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %e,
+                "failed to read raw config.toml for skill config injection; \
+                 falling back to empty table"
+            );
+            return empty();
         }
-        Err(_) => toml::Value::Table(toml::map::Map::new()),
+    };
+    match toml::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %e,
+                "failed to parse raw config.toml for skill config injection; \
+                 falling back to empty table"
+            );
+            empty()
+        }
     }
 }
 
