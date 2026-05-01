@@ -30,9 +30,27 @@ serde = { workspace = true }
 toml = { workspace = true }
 open = "5"
 
-[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
-# Desktop-only: adds tray-icon + image-png features on top of the shared `tauri` entry above.
+# macOS + Windows desktop: always include `tray-icon` — these platforms use
+# native APIs (NSStatusItem / Shell_NotifyIconW), no GTK involved.
+[target.'cfg(all(not(any(target_os = "ios", target_os = "android")), not(target_os = "linux")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-shell = "2"
+
+# Linux desktop: same plugin set as macOS/Windows, but `tray-icon` is held
+# back behind the `linux-tray` Cargo feature. Tauri 2.10's `tray-icon` on
+# Linux hard-pulls `libappindicator-rs 0.9`, which transitively drags 8
+# unmaintained GTK3 crates (RUSTSEC-2024-0411..0420) plus a `glib`
+# unsoundness (RUSTSEC-2024-0429). Headless Linux server / CI builds
+# don't need a system tray, so the default is OFF; opt in with
+# `--features linux-tray` for distros where the tray is desired (and
+# accept the audit advisories until tauri's `tray-icon 0.22+`/ksni
+# migration ships). See #3667.
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
@@ -52,6 +70,11 @@ mini = ["librefang-api/mini"]
 custom-protocol = ["tauri/custom-protocol"]
 # Documents the mobile build path (no-op flag, mobile targets are cfg-gated)
 mobile = []
+# Linux-only opt-in: re-enables the system tray on Linux desktop builds at
+# the cost of pulling the deprecated GTK3 stack (see #3667). On macOS /
+# Windows the tray is always on (handled in the per-target dependency
+# blocks above) and this feature is a no-op.
+linux-tray = ["tauri/tray-icon"]
 # Mobile build flavor — excludes channel-email because rustls-connector 0.23.0
 # pulls rustls-platform-verifier 0.7.0, whose `Verifier::new_with_extra_roots`
 # is not implemented on the Android target. Used by mobile-smoke.yml with

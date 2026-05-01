@@ -953,6 +953,11 @@ impl OpenAIDriver {
 
 #[async_trait]
 impl LlmDriver for OpenAIDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "openai", model = %request.model)
+    )]
     async fn complete(
         &self,
         mut request: CompletionRequest,
@@ -1354,6 +1359,11 @@ impl LlmDriver for OpenAIDriver {
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "openai", model = %request.model)
+    )]
     async fn stream(
         &self,
         mut request: CompletionRequest,
