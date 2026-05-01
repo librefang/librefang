@@ -71,6 +71,14 @@ pub enum WireRequest {
         /// `public_key` is also absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity_signature: Option<String>,
+        /// SECURITY (#4269): Per-handshake X25519 ephemeral public key
+        /// (base64, 32 bytes). When both peers send one, the per-message
+        /// HMAC `session_key` is derived via X25519 ECDH + HKDF instead
+        /// of from `shared_secret + nonces`, decoupling session integrity
+        /// from `shared_secret` and gaining forward secrecy. Optional
+        /// for backward compatibility with peers that omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ephemeral_pubkey: Option<String>,
     },
     /// Discover agents matching a query on the remote peer.
     #[serde(rename = "discover")]
@@ -119,6 +127,9 @@ pub enum WireResponse {
         /// SECURITY (#3873): See `WireRequest::Handshake::identity_signature`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity_signature: Option<String>,
+        /// SECURITY (#4269): See `WireRequest::Handshake::ephemeral_pubkey`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ephemeral_pubkey: Option<String>,
     },
     /// Discovery results.
     #[serde(rename = "discover_result")]
@@ -244,6 +255,7 @@ mod tests {
                 auth_hmac: "test-hmac".to_string(),
                 public_key: None,
                 identity_signature: None,
+                ephemeral_pubkey: None,
             }),
         };
         let json = serde_json::to_string_pretty(&msg).unwrap();
