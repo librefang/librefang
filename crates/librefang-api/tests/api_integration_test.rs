@@ -16,11 +16,11 @@ use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::audit::AuditAction;
+use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -71,58 +71,18 @@ async fn start_test_server_with_provider(
     model: &str,
     api_key_env: &str,
 ) -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            api_key_env: api_key_env.to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let config_path = tmp.path().join("config.toml");
-    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
-        .expect("Failed to write test config");
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let provider = provider.to_string();
+    let model = model.to_string();
+    let api_key_env = api_key_env.to_string();
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.default_model.provider = provider;
+        cfg.default_model.model = model;
+        cfg.default_model.api_key_env = api_key_env;
+    }));
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, _tmp, _) = test.into_parts();
+    state.kernel.set_self_handle();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -206,7 +166,7 @@ async fn start_test_server_with_provider(
         base_url: format!("http://{}", addr),
         config_path,
         state,
-        _tmp: tmp,
+        _tmp,
     }
 }
 
@@ -1587,71 +1547,21 @@ system_prompt = "Test."
 
 /// Start a test server with Bearer-token authentication enabled.
 async fn start_test_server_with_auth(api_key: &str) -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: api_key.to_string(),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let config_path = tmp.path().join("config.toml");
-    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
-        .expect("Failed to write test config");
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
-        kernel.config_ref().api_key.clone(),
-    ));
-
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let api_key_owned = api_key.to_string();
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.api_key = api_key_owned;
+    }))
+    .with_api_key(api_key);
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, _tmp, _) = test.into_parts();
+    state.kernel.set_self_handle();
 
     let api_key_state = middleware::AuthState {
-        api_key_lock,
+        api_key_lock: state.api_key_lock.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         // Tests synthesize requests without ConnectInfo, so opt in to the
         // open-server path to keep them green.
@@ -1738,7 +1648,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         base_url: format!("http://{}", addr),
         config_path,
         state,
-        _tmp: tmp,
+        _tmp,
     }
 }
 
@@ -2741,8 +2651,6 @@ async fn start_test_server_with_rbac_users(
     api_key: &str,
     users: Vec<(&str, &str, &str)>,
 ) -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
     let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
     let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
     for (name, role_str, key) in &users {
@@ -2763,79 +2671,30 @@ async fn start_test_server_with_rbac_users(
         });
     }
 
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: api_key.to_string(),
-        users: user_configs,
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let config_path = tmp.path().join("config.toml");
-    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
-        .expect("Failed to write test config");
+    let api_key_owned = api_key.to_string();
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.api_key = api_key_owned;
+        cfg.users = user_configs;
+    }))
+    .with_api_key(api_key)
+    .with_user_api_keys(api_user_records);
 
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
-        kernel.config_ref().api_key.clone(),
-    ));
-
-    let audit_log = kernel.audit().clone();
-
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, tmp, _) = test.into_parts();
 
     let api_key_state = middleware::AuthState {
-        api_key_lock,
+        api_key_lock: state.api_key_lock.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         // Anonymous-rejection tests rely on this — we synthesize requests
         // without a Bearer header and need them to flow through to the
         // in-handler `require_admin` gate (where they get 403'd). Without
         // `allow_no_auth = true` the middleware would 401 first.
         allow_no_auth: true,
-        audit_log: Some(audit_log),
+        audit_log: Some(state.kernel.audit().clone()),
     };
 
     let app = Router::new()
@@ -3052,8 +2911,6 @@ async fn start_test_server_with_full_user_configs(
     api_key: &str,
     users: Vec<(UserConfig, &str)>,
 ) -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
     let mut user_configs: Vec<UserConfig> = Vec::with_capacity(users.len());
     let mut api_user_records: Vec<middleware::ApiUserAuth> = Vec::with_capacity(users.len());
     for (cfg, key) in &users {
@@ -3070,75 +2927,26 @@ async fn start_test_server_with_full_user_configs(
         user_configs.push(cfg);
     }
 
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        api_key: api_key.to_string(),
-        users: user_configs,
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    let config_path = tmp.path().join("config.toml");
-    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
-        .expect("Failed to write test config");
+    let api_key_owned = api_key.to_string();
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.api_key = api_key_owned;
+        cfg.users = user_configs;
+    }))
+    .with_api_key(api_key)
+    .with_user_api_keys(api_user_records);
 
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let api_key_lock = std::sync::Arc::new(tokio::sync::RwLock::new(
-        kernel.config_ref().api_key.clone(),
-    ));
-
-    let audit_log = kernel.audit().clone();
-
-    let user_api_keys_lock = Arc::new(tokio::sync::RwLock::new(api_user_records));
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: api_key_lock.clone(),
-        user_api_keys: user_api_keys_lock.clone(),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path.clone());
+    let (state, tmp, _) = test.into_parts();
 
     let api_key_state = middleware::AuthState {
-        api_key_lock,
+        api_key_lock: state.api_key_lock.clone(),
         active_sessions: state.active_sessions.clone(),
         dashboard_auth_enabled: false,
-        user_api_keys: user_api_keys_lock.clone(),
+        user_api_keys: state.user_api_keys.clone(),
         require_auth_for_reads: false,
         allow_no_auth: true,
-        audit_log: Some(audit_log),
+        audit_log: Some(state.kernel.audit().clone()),
     };
 
     let app = Router::new()

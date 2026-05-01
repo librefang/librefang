@@ -906,8 +906,17 @@ async fn read_capped_body(
 }
 
 /// Client for discovering and interacting with external A2A agents.
+///
+/// Holds the SSRF allowlist; the underlying `reqwest::Client` is rebuilt per
+/// outbound request so DNS resolution and address validation happen together
+/// and the resolved IPs can be pinned (#3563). Sharing a `reqwest::Client`
+/// across calls would pin DNS to whichever host was first contacted, which
+/// is not what we want for a multi-target client like A2A.
 pub struct A2aClient {
-    client: reqwest::Client,
+    /// Hosts/CIDRs/glob patterns that are allowed even when they resolve to
+    /// otherwise-private IP space.  Cloud metadata ranges remain blocked
+    /// unconditionally regardless of allowlist entries.
+    allowed_hosts: Vec<String>,
 }
 
 impl A2aClient {
@@ -916,39 +925,59 @@ impl A2aClient {
         Self::new_with_allowlist(Vec::new())
     }
 
-    /// Create a new A2A client; every redirect hop is re-validated via `check_ssrf` (#3782).
+    /// Create a new A2A client.
+    ///
+    /// Each outbound request rebuilds a `reqwest::Client` from
+    /// [`build_client_for_url`], which:
+    /// 1. Runs `web_fetch::check_ssrf` on the URL to resolve DNS once,
+    ///    validate the addresses, and obtain a [`SsrfResolution`].
+    /// 2. Pins those exact addresses via `ClientBuilder::resolve` so the
+    ///    HTTP stack cannot re-resolve and connect to a different IP — this
+    ///    closes the DNS-rebinding TOCTOU window (#3563).
+    /// 3. Installs a custom redirect policy that re-runs `check_ssrf` against
+    ///    every redirect target (#3782), since the DNS pin only protects the
+    ///    original hostname.
     pub fn new_with_allowlist(allowed_hosts: Vec<String>) -> Self {
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error("too many redirects");
-            }
-            // Re-validate every hop; a 302 response can otherwise bypass the entry-point SSRF check.
-            let target = attempt.url().as_str().to_owned();
-            match crate::web_fetch::check_ssrf(&target, &allowed_hosts) {
-                Ok(_) => attempt.follow(),
-                Err(reason) => {
-                    attempt.error(format!("A2A SSRF blocked redirect to {target}: {reason}"))
-                }
-            }
-        });
+        Self { allowed_hosts }
+    }
 
-        Self {
-            client: crate::http_client::proxied_client_builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .redirect(redirect_policy)
-                // Bug #3785: disable transport-layer decompression. Otherwise
-                // `Response::content_length()` is the *encoded* size and
-                // `Response::chunk()` yields *decoded* bytes, so a 10 KB gzip
-                // bomb that decompresses to 1 GB would slip past the upfront
-                // check and start filling the buffer before the per-chunk
-                // cap fires. Reading the wire bytes directly keeps the cap
-                // honest.
-                .no_gzip()
-                .no_brotli()
-                .no_deflate()
-                .build()
-                .expect("HTTP client build"),
-        }
+    /// Build a per-request reqwest client pinned to the SSRF-validated IPs of
+    /// the supplied URL.  Returns `Err` if the URL fails the entry-point SSRF
+    /// check (private IP, blocked hostname, unresolvable host, …).
+    fn build_client_for_url(&self, url: &str) -> Result<reqwest::Client, String> {
+        let resolution = crate::web_fetch::check_ssrf(url, &self.allowed_hosts)?;
+
+        // Bug #3563: refuse to follow redirects entirely. A `Policy::custom`
+        // that re-runs `check_ssrf` on each hop is *not* enough — DNS for the
+        // redirect target would be re-resolved by reqwest's connector and the
+        // pinned-DNS protection only covers the original hostname, so a
+        // public-IP redirect target with a TTL-0 rebind would still escape.
+        // Returning the 3xx to the caller is safe because every method
+        // already short-circuits on `response.status().is_redirection()`.
+        let redirect_policy = reqwest::redirect::Policy::none();
+
+        let builder = crate::http_client::proxied_client_builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(redirect_policy)
+            // Bug #3785: disable transport-layer decompression. Otherwise
+            // `Response::content_length()` is the *encoded* size and
+            // `Response::chunk()` yields *decoded* bytes, so a 10 KB gzip
+            // bomb that decompresses to 1 GB would slip past the upfront
+            // check and start filling the buffer before the per-chunk
+            // cap fires. Reading the wire bytes directly keeps the cap
+            // honest.
+            .no_gzip()
+            .no_brotli()
+            .no_deflate();
+
+        // Bug #3563: pin DNS to the addresses we just validated. Without this,
+        // reqwest re-resolves the hostname and a TTL-0 DNS rebind could swap
+        // the public IP for 127.0.0.1 / 169.254.169.254 between our check and
+        // the connect.
+        resolution
+            .pin_dns(builder)
+            .build()
+            .map_err(|e| format!("HTTP client build failed: {e}"))
     }
 
     /// Discover an external agent by fetching its Agent Card.
@@ -957,8 +986,12 @@ impl A2aClient {
 
         debug!(url = %agent_json_url, "Discovering A2A agent");
 
-        let response = self
-            .client
+        // Bug #3563: SSRF check + DNS pin happen together inside
+        // `build_client_for_url`.  Build against the actual URL we are about
+        // to fetch (with the `/.well-known/agent.json` suffix) so the pinned
+        // host matches the request host.
+        let client = self.build_client_for_url(&agent_json_url)?;
+        let response = client
             .get(&agent_json_url)
             .header(
                 "User-Agent",
@@ -1004,8 +1037,9 @@ impl A2aClient {
             }
         });
 
-        let response = self
-            .client
+        // Bug #3563: SSRF check + DNS pin per call (see `discover`).
+        let client = self.build_client_for_url(url)?;
+        let response = client
             .post(url)
             .json(&request)
             .send()
@@ -1042,8 +1076,9 @@ impl A2aClient {
             }
         });
 
-        let response = self
-            .client
+        // Bug #3563: SSRF check + DNS pin per call (see `discover`).
+        let client = self.build_client_for_url(url)?;
+        let response = client
             .post(url)
             .json(&request)
             .send()
@@ -1716,6 +1751,48 @@ mod tests {
         assert!(
             err.contains("exceeds cap") || err.contains("body read failed"),
             "expected streaming cap rejection or body-read failure, got: {err}"
+        );
+    }
+
+    /// Bug #3563: A2A must NOT follow redirects. Following them re-resolves
+    /// DNS for the redirect target, which a TTL-0 rebind could swap for an
+    /// internal IP after the entry-point SSRF check passed. The fix switched
+    /// the redirect policy to `Policy::none` and added an explicit
+    /// `is_redirection()` short-circuit; this test locks both decisions so a
+    /// future "let's just allow safe redirects" refactor (`Policy::limited`,
+    /// `Policy::custom`, …) fails loudly instead of silently re-opening the
+    /// rebind window.
+    #[tokio::test]
+    async fn discover_rejects_redirect_response() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                // Reply with a 302 to a benign-looking external URL. The
+                // target is irrelevant — `Policy::none` plus the explicit
+                // `is_redirection()` check must reject before any second
+                // request is made, so DNS for example.com is never resolved.
+                let response = "HTTP/1.1 302 Found\r\nLocation: http://example.com/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let url = format!("http://{addr}");
+        let result = tokio::time::timeout(Duration::from_secs(5), client.discover(&url))
+            .await
+            .expect("client must terminate, not hang following redirect");
+        let _ = server.await;
+
+        let err = result.expect_err("discover() must reject 3xx redirect responses");
+        assert!(
+            err.contains("redirect not followed"),
+            "expected explicit redirect rejection, got: {err}"
         );
     }
 }

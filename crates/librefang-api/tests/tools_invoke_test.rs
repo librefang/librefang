@@ -16,16 +16,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig, ToolInvokeConfig};
+use librefang_testing::{MockKernelBuilder, TestAppState};
 use std::sync::Arc;
-use std::time::Instant;
 use tower::ServiceExt;
 
 struct Harness {
     app: Router,
     state: Arc<AppState>,
-    _tmp: tempfile::TempDir,
+    _test: TestAppState,
 }
 
 impl Drop for Harness {
@@ -34,12 +32,9 @@ impl Drop for Harness {
     }
 }
 
-async fn build_harness(tool_invoke: ToolInvokeConfig) -> Harness {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
+async fn build_harness(tool_invoke: librefang_types::config::ToolInvokeConfig) -> Harness {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.default_model = librefang_types::config::DefaultModelConfig {
             provider: "ollama".into(),
             model: "test-model".into(),
             api_key_env: "OLLAMA_API_KEY".into(),
@@ -47,43 +42,11 @@ async fn build_harness(tool_invoke: ToolInvokeConfig) -> Harness {
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
             cli_profile_dirs: Vec::new(),
-        },
-        tool_invoke,
-        ..KernelConfig::default()
-    };
+        };
+        cfg.tool_invoke = tool_invoke;
+    }));
 
-    let kernel = Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel boots"));
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(
-            std::env::temp_dir().join(format!("lf-test-{}.json", uuid::Uuid::new_v4())),
-        ),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
-
+    let state = test.state.clone();
     let app = Router::new()
         .route(
             "/api/tools/{name}/invoke",
@@ -94,7 +57,7 @@ async fn build_harness(tool_invoke: ToolInvokeConfig) -> Harness {
     Harness {
         app,
         state,
-        _tmp: tmp,
+        _test: test,
     }
 }
 
@@ -130,14 +93,14 @@ async fn invoke(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_disabled_returns_403() {
-    let h = build_harness(ToolInvokeConfig::default()).await;
+    let h = build_harness(librefang_types::config::ToolInvokeConfig::default()).await;
     let (status, _) = invoke(&h.app, "web_search", None, serde_json::json!({})).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_tool_not_in_allowlist_returns_403() {
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["notify_owner".into()],
     })
@@ -148,7 +111,7 @@ async fn test_invoke_tool_not_in_allowlist_returns_403() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_unknown_tool_returns_404() {
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["*".into()],
     })
@@ -166,7 +129,7 @@ async fn test_invoke_unknown_tool_returns_404() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_approval_gated_without_agent_id_returns_400() {
     // `shell_exec` is in the default `require_approval` list.
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["shell_exec".into()],
     })
@@ -183,7 +146,7 @@ async fn test_invoke_approval_gated_without_agent_id_returns_400() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_invoke_malformed_agent_id_returns_400() {
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["notify_owner".into()],
     })
@@ -202,7 +165,7 @@ async fn test_invoke_malformed_agent_id_returns_400() {
 async fn test_invoke_allowlisted_non_approval_tool_succeeds() {
     // `notify_owner` does not require approval and succeeds without any
     // channel wiring (it returns a structured owner_notice in ToolResult).
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["notify_owner".into()],
     })
@@ -224,7 +187,7 @@ async fn test_invoke_writes_audit_entry() {
     // handler must emit its own. Verify: on a successful call we get a
     // ToolInvoke entry tagged with the caller_agent_id, detail = tool name,
     // outcome starting with "ok".
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["notify_owner".into()],
     })
@@ -277,7 +240,7 @@ async fn test_invoke_file_read_uses_plumbed_workspace_root() {
     // Guards the sandbox-context plumbing: if `workspace_root` is ever
     // silently reverted to None in the handler, `file_read` returns
     // "Workspace sandbox not configured" and this test flips to a 400.
-    let h = build_harness(ToolInvokeConfig {
+    let h = build_harness(librefang_types::config::ToolInvokeConfig {
         enabled: true,
         allowlist: vec!["file_read".into()],
     })
