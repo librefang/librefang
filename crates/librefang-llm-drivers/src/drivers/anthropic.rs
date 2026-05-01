@@ -422,16 +422,12 @@ impl LlmDriver for AnthropicDriver {
                     continue;
                 }
                 // Honor the server-supplied Retry-After when surfacing
-                // the final error after retries are exhausted; only
-                // fall back to 5 s if the header was absent / invalid.
-                let retry_after_ms = u64::try_from(retry_after.as_millis())
-                    .unwrap_or(u64::MAX)
-                    .max(1);
-                let retry_after_ms = if retry_after.is_zero() {
-                    5000
-                } else {
-                    retry_after_ms
-                };
+                // the final error after retries are exhausted; fall
+                // back to 5 s when the header was absent, invalid, or
+                // pointed at a moment already in the past (which the
+                // parser collapses to ZERO).
+                let retry_after_ms =
+                    crate::retry_after::duration_to_ms_or_fallback(retry_after, 5000);
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms,
@@ -566,16 +562,12 @@ impl LlmDriver for AnthropicDriver {
                     continue;
                 }
                 // Honor the server-supplied Retry-After when surfacing
-                // the final error after retries are exhausted; only
-                // fall back to 5 s if the header was absent / invalid.
-                let retry_after_ms = u64::try_from(retry_after.as_millis())
-                    .unwrap_or(u64::MAX)
-                    .max(1);
-                let retry_after_ms = if retry_after.is_zero() {
-                    5000
-                } else {
-                    retry_after_ms
-                };
+                // the final error after retries are exhausted; fall
+                // back to 5 s when the header was absent, invalid, or
+                // pointed at a moment already in the past (which the
+                // parser collapses to ZERO).
+                let retry_after_ms =
+                    crate::retry_after::duration_to_ms_or_fallback(retry_after, 5000);
                 return Err(if status == 429 {
                     LlmError::RateLimited {
                         retry_after_ms,

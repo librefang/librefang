@@ -23,9 +23,15 @@ use reqwest::header::HeaderMap;
 
 /// Parse the `Retry-After` header into a [`Duration`].
 ///
-/// Returns `Duration::from_millis(fallback_ms)` if the header is
-/// missing, not valid UTF-8, fails to parse as either delta-seconds or
-/// an HTTP-date, or refers to a moment in the past.
+/// Returns `Duration::from_millis(fallback_ms)` when the header is
+/// missing, not valid UTF-8, or fails to parse as either delta-seconds
+/// or an HTTP-date.
+///
+/// Returns [`Duration::ZERO`] when the header value is the literal
+/// `0`, an HTTP-date in the past, or `fallback_ms` is `0`. Callers
+/// that need to distinguish "wait 0 ms" from "no signal" should use
+/// [`duration_to_ms_or_fallback`] to collapse the zero case back to a
+/// caller-supplied default.
 pub fn parse_retry_after(headers: &HeaderMap, fallback_ms: u64) -> Duration {
     parse_retry_after_value(headers.get(reqwest::header::RETRY_AFTER))
         .unwrap_or_else(|| Duration::from_millis(fallback_ms))
@@ -36,6 +42,25 @@ pub fn parse_retry_after(headers: &HeaderMap, fallback_ms: u64) -> Duration {
 /// `LlmError::RateLimited { retry_after_ms, .. }` field.
 pub fn parse_retry_after_ms(headers: &HeaderMap, fallback_ms: u64) -> u64 {
     let d = parse_retry_after(headers, fallback_ms);
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Convert a `Duration` (typically returned by [`parse_retry_after`])
+/// into a `u64` millisecond value, substituting `fallback_ms` whenever
+/// the duration is zero.
+///
+/// `LlmError::RateLimited.retry_after_ms == 0` is interpreted by the
+/// failover layer as "no Retry-After signal at all" rather than "wait
+/// zero ms" (see `LlmError::failover_reason` in
+/// `librefang-llm-driver`). For drivers that have already exhausted
+/// their internal retry loop and want to surface a sensible
+/// human-facing default, this helper collapses both the
+/// missing-header case and the explicit-zero case (delta-seconds `0`,
+/// past-dated HTTP-date) into the same fallback.
+pub fn duration_to_ms_or_fallback(d: Duration, fallback_ms: u64) -> u64 {
+    if d.is_zero() {
+        return fallback_ms;
+    }
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
@@ -149,5 +174,33 @@ mod tests {
         // The exact example from RFC 7231 — definitely in the past.
         let h = headers_with("Wed, 21 Oct 2015 07:28:00 GMT");
         assert_eq!(parse_retry_after(&h, 5000), Duration::ZERO);
+    }
+
+    #[test]
+    fn duration_to_ms_or_fallback_zero_uses_fallback() {
+        assert_eq!(duration_to_ms_or_fallback(Duration::ZERO, 5000), 5000);
+        assert_eq!(duration_to_ms_or_fallback(Duration::ZERO, 0), 0);
+    }
+
+    #[test]
+    fn duration_to_ms_or_fallback_nonzero_passes_through() {
+        assert_eq!(
+            duration_to_ms_or_fallback(Duration::from_millis(120_000), 5000),
+            120_000
+        );
+        assert_eq!(
+            duration_to_ms_or_fallback(Duration::from_millis(1), 5000),
+            1
+        );
+    }
+
+    #[test]
+    fn duration_to_ms_or_fallback_saturates_overflow() {
+        // Durations beyond u64::MAX milliseconds saturate rather than
+        // wrap or panic.
+        assert_eq!(
+            duration_to_ms_or_fallback(Duration::from_secs(u64::MAX), 5000),
+            u64::MAX
+        );
     }
 }
