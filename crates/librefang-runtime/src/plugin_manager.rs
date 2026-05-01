@@ -4025,10 +4025,9 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
     // load_plugin_manifest_raw reads plugin.toml synchronously; run on the
     // blocking pool so we don't stall the async runtime.
     let manifest_dir = plugin_dir.clone();
-    let manifest =
-        tokio::task::spawn_blocking(move || load_plugin_manifest_raw(&manifest_dir))
-            .await
-            .map_err(|e| format!("load_plugin_manifest_raw task failed: {e}"))??;
+    let manifest = tokio::task::spawn_blocking(move || load_plugin_manifest_raw(&manifest_dir))
+        .await
+        .map_err(|e| format!("load_plugin_manifest_raw task failed: {e}"))??;
     let runtime = manifest
         .hooks
         .runtime
