@@ -85,6 +85,21 @@ jobs:
             echo "No release-tag marker found, skipping"
             exit 0
           fi
+
+          # Guard against PR-body markers that drifted from the actual
+          # workspace version. Without this gate, a stale `<!-- release-tag: vX -->`
+          # marker would tag the merge with vX while the binary inside reports
+          # the workspace version, producing artifacts whose `librefang --version`
+          # disagrees with the GitHub Release name. See #3545.
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::PR-body release-tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+
           echo "Creating tag $TAG on main"
           git tag "$TAG"
           git push origin "$TAG"
@@ -146,6 +161,25 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      # Block any tag whose stripped form does not match
+      # `[workspace.package].version` in Cargo.toml. A mismatch means the
+      # CHANGELOG `awk` extractor below silently falls through to the generic
+      # "See CHANGELOG..." note, the Homebrew formula version (derived from
+      # `${TAG#v}` further down the workflow) drifts from `librefang --version`,
+      # and downstream consumers ship inconsistent metadata. See #3545.
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::pushed tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+          echo "Tag $TAG matches workspace version $WS_VERSION"
 
       - name: Extract changelog for this version
         id: changelog
@@ -355,10 +389,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
@@ -422,14 +453,11 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+            cross build --release --target ${{ matrix.target }} --bin librefang
           else
-            cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+            cargo build --release --target ${{ matrix.target }} --bin librefang
           fi
       - name: Package
         run: |
@@ -581,9 +609,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build static CLI
-        # `--features all-channels`: see other CLI build steps in this file —
-        # the default was trimmed to "core-channels" (#3655, #3688).
-        run: cross build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Verify static linking
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
@@ -641,10 +667,7 @@ jobs:
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI
-        # `--features all-channels`: the CLI default was trimmed to a small
-        # "core-channels" set (#3655, #3688) to speed up developer builds;
-        # published binaries opt back in to every adapter.
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Package
         shell: pwsh
         run: |
@@ -770,6 +793,145 @@ jobs:
           done
           echo "::error::Upload failed after 5 attempts"
           exit 1
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Aggregate per-asset *.sha256 sibling files into one SHA256SUMS manifest
+  # and sign it with cosign keyless (Sigstore + GitHub OIDC). See #3546.
+  #
+  # Why an aggregator instead of signing each `*.sha256` in place:
+  #   - One signature per release (vs ~20) is cheaper for verifiers.
+  #   - `install.sh` only has to fetch+verify two files (SHA256SUMS,
+  #     SHA256SUMS.sig) and the cert bundle, regardless of platform count.
+  #   - Matches the layout most upstream Rust tooling (rustup, sigstore-rs)
+  #     already understands.
+  #
+  # Keyless signing uses the workflow's OIDC identity, so no long-lived
+  # secret is required. Verifiers re-derive trust from:
+  #     --certificate-identity-regexp "https://github\.com/librefang/librefang/.*"
+  #     --certificate-oidc-issuer     "https://token.actions.githubusercontent.com"
+  #
+  # SLSA build-provenance attestation (`actions/attest-build-provenance`) is
+  # tracked as a follow-up — it requires touching every per-target packaging
+  # step to stamp `subject-path:`, which is out of scope for this PR.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sign_release_artifacts:
+    name: Sign Release Artifacts
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs:
+      - create_release
+      - cli_mac
+      - cli_linux
+      - cli_android
+      - cli_linux_mini
+      - cli_musl
+      - cli_windows
+      - cli_mac_mini
+      - cli_windows_mini
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # upload signed manifest as release asset
+      id-token: write   # fetch OIDC token for cosign keyless signing
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: "v2.6.3"
+
+      - name: Build SHA256SUMS manifest from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p sums
+          cd sums
+
+          # Pull every per-asset sibling .sha256 the cli_* jobs uploaded.
+          # Skip the manifest itself if it exists from a prior re-run.
+          gh release view "$TAG" --json assets \
+            --jq '.assets[].name | select(endswith(".sha256")) | select(. != "SHA256SUMS")' \
+            > asset-list.txt
+
+          if [ ! -s asset-list.txt ]; then
+            echo "::error::no *.sha256 sibling files attached to release $TAG"
+            exit 1
+          fi
+
+          # Exact-match sanity check: must equal the total number of matrix
+          # targets across the cli_* jobs in `needs:` above (NOT the number of
+          # jobs — most cli_* are matrix jobs that emit one .sha256 per target).
+          # Current breakdown:
+          #   cli_mac          x86_64 + aarch64                       = 2
+          #   cli_linux        x86_64 + aarch64                       = 2
+          #   cli_android      aarch64                                = 1
+          #   cli_linux_mini   x86_64                                 = 1
+          #   cli_musl         x86_64 + aarch64                       = 2
+          #   cli_windows      x86_64 + aarch64                       = 2
+          #   cli_mac_mini     x86_64                                 = 1
+          #   cli_windows_mini x86_64                                 = 1
+          #                                                    total  = 12
+          # Drift in either direction is a bug — adding a new matrix target
+          # without bumping this constant would silently publish a manifest
+          # missing the new platform's hash; dropping a target without
+          # decrementing it blocks all releases until corrected (the desired
+          # loud failure). Update both together.
+          EXPECTED_PLATFORMS=12
+          ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
+          if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
+            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings (one per matrix target across cli_* jobs), got $ACTUAL"
+            cat asset-list.txt
+            exit 1
+          fi
+
+          while IFS= read -r name; do
+            echo "Fetching $name"
+            gh release download "$TAG" --pattern "$name" --clobber
+          done < asset-list.txt
+
+          # Each sibling file already contains "<hash>  <filename>". Use
+          # `awk 1` to concatenate so a sibling missing its trailing newline
+          # cannot glue two records onto the same line and silently break
+          # `sha256sum -c SHA256SUMS` on the verifier side. Sorted input for
+          # deterministic ordering.
+          ls *.sha256 | sort | xargs awk 1 > ../SHA256SUMS
+
+          cd ..
+          echo "::group::SHA256SUMS"
+          cat SHA256SUMS
+          echo "::endgroup::"
+
+      - name: Sign SHA256SUMS with cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Verify signature locally before upload
+        run: |
+          cosign verify-blob \
+            --certificate SHA256SUMS.pem \
+            --signature SHA256SUMS.sig \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            SHA256SUMS
+
+      - name: Upload signed manifest to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            SHA256SUMS.pem \
+            --clobber
 
   cli_npm:
     name: CLI / npm
