@@ -3,24 +3,61 @@
 //! When a new field is added to `KernelConfig` (or a nested config struct)
 //! with `#[serde(default)]` but the developer forgets to populate it in the
 //! manual `Default` impl, deserialization succeeds with `T::default()` while
-//! the in-process `KernelConfig::default()` returns whatever the manual impl
-//! produces. The two diverge silently — empty TOML round-trips, but the
-//! in-memory default carries different values. The schemars-based golden
-//! schema test does not catch this because schemars reads the
-//! `#[serde(default)]` attribute, not the `Default` impl body.
+//! the in-process `T::default()` returns whatever the manual impl produces.
+//! The two diverge silently — empty TOML round-trips, but the in-memory
+//! default carries different values. The schemars-based golden schema test
+//! does not catch this because schemars reads the `#[serde(default)]`
+//! attribute, not the `Default` impl body.
 //!
-//! This test asserts:
-//!   1. `T::default()` equals what serde produces from an empty TOML document.
+//! For each tested type `T`, this file asserts:
+//!   1. `T::default()` equals what serde produces from an empty TOML
+//!      document (the property that catches the #3404 bug class).
 //!   2. `T::default()` round-trips losslessly through TOML serialization.
 //!
 //! Equality is checked by comparing the TOML serialization of both sides
-//! rather than deriving `PartialEq` on `KernelConfig` (which would force
-//! `PartialEq` onto every nested config type — see issue #3404 caveat 1).
+//! rather than deriving `PartialEq` on every config type — see issue #3404
+//! caveat 1, which warns that derived `PartialEq` would cascade through the
+//! entire nested config tree.
+//!
+//! ## Adding a new type
+//!
+//! For most config structs a single `#[test]` calling
+//! `assert_default_roundtrip::<T>("T")` is enough. If `T::default()` and the
+//! serde-empty fill legitimately diverge on a specific field (see
+//! `KernelConfig` below for the `config_version` migration tripwire), use
+//! `assert_default_roundtrip_with` and pass a normalizer closure that copies
+//! the canonical value over before comparison. The test will still assert
+//! that every other field matches exactly.
 
-use librefang_types::config::{BudgetConfig, KernelConfig, QueueConfig, SessionConfig};
+use librefang_types::config::{
+    AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig, BrowserConfig, BudgetConfig,
+    CanvasConfig, ChunkConfig, CompactionTomlConfig, ContextEngineTomlConfig, DockerSandboxConfig,
+    ExtensionsConfig, ExternalAuthConfig, HealthCheckConfig, HeartbeatTomlConfig, InboxConfig,
+    JinaSearchConfig, KernelConfig, LinkedInConfig, MemoryConfig, MemoryDecayConfig, NetworkConfig,
+    PairingConfig, ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig,
+    PromptIntelligenceConfig, QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig,
+    ReloadConfig, SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
+    TelemetryConfig, TerminalConfig, ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig,
+    VoiceConfig, WebConfig, WebFetchConfig, WebhookTriggerConfig,
+};
 use serde::Serialize;
 
+/// Asserts that `T::default()` matches an empty-TOML deserialization and
+/// round-trips through TOML serialization. Use this for the common case
+/// where the two sources are expected to agree on every field.
 fn assert_default_roundtrip<T>(label: &str)
+where
+    T: Default + Serialize + for<'de> serde::Deserialize<'de>,
+{
+    assert_default_roundtrip_with::<T>(label, |_| {});
+}
+
+/// Variant that runs `normalize` on the from-empty / from-roundtrip values
+/// before comparison, for types with a known legitimate divergence (see the
+/// `KernelConfig` test for the `config_version` rationale). Every field
+/// untouched by `normalize` is still required to match exactly — that is the
+/// property that catches the #3404 bug class.
+fn assert_default_roundtrip_with<T>(label: &str, mut normalize: impl FnMut(&mut T))
 where
     T: Default + Serialize + for<'de> serde::Deserialize<'de>,
 {
@@ -33,8 +70,9 @@ where
     // is missing from the manual `Default` impl: serde fills it with
     // `Field::default()` while our manual impl produces something else, and the
     // two TOML strings will differ.
-    let from_empty: T = toml::from_str("")
+    let mut from_empty: T = toml::from_str("")
         .unwrap_or_else(|e| panic!("{label}: deserialize empty TOML failed: {e}"));
+    normalize(&mut from_empty);
     let empty_toml = toml::to_string(&from_empty)
         .unwrap_or_else(|e| panic!("{label}: serialize from-empty failed: {e}"));
     assert_eq!(
@@ -45,8 +83,9 @@ where
     );
 
     // Round-trip the serialized default and assert idempotency.
-    let from_roundtrip: T = toml::from_str(&default_toml)
+    let mut from_roundtrip: T = toml::from_str(&default_toml)
         .unwrap_or_else(|e| panic!("{label}: deserialize roundtrip failed: {e}"));
+    normalize(&mut from_roundtrip);
     let roundtrip_toml = toml::to_string(&from_roundtrip)
         .unwrap_or_else(|e| panic!("{label}: serialize roundtrip failed: {e}"));
     assert_eq!(
@@ -59,10 +98,10 @@ where
 fn kernel_config_default_roundtrips_through_toml() {
     // KernelConfig::default() pulls in machine-specific paths via
     // `librefang_home_dir()`, but those paths are deterministic within a
-    // single process run, and empty-TOML deserialization re-invokes the same
-    // `KernelConfig::default()` (because the struct is annotated with
-    // `#[serde(default)]`). Both sides therefore observe identical paths —
-    // no normalization needed for paths.
+    // single process run — both `Default::default()` and the empty-TOML
+    // deserialization re-invoke the same function (because the struct is
+    // annotated with `#[serde(default)]`), so the paths agree without
+    // normalization.
     //
     // `config_version` is the one field where the two sources legitimately
     // diverge and must be normalized before comparison:
@@ -78,46 +117,28 @@ fn kernel_config_default_roundtrips_through_toml() {
     //     `config_version` is by definition pre-versioning (v1), and
     //     `run_migrations` will lift it forward to `CONFIG_VERSION`.
     //
-    // We normalize `config_version` on the from-empty / from-roundtrip sides
-    // so the test still asserts that EVERY OTHER field round-trips exactly.
-    // That is the property that catches the bug class issue #3404 describes
-    // (a new `#[serde(default)]` field forgotten in the manual `Default`
-    // impl) — the deliberate v1 sentinel is orthogonal to that bug class
-    // and would otherwise mask all other field comparisons behind a single
-    // expected mismatch.
-    let from_default = KernelConfig::default();
-    let mut from_empty: KernelConfig =
-        toml::from_str("").expect("KernelConfig: deserialize empty TOML failed");
-    from_empty.config_version = from_default.config_version;
-
-    let default_toml =
-        toml::to_string(&from_default).expect("KernelConfig: serialize default failed");
-    let empty_toml =
-        toml::to_string(&from_empty).expect("KernelConfig: serialize from-empty failed");
-    assert_eq!(
-        default_toml, empty_toml,
-        "KernelConfig::default() must equal what serde produces from an \
-         empty TOML document (after normalizing the intentional \
-         config_version divergence). A field is likely declared with \
-         `#[serde(default)]` but missing from the manual `Default` impl \
-         (or vice versa)."
-    );
-
-    let mut from_roundtrip: KernelConfig =
-        toml::from_str(&default_toml).expect("KernelConfig: deserialize roundtrip failed");
-    from_roundtrip.config_version = from_default.config_version;
-    let roundtrip_toml =
-        toml::to_string(&from_roundtrip).expect("KernelConfig: serialize roundtrip failed");
-    assert_eq!(
-        default_toml, roundtrip_toml,
-        "KernelConfig::default() must round-trip through TOML serialization \
-         (after normalizing config_version)."
-    );
+    // Normalizing only `config_version` keeps the deliberate v1 sentinel
+    // from masking comparisons on every other field — which is the property
+    // that catches the bug class issue #3404 describes.
+    let canonical_version = KernelConfig::default().config_version;
+    assert_default_roundtrip_with::<KernelConfig>("KernelConfig", move |c| {
+        c.config_version = canonical_version;
+    });
 }
+
+// All remaining tests use the simple helper. Each `#[test]` covers one
+// config struct that has both `#[serde(default)]` and a manual `impl Default`
+// (or transitively reaches one) — those are the structures where the
+// #3404 bug class can recur.
 
 #[test]
 fn queue_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<QueueConfig>("QueueConfig");
+}
+
+#[test]
+fn queue_concurrency_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<QueueConcurrencyConfig>("QueueConcurrencyConfig");
 }
 
 #[test]
@@ -128,4 +149,214 @@ fn budget_config_default_roundtrips_through_toml() {
 #[test]
 fn session_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<SessionConfig>("SessionConfig");
+}
+
+#[test]
+fn compaction_toml_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<CompactionTomlConfig>("CompactionTomlConfig");
+}
+
+#[test]
+fn task_board_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TaskBoardConfig>("TaskBoardConfig");
+}
+
+#[test]
+fn triggers_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TriggersConfig>("TriggersConfig");
+}
+
+#[test]
+fn webhook_trigger_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<WebhookTriggerConfig>("WebhookTriggerConfig");
+}
+
+#[test]
+fn web_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<WebConfig>("WebConfig");
+}
+
+#[test]
+fn web_fetch_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<WebFetchConfig>("WebFetchConfig");
+}
+
+#[test]
+fn browser_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<BrowserConfig>("BrowserConfig");
+}
+
+#[test]
+fn brave_search_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<BraveSearchConfig>("BraveSearchConfig");
+}
+
+#[test]
+fn tavily_search_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TavilySearchConfig>("TavilySearchConfig");
+}
+
+#[test]
+fn perplexity_search_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<PerplexitySearchConfig>("PerplexitySearchConfig");
+}
+
+#[test]
+fn jina_search_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<JinaSearchConfig>("JinaSearchConfig");
+}
+
+#[test]
+fn reload_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ReloadConfig>("ReloadConfig");
+}
+
+#[test]
+fn rate_limit_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<RateLimitConfig>("RateLimitConfig");
+}
+
+#[test]
+fn skills_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<SkillsConfig>("SkillsConfig");
+}
+
+#[test]
+fn extensions_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ExtensionsConfig>("ExtensionsConfig");
+}
+
+#[test]
+fn vault_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<VaultConfig>("VaultConfig");
+}
+
+#[test]
+fn auto_reply_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<AutoReplyConfig>("AutoReplyConfig");
+}
+
+#[test]
+fn inbox_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<InboxConfig>("InboxConfig");
+}
+
+#[test]
+fn telemetry_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TelemetryConfig>("TelemetryConfig");
+}
+
+#[test]
+fn prompt_intelligence_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<PromptIntelligenceConfig>("PromptIntelligenceConfig");
+}
+
+#[test]
+fn canvas_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<CanvasConfig>("CanvasConfig");
+}
+
+#[test]
+fn thinking_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ThinkingConfig>("ThinkingConfig");
+}
+
+#[test]
+fn context_engine_toml_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ContextEngineTomlConfig>("ContextEngineTomlConfig");
+}
+
+#[test]
+fn external_auth_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ExternalAuthConfig>("ExternalAuthConfig");
+}
+
+#[test]
+fn audit_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<AuditConfig>("AuditConfig");
+}
+
+#[test]
+fn privacy_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<PrivacyConfig>("PrivacyConfig");
+}
+
+#[test]
+fn health_check_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<HealthCheckConfig>("HealthCheckConfig");
+}
+
+#[test]
+fn heartbeat_toml_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<HeartbeatTomlConfig>("HeartbeatTomlConfig");
+}
+
+#[test]
+fn auto_dream_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<AutoDreamConfig>("AutoDreamConfig");
+}
+
+#[test]
+fn registry_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<RegistryConfig>("RegistryConfig");
+}
+
+#[test]
+fn memory_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<MemoryConfig>("MemoryConfig");
+}
+
+#[test]
+fn memory_decay_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<MemoryDecayConfig>("MemoryDecayConfig");
+}
+
+#[test]
+fn chunk_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ChunkConfig>("ChunkConfig");
+}
+
+#[test]
+fn network_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<NetworkConfig>("NetworkConfig");
+}
+
+#[test]
+fn tts_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TtsConfig>("TtsConfig");
+}
+
+#[test]
+fn docker_sandbox_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<DockerSandboxConfig>("DockerSandboxConfig");
+}
+
+#[test]
+fn pairing_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<PairingConfig>("PairingConfig");
+}
+
+#[test]
+fn sanitize_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<SanitizeConfig>("SanitizeConfig");
+}
+
+#[test]
+fn parallel_tools_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<ParallelToolsConfig>("ParallelToolsConfig");
+}
+
+#[test]
+fn terminal_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<TerminalConfig>("TerminalConfig");
+}
+
+#[test]
+fn voice_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<VoiceConfig>("VoiceConfig");
+}
+
+#[test]
+fn linked_in_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<LinkedInConfig>("LinkedInConfig");
 }
