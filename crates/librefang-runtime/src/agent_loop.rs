@@ -2112,8 +2112,6 @@ struct PreparedMessages {
     messages: Vec<Message>,
     new_messages_start: usize,
     repair_stats: crate::session_repair::RepairStats,
-    #[allow(dead_code)]
-    messages_generation_after_repair: u64,
 }
 
 struct FinalizeEndTurnContext<'a> {
@@ -2527,14 +2525,13 @@ fn prepare_llm_messages(
     let _working_stripped = strip_prior_image_data(&mut messages);
     let session_stripped = strip_prior_image_data(&mut session.messages);
     if session_trimmed || session_stripped {
-        session.messages_generation = session.messages_generation.wrapping_add(1);
+        session.mark_messages_mutated();
     }
 
     PreparedMessages {
         messages,
         new_messages_start,
         repair_stats,
-        messages_generation_after_repair: session.messages_generation,
     }
 }
 
@@ -3247,7 +3244,6 @@ pub async fn run_agent_loop(
         mut messages,
         new_messages_start: prepared_new_messages_start,
         repair_stats,
-        messages_generation_after_repair: _,
     } = prepare_llm_messages(
         manifest,
         session,
@@ -4643,7 +4639,6 @@ pub async fn run_agent_loop_streaming(
         mut messages,
         new_messages_start: prepared_new_messages_start,
         repair_stats,
-        messages_generation_after_repair: _,
     } = prepare_llm_messages(
         manifest,
         session,
@@ -7652,9 +7647,7 @@ mod tests {
         let prior_len = session.messages.len();
         session.messages.push(Message::user("current turn"));
         let PreparedMessages {
-            new_messages_start,
-            messages_generation_after_repair: _,
-            ..
+            new_messages_start, ..
         } = prepare_llm_messages(
             &manifest,
             &mut session,
@@ -7727,7 +7720,6 @@ mod tests {
         let PreparedMessages {
             messages,
             new_messages_start,
-            messages_generation_after_repair: _,
             ..
         } = prepare_llm_messages(
             &manifest,

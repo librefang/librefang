@@ -63,45 +63,22 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
     // removal, same-role merge, and text-coalesce are relevant for
     // plain-text sessions. We check both block kinds because orphan
     // ToolResults (no matching ToolUse) still need to be filtered out.
-    let has_tool_blocks = messages.iter().any(|m| {
-        message_has_tool_use(m)
-            || message_is_only_tool_results(m)
-            || match &m.content {
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolResult { .. })),
-                _ => false,
-            }
-    });
+    let has_tool_blocks = messages.iter().any(message_has_tool_blocks);
 
     let mut cleaned: Vec<Message>;
     if has_tool_blocks {
         // Phase 1: Collect all ToolUse IDs from assistant messages
-        let tool_use_ids: HashSet<String> = messages
-            .iter()
-            .flat_map(|m| match &m.content {
-                MessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                _ => vec![],
-            })
-            .collect();
+        let tool_use_ids: HashSet<String> = collect_tool_use_ids(messages);
 
         // Phase 2: Filter orphaned ToolResults and empty messages
         cleaned = Vec::with_capacity(messages.len());
         for msg in messages {
             let new_content = match &msg.content {
-                MessageContent::Text(s) => {
-                    if s.is_empty() {
-                        stats.empty_messages_removed += 1;
-                        continue;
-                    }
-                    MessageContent::Text(s.clone())
+                MessageContent::Text(s) if is_empty_text_content(s) => {
+                    stats.empty_messages_removed += 1;
+                    continue;
                 }
+                MessageContent::Text(s) => MessageContent::Text(s.clone()),
                 MessageContent::Blocks(blocks) => {
                     let original_len = blocks.len();
                     let filtered: Vec<ContentBlock> = blocks
@@ -182,14 +159,14 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
                 }
                 match &m.content {
                     MessageContent::Text(s) => {
-                        if s.is_empty() {
+                        if is_empty_text_content(s) {
                             stats.empty_messages_removed += 1;
                             return false;
                         }
                         true
                     }
                     MessageContent::Blocks(b) => {
-                        if b.is_empty() {
+                        if is_empty_blocks_content(b) {
                             stats.empty_messages_removed += 1;
                             return false;
                         }
@@ -350,19 +327,7 @@ pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
                     "Dropping leading assistant turn(s) to ensure history starts with user"
                 );
                 messages.drain(..i);
-                let surviving_tool_use_ids: HashSet<String> = messages
-                    .iter()
-                    .flat_map(|m| match &m.content {
-                        MessageContent::Blocks(blocks) => blocks
-                            .iter()
-                            .filter_map(|b| match b {
-                                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                        _ => vec![],
-                    })
-                    .collect();
+                let surviving_tool_use_ids: HashSet<String> = collect_tool_use_ids(&messages);
                 for msg in &mut messages {
                     if let MessageContent::Blocks(blocks) = &mut msg.content {
                         blocks.retain(|b| match b {
@@ -973,16 +938,50 @@ fn remove_aborted_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
 /// Check if a message's content is effectively empty (no blocks or only empty text).
 fn is_empty_or_blank_content(content: &MessageContent) -> bool {
     match content {
-        MessageContent::Text(s) => s.trim().is_empty(),
-        MessageContent::Blocks(blocks) => {
-            blocks.is_empty()
-                || blocks.iter().all(|b| match b {
-                    ContentBlock::Text { text, .. } => text.trim().is_empty(),
-                    ContentBlock::Unknown => true,
-                    _ => false,
-                })
-        }
+        MessageContent::Text(s) => is_empty_text_content(s),
+        MessageContent::Blocks(blocks) => is_empty_blocks_content(blocks),
     }
+}
+
+fn is_empty_text_content(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+fn is_empty_blocks_content(blocks: &[ContentBlock]) -> bool {
+    blocks.is_empty()
+        || blocks.iter().all(|b| match b {
+            ContentBlock::Text { text, .. } => is_empty_text_content(text),
+            ContentBlock::Unknown => true,
+            _ => false,
+        })
+}
+
+fn message_has_tool_blocks(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+            )
+        }),
+        MessageContent::Text(_) => false,
+    }
+}
+
+fn collect_tool_use_ids(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
+        })
+        .flat_map(|blocks| {
+            blocks.iter().filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Strip untrusted details from ToolResult content.
