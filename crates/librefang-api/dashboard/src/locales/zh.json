@@ -2176,7 +2176,48 @@
     "batch_disabled_totp": "TOTP 强制启用时不可批量审批",
     "goToAgent": "跳转到 Agent",
     "totpPlaceholder": "000000 / 0000-0000",
-    "totpLabel": "TOTP"
+    "totpLabel": "TOTP",
+    "tabHistory": "历史",
+    "pendingCount": "{{count}} 个待处理",
+    "filter": "筛选",
+    "filterPlaceholder": "按智能体、工具或操作筛选…",
+    "noFilterMatch": "没有匹配此筛选的请求。",
+    "autoRules": "自动规则",
+    "requestedAgo": "{{ago}} 前请求",
+    "approveWithTotp": "使用 TOTP 批准",
+    "editApprove": "编辑并批准",
+    "editApproveTitle": "编辑并批准",
+    "editApproveSubmit": "提交并批准",
+    "deny": "拒绝",
+    "risk": {
+      "high": "高风险",
+      "medium": "中风险",
+      "low": "低风险"
+    },
+    "history": {
+      "empty": "暂无历史",
+      "emptyDesc": "已处理的审批将显示在这里。",
+      "decisions": {
+        "approved": "已批准",
+        "denied": "已拒绝",
+        "edited": "已修改"
+      },
+      "cols": {
+        "decision": "决定",
+        "agent": "智能体",
+        "action": "操作",
+        "risk": "风险",
+        "resolvedBy": "处理者",
+        "when": "时间"
+      }
+    },
+    "totp": {
+      "modalTitle": "TOTP 确认",
+      "modalSubtitle": "高风险操作需要二次验证",
+      "modalContext": "想要执行：{{action}}。请输入身份验证器中的 6 位验证码（或 8 位恢复码）。",
+      "expiresHint": "验证码每 30 秒刷新。",
+      "confirm": "确认并批准"
+    }
   },
   "wizard": {
     "welcome": "欢迎使用 LibreFang",
