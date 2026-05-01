@@ -100,6 +100,8 @@
     "resume": "恢复",
     "close": "关闭",
     "clear_search": "清除搜索",
+    "select": "选择",
+    "deselect": "取消选择",
     "yes": "是",
     "no": "否",
     "details": "详情",
@@ -774,7 +776,14 @@
     "qr_failed": "获取二维码失败",
     "login_success": "登录成功！正在保存配置...",
     "config_failed": "配置失败",
-    "config_success": "配置已保存"
+    "config_success": "配置已保存",
+    "add": "添加",
+    "all_configured": "已配置全部 channel",
+    "msgs_24h": "条/24h",
+    "empty_title": "尚未配置 channel",
+    "empty_body": "接入 Slack、Discord、邮件、短信或其他自带桥接，让 agent 可以收发消息。",
+    "connect_first": "添加一个 channel",
+    "picker_title": "添加 channel"
   },
   "skills": {
     "title": "技能",
