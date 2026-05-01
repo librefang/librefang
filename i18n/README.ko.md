@@ -111,9 +111,9 @@ librefang hand list                  # 모든 Hands 보기
 
 ```
 librefang-kernel            오케스트레이션, 워크플로, 미터링, RBAC, 스케줄러, 예산
-librefang-runtime           에이전트 루프, 3 LLM 드라이버, 53 도구, WASM 샌드박스, MCP, A2A
+librefang-runtime           에이전트 루프, 도구 실행, WASM 샌드박스, MCP, A2A
 librefang-api               140+ REST/WS/SSE 엔드포인트, OpenAI 호환 API, 대시보드
-librefang-channels          40 메시징 어댑터, 레이트 리미팅, DM/그룹 정책
+librefang-channels          45 메시징 어댑터, 레이트 리미팅, DM/그룹 정책
 librefang-memory            SQLite 영속화, 벡터 임베딩, 세션, 압축
 librefang-types             코어 타입, 테인트 추적, Ed25519 서명, 모델 카탈로그
 librefang-skills            60 번들 스킬, SKILL.md 파서, FangHub 마켓플레이스

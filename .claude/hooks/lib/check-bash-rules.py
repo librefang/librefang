@@ -246,8 +246,13 @@ GIT_TAG_DELETE_FLAGS = {"-d", "--delete"}
 
 
 def rule_git_mutation_main(toks, ctx):
-    """When kind=main, refuse any modifying git invocation. We use
-    walk_git_invocations to skip git commands embedded inside quoted args."""
+    """When kind=main, refuse any modifying git invocation that would touch
+    the main worktree's tree, HEAD, or stash. Worktree-cleanup commands
+    (`git worktree remove|prune|move` against linked trees, `git branch
+    -D <feature>` for spent branches) are allowed: removing a linked
+    worktree doesn't affect main, and git itself refuses to delete a
+    checked-out branch. The dangerous case (removing main itself) is
+    caught by `rule_worktree_remove_main`."""
     if ctx.get("kind") != "main":
         return None
 
@@ -258,12 +263,8 @@ def rule_git_mutation_main(toks, ctx):
         sub_arg = strip_parens(toks[j + 1]) if j + 1 < len(toks) else None
         if sub in GIT_DIRECT_MUTATIONS:
             return f"`git {sub}` in main worktree."
-        if sub == "branch" and sub_arg in GIT_BRANCH_FORCE_FLAGS:
-            return f"`git branch {sub_arg}` in main worktree."
         if sub == "stash" and sub_arg in GIT_STASH_MUTATIONS:
             return f"`git stash {sub_arg}` in main worktree."
-        if sub == "worktree" and sub_arg in GIT_WORKTREE_MUTATIONS:
-            return f"`git worktree {sub_arg}` in main worktree."
         if sub == "tag" and sub_arg in GIT_TAG_DELETE_FLAGS:
             return f"`git tag {sub_arg}` in main worktree."
     return None
