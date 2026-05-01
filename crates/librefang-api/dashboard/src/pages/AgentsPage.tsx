@@ -1175,7 +1175,7 @@ export function AgentsPage() {
 
   // ---------- Logs tab — terminal-style stderr tail per design canvas
   const renderLogsTab = (agent: AgentDetail) => {
-    const audit = (auditRecentQuery.data ?? []) as Array<{
+    const audit = (auditRecentQuery.data?.entries ?? []) as Array<{
       timestamp?: string;
       action?: string;
       agent_id?: string;
