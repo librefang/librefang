@@ -50,21 +50,47 @@ case "$tool" in
     ;;
 esac
 
-# For Bash, prefer the path passed via `git -C <path>` if present, since the
-# user often operates on a worktree from a different cwd.
+# For Bash, recompute target_dir by inspecting the command itself:
+#   1. A leading `cd <path>` (or `(cd <path>` subshell) changes the shell's
+#      working directory for everything that follows. Common case:
+#      `cd /tmp/librefang-feat && git add ... && git commit ...`
+#   2. `git -C <path>` overrides cwd for that single git invocation. Common
+#      case: operating on a worktree without `cd`-ing into it.
+# Resolution: cd first (sets the new shell base), then -C (overrides for git).
 if [ "$tool" = "Bash" ]; then
   cmd="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))')"
-  c_path="$(printf '%s' "$cmd" | py 'import sys,re
-cmd=sys.stdin.read()
-m=re.search(r"\bgit\s+-C\s+(\"([^\"]+)\"|'\''([^'\'']+)'\''|(\S+))", cmd)
+
+  # Compute the effective working dir for this Bash command.
+  target_dir="$(printf '%s' "$cmd" | python3 -c '
+import sys, re, os
+text = sys.stdin.read()
+cwd = sys.argv[1] if len(sys.argv) > 1 else ""
+base = cwd
+
+# Leading `cd <path>` (or `(cd <path>` subshell) at the very start of the
+# command updates the shell base for everything that follows. We only
+# handle the leading occurrence — chasing nested cds is too ambiguous.
+m = re.match(r"\s*\(?\s*cd\s+(\"([^\"]+)\"|\x27([^\x27]+)\x27|(\S+))", text)
 if m:
-    print(m.group(2) or m.group(3) or m.group(4) or "")')"
-  if [ -n "$c_path" ]; then
-    case "$c_path" in
-      /*) target_dir="$c_path" ;;
-      *)  target_dir="$cwd/$c_path" ;;
-    esac
-  fi
+    p = m.group(2) or m.group(3) or m.group(4) or ""
+    if p.startswith("/"):
+        base = p
+    elif base:
+        base = os.path.join(base, p)
+
+# `git -C <path>` overrides for that one git invocation. If both are present
+# the -C wins (it is closer to the call site). Relative -C resolves against
+# the post-cd base.
+m = re.search(r"\bgit\s+-C\s+(\"([^\"]+)\"|\x27([^\x27]+)\x27|(\S+))", text)
+if m:
+    p = m.group(2) or m.group(3) or m.group(4) or ""
+    if p.startswith("/"):
+        base = p
+    elif base:
+        base = os.path.join(base, p)
+
+print(base)
+' "$cwd" 2>/dev/null || echo "$cwd")"
 fi
 
 read -r repo_root kind <<<"$(detect_git "$target_dir" || true)"
@@ -92,6 +118,57 @@ if [ "$tool" = "Bash" ]; then
 banned in this repo (target/ is shared across worktrees and contends
 with the user's other sessions). Use \`cargo check\` for compile
 verification; CI handles full build.
+Command: $cmd
+EOF
+          exit 2
+        fi
+        # \`git worktree remove\`/\`worktree move\` against the MAIN tree —
+        # blocked from any worktree. The earlier git-mutation regex only
+        # catches it when cwd resolves to main; using \`git -C <linked>\` to
+        # remove main was a hole. Here we parse the target path and refuse
+        # if it resolves to the main worktree itself.
+        wt_target_hits_main="$(printf '%s' "$cmd" | python3 -c '
+import sys, shlex, os
+text = sys.stdin.read()
+cwd = sys.argv[1] if len(sys.argv) > 1 else ""
+main_root = sys.argv[2] if len(sys.argv) > 2 else ""
+real_main = os.path.realpath(main_root) if main_root else ""
+try:
+    toks = shlex.split(text, posix=True)
+except ValueError:
+    toks = text.split()
+# Track a -C base for relative-path resolution.
+c_base = cwd
+i = 0
+hit = False
+subcmd = None
+while i < len(toks):
+    t = toks[i]
+    if t == "git" and i + 1 < len(toks) and toks[i+1] == "-C":
+        c_base = toks[i+2] if i + 2 < len(toks) else c_base
+        i += 3
+        continue
+    if t == "worktree" and i + 1 < len(toks) and toks[i+1] in ("remove", "move"):
+        subcmd = toks[i+1]
+        rest = toks[i+2:]
+        positionals = [x for x in rest if not x.startswith("-")]
+        if positionals:
+            target = positionals[0]
+            if not target.startswith("/") and c_base:
+                target = os.path.join(c_base, target)
+            target = os.path.realpath(target) if target else ""
+            if real_main and (target == real_main):
+                hit = True
+        break
+    i += 1
+print(str(1 if hit else 0) + "|" + (subcmd if subcmd else ""))
+' "$cwd" "$main_root" 2>/dev/null || echo "0|")"
+        if [ "${wt_target_hits_main%%|*}" = "1" ]; then
+          subcmd="${wt_target_hits_main#*|}"
+          cat >&2 <<EOF
+[forbid-main-worktree] Refusing \`git worktree $subcmd\` targeting the MAIN
+worktree itself ($main_root). That would destroy the user's main checkout.
+If this is really what you want, ask the user to do it manually.
 Command: $cmd
 EOF
           exit 2
