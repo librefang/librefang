@@ -98,6 +98,21 @@ pub struct UsageSummary {
     pub total_tool_calls: u64,
 }
 
+/// One row of a per-agent recent-events feed. Mirrors the columns on
+/// `usage_events` that operators care about when looking at a single
+/// agent's tail (model / latency / tokens / cost).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEventRow {
+    pub timestamp: String,
+    pub model: String,
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u64,
+    pub latency_ms: u64,
+}
+
 /// Usage grouped by model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUsage {
@@ -1219,6 +1234,53 @@ impl UsageStore {
             }
         }
         Ok(results)
+    }
+
+    /// Recent usage events for one agent — backs the dashboard's
+    /// agent-detail Logs tab so it shows turn-level operational data
+    /// (model / latency / tokens / cost) instead of the audit ledger,
+    /// which is mostly admin lifecycle entries. Newest first.
+    pub fn list_agent_events_recent(
+        &self,
+        agent_id: AgentId,
+        limit: u32,
+    ) -> LibreFangResult<Vec<AgentEventRow>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp, model, provider, input_tokens, output_tokens,
+                        cost_usd, tool_calls, latency_ms
+                 FROM usage_events
+                 WHERE agent_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                |row| {
+                    Ok(AgentEventRow {
+                        timestamp: row.get(0)?,
+                        model: row.get(1)?,
+                        provider: row.get(2)?,
+                        input_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                        output_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                        cost_usd: row.get(5)?,
+                        tool_calls: row.get::<_, i64>(6)?.max(0) as u64,
+                        latency_ms: row.get::<_, i64>(7)?.max(0) as u64,
+                    })
+                },
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+        }
+        Ok(out)
     }
 
     /// Delete usage events older than the given number of days.

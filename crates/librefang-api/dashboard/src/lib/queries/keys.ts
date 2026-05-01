@@ -26,6 +26,8 @@ export const agentKeys = {
     [...agentKeys.all, "sessions", agentId] as const,
   stats: (agentId: string) =>
     [...agentKeys.all, "stats", agentId] as const,
+  events: (agentId: string, limit: number) =>
+    [...agentKeys.all, "events", agentId, limit] as const,
   promptVersions: (agentId: string) =>
     [...agentKeys.all, "promptVersions", agentId] as const,
   experiments: (agentId: string) =>
