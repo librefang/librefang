@@ -4115,8 +4115,10 @@ pub async fn install_plugin_with_deps(
     validate_plugin_name(name)?;
 
     // Fetch the registry index to resolve the dependency graph.
+    // Routed through librefang-http so the registry fetch honors [proxy] and
+    // the workspace TLS roots (#3577).
     let repo = github_repo.unwrap_or("librefang/librefang-registry");
-    let client = reqwest::Client::builder()
+    let client = librefang_http::proxied_client_builder()
         .user_agent("librefang-plugin-installer/1.0")
         .timeout(std::time::Duration::from_secs(30))
         .build()
