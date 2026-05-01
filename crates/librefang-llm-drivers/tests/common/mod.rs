@@ -63,7 +63,7 @@ pub fn mock_gemini_driver(server: &MockServer) -> GeminiDriver {
 pub fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message::user("hello")],
+        messages: std::sync::Arc::new(vec![Message::user("hello")]),
         tools: Vec::new(),
         max_tokens: 16,
         temperature: 0.0,
@@ -81,7 +81,7 @@ pub fn simple_request(model: &str) -> CompletionRequest {
 pub fn request_with_tools(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message::user("use a tool")],
+        messages: std::sync::Arc::new(vec![Message::user("use a tool")]),
         tools: vec![ToolDefinition {
             name: "get_weather".to_string(),
             description: "Get current weather".to_string(),
@@ -109,7 +109,7 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
 pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
-        messages: vec![Message::user("hello")],
+        messages: std::sync::Arc::new(vec![Message::user("hello")]),
         tools: Vec::new(),
         max_tokens: 16,
         temperature: temp,
@@ -127,7 +127,7 @@ pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
 pub fn o_series_request() -> CompletionRequest {
     CompletionRequest {
         model: "o3-mini".to_string(),
-        messages: vec![Message::user("solve this")],
+        messages: std::sync::Arc::new(vec![Message::user("solve this")]),
         tools: Vec::new(),
         max_tokens: 1000,
         temperature: 1.0,
