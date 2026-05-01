@@ -17,7 +17,7 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
-  Settings, Key, Clock, AlertCircle, CheckSquare, Square,
+  Settings, Key, Clock, AlertCircle, CheckSquare, Square, Plus,
   MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
 
@@ -631,11 +631,8 @@ function QrLoginDialog({ channel, onClose, t }: { channel: Channel; onClose: () 
   );
 }
 
-type TabType = "configured" | "unconfigured";
-
 export function ChannelsPage() {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<TabType>("configured");
   const [search, setSearch] = useState("");
   const [sortField, setSortField] = useState<SortField>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -644,6 +641,11 @@ export function ChannelsPage() {
   const [detailsChannel, setDetailsChannel] = useState<Channel | null>(null);
   const [configuringChannel, setConfiguringChannel] = useState<Channel | null>(null);
   const [qrLoginChannel, setQrLoginChannel] = useState<Channel | null>(null);
+  // The picker drawer holds the catalog of unconfigured channel types
+  // (slack / discord / email / …). Default view shows only configured
+  // channels so the page stays focused on what's actually wired up.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState("");
 
   const addToast = useUIStore((s) => s.addToast);
 
@@ -668,23 +670,14 @@ export function ChannelsPage() {
   const configuredCount = useMemo(() => channels.filter(c => c.configured).length, [channels]);
   const unconfiguredCount = useMemo(() => channels.filter(c => !c.configured).length, [channels]);
 
-  // Auto-switch to "unconfigured" tab when no channels are configured,
-  // so new users see the setup buttons instead of an empty page.
-  const hasInitTab = useRef(false);
-  useEffect(() => {
-    if (!hasInitTab.current && channels.length > 0) {
-      hasInitTab.current = true;
-      if (configuredCount === 0) setActiveTab("unconfigured");
-    }
-  }, [channels.length, configuredCount]);
-
-  // Filter, search, and sort
+  // Configured channels are the main page content. Filter/sort applies
+  // to those only; the unconfigured catalog lives behind the Add picker.
   const filteredChannels = useMemo(
     () => [...channels]
       .filter(c => {
-        const tabMatch = activeTab === "configured" ? c.configured : !c.configured;
+        if (!c.configured) return false;
         const searchMatch = !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()) || c.category?.toLowerCase().includes(search.toLowerCase());
-        return tabMatch && searchMatch;
+        return searchMatch;
       })
       .sort((a, b) => {
         let cmp = 0;
@@ -692,14 +685,30 @@ export function ChannelsPage() {
         else if (sortField === "category") cmp = (a.category || "").localeCompare(b.category || "");
         return sortOrder === "asc" ? cmp : -cmp;
       }),
-    [channels, activeTab, search, sortField, sortOrder],
+    [channels, search, sortField, sortOrder],
   );
 
   const paginatedChannels = filteredChannels;
 
-  const handleTabChange = (tab: TabType) => {
-    setActiveTab(tab);
-    setSelectedIds(new Set());
+  // Catalog of unconfigured channel types, surfaced in the Add picker.
+  const pickerChannels = useMemo(
+    () => [...channels]
+      .filter(c => !c.configured)
+      .filter(c => !pickerSearch
+        || (c.display_name || c.name).toLowerCase().includes(pickerSearch.toLowerCase())
+        || c.category?.toLowerCase().includes(pickerSearch.toLowerCase()))
+      .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name)),
+    [channels, pickerSearch],
+  );
+
+  const openPicker = () => {
+    setPickerSearch("");
+    setPickerOpen(true);
+  };
+  const handlePick = (ch: Channel) => {
+    setPickerOpen(false);
+    if (ch.setup_type === "qr") setQrLoginChannel(ch);
+    else setConfiguringChannel(ch);
   };
 
   const handleSort = (field: SortField) => {
@@ -744,6 +753,18 @@ export function ChannelsPage() {
           <div className="flex items-center gap-2">
             <Button variant="secondary" size="sm" onClick={handleReload} disabled={reloadMut.isPending}>
               {t("channels.reload", { defaultValue: "Reload" })}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={openPicker}
+              leftIcon={<Plus className="h-3.5 w-3.5" />}
+              disabled={unconfiguredCount === 0}
+              title={unconfiguredCount === 0
+                ? t("channels.all_configured", { defaultValue: "All channels configured" })
+                : t("channels.add", { defaultValue: "Add channel" })}
+            >
+              {t("channels.add", { defaultValue: "Add" })}
             </Button>
             <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase text-text-dim sm:block">
               {t("channels.configured_count", { count: configuredCount })}
@@ -803,55 +824,39 @@ export function ChannelsPage() {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-4 flex-wrap overflow-x-auto">
-        <div role="tablist" aria-label={t("nav.channels", { defaultValue: "Channels" })} className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
-          <button
-            id="channels-tab-configured"
-            role="tab"
-            aria-selected={activeTab === "configured"}
-            aria-controls="channels-panel"
-            tabIndex={activeTab === "configured" ? 0 : -1}
-            onClick={() => handleTabChange("configured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-              activeTab === "configured" ? "bg-surface text-success shadow-sm" : "text-text-dim hover:text-text-main"
-            }`}
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            {t("channels.configured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "configured" ? "bg-success/20 text-success" : "bg-border-subtle text-text-dim"}`}>
-              {configuredCount}
-            </span>
-          </button>
-          <button
-            id="channels-tab-unconfigured"
-            role="tab"
-            aria-selected={activeTab === "unconfigured"}
-            aria-controls="channels-panel"
-            tabIndex={activeTab === "unconfigured" ? 0 : -1}
-            onClick={() => handleTabChange("unconfigured")}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-colors ${
-              activeTab === "unconfigured" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
-            }`}
-          >
-            <XCircle className="w-4 h-4" />
-            {t("channels.unconfigured")}
-            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === "unconfigured" ? "bg-brand/20 text-brand" : "bg-border-subtle text-text-dim"}`}>
-              {unconfiguredCount}
-            </span>
-          </button>
-        </div>
-      </div>
-
-      <div id="channels-panel" role="tabpanel" aria-labelledby={`channels-tab-${activeTab}`}>
+      <div>
       {channelsQuery.isLoading ? (
         <div className={viewMode === "grid" ? "grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 4xl:grid-cols-6" : "flex flex-col gap-2"}>
           {[1, 2, 3].map((i) => <CardSkeleton key={i} />)}
         </div>
-      ) : channels.length === 0 ? (
-        <EmptyState title={t("channels.no_channels")} icon={<Network className="h-6 w-6" />} />
+      ) : configuredCount === 0 ? (
+        // No channels configured yet — surface the picker as a primary
+        // CTA instead of a tab buried below. Mirrors the design canvas
+        // empty state ("Connect Slack, Discord, email, or SMS so agents
+        // can post and receive messages.").
+        <Card padding="lg" className="flex flex-col items-center text-center gap-4 py-10">
+          <div className="w-12 h-12 rounded-xl bg-brand/10 border border-brand/30 grid place-items-center text-brand">
+            <Network className="h-6 w-6" />
+          </div>
+          <div className="max-w-md space-y-2">
+            <h2 className="text-base font-bold text-text-main">
+              {t("channels.empty_title", { defaultValue: "No channels yet" })}
+            </h2>
+            <p className="text-sm text-text-dim leading-relaxed">
+              {t("channels.empty_body", {
+                defaultValue: "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
+              })}
+            </p>
+          </div>
+          <Button variant="primary" size="md" onClick={openPicker} leftIcon={<Plus className="h-4 w-4" />}>
+            {t("channels.connect_first", { defaultValue: "Connect a channel" })}
+          </Button>
+        </Card>
       ) : filteredChannels.length === 0 ? (
-        <EmptyState title={search ? t("channels.no_results") : (activeTab === "configured" ? t("channels.no_configured") : t("channels.no_unconfigured"))} icon={<Search className="h-6 w-6" />} />
+        <EmptyState
+          title={search ? t("channels.no_results") : t("channels.no_configured")}
+          icon={<Search className="h-6 w-6" />}
+        />
       ) : (
         <>
           {/* Select all */}
@@ -922,6 +927,64 @@ export function ChannelsPage() {
           t={t}
         />
       )}
+
+      {/* Add-channel picker — shows the catalog of unconfigured channel
+          types. Click one to launch the existing configure / QR flow. */}
+      <DrawerPanel
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        title={t("channels.picker_title", { defaultValue: "Add channel" })}
+        size="lg"
+      >
+        <div className="flex flex-col gap-4">
+          <Input
+            value={pickerSearch}
+            onChange={(e) => setPickerSearch(e.target.value)}
+            placeholder={t("common.search")}
+            leftIcon={<Search className="w-4 h-4" />}
+            rightIcon={pickerSearch && (
+              <button
+                onClick={() => setPickerSearch("")}
+                className="hover:text-text-main"
+                aria-label={t("common.clear_search", { defaultValue: "Clear search" })}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          />
+          {pickerChannels.length === 0 ? (
+            <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
+              {pickerSearch
+                ? t("channels.no_results")
+                : t("channels.all_configured", { defaultValue: "All available channel types are already configured." })}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {pickerChannels.map((c) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  onClick={() => handlePick(c)}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg border border-border-subtle bg-main/40 hover:border-brand/40 hover:bg-main/60 transition-colors text-left"
+                >
+                  <div className="w-9 h-9 rounded-lg bg-brand/10 border border-brand/20 grid place-items-center text-brand shrink-0">
+                    {getChannelIcon(c.name)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-[13px] font-medium text-text-main truncate">
+                      {c.display_name || c.name}
+                    </div>
+                    <div className="font-mono text-[10.5px] text-text-dim/80 truncate">
+                      {c.category || c.name}
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-text-dim shrink-0" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </DrawerPanel>
     </div>
   );
 }
