@@ -529,6 +529,29 @@ struct MessageDebouncer {
     flush_tx: mpsc::UnboundedSender<String>,
 }
 
+/// Log a `MessageDebouncer` flush-channel send failure at `warn` level.
+///
+/// All five flush trigger paths (max-timer, immediate, debounce-timer,
+/// typing-triggered, typing-stop) share the same failure mode — the
+/// dispatcher's receiver has been dropped, so buffered messages will be
+/// lost. `location` distinguishes the trigger in logs as a structured
+/// field; `key` is the debouncer key when the call site has it on hand
+/// (the spawn'd timer paths consume it before the send and pass `None`).
+fn warn_flush_dropped<E: std::fmt::Display>(
+    result: Result<(), E>,
+    location: &'static str,
+    key: Option<&str>,
+) {
+    if let Err(e) = result {
+        warn!(
+            error = %e,
+            key = key.unwrap_or(""),
+            location,
+            "Debouncer flush dropped: dispatch receiver closed",
+        );
+    }
+}
+
 impl MessageDebouncer {
     fn new(
         debounce_ms: u64,
@@ -562,12 +585,10 @@ impl MessageDebouncer {
             let flush_key = key.to_string();
             let max_timer_handle = Some(tokio::spawn(async move {
                 tokio::time::sleep(max_dur).await;
-                if let Err(e) = flush_tx.send(flush_key) {
-                    // Dispatcher receiver gone — buffered messages for this
-                    // sender will be dropped. Usually only happens during
-                    // shutdown.
-                    warn!(error = %e, "Debouncer max-timer flush dropped: dispatch receiver closed");
-                }
+                // Dispatcher receiver gone — buffered messages for this
+                // sender will be dropped. Usually only happens during
+                // shutdown.
+                warn_flush_dropped(flush_tx.send(flush_key), "max-timer", None);
             }));
             SenderBuffer {
                 messages: Vec::new(),
@@ -592,9 +613,7 @@ impl MessageDebouncer {
             // The double-fire is suppressed by `drain()` below — once the
             // first flush key is processed, the entry is removed from
             // `buffers`, so the stale key will find nothing and return None.
-            if let Err(e) = self.flush_tx.send(key.to_string()) {
-                warn!(error = %e, key = %key, "Debouncer immediate flush dropped: dispatch receiver closed");
-            }
+            warn_flush_dropped(self.flush_tx.send(key.to_string()), "immediate", Some(key));
             return;
         }
 
@@ -604,9 +623,7 @@ impl MessageDebouncer {
         let flush_key = key.to_string();
         buf.timer_handle = Some(tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            if let Err(e) = flush_tx.send(flush_key) {
-                warn!(error = %e, "Debouncer debounce-timer flush dropped: dispatch receiver closed");
-            }
+            warn_flush_dropped(flush_tx.send(flush_key), "debounce-timer", None);
         }));
     }
 
@@ -619,9 +636,11 @@ impl MessageDebouncer {
         let max_dur = Duration::from_millis(self.debounce_max_ms);
         let elapsed = buf.first_arrived.elapsed();
         if elapsed >= max_dur {
-            if let Err(e) = self.flush_tx.send(key.to_string()) {
-                warn!(error = %e, key = %key, "Debouncer typing-triggered flush dropped: dispatch receiver closed");
-            }
+            warn_flush_dropped(
+                self.flush_tx.send(key.to_string()),
+                "typing-triggered",
+                Some(key),
+            );
             return;
         }
 
@@ -636,9 +655,7 @@ impl MessageDebouncer {
             let flush_key = key.to_string();
             buf.timer_handle = Some(tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
-                if let Err(e) = flush_tx.send(flush_key) {
-                    warn!(error = %e, "Debouncer typing-stop flush dropped: dispatch receiver closed");
-                }
+                warn_flush_dropped(flush_tx.send(flush_key), "typing-stop", None);
             }));
         }
     }
@@ -2134,10 +2151,10 @@ async fn send_lifecycle_reaction(
     adapter: &dyn ChannelAdapter,
     user: &ChannelUser,
     message_id: &str,
-    phase: AgentPhase,
+    phase: &AgentPhase,
 ) {
     let reaction = LifecycleReaction {
-        emoji: default_phase_emoji(&phase).to_string(),
+        emoji: default_phase_emoji(phase).to_string(),
         phase: phase.clone(),
         remove_previous: true,
     };
@@ -2220,11 +2237,11 @@ async fn handle_send_error<F, Fut>(
 {
     // Try re-resolution for stale agent IDs
     if let Some(new_id) = try_reresolution(error, agent_id, channel_key, handle, router).await {
-        send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Thinking).await;
+        send_lifecycle_reaction(adapter, sender, msg_id, &AgentPhase::Thinking).await;
 
         match send_fn(new_id).await {
             Ok(response) => {
-                send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Done).await;
+                send_lifecycle_reaction(adapter, sender, msg_id, &AgentPhase::Done).await;
                 if !response.is_empty() {
                     let response = maybe_prefix_response(handle, overrides, new_id, response).await;
                     send_response(adapter, sender, response, thread_id, output_format).await;
@@ -2236,7 +2253,7 @@ async fn handle_send_error<F, Fut>(
             }
             Err(e2) => {
                 // Re-resolution succeeded but the retry failed — report retry error
-                send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
+                send_lifecycle_reaction(adapter, sender, msg_id, &AgentPhase::Error).await;
                 warn!("Agent error for {new_id} (after re-resolution): {e2}");
                 let err_msg = format!("Agent error: {e2}");
                 if !adapter.suppress_error_responses() {
@@ -2258,7 +2275,7 @@ async fn handle_send_error<F, Fut>(
     }
 
     // Not a stale-agent error (or re-resolution not applicable) — report original error
-    send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
+    send_lifecycle_reaction(adapter, sender, msg_id, &AgentPhase::Error).await;
     warn!("Agent error for {agent_id}: {error}");
     let err_msg = format!("Agent error: {error}");
     if !adapter.suppress_error_responses() {
@@ -3461,8 +3478,8 @@ async fn dispatch_message(
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
-    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
-    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Queued).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Thinking).await;
 
     upsert_sender_into_roster(handle, message).await;
 
@@ -3491,7 +3508,7 @@ async fn dispatch_message(
             .await
         {
             Ok((mut delta_rx, status_rx)) => {
-                send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
+                send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Streaming)
                     .await;
 
                 // Resolve the agent-name prefix once up-front so it can be
@@ -3555,7 +3572,7 @@ async fn dispatch_message(
                         } else {
                             AgentPhase::Error
                         };
-                        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, &phase).await;
                         handle
                             .record_delivery(
                                 agent_id,
@@ -3616,7 +3633,7 @@ async fn dispatch_message(
                             } else {
                                 AgentPhase::Error
                             };
-                            send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+                            send_lifecycle_reaction(adapter, &message.sender, msg_id, &phase).await;
                             // Pair the err field with the success flag — when
                             // kernel succeeded, the fallback send_response
                             // delivered the real reply, so the transport-side
@@ -3658,7 +3675,7 @@ async fn dispatch_message(
                             adapter,
                             &message.sender,
                             msg_id,
-                            AgentPhase::Error,
+                            &AgentPhase::Error,
                         )
                         .await;
                         let err_str = kernel_err_str.unwrap_or_else(|| e.to_string());
@@ -3727,7 +3744,7 @@ async fn dispatch_message(
         } else {
             AgentPhase::Error
         };
-        send_lifecycle_reaction(adapter, &message.sender, msg_id, phase).await;
+        send_lifecycle_reaction(adapter, &message.sender, msg_id, &phase).await;
         if !accumulated.is_empty() && (success || !adapter.suppress_error_responses()) {
             let accumulated = if success {
                 maybe_prefix_response(handle, overrides.as_ref(), agent_id, accumulated).await
@@ -3772,7 +3789,7 @@ async fn dispatch_message(
         .await
     {
         Ok(response) => {
-            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Done).await;
             if !response.is_empty() {
                 let response =
                     maybe_prefix_response(handle, overrides.as_ref(), agent_id, response).await;
@@ -4504,8 +4521,8 @@ async fn dispatch_with_blocks(
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
-    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
-    send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Queued).await;
+    send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Thinking).await;
 
     upsert_sender_into_roster(handle, message).await;
 
@@ -4517,7 +4534,7 @@ async fn dispatch_with_blocks(
         .await
     {
         Ok(response) => {
-            send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
+            send_lifecycle_reaction(adapter, &message.sender, msg_id, &AgentPhase::Done).await;
             if !response.is_empty() {
                 let response = maybe_prefix_response(handle, overrides, agent_id, response).await;
                 send_response(adapter, &message.sender, response, thread_id, output_format).await;
