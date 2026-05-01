@@ -526,6 +526,31 @@ impl PeerNode {
         self.pinned_pubkeys.lock().map(|g| g.len()).unwrap_or(0)
     }
 
+    /// SECURITY (#3873): Snapshot of every TOFU-pinned `(node_id,
+    /// public_key, fingerprint)` triple, sorted by `node_id` for stable
+    /// rendering. Used by `GET /api/network/trusted-peers` so an operator
+    /// can verify exactly which identities this node will accept under
+    /// each `node_id`. Fingerprint is the value to compare out-of-band
+    /// with the remote operator before treating the pin as trustworthy.
+    pub fn list_pinned_peers(&self) -> Vec<(String, String, String)> {
+        let pins = match self.pinned_pubkeys.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<_> = pins
+            .iter()
+            .map(|(id, pk)| {
+                (
+                    id.clone(),
+                    pk.clone(),
+                    crate::keys::fingerprint_of_pubkey(pk),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// SECURITY (#3873): If this node has an Ed25519 identity, return
     /// `(Some(public_key_b64), Some(signature_b64))` over `auth_data`. With
     /// no identity configured returns `(None, None)` and the recipient gets

@@ -8,6 +8,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/peers", axum::routing::get(list_peers))
         .route("/peers/{id}", axum::routing::get(get_peer))
         .route("/network/status", axum::routing::get(network_status))
+        .route(
+            "/network/trusted-peers",
+            axum::routing::get(network_trusted_peers),
+        )
         .route("/comms/topology", axum::routing::get(comms_topology))
         .route("/comms/events", axum::routing::get(comms_events))
         .route(
@@ -197,6 +201,36 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         "identity_fingerprint": identity_fingerprint,
         "pinned_peers": pinned_peers,
     }))
+}
+
+/// SECURITY (#3873): GET /api/network/trusted-peers — list every TOFU-pinned
+/// peer this node will accept under each `node_id`. Operators read this to
+/// verify what their daemon trusts and out-of-band-compare fingerprints
+/// with remote operators before federating.
+#[utoipa::path(
+    get,
+    path = "/api/network/trusted-peers",
+    tag = "network",
+    responses(
+        (status = 200, description = "List TOFU-pinned peers", body = serde_json::Value)
+    )
+)]
+pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let entries: Vec<serde_json::Value> = match state.kernel.peer_node_ref() {
+        Some(peer_node) => peer_node
+            .list_pinned_peers()
+            .into_iter()
+            .map(|(node_id, public_key, fingerprint)| {
+                serde_json::json!({
+                    "node_id": node_id,
+                    "public_key": public_key,
+                    "fingerprint": fingerprint,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({ "peers": entries }))
 }
 
 #[utoipa::path(

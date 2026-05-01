@@ -2797,7 +2797,18 @@ export interface NetworkStatusResponse {
   protocol_version?: string;
   listen_addr?: string;
   peer_count?: number;
+  // SECURITY (#3873): null when this node has no Ed25519 identity
+  // (HMAC-only legacy mode); operators should treat that as "new defense
+  // is dormant" and investigate.
+  identity_fingerprint?: string | null;
+  pinned_peers?: number;
   [key: string]: unknown;
+}
+
+export interface TrustedPeerItem {
+  node_id: string;
+  public_key: string;
+  fingerprint: string;
 }
 
 export interface PeerItem {
@@ -2817,6 +2828,13 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 
 export async function listPeers(): Promise<PeerItem[]> {
   const data = await get<{ peers?: PeerItem[] }>("/api/peers");
+  return data.peers ?? [];
+}
+
+export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
+  const data = await get<{ peers?: TrustedPeerItem[] }>(
+    "/api/network/trusted-peers",
+  );
   return data.peers ?? [];
 }
 

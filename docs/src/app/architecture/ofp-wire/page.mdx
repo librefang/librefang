@@ -14,18 +14,33 @@ networks safely.
 - **OFP frames are plaintext on the wire.** A passive observer between two
   kernels can read system prompts, user inputs, LLM outputs, and tool
   results.
-- **HMAC framing covers active attackers** (forgery, tampering, replay,
-  cross-peer replay). It does **not** cover confidentiality.
+- **HMAC framing + Ed25519 identity covers active attackers** (forgery,
+  tampering, replay, cross-peer replay, **and** node-id impersonation
+  via leaked `shared_secret`). It does **not** cover confidentiality.
 - **Confidentiality is delegated to the deployment layer.** For
   cross-network federation, run OFP behind WireGuard, Tailscale, an SSH
   tunnel, or a service-mesh mTLS layer.
 - We **don't** ship in-tree TLS in `librefang-wire` and don't plan to —
   see the rationale below.
 
-## What HMAC framing already covers
+## What the framing already covers
 
-OFP requires a pre-shared `shared_secret` before any traffic flows.
-Authentication runs on every frame:
+OFP authenticates every connection in two layers:
+
+1. **HMAC admission** — `shared_secret` HMAC-SHA256 over
+   `nonce | sender_node_id | recipient_node_id`. A coarse "do you have
+   the cluster password" gate, bound to a specific (sender, recipient)
+   pair.
+2. **Per-peer Ed25519 identity** ([#3873](https://github.com/librefang/librefang/issues/3873)) —
+   each kernel persists an Ed25519 keypair in
+   `<data_dir>/peer_keypair.json` and signs the same auth-data string
+   the HMAC covers. Recipients verify the signature and TOFU-pin the
+   pubkey to the sender's `node_id`. Subsequent handshakes claiming the
+   same `node_id` MUST present the same pubkey or are rejected. Pins
+   persist in `<data_dir>/trusted_peers.json` so the defense is durable
+   across daemon restarts. Operators view the local fingerprint and the
+   pin set via `GET /api/network/status` and
+   `GET /api/network/trusted-peers`.
 
 | Attack | Blocked? | Mechanism |
 |--------|----------|-----------|
@@ -33,9 +48,12 @@ Authentication runs on every frame:
 | Modifying frame contents in transit | Yes | Per-message HMAC over the JSON body |
 | Replaying a captured handshake | Yes | Time-windowed nonce tracker ([#3880](https://github.com/librefang/librefang/issues/3880)), HMAC-verify-before-record ordering |
 | Replaying a captured handshake against a *different* peer that shares the secret | Yes | HMAC binds `nonce \| sender_node_id \| recipient_node_id` ([#3875](https://github.com/librefang/librefang/issues/3875)) |
+| **Impersonating a previously-pinned `node_id` after stealing `shared_secret`** | **Yes** | **Per-peer Ed25519 identity + TOFU pin ([#3873](https://github.com/librefang/librefang/issues/3873)). Attacker would also need the victim's `peer_keypair.json` private key.** |
+| Downgrading from Ed25519 identity back to HMAC-only on a pinned node_id | Yes | Pinned node_ids reject (None, None) identity fields ([#3873](https://github.com/librefang/librefang/issues/3873)) |
 | Oversized `AgentMessage` draining the receiver's LLM budget | Yes | `MAX_PEER_MESSAGE_BYTES = 64 KiB` ([#3876](https://github.com/librefang/librefang/issues/3876)) |
 | Timing side-channel on HMAC verification | Yes | `subtle::ConstantTimeEq` |
 | **Reading frame contents on the wire** | **No** | Use a deployment-layer overlay |
+| **Forging in-flight messages of an existing connection given `shared_secret` + nonce sniff** | **Partial — open follow-up** | Per-message HMAC currently derives `session_key` from `shared_secret` + handshake nonces; a passive observer who has both can recompute it. Closing this requires an Ed25519/X25519 ephemeral key exchange and is filed for a separate protocol PR. |
 
 In other words: an attacker on the path can sniff your federation traffic,
 but cannot impersonate a peer, mutate a message, or get oversized payloads

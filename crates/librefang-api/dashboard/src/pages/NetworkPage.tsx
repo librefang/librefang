@@ -1,28 +1,47 @@
 import { useCallback } from "react";
 import { formatDateTime } from "../lib/datetime";
 import { useTranslation } from "react-i18next";
-import { useNetworkStatus, usePeers } from "../lib/queries/network";
+import {
+  useNetworkStatus,
+  usePeers,
+  useTrustedPeers,
+} from "../lib/queries/network";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { EmptyState } from "../components/ui/EmptyState";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { StaggerList } from "../components/ui/StaggerList";
-import { Network, Globe, Server, Wifi, WifiOff, Hash, Clock } from "lucide-react";
+import {
+  Network,
+  Globe,
+  Server,
+  Wifi,
+  WifiOff,
+  Hash,
+  Clock,
+  ShieldCheck,
+} from "lucide-react";
 
 export function NetworkPage() {
   const { t } = useTranslation();
 
   const statusQuery = useNetworkStatus();
   const peersQuery = usePeers();
+  const trustedQuery = useTrustedPeers();
 
   const status = statusQuery.data;
   const peers = peersQuery.data ?? [];
+  const trustedPeers = trustedQuery.data ?? [];
   const isLoading = statusQuery.isPending || peersQuery.isPending;
 
   const handleRefresh = useCallback(() => {
-    void Promise.all([statusQuery.refetch(), peersQuery.refetch()]);
-  }, [statusQuery, peersQuery]);
+    void Promise.all([
+      statusQuery.refetch(),
+      peersQuery.refetch(),
+      trustedQuery.refetch(),
+    ]);
+  }, [statusQuery, peersQuery, trustedQuery]);
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -95,6 +114,85 @@ export function NetworkPage() {
               ) : null}
             </Card>
           </StaggerList>
+
+          {/* SECURITY (#3873): Identity card. Operators verify the
+              fingerprint is non-null (else this node is HMAC-only and the
+              new defense is dormant) and OOB-share it with remote peers
+              before federating. */}
+          <Card padding="md">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
+                Identity fingerprint
+              </span>
+              <div
+                className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                  status?.identity_fingerprint ? "bg-success/10" : "bg-warning/10"
+                }`}
+              >
+                <ShieldCheck
+                  className={`w-4 h-4 ${
+                    status?.identity_fingerprint ? "text-success" : "text-warning"
+                  }`}
+                />
+              </div>
+            </div>
+            {status?.identity_fingerprint ? (
+              <p
+                className="text-xs font-mono mt-2 break-all"
+                title="Compare with the remote operator out-of-band before pinning."
+              >
+                {status.identity_fingerprint}
+              </p>
+            ) : (
+              <p className="text-xs text-warning mt-2">
+                No Ed25519 identity loaded. OFP is running in HMAC-only legacy
+                mode; per-peer impersonation defense (#3873) is dormant.
+              </p>
+            )}
+            <p className="text-[10px] text-text-dim mt-2">
+              {status?.pinned_peers ?? 0} TOFU-pinned peer
+              {(status?.pinned_peers ?? 0) === 1 ? "" : "s"}
+            </p>
+          </Card>
+
+          {/* SECURITY (#3873): Trusted peers list. Each entry is a
+              (node_id, fingerprint) the local kernel will accept on
+              future handshakes. Mismatches are rejected. */}
+          {trustedPeers.length > 0 ? (
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-black tracking-tight">
+                  Trusted peers
+                </h2>
+                <Badge variant="brand">{trustedPeers.length} pinned</Badge>
+              </div>
+              <StaggerList className="grid gap-2 sm:gap-3 md:grid-cols-2">
+                {trustedPeers.map((tp) => (
+                  <Card key={tp.node_id} padding="md">
+                    <div className="flex items-start gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-success/10 flex items-center justify-center shrink-0">
+                        <ShieldCheck className="w-5 h-5 text-success" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p
+                          className="text-sm font-bold font-mono truncate"
+                          title={tp.node_id}
+                        >
+                          {tp.node_id}
+                        </p>
+                        <p
+                          className="text-[10px] text-text-dim font-mono mt-1 break-all"
+                          title="SHA-256 fingerprint of the pinned Ed25519 public key. Compare OOB."
+                        >
+                          {tp.fingerprint}
+                        </p>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </StaggerList>
+            </div>
+          ) : null}
 
           {/* Peers list */}
           <div>
