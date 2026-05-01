@@ -359,7 +359,7 @@ mod tests {
         CompletionRequest {
             model: "test".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: None,

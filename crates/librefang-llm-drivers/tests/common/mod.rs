@@ -64,7 +64,7 @@ pub fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         messages: std::sync::Arc::new(vec![Message::user("hello")]),
-        tools: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 16,
         temperature: 0.0,
         system: None,
@@ -82,7 +82,7 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         messages: std::sync::Arc::new(vec![Message::user("use a tool")]),
-        tools: vec![ToolDefinition {
+        tools: std::sync::Arc::new(vec![ToolDefinition {
             name: "get_weather".to_string(),
             description: "Get current weather".to_string(),
             input_schema: serde_json::json!({
@@ -92,7 +92,7 @@ pub fn request_with_tools(model: &str) -> CompletionRequest {
                 },
                 "required": ["location"]
             }),
-        }],
+        }]),
         max_tokens: 256,
         temperature: 0.0,
         system: None,
@@ -110,7 +110,7 @@ pub fn request_with_temperature(model: &str, temp: f32) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         messages: std::sync::Arc::new(vec![Message::user("hello")]),
-        tools: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 16,
         temperature: temp,
         system: None,
@@ -128,7 +128,7 @@ pub fn o_series_request() -> CompletionRequest {
     CompletionRequest {
         model: "o3-mini".to_string(),
         messages: std::sync::Arc::new(vec![Message::user("solve this")]),
-        tools: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 1000,
         temperature: 1.0,
         system: None,

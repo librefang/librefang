@@ -368,7 +368,7 @@ mod tests {
         let req = CompletionRequest {
             model: "test".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 32,
             temperature: 0.0,
             system: None,

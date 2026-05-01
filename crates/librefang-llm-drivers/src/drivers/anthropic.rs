@@ -1401,7 +1401,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
-            tools: vec![tool_a, tool_b],
+            tools: std::sync::Arc::new(vec![tool_a, tool_b]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1439,7 +1439,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
-            tools: vec![tool],
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1485,7 +1485,7 @@ mod tests {
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
             ]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1535,7 +1535,7 @@ mod tests {
                 Message::user("u3"),
                 Message::assistant("a3 (last)"),
             ]),
-            tools: vec![tool.clone(), tool],
+            tools: std::sync::Arc::new(vec![tool.clone(), tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1582,7 +1582,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![tool_result_msg]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1618,7 +1618,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]), // dummy: api requires >=1 user msg
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys-prompt".to_string()),
@@ -1658,7 +1658,7 @@ mod tests {
                 Message::assistant("a1"),
                 Message::user("u2 (last)"),
             ]),
-            tools: vec![tool],
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1700,7 +1700,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1732,7 +1732,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1844,7 +1844,7 @@ mod tests {
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
             ]),
-            tools: vec![tool],
+            tools: std::sync::Arc::new(vec![tool]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
@@ -1929,7 +1929,7 @@ mod tests {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
             messages: std::sync::Arc::new(vec![Message::user("hi")]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: Some("sys".to_string()),
