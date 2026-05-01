@@ -2265,6 +2265,12 @@ impl LibreFangKernel {
         // Clamp configuration bounds to prevent zero-value or unbounded misconfigs
         config.clamp_bounds();
 
+        // Resolve `vault.use_os_keyring` into the process-global vault state
+        // before any vault operation runs. Must happen before the TOTP
+        // check below (which unlocks the vault) and before any agent boot
+        // path that touches MCP OAuth tokens. Idempotent: first call wins.
+        librefang_extensions::vault::CredentialVault::init_with_config(config.vault.use_os_keyring);
+
         match config.mode {
             KernelMode::Stable => {
                 info!("Booting LibreFang kernel in STABLE mode — conservative defaults enforced");
