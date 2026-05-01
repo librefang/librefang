@@ -214,6 +214,25 @@ fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeCo
 /// TTL for cached prompt metadata entries (30 seconds).
 const PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Best-effort load of the raw `config.toml` as a `toml::Value` for
+/// skill config-var injection.  Used **only** at boot and on
+/// `reload_config` — never on the per-message hot path (#3722).
+///
+/// A missing or unparseable file falls back to an empty table, matching
+/// the behaviour the inline read previously had on `read_to_string` /
+/// `from_str` errors.
+fn load_raw_config_toml(config_path: &Path) -> toml::Value {
+    if !config_path.exists() {
+        return toml::Value::Table(toml::map::Map::new());
+    }
+    match std::fs::read_to_string(config_path) {
+        Ok(contents) => {
+            toml::from_str(&contents).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+        }
+        Err(_) => toml::Value::Table(toml::map::Map::new()),
+    }
+}
+
 /// Cached workspace context and identity files for an agent's workspace.
 #[derive(Clone, Debug)]
 struct CachedWorkspaceMetadata {
@@ -487,6 +506,14 @@ pub struct LibreFangKernel {
     data_dir_boot: PathBuf,
     /// Kernel configuration (atomically swappable for hot-reload).
     pub(crate) config: ArcSwap<KernelConfig>,
+    /// Cached raw `config.toml` value used for skill config-var injection.
+    ///
+    /// Refreshed once at boot and once per successful `reload_config` call —
+    /// **never** on the per-message hot path (#3722).  `KernelConfig` itself
+    /// is strongly-typed and does not preserve the open-ended
+    /// `[skills.config.<key>]` namespace that `resolve_config_vars`
+    /// walks, so we keep a separate `toml::Value` snapshot.
+    pub(crate) raw_config_toml: ArcSwap<toml::Value>,
     /// Agent registry.
     pub(crate) registry: AgentRegistry,
     /// Capability manager.
@@ -3213,10 +3240,17 @@ impl LibreFangKernel {
             std::sync::Arc::new(config.clone()),
             Arc::clone(&driver),
         );
+        // Pre-parse `config.toml` once at boot so the per-message hot path
+        // never has to re-read it (#3722). Errors here are non-fatal — the
+        // skill config injection layer treats a missing/invalid file as an
+        // empty table, which is the same semantics as the previous on-miss
+        // path.
+        let initial_raw_config_toml = load_raw_config_toml(&config.home_dir.join("config.toml"));
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
+            raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
@@ -11292,6 +11326,15 @@ system_prompt = "You are a helpful assistant."
             // edits even when no other hot action fires.
             self.taint_rules_swap
                 .store(std::sync::Arc::new(new_config.taint_rules.clone()));
+            // Refresh the cached raw `config.toml` snapshot (#3722) so
+            // skill config injection picks up `[skills.config.*]` edits
+            // without needing the per-message hot path to re-read the
+            // file. The strongly-typed `KernelConfig` does not preserve
+            // this open-ended namespace, so we keep the raw value
+            // separately.
+            let refreshed_raw = load_raw_config_toml(&config_path);
+            self.raw_config_toml
+                .store(std::sync::Arc::new(refreshed_raw));
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits
@@ -15896,15 +15939,9 @@ system_prompt = "You are a helpful assistant."
         let skills = self.sorted_enabled_skills(skill_allowlist);
         let skill_count = skills.len();
         let skill_config_section = {
-            let config_path = self.home_dir_boot.join("config.toml");
-            let config_toml: toml::Value = if config_path.exists() {
-                std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|s| toml::from_str(&s).ok())
-                    .unwrap_or(toml::Value::Table(toml::map::Map::new()))
-            } else {
-                toml::Value::Table(toml::map::Map::new())
-            };
+            // Use the boot-time cached `config.toml` value — refreshed by
+            // `reload_config`, never read on this hot path (#3722).
+            let config_toml = self.raw_config_toml.load();
             let declared = librefang_skills::config_injection::collect_config_vars(&skills);
             let resolved =
                 librefang_skills::config_injection::resolve_config_vars(&declared, &config_toml);
