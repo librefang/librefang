@@ -195,11 +195,12 @@ impl ConsolidationEngine {
                         // Grow the keeper's accumulated weight by the
                         // loser's confidence so the next merge against
                         // this keeper averages over the full absorbed
-                        // history (not just the most recent pair).
-                        accum_weights
-                            .entry(keeper_id.clone())
-                            .and_modify(|w| *w += loser_w)
-                            .or_insert(keeper_w + loser_w);
+                        // history (not just the most recent pair). The
+                        // entry is guaranteed to exist — we read from it
+                        // a few lines above via `or_insert(...)`.
+                        if let Some(w) = accum_weights.get_mut(&keeper_id) {
+                            *w += loser_w;
+                        }
                         absorbed.insert(loser_id);
                         memories_merged += 1;
 
@@ -768,6 +769,99 @@ mod tests {
             emb[0] >= 0.45,
             "running weighted average should keep keeper axis dominant; got {:?}",
             emb
+        );
+    }
+
+    /// A dim-mismatched loser must not corrupt the keeper's embedding,
+    /// must not crash the merge, and must not poison subsequent merges
+    /// against the same keeper. The keeper's bytes flow through verbatim
+    /// (the `(Some, Some, dim mismatch)` branch in
+    /// `merge_embeddings_weighted`), and the next same-dim loser is then
+    /// blended in normally.
+    #[test]
+    fn test_merge_embeddings_handles_dim_mismatch_then_same_dim() {
+        let engine = setup();
+        {
+            let conn = engine.conn.lock().unwrap();
+            // Sorted by confidence DESC: k → l_bad → l_ok.
+            insert_memory_full(
+                &conn,
+                "k",
+                "the quick brown fox jumps over the lazy dog",
+                0.9,
+                "{}",
+                1,
+                Some(&[1.0_f32, 0.0, 0.0, 0.0]),
+            );
+            insert_memory_full(
+                &conn,
+                "l_bad",
+                "the quick brown fox jumps over the lazy dog",
+                0.5,
+                "{}",
+                1,
+                Some(&[0.0_f32, 1.0, 0.0]), // 3-dim → mismatch with keeper's 4-dim
+            );
+            insert_memory_full(
+                &conn,
+                "l_ok",
+                "the quick brown fox jumps over the lazy dog",
+                0.45,
+                "{}",
+                1,
+                Some(&[0.0_f32, 1.0, 0.0, 0.0]),
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 2, "both losers must be absorbed");
+
+        let conn = engine.conn.lock().unwrap();
+        // Keeper still holds a 4-dim embedding (no dim corruption from
+        // the mismatched loser).
+        let emb_bytes: Vec<u8> = conn
+            .query_row("SELECT embedding FROM memories WHERE id = 'k'", [], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })
+            .unwrap()
+            .expect("embedding must remain present");
+        assert_eq!(
+            emb_bytes.len(),
+            16,
+            "keeper must stay 4-dim after dim-mismatched merge"
+        );
+
+        let emb: Vec<f32> = emb_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        // After the dim-mismatched merge the keeper bytes are preserved
+        // verbatim; after the subsequent same-dim merge, x stays the
+        // dominant axis but y picks up some loser contribution.
+        assert!(
+            emb[0] > 0.0 && emb[1] > 0.0,
+            "expected blended axes, got {:?}",
+            emb
+        );
+        assert!(
+            emb[2] == 0.0 && emb[3] == 0.0,
+            "no contribution to unused axes, got {:?}",
+            emb
+        );
+
+        // Both losers soft-deleted; access_count summed across all three.
+        assert!(is_deleted(&conn, "l_bad"));
+        assert!(is_deleted(&conn, "l_ok"));
+        let access: i64 = conn
+            .query_row(
+                "SELECT access_count FROM memories WHERE id = 'k'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            access, 3,
+            "access_count must sum 1+1+1 across keeper + 2 losers"
         );
     }
 }
