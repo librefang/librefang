@@ -19,6 +19,11 @@ use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
+// Single canonical impl lives in librefang-types; re-exported here so
+// existing `librefang_runtime::embedding::cosine_similarity` callers keep
+// working without three independently-edited copies drifting (see PR #4125).
+pub use librefang_types::memory::cosine_similarity;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Error type for embedding operations.
@@ -928,32 +933,6 @@ fn provider_default_key_env(provider: &str) -> &'static str {
     }
 }
 
-/// Compute cosine similarity between two vectors.
-///
-/// Returns a value in [-1.0, 1.0] where 1.0 = identical direction.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom < f32::EPSILON {
-        0.0
-    } else {
-        dot / denom
-    }
-}
-
 /// Serialize an embedding vector to bytes (for SQLite BLOB storage).
 pub fn embedding_to_bytes(embedding: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(embedding.len() * 4);
@@ -975,55 +954,10 @@ pub fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cosine_similarity_identical() {
-        let a = vec![1.0, 0.0, 0.0];
-        let b = vec![1.0, 0.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_orthogonal() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!(sim.abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_opposite() {
-        let a = vec![1.0, 0.0];
-        let b = vec![-1.0, 0.0];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim + 1.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_cosine_similarity_real_vectors() {
-        let a = vec![0.1, 0.2, 0.3, 0.4];
-        let b = vec![0.1, 0.2, 0.3, 0.4];
-        let sim = cosine_similarity(&a, &b);
-        assert!((sim - 1.0).abs() < 1e-5);
-
-        let c = vec![0.4, 0.3, 0.2, 0.1];
-        let sim2 = cosine_similarity(&a, &c);
-        assert!(sim2 > 0.0 && sim2 < 1.0); // Similar but not identical
-    }
-
-    #[test]
-    fn test_cosine_similarity_empty() {
-        let sim = cosine_similarity(&[], &[]);
-        assert_eq!(sim, 0.0);
-    }
-
-    #[test]
-    fn test_cosine_similarity_length_mismatch() {
-        let a = vec![1.0, 2.0];
-        let b = vec![1.0, 2.0, 3.0];
-        let sim = cosine_similarity(&a, &b);
-        assert_eq!(sim, 0.0);
-    }
+    // `cosine_similarity` itself is exercised in librefang-types
+    // (memory::tests::test_cosine_similarity_*); this module only
+    // re-exports it, so duplicating the same six test cases here would
+    // just lie about coverage when the canonical impl drifts.
 
     #[test]
     fn test_embedding_roundtrip() {
