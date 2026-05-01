@@ -434,21 +434,61 @@ pub fn merge_metadata_with_config(
 // Auth flow handle + provider trait
 // ---------------------------------------------------------------------------
 
+/// Structured error type for `McpOAuthProvider` storage operations (#3750).
+///
+/// Replaces the prior `Result<_, String>` so callers can distinguish:
+/// - **VaultLocked** — vault exists but no master key available (env var
+///   missing / OS keyring inaccessible). Recovery: prompt the operator to
+///   set `LIBREFANG_VAULT_KEY` or unlock via `librefang vault init`.
+/// - **KeyNotFound** — vault file does not exist yet, or the requested
+///   per-server entry is absent. Recovery: run the OAuth flow.
+/// - **Io** — filesystem I/O failed (disk full, permission denied, etc).
+/// - **Crypto** — decryption / parse failure (corrupt vault, wrong key
+///   that decoded but failed AEAD, schema mismatch). Recovery: investigate
+///   `~/.librefang/vault.enc`; do NOT auto-recreate (data loss risk).
+///
+/// `load_token` returns `Ok(None)` for "no token stored" (a normal state
+/// requiring the OAuth flow); only `Err` indicates an underlying storage
+/// problem that the UI should surface distinctly from re-auth.
+#[derive(Debug, thiserror::Error)]
+pub enum McpOAuthError {
+    #[error("vault is locked — set LIBREFANG_VAULT_KEY or unlock via `librefang vault init`")]
+    VaultLocked,
+    #[error("vault key not found: {0}")]
+    KeyNotFound(String),
+    #[error("vault I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("vault crypto/format error: {0}")]
+    Crypto(String),
+}
+
 /// Trait for OAuth token storage and management.
 ///
 /// Implementors handle persistence of tokens (e.g., encrypted vault on disk).
 /// The actual OAuth flow (PKCE, browser redirect) is driven by the API layer,
 /// not by the provider — the provider only handles token CRUD.
+///
+/// Errors are reported via [`McpOAuthError`] so callers can distinguish
+/// "vault locked" (prompt for key) from "no token stored" (run OAuth flow)
+/// from "I/O failure" (operational alert) — see #3750.
 #[async_trait]
 pub trait McpOAuthProvider: Send + Sync {
     /// Load a cached access token for the given server URL.
-    async fn load_token(&self, server_url: &str) -> Option<String>;
+    ///
+    /// Returns `Ok(None)` when no token is stored (normal pre-auth state) and
+    /// `Err(...)` only for underlying storage problems (locked vault, I/O
+    /// failure, decryption failure).
+    async fn load_token(&self, server_url: &str) -> Result<Option<String>, McpOAuthError>;
 
     /// Store tokens received from the token endpoint.
-    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String>;
+    async fn store_tokens(
+        &self,
+        server_url: &str,
+        tokens: OAuthTokens,
+    ) -> Result<(), McpOAuthError>;
 
     /// Clear stored tokens for the given server URL.
-    async fn clear_tokens(&self, server_url: &str) -> Result<(), String>;
+    async fn clear_tokens(&self, server_url: &str) -> Result<(), McpOAuthError>;
 }
 
 // ---------------------------------------------------------------------------

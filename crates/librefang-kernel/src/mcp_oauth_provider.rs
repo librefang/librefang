@@ -5,9 +5,30 @@
 //! by the API layer — this provider handles token CRUD and client registration.
 
 use async_trait::async_trait;
-use librefang_runtime::mcp_oauth::{McpOAuthProvider, OAuthTokens};
+use librefang_extensions::ExtensionError;
+use librefang_runtime::mcp_oauth::{McpOAuthError, McpOAuthProvider, OAuthTokens};
 use std::path::PathBuf;
 use tracing::{debug, warn};
+
+/// Convert vault-layer errors to the public OAuth storage error taxonomy
+/// (#3750). Centralized so every callsite gets the same mapping:
+/// - `VaultLocked` ↔ no master key resolvable
+/// - `Vault("Vault not initialized…")` → `KeyNotFound` (no vault file yet)
+/// - `Vault(other)` → `Crypto(...)` (decryption / parse / schema failure)
+/// - `Io` propagates as `Io`
+/// - All other extension errors map to `Crypto` so they surface with a
+///   distinct taxonomy from "missing token" rather than disappearing.
+fn map_extension_err(err: ExtensionError) -> McpOAuthError {
+    match err {
+        ExtensionError::VaultLocked => McpOAuthError::VaultLocked,
+        ExtensionError::Vault(msg) if msg.starts_with("Vault not initialized") => {
+            McpOAuthError::KeyNotFound(msg)
+        }
+        ExtensionError::Vault(msg) => McpOAuthError::Crypto(msg),
+        ExtensionError::Io(io) => McpOAuthError::Io(io),
+        other => McpOAuthError::Crypto(other.to_string()),
+    }
+}
 
 /// Vault key prefix for MCP OAuth tokens.
 const VAULT_PREFIX: &str = "mcp_oauth";
@@ -47,54 +68,78 @@ impl KernelOAuthProvider {
         format!("{VAULT_PREFIX}:{server_url}:{field}")
     }
 
-    /// Read a value from the vault. Returns `None` if the vault cannot be
-    /// unlocked or the key is missing.
-    pub fn vault_get(&self, key: &str) -> Option<String> {
-        let vault_path = self.home_dir.join("vault.enc");
-        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
-        if let Err(e) = vault.unlock() {
-            tracing::warn!(
-                error = %e,
-                key = %key,
-                "MCP OAuth vault_get: unlock failed — returning None. \
-                 Check that LIBREFANG_VAULT_KEY is set."
-            );
-            return None;
-        }
-        vault.get(key).map(|s| s.to_string())
-    }
-
-    /// Write a value to the vault. Creates the vault if it does not exist.
-    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+    /// Read a value from the vault.
+    ///
+    /// Returns `Ok(None)` only when the vault is unlocked and the key is
+    /// genuinely absent. Vault unlock failures are surfaced as
+    /// [`McpOAuthError`] (#3750) so callers can distinguish "no token
+    /// stored" from "vault locked / corrupt".
+    pub fn vault_get(&self, key: &str) -> Result<Option<String>, McpOAuthError> {
         let vault_path = self.home_dir.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
         if !vault.exists() {
-            vault
-                .init()
-                .map_err(|e| format!("Vault init failed: {e}"))?;
+            return Err(McpOAuthError::KeyNotFound(format!(
+                "vault file not initialized; key {key} unreachable"
+            )));
+        }
+        vault.unlock().map_err(map_extension_err)?;
+        Ok(vault.get(key).map(|s| s.to_string()))
+    }
+
+    /// Read a value from the vault, treating "vault not initialized" as
+    /// `Ok(None)` rather than `KeyNotFound`. Used by `load_token` where a
+    /// missing vault is semantically equivalent to "no cached token".
+    fn vault_get_optional(&self, key: &str) -> Result<Option<String>, McpOAuthError> {
+        let vault_path = self.home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            return Ok(None);
+        }
+        vault.unlock().map_err(map_extension_err)?;
+        Ok(vault.get(key).map(|s| s.to_string()))
+    }
+
+    /// Legacy `Option`-returning helper for code paths (e.g. `try_refresh`,
+    /// `auth_start`) whose error model is still `Result<_, String>`. Logs
+    /// vault failures the same way the original `vault_get` did.
+    pub fn vault_get_or_warn(&self, key: &str) -> Option<String> {
+        match self.vault_get_optional(key) {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    key = %key,
+                    "MCP OAuth vault_get_or_warn: vault unlock failed — returning None. \
+                     Check that LIBREFANG_VAULT_KEY is set."
+                );
+                None
+            }
+        }
+    }
+
+    /// Write a value to the vault. Creates the vault if it does not exist.
+    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), McpOAuthError> {
+        let vault_path = self.home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        if !vault.exists() {
+            vault.init().map_err(map_extension_err)?;
         } else {
-            vault
-                .unlock()
-                .map_err(|e| format!("Vault unlock failed: {e}"))?;
+            vault.unlock().map_err(map_extension_err)?;
         }
         vault
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
-            .map_err(|e| format!("Vault write failed: {e}"))
+            .map_err(map_extension_err)
     }
 
     /// Remove a value from the vault. Returns `Ok(true)` if the key existed.
-    pub fn vault_remove(&self, key: &str) -> Result<bool, String> {
+    pub fn vault_remove(&self, key: &str) -> Result<bool, McpOAuthError> {
         let vault_path = self.home_dir.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
         if !vault.exists() {
             return Ok(false);
         }
-        vault
-            .unlock()
-            .map_err(|e| format!("Vault unlock failed: {e}"))?;
-        vault
-            .remove(key)
-            .map_err(|e| format!("Vault remove failed: {e}"))
+        vault.unlock().map_err(map_extension_err)?;
+        vault.remove(key).map_err(map_extension_err)
     }
 
     /// Try to refresh the access token using a stored refresh token.
@@ -104,7 +149,7 @@ impl KernelOAuthProvider {
         refresh_token: &str,
     ) -> Result<OAuthTokens, String> {
         let token_endpoint = self
-            .vault_get(&Self::vault_key(server_url, "token_endpoint"))
+            .vault_get_or_warn(&Self::vault_key(server_url, "token_endpoint"))
             .ok_or_else(|| "No token_endpoint stored for refresh".to_string())?;
 
         // SSRF guard (#3623): re-validate the stored token_endpoint before
@@ -117,7 +162,7 @@ impl KernelOAuthProvider {
             ));
         }
 
-        let client_id = self.vault_get(&Self::vault_key(server_url, "client_id"));
+        let client_id = self.vault_get_or_warn(&Self::vault_key(server_url, "client_id"));
 
         let client = librefang_extensions::http_client::new_client();
         let mut params = vec![
@@ -217,18 +262,27 @@ impl KernelOAuthProvider {
 
 #[async_trait]
 impl McpOAuthProvider for KernelOAuthProvider {
-    async fn load_token(&self, server_url: &str) -> Option<String> {
-        let access_token = self.vault_get(&Self::vault_key(server_url, "access_token"))?;
+    async fn load_token(&self, server_url: &str) -> Result<Option<String>, McpOAuthError> {
+        // Treat "no vault file at all" as Ok(None) — the user simply has not
+        // run any OAuth flow yet. Locked/corrupt vault propagates as Err so
+        // the dashboard can prompt re-unlock instead of falsely re-auth'ing.
+        let access_token =
+            match self.vault_get_optional(&Self::vault_key(server_url, "access_token"))? {
+                Some(t) => t,
+                None => return Ok(None),
+            };
 
-        // Check expiration if stored
-        if let Some(expires_at_str) = self.vault_get(&Self::vault_key(server_url, "expires_at")) {
+        // Check expiration if stored.
+        if let Some(expires_at_str) =
+            self.vault_get_optional(&Self::vault_key(server_url, "expires_at"))?
+        {
             if let Ok(expires_at) = expires_at_str.parse::<i64>() {
                 let now = chrono::Utc::now().timestamp();
                 if now >= expires_at - 60 {
                     debug!(server = %server_url, "MCP OAuth token expired or near expiry, attempting refresh");
 
                     if let Some(refresh_token) =
-                        self.vault_get(&Self::vault_key(server_url, "refresh_token"))
+                        self.vault_get_optional(&Self::vault_key(server_url, "refresh_token"))?
                     {
                         match self.try_refresh(server_url, &refresh_token).await {
                             Ok(new_tokens) => {
@@ -237,23 +291,30 @@ impl McpOAuthProvider for KernelOAuthProvider {
                                 {
                                     warn!(error = %e, "Failed to store refreshed tokens");
                                 }
-                                return Some(new_tokens.access_token);
+                                return Ok(Some(new_tokens.access_token));
                             }
                             Err(e) => {
+                                // Refresh-network/HTTP failure is NOT a vault
+                                // storage error — surface as Ok(None) so the
+                                // dashboard re-runs the OAuth flow.
                                 warn!(error = %e, "Token refresh failed");
-                                return None;
+                                return Ok(None);
                             }
                         }
                     }
-                    return None;
+                    return Ok(None);
                 }
             }
         }
-        // No expires_at stored (e.g. Notion) — return token as-is
-        Some(access_token)
+        // No expires_at stored (e.g. Notion) — return token as-is.
+        Ok(Some(access_token))
     }
 
-    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String> {
+    async fn store_tokens(
+        &self,
+        server_url: &str,
+        tokens: OAuthTokens,
+    ) -> Result<(), McpOAuthError> {
         self.vault_set(
             &Self::vault_key(server_url, "access_token"),
             &tokens.access_token,
@@ -275,24 +336,35 @@ impl McpOAuthProvider for KernelOAuthProvider {
         Ok(())
     }
 
-    async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
+    async fn clear_tokens(&self, server_url: &str) -> Result<(), McpOAuthError> {
         // #3369: aggregate per-field failures and surface them. Returning Ok
         // when vault_remove failed lets the UI display "logged out" while the
         // refresh/access tokens still sit in the vault — daemon keeps using
         // them on the next request.
+        //
+        // #3750: if the *first* failure is VaultLocked, propagate it as the
+        // typed variant so the API layer can return 423 Locked. Mixed
+        // failures collapse into Crypto with the aggregated detail.
         let mut failures: Vec<String> = Vec::new();
+        let mut first_locked = false;
         for field in ALL_VAULT_FIELDS {
             let key = Self::vault_key(server_url, field);
             if let Err(e) = self.vault_remove(&key) {
                 warn!(server = %server_url, field = %field, error = %e, "MCP OAuth clear_tokens: vault_remove failed");
+                if matches!(e, McpOAuthError::VaultLocked) && failures.is_empty() {
+                    first_locked = true;
+                }
                 failures.push(format!("{field}: {e}"));
             }
         }
         if !failures.is_empty() {
-            return Err(format!(
+            if first_locked && failures.iter().all(|f| f.contains("vault is locked")) {
+                return Err(McpOAuthError::VaultLocked);
+            }
+            return Err(McpOAuthError::Crypto(format!(
                 "Sign-out failed to fully clear vault for {server_url}; tokens may still be valid. Retry. Details: {}",
                 failures.join("; ")
-            ));
+            )));
         }
         debug!(server = %server_url, "MCP OAuth tokens cleared from vault");
         Ok(())
@@ -390,8 +462,9 @@ mod tests {
             result
         );
         let err = result.unwrap_err();
+        let msg = err.to_string().to_lowercase();
         assert!(
-            err.to_lowercase().contains("retry") || err.to_lowercase().contains("sign-out"),
+            msg.contains("retry") || msg.contains("sign-out"),
             "error message should prompt the caller to retry, got: {err}"
         );
     }

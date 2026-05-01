@@ -314,7 +314,19 @@ pub async fn auth_start(
     let mut client_id = metadata
         .client_id
         .clone()
-        .or_else(|| provider.vault_get(&KernelOAuthProvider::vault_key(&server_url, "client_id")));
+        .or_else(|| {
+            // #3750: vault_get now returns Result; treat any storage error
+            // as "no cached client_id" and fall through to Dynamic Client
+            // Registration. The structured error is logged but does not
+            // abort discovery — DCR is the documented recovery path.
+            match provider.vault_get(&KernelOAuthProvider::vault_key(&server_url, "client_id")) {
+                Ok(opt) => opt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "vault_get(client_id) failed; continuing without cached client_id");
+                    None
+                }
+            }
+        });
 
     if client_id.is_none() {
         if let Some(ref reg_endpoint) = metadata.registration_endpoint {
@@ -377,9 +389,10 @@ pub async fn auth_start(
     // Store PKCE state in vault under per-flow keys for the callback to retrieve.
     let flow_vault_key =
         |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
-    let store = |field: &str, value: &str| -> Result<(), String> {
-        provider.vault_set(&flow_vault_key(field), value)
-    };
+    let store =
+        |field: &str, value: &str| -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+            provider.vault_set(&flow_vault_key(field), value)
+        };
     if let Err(e) = store("pkce_verifier", &pkce_verifier) {
         tracing::error!(error = %e, "Failed to store PKCE verifier in vault");
         return ApiErrorResponse::internal(format!(
@@ -527,8 +540,23 @@ pub async fn auth_callback(
     // Load stored PKCE state from vault using the per-flow key (#3727).
     let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
     let flow_key_prefix = format!("{server_url}:{flow_id}");
-    let load =
-        |field: &str| provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field));
+    // #3750: collapse vault Result into Option for callers below — a vault
+    // storage failure during callback is logged and treated the same as
+    // "value missing", since the recovery path (retry from dashboard) is
+    // identical for both cases.
+    let load = |field: &str| -> Option<String> {
+        match provider.vault_get(&KernelOAuthProvider::vault_key(&flow_key_prefix, field)) {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::warn!(
+                    field = %field,
+                    error = %e,
+                    "vault_get failed during OAuth callback"
+                );
+                None
+            }
+        }
+    };
 
     let stored_state = match load("pkce_state") {
         Some(s) => s,
@@ -859,10 +887,30 @@ pub async fn auth_revoke(
     let provider = state.kernel.oauth_provider_ref();
     if let Err(e) = provider.clear_tokens(&server_url).await {
         tracing::error!(server = %name, error = %e, "auth_revoke: vault clear failed");
-        return ApiErrorResponse::internal(format!(
-            "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {e}"
-        ))
-        .into_json_tuple();
+        // #3750: surface VaultLocked / KeyNotFound / Io / Crypto distinctly so
+        // the dashboard can render the right recovery prompt instead of a
+        // generic 500.
+        use librefang_runtime::mcp_oauth::McpOAuthError;
+        let resp = match e {
+            McpOAuthError::VaultLocked => ApiErrorResponse::bad_request(
+                "Vault is locked — set LIBREFANG_VAULT_KEY before retrying sign-out.",
+            )
+            .with_status(axum::http::StatusCode::LOCKED)
+            .with_code("vault_locked"),
+            McpOAuthError::KeyNotFound(detail) => ApiErrorResponse::not_found(format!(
+                "No stored tokens to clear: {detail}"
+            ))
+            .with_code("vault_key_not_found"),
+            McpOAuthError::Io(io) => ApiErrorResponse::internal(format!(
+                "Sign-out failed due to vault I/O error: {io}. Tokens may still be valid. Retry."
+            ))
+            .with_code("vault_io"),
+            McpOAuthError::Crypto(detail) => ApiErrorResponse::internal(format!(
+                "Sign-out partially failed: in-memory session cleared but stored tokens may remain in the vault. Retry. Details: {detail}"
+            ))
+            .with_code("vault_crypto"),
+        };
+        return resp.into_json_tuple();
     }
 
     (

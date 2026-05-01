@@ -53,16 +53,26 @@ impl TrackingOAuthProvider {
 
 #[async_trait]
 impl McpOAuthProvider for TrackingOAuthProvider {
-    async fn load_token(&self, _server_url: &str) -> Option<String> {
+    async fn load_token(
+        &self,
+        _server_url: &str,
+    ) -> Result<Option<String>, librefang_runtime::mcp_oauth::McpOAuthError> {
         self.load_token_called.store(true, Ordering::SeqCst);
-        None // No cached token — force the connect to fail with 401
+        Ok(None) // No cached token — force the connect to fail with 401
     }
 
-    async fn store_tokens(&self, _server_url: &str, _tokens: OAuthTokens) -> Result<(), String> {
+    async fn store_tokens(
+        &self,
+        _server_url: &str,
+        _tokens: OAuthTokens,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
         Ok(())
     }
 
-    async fn clear_tokens(&self, _server_url: &str) -> Result<(), String> {
+    async fn clear_tokens(
+        &self,
+        _server_url: &str,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
         Ok(())
     }
 }
@@ -124,12 +134,19 @@ impl InMemoryOAuthProvider {
 
 #[async_trait]
 impl McpOAuthProvider for InMemoryOAuthProvider {
-    async fn load_token(&self, server_url: &str) -> Option<String> {
+    async fn load_token(
+        &self,
+        server_url: &str,
+    ) -> Result<Option<String>, librefang_runtime::mcp_oauth::McpOAuthError> {
         let tokens = self.tokens.lock().await;
-        tokens.get(server_url).map(|t| t.access_token.clone())
+        Ok(tokens.get(server_url).map(|t| t.access_token.clone()))
     }
 
-    async fn store_tokens(&self, server_url: &str, tokens: OAuthTokens) -> Result<(), String> {
+    async fn store_tokens(
+        &self,
+        server_url: &str,
+        tokens: OAuthTokens,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
         self.tokens
             .lock()
             .await
@@ -137,7 +154,10 @@ impl McpOAuthProvider for InMemoryOAuthProvider {
         Ok(())
     }
 
-    async fn clear_tokens(&self, server_url: &str) -> Result<(), String> {
+    async fn clear_tokens(
+        &self,
+        server_url: &str,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
         self.tokens.lock().await.remove(server_url);
         Ok(())
     }
@@ -150,7 +170,7 @@ async fn test_provider_store_then_load() {
     let url = "https://mcp.notion.com/mcp";
 
     // Initially no token
-    assert!(provider.load_token(url).await.is_none());
+    assert!(provider.load_token(url).await.unwrap().is_none());
 
     // Store a token
     let tokens = OAuthTokens {
@@ -163,7 +183,10 @@ async fn test_provider_store_then_load() {
     provider.store_tokens(url, tokens).await.unwrap();
 
     // Should return the stored token
-    assert_eq!(provider.load_token(url).await.unwrap(), "test_access_token");
+    assert_eq!(
+        provider.load_token(url).await.unwrap().unwrap(),
+        "test_access_token"
+    );
 }
 
 /// Verify clear_tokens removes the token.
@@ -180,11 +203,11 @@ async fn test_provider_clear_removes_token() {
         scope: "".to_string(),
     };
     provider.store_tokens(url, tokens).await.unwrap();
-    assert!(provider.load_token(url).await.is_some());
+    assert!(provider.load_token(url).await.unwrap().is_some());
 
     provider.clear_tokens(url).await.unwrap();
     assert!(
-        provider.load_token(url).await.is_none(),
+        provider.load_token(url).await.unwrap().is_none(),
         "Token should be gone after clear"
     );
 }
@@ -216,8 +239,8 @@ async fn test_provider_clear_is_isolated() {
     // Clear only A
     provider.clear_tokens(url_a).await.unwrap();
 
-    assert!(provider.load_token(url_a).await.is_none());
-    assert_eq!(provider.load_token(url_b).await.unwrap(), "tok_b");
+    assert!(provider.load_token(url_a).await.unwrap().is_none());
+    assert_eq!(provider.load_token(url_b).await.unwrap().unwrap(), "tok_b");
 }
 
 /// Verify the expected state transition: store → clear → store should work.
@@ -240,11 +263,11 @@ async fn test_provider_reauthorize_after_clear() {
         .store_tokens(url, make_token("tok_v1"))
         .await
         .unwrap();
-    assert_eq!(provider.load_token(url).await.unwrap(), "tok_v1");
+    assert_eq!(provider.load_token(url).await.unwrap().unwrap(), "tok_v1");
 
     // Revoke
     provider.clear_tokens(url).await.unwrap();
-    assert!(provider.load_token(url).await.is_none());
+    assert!(provider.load_token(url).await.unwrap().is_none());
 
     // Re-authorize with new token
     provider
@@ -252,7 +275,7 @@ async fn test_provider_reauthorize_after_clear() {
         .await
         .unwrap();
     assert_eq!(
-        provider.load_token(url).await.unwrap(),
+        provider.load_token(url).await.unwrap().unwrap(),
         "tok_v2",
         "Re-authorization after revoke should work with the new token"
     );
