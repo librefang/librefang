@@ -91,6 +91,28 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
             .current_dir(&dashboard_dir)
             .status();
 
+        // Kick off a one-shot production build in the background so daemon-served
+        // assets at :4545 catch up to source. Vite HMR on :5173 is unaffected.
+        let build_dir = dashboard_dir.clone();
+        let build_pm = pm.to_string();
+        std::thread::spawn(move || {
+            println!("Building dashboard production bundle in background (using {build_pm})...");
+            let status = Command::new("sh")
+                .args(["-c", &format!("{build_pm} run build")])
+                .current_dir(&build_dir)
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("\x1b[32m✓ dashboard production build done — :4545 assets refreshed\x1b[0m");
+                }
+                Ok(s) => eprintln!(
+                    "\x1b[33m! dashboard production build exited with status {} — :4545 assets may be stale\x1b[0m",
+                    s.code().unwrap_or(-1)
+                ),
+                Err(e) => eprintln!("\x1b[33m! dashboard production build failed to start: {e}\x1b[0m"),
+            }
+        });
+
         println!("Starting dashboard dev server (using {pm})...");
         let child = Command::new("sh")
             .args(["-c", &format!("{pm} run dev")])
