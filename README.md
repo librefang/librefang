@@ -111,9 +111,9 @@ Build your own: define a `HAND.toml` + system prompt + `SKILL.md`. [Guide](https
 
 ```
 librefang-kernel            Orchestration, workflows, metering, RBAC, scheduler, budget
-librefang-runtime           Agent loop, 3 LLM drivers, 53 tools, WASM sandbox, MCP, A2A
+librefang-runtime           Agent loop, tool execution, WASM sandbox, MCP, A2A
 librefang-api               140+ REST/WS/SSE endpoints, OpenAI-compatible API, dashboard
-librefang-channels          40 messaging adapters with rate limiting, DM/group policies
+librefang-channels          45 messaging adapters with rate limiting, DM/group policies
 librefang-memory            SQLite persistence, vector embeddings, sessions, compaction
 librefang-types             Core types, taint tracking, Ed25519 signing, model catalog
 librefang-skills            60 bundled skills, SKILL.md parser, FangHub marketplace
