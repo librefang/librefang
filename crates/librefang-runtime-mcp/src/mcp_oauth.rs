@@ -531,7 +531,9 @@ pub async fn discover_oauth_metadata(
     www_authenticate: Option<&str>,
     config: Option<&McpOAuthConfig>,
 ) -> Result<OAuthMetadata, String> {
-    let client = reqwest::Client::builder()
+    // OAuth metadata discovery must respect [proxy] config (#3577) — corporate
+    // networks routinely require a proxy and OAuth was a primary failure case.
+    let client = librefang_http::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
