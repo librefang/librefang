@@ -1154,6 +1154,15 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
+    // 24h activity per channel — backs the design's "slack · 142 msgs/24h"
+    // sub-line. One grouped SQL pass for the whole page; falls back to an
+    // empty map if the query fails so the listing itself still loads.
+    let msgs_24h = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .channels_msgs_24h_bulk()
+        .unwrap_or_default();
     let mut channels = Vec::new();
     let mut configured_count = 0u32;
 
@@ -1197,6 +1206,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "fields": fields,
             "setup_steps": meta.setup_steps,
             "config_template": meta.config_template,
+            "msgs_24h": msgs_24h.get(meta.name).copied().unwrap_or(0),
         });
         if let Some(endpoint) = webhook_endpoint_url(meta.name) {
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);

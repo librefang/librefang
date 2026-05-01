@@ -17,7 +17,7 @@ import { Input } from "../components/ui/Input";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
-  Settings, Key, Clock, AlertCircle, CheckSquare, Square, Plus,
+  Settings, AlertCircle, CheckSquare, Square, Plus,
   MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
 
@@ -54,7 +54,7 @@ interface ChannelCardProps {
   onSelect: (name: string, checked: boolean) => void;
   onConfigure: (channel: Channel) => void;
   onViewDetails: (channel: Channel) => void;
-  t: (key: string) => string;
+  t: (key: string, opts?: { defaultValue?: string }) => string;
 }
 
 function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, onViewDetails, t }: ChannelCardProps) {
@@ -80,130 +80,57 @@ function ChannelCard({ channel: c, isSelected, viewMode, onSelect, onConfigure, 
     "aria-label": c.display_name || c.name,
   };
 
-  if (viewMode === "list") {
-    return (
-      <Card
-        hover
-        padding="sm"
-        className={`flex items-center gap-4 group transition-all focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:outline-none ${isSelected ? "ring-2 ring-brand" : ""}`}
-        {...cardA11y}
-      >
-        <button
-          onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
-          className="shrink-0 text-text-dim hover:text-brand transition-colors"
-        >
-          {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
-        </button>
-
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${c.configured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
-          {getChannelIcon(c.name)}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h3 className="font-black truncate">{c.display_name || c.name}</h3>
-            <Badge variant={c.configured ? "success" : "warning"} className="shrink-0">
-              {c.configured ? t("common.online") : t("common.setup")}
-            </Badge>
-          </div>
-          <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{c.category || "-"}</p>
-        </div>
-
-        <div className="flex items-center gap-2 text-xs text-text-dim shrink-0">
-          {c.difficulty && (
-            <span className="px-2 py-1 rounded bg-main/50">{c.difficulty}</span>
-          )}
-          {c.setup_time && (
-            <span className="flex items-center gap-1">
-              <Clock className="w-3 h-3" />
-              {c.setup_time}
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-            leftIcon={<Settings className="w-3 h-3" />}
-          >
-            {t("channels.config")}
-          </Button>
-          <ChevronRight className="w-4 h-4 text-text-dim/60" aria-hidden="true" />
-        </div>
-      </Card>
-    );
-  }
-
-  // Grid view
+  // Compact card matching the design canvas: 30×30 accent icon, mono
+  // name, mono `kind · N msgs/24h` sub-line, status dot. Both list and
+  // grid views use the same shape now since the page only shows
+  // configured channels (configure-flow chips moved to the picker
+  // drawer where they actually help selection).
+  const msgs = typeof c.msgs_24h === "number" ? c.msgs_24h : 0;
+  const kind = c.category || c.name;
   return (
     <Card
       hover
-      padding="none"
-      className={`flex flex-col overflow-hidden group transition-all focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:outline-none ${isSelected ? "ring-2 ring-brand" : ""}`}
+      padding="sm"
+      className={`flex items-center gap-3 group transition-all focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:outline-none ${isSelected ? "ring-2 ring-brand" : ""}`}
       {...cardA11y}
     >
-      <div className={`h-1.5 bg-linear-to-r ${c.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"}`} />
-      <div className="p-5 flex-1 flex flex-col">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <button
-              onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
-              className="shrink-0 text-text-dim hover:text-brand transition-colors"
-            >
-              {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
-            </button>
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl shadow-sm ${c.configured ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20" : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"}`}>
-              {getChannelIcon(c.name)}
-            </div>
-            <div className="min-w-0">
-              <h2 className={`text-base font-black truncate transition-colors ${c.configured ? "group-hover:text-success" : "group-hover:text-brand"}`}>{c.display_name || c.name}</h2>
-              <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{c.category || c.name}</p>
-            </div>
-          </div>
-          <Badge variant={c.configured ? "success" : "warning"}>
-            {c.configured ? t("common.online") : t("common.setup")}
-          </Badge>
+      <button
+        onClick={(e) => { e.stopPropagation(); onSelect(c.name, !isSelected); }}
+        className="shrink-0 text-text-dim hover:text-brand transition-colors"
+        aria-label={isSelected ? t("common.deselect", { defaultValue: "Deselect" }) : t("common.select", { defaultValue: "Select" })}
+      >
+        {isSelected ? <CheckSquare className="w-4 h-4 text-brand" /> : <Square className="w-4 h-4" />}
+      </button>
+      <div className="w-[30px] h-[30px] rounded-[7px] bg-accent/10 border border-accent/30 text-accent grid place-items-center shrink-0">
+        {getChannelIcon(c.name)}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="font-mono text-[13px] truncate text-text-main">
+          {c.display_name || c.name}
         </div>
-
-        {/* Description */}
-        <p className="text-xs text-text-dim line-clamp-2 italic mb-4 flex-1">{c.description || "-"}</p>
-
-        {/* Info tags */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          {c.difficulty && (
-            <span className="px-2 py-1 rounded-lg bg-main/50 text-[10px] font-bold text-text-dim">{c.difficulty}</span>
-          )}
-          {c.setup_time && (
-            <span className="flex items-center gap-1 px-2 py-1 rounded-lg bg-main/50 text-[10px] font-bold text-text-dim">
-              <Clock className="w-3 h-3" />
-              {c.setup_time}
-            </span>
-          )}
-          {c.has_token !== undefined && (
-            <span className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold ${c.has_token ? "bg-success/10 text-success" : "bg-warning/10 text-warning"}`}>
-              <Key className="w-3 h-3" />
-              {c.has_token ? t("channels.has_token") : t("channels.no_token")}
-            </span>
-          )}
-        </div>
-
-        {/* Actions */}
-        <div className="flex gap-2 mt-auto items-center">
-          <Button
-            variant="secondary"
-            size="sm"
-            className="flex-1"
-            onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
-            leftIcon={<Settings className="w-3 h-3" />}
-          >
-            {t("channels.config")}
-          </Button>
-          <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
+        <div className="font-mono text-[11px] text-text-dim mt-0.5 truncate">
+          {kind} · {msgs} {t("channels.msgs_24h", { defaultValue: "msgs/24h" })}
         </div>
       </div>
+      {/* Status dot — running when there's recent activity, idle otherwise.
+          Matches the design's `status: 'running' | 'idle'` field. */}
+      <Badge variant={msgs > 0 ? "success" : "default"} dot className="shrink-0">
+        <span className="sr-only">
+          {msgs > 0 ? t("common.running") : t("common.idle")}
+        </span>
+      </Badge>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onConfigure(c); }}
+        className="shrink-0 p-1.5 rounded-md text-text-dim hover:text-text-main hover:bg-main/40 transition-colors"
+        aria-label={t("channels.config")}
+        title={t("channels.config")}
+      >
+        <Settings className="w-3.5 h-3.5" />
+      </button>
+      {viewMode === "grid" && (
+        <ChevronRight className="w-4 h-4 text-text-dim/60 shrink-0" aria-hidden="true" />
+      )}
     </Card>
   );
 }
