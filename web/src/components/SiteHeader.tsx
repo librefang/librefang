@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
   ChevronDown, ExternalLink, Globe, Menu, Moon,
-  Search, Sun, X, Github,
+  Search, Sun, X,
 } from 'lucide-react'
+import { Github } from './BrandIcons'
 import { languages, translations } from '../i18n'
 import type { Translation } from '../i18n'
 import { useAppStore } from '../store'

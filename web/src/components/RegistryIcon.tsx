@@ -2,13 +2,14 @@ import {
   BarChart3, Bell, Bird, BookOpen, Bot, Box, Briefcase, Bug, Building,
   Calendar, Castle, CheckCircle, Circle, ClipboardList, Cloud, Command,
   Construction, Database, Diamond, Droplet, Feather, FileText, Film,
-  Flame, FlaskConical, Folder, Gamepad2, Github, Globe, HardHat, Heart,
+  Flame, FlaskConical, Folder, Gamepad2, Globe, HardHat, Heart,
   Hexagon, Leaf, Link, Lock, LockKeyhole, Mail, Megaphone, MessageCircle,
   Mic, Monitor, Package, Palette, Plug, Rocket, Ruler, SatelliteDish,
   Save, Search, Shield, Shuffle, Signal, Smartphone, Sparkles, Square,
-  Target, TrendingUp, Twitter, Users, Volume2,
+  Target, TrendingUp, Users, Volume2,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { Github, Twitter } from './BrandIcons'
 
 // Mapping of the kebab-case lucide names used in librefang-registry TOMLs
 // to the actual React components. Keep in sync with the set of icons

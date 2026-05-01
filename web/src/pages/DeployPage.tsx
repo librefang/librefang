@@ -3,8 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   ArrowLeft, Copy, Check, ExternalLink, ChevronDown,
   Zap, Server, Cloud, Container, Terminal, Monitor, Layers,
-  Loader2, CheckCircle2, XCircle, Github
+  Loader2, CheckCircle2, XCircle
 } from 'lucide-react'
+import { Github } from '../components/BrandIcons'
 import { cn } from '../lib/utils'
 
 // ---- Types ----

@@ -3,11 +3,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Terminal, Cpu, Shield, Zap, Network, ChevronRight, ExternalLink,
   Copy, Check, Box, Layers, Radio, Eye,
-  Scissors, Users, Globe, ArrowRight, Github, Monitor,
+  Scissors, Users, Globe, ArrowRight, Monitor,
   Star, GitFork, CircleDot, GitPullRequest, MessageSquare,
   Sparkles, History, RotateCcw, FileEdit, Trash2, FilePlus,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { Github } from './components/BrandIcons'
 import { useQuery } from '@tanstack/react-query'
 import { translations } from './i18n'
 import type { Translation } from './i18n'

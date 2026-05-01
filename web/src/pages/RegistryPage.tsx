@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, Github, ExternalLink, ArrowUpDown, Star, Download, TrendingUp } from 'lucide-react'
+import { ArrowRight, Search, Loader2, AlertCircle, Sparkles, RotateCcw, ExternalLink, ArrowUpDown, Star, Download, TrendingUp } from 'lucide-react'
+import { Github } from '../components/BrandIcons'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
 import { translations } from './../i18n'
