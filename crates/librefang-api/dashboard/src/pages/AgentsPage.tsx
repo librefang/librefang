@@ -57,6 +57,7 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentSessions,
   useAgentStats,
   useAgentTemplates,
   useExperimentMetrics,
@@ -493,18 +494,21 @@ export function AgentsPage() {
   // capped by pagination and missed agents whose sessions weren't in
   // the latest N rows.
   const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
-  // Pick the latest session for the selected agent so the Conversation
-  // tab can stream in its messages without a separate per-agent route.
+  // Use the per-agent session list endpoint so the Conversation tab
+  // never gets clipped by the global /api/sessions pagination cap
+  // (which previously made the tab render "No conversation yet" for
+  // agents whose sessions weren't in the latest N rows globally).
+  const agentSessionsQuery = useAgentSessions(detailAgent?.id ?? "");
   const latestSessionForAgent = useMemo(() => {
-    if (!detailAgent?.id) return undefined;
+    const list = agentSessionsQuery.data ?? [];
+    if (list.length === 0) return undefined;
     let best: { session_id: string; ts: number } | undefined;
-    for (const s of sessionsQuery.data ?? []) {
-      if (s.agent_id !== detailAgent.id) continue;
+    for (const s of list) {
       const ts = s.created_at ? Date.parse(s.created_at) : 0;
       if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
     }
     return best?.session_id;
-  }, [sessionsQuery.data, detailAgent?.id]);
+  }, [agentSessionsQuery.data]);
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
   // Row-level aggregate only — detail-panel KPI reads from the per-agent
   // /stats endpoint (useAgentStats) which doesn't suffer from the global
