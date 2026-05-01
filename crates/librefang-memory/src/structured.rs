@@ -379,31 +379,7 @@ impl StructuredStore {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-        // Subquery-scoped deletes must happen BEFORE prompt_experiments
-        // is cleared, otherwise the IN (SELECT ...) matches nothing.
-        for stmt in [
-            "DELETE FROM experiment_metrics \
-             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
-            "DELETE FROM experiment_variants \
-             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
-            "DELETE FROM prompt_experiments WHERE agent_id = ?1",
-            "DELETE FROM prompt_versions WHERE agent_id = ?1",
-            "DELETE FROM approval_audit WHERE agent_id = ?1",
-            "DELETE FROM audit_entries WHERE agent_id = ?1",
-            "DELETE FROM usage_events WHERE agent_id = ?1",
-            "DELETE FROM memories WHERE agent_id = ?1",
-            "DELETE FROM canonical_sessions WHERE agent_id = ?1",
-            "DELETE FROM kv_store WHERE agent_id = ?1",
-            "DELETE FROM task_queue WHERE agent_id = ?1",
-            "DELETE FROM entities WHERE agent_id = ?1",
-            "DELETE FROM relations WHERE agent_id = ?1",
-            "DELETE FROM events WHERE source_agent = ?1",
-            "DELETE FROM agents WHERE id = ?1",
-        ] {
-            tx.execute(stmt, rusqlite::params![id])
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        }
+        execute_structured_agent_deletes(&tx, &id)?;
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
@@ -628,6 +604,44 @@ impl StructuredStore {
         }
         Ok(agents)
     }
+}
+
+/// Run every structured-store DELETE for an agent inside the caller's
+/// transaction. The single canonical list of agent-scoped tables;
+/// [`StructuredStore::remove_agent`] and
+/// [`crate::substrate::MemorySubstrate::remove_agent`] both share this
+/// helper so a new agent-scoped table only has to be added in one place.
+///
+/// Subquery-scoped deletes (`experiment_metrics` / `experiment_variants`)
+/// must run before `prompt_experiments` is cleared — otherwise the
+/// `IN (SELECT ...)` matches nothing.
+pub(crate) fn execute_structured_agent_deletes(
+    tx: &rusqlite::Transaction<'_>,
+    agent_id: &str,
+) -> LibreFangResult<()> {
+    for stmt in [
+        "DELETE FROM experiment_metrics \
+         WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+        "DELETE FROM experiment_variants \
+         WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
+        "DELETE FROM prompt_experiments WHERE agent_id = ?1",
+        "DELETE FROM prompt_versions WHERE agent_id = ?1",
+        "DELETE FROM approval_audit WHERE agent_id = ?1",
+        "DELETE FROM audit_entries WHERE agent_id = ?1",
+        "DELETE FROM usage_events WHERE agent_id = ?1",
+        "DELETE FROM memories WHERE agent_id = ?1",
+        "DELETE FROM canonical_sessions WHERE agent_id = ?1",
+        "DELETE FROM kv_store WHERE agent_id = ?1",
+        "DELETE FROM task_queue WHERE agent_id = ?1",
+        "DELETE FROM entities WHERE agent_id = ?1",
+        "DELETE FROM relations WHERE agent_id = ?1",
+        "DELETE FROM events WHERE source_agent = ?1",
+        "DELETE FROM agents WHERE id = ?1",
+    ] {
+        tx.execute(stmt, rusqlite::params![agent_id])
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

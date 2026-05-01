@@ -549,16 +549,7 @@ impl SessionStore {
         let tx = conn
             .transaction()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        tx.execute(
-            "DELETE FROM sessions WHERE agent_id = ?1",
-            rusqlite::params![agent_id_str],
-        )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        tx.execute(
-            "DELETE FROM sessions_fts WHERE agent_id = ?1",
-            rusqlite::params![agent_id_str],
-        )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        execute_session_agent_deletes(&tx, &agent_id_str)?;
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
@@ -1352,6 +1343,32 @@ impl SessionStore {
 
         Ok(())
     }
+}
+
+/// Run every session-store DELETE for an agent inside the caller's
+/// transaction. Both `sessions` and `sessions_fts` MUST be cleared
+/// together — `search_sessions` reads from `sessions_fts` without
+/// joining `sessions`, so an orphan FTS row leaves the deleted agent's
+/// content searchable (a privacy regression, see #3501).
+///
+/// Shared by [`SessionStore::delete_agent_sessions`] and
+/// [`crate::substrate::MemorySubstrate::remove_agent`] so the cascade
+/// stays consistent across both entry points.
+pub(crate) fn execute_session_agent_deletes(
+    tx: &rusqlite::Transaction<'_>,
+    agent_id: &str,
+) -> LibreFangResult<()> {
+    tx.execute(
+        "DELETE FROM sessions WHERE agent_id = ?1",
+        rusqlite::params![agent_id],
+    )
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    tx.execute(
+        "DELETE FROM sessions_fts WHERE agent_id = ?1",
+        rusqlite::params![agent_id],
+    )
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]

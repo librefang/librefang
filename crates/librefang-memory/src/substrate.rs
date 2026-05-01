@@ -200,35 +200,11 @@ impl MemorySubstrate {
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-        // Order matters: subquery-scoped deletes must run BEFORE their
-        // parent rows are cleared, otherwise `IN (SELECT ...)` matches
-        // nothing. `agents` last so foreign-key-style references are
-        // resolved first.
-        for stmt in [
-            "DELETE FROM experiment_metrics \
-             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
-            "DELETE FROM experiment_variants \
-             WHERE experiment_id IN (SELECT id FROM prompt_experiments WHERE agent_id = ?1)",
-            "DELETE FROM prompt_experiments WHERE agent_id = ?1",
-            "DELETE FROM prompt_versions WHERE agent_id = ?1",
-            "DELETE FROM approval_audit WHERE agent_id = ?1",
-            "DELETE FROM audit_entries WHERE agent_id = ?1",
-            "DELETE FROM usage_events WHERE agent_id = ?1",
-            "DELETE FROM memories WHERE agent_id = ?1",
-            "DELETE FROM sessions WHERE agent_id = ?1",
-            "DELETE FROM sessions_fts WHERE agent_id = ?1",
-            "DELETE FROM canonical_sessions WHERE agent_id = ?1",
-            "DELETE FROM kv_store WHERE agent_id = ?1",
-            "DELETE FROM task_queue WHERE agent_id = ?1",
-            "DELETE FROM entities WHERE agent_id = ?1",
-            "DELETE FROM relations WHERE agent_id = ?1",
-            "DELETE FROM events WHERE source_agent = ?1",
-            "DELETE FROM agents WHERE id = ?1",
-        ] {
-            tx.execute(stmt, rusqlite::params![id])
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        }
+        // Both helpers share their canonical DELETE list with the
+        // standalone `*_agent` methods on the individual stores so a new
+        // agent-scoped table only has to be added in one place.
+        crate::session::execute_session_agent_deletes(&tx, &id)?;
+        crate::structured::execute_structured_agent_deletes(&tx, &id)?;
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())

@@ -98,6 +98,14 @@ impl ConsolidationEngine {
 
             // Track which IDs have been absorbed into another memory.
             let mut absorbed: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Per-keeper accumulated weight. Initialized lazily to the
+            // keeper's original confidence; each loser merged into a
+            // keeper grows its accumulated weight by the loser's
+            // confidence. This makes the running embedding a true
+            // confidence-weighted average over all losers absorbed by
+            // a keeper, not a chain of pairwise blends biased toward
+            // whichever loser arrived last.
+            let mut accum_weights: HashMap<String, f32> = HashMap::new();
 
             for i in 0..rows.len() {
                 if absorbed.contains(&rows[i].0) {
@@ -112,21 +120,24 @@ impl ConsolidationEngine {
                         // Keep rows[i] (sorted by confidence DESC). Merge:
                         //   - access_count: keeper + loser (sum)
                         //   - metadata: union, keeper wins on key conflict
-                        //   - embedding: confidence-weighted average when
-                        //                both present, else whichever exists
+                        //   - embedding: running confidence-weighted average
+                        //                across all losers absorbed so far
                         //   - confidence: max(keeper, loser)
                         // All writes wrapped in a single tx so we never
                         // soft-delete the loser without applying the merge.
                         let keeper_id = rows[i].0.clone();
                         let loser_id = rows[j].0.clone();
                         let merged_access = rows[i].4.saturating_add(rows[j].4);
-                        let merged_metadata =
-                            merge_metadata_json(&rows[i].3, &rows[j].3);
+                        let merged_metadata = merge_metadata_json(&rows[i].3, &rows[j].3);
+                        let keeper_w = *accum_weights
+                            .entry(keeper_id.clone())
+                            .or_insert(rows[i].2 as f32);
+                        let loser_w = rows[j].2 as f32;
                         let merged_embedding = merge_embeddings_weighted(
                             rows[i].5.as_deref(),
-                            rows[i].2 as f32,
+                            keeper_w,
                             rows[j].5.as_deref(),
-                            rows[j].2 as f32,
+                            loser_w,
                         );
                         let merged_confidence = rows[i].2.max(rows[j].2);
 
@@ -181,6 +192,14 @@ impl ConsolidationEngine {
                         if merged_embedding.is_some() {
                             rows[i].5 = merged_embedding;
                         }
+                        // Grow the keeper's accumulated weight by the
+                        // loser's confidence so the next merge against
+                        // this keeper averages over the full absorbed
+                        // history (not just the most recent pair).
+                        accum_weights
+                            .entry(keeper_id.clone())
+                            .and_modify(|w| *w += loser_w)
+                            .or_insert(keeper_w + loser_w);
                         absorbed.insert(loser_id);
                         memories_merged += 1;
 
@@ -204,18 +223,36 @@ impl ConsolidationEngine {
 
 /// Merge two metadata JSON strings; on key collision keeper wins.
 ///
-/// Falls back to keeper-only if either side is malformed JSON — better
-/// to preserve known state than crash consolidation.
+/// Both sides must parse as a JSON object for the union semantics to
+/// apply. If either side is a non-object value (array, string, number,
+/// malformed) we cannot safely union and instead preserve the keeper
+/// verbatim — silently coercing a non-object payload to `{}` would
+/// regress the pre-PR behavior of preserving the loser's metadata
+/// untouched (and outright destroy a non-object keeper's payload).
 fn merge_metadata_json(keeper: &str, loser: &str) -> String {
-    let keeper_map: HashMap<String, serde_json::Value> =
-        serde_json::from_str(keeper).unwrap_or_default();
-    let loser_map: HashMap<String, serde_json::Value> =
-        serde_json::from_str(loser).unwrap_or_default();
-    let mut merged = loser_map;
-    for (k, v) in keeper_map {
-        merged.insert(k, v); // keeper wins on conflict
+    let keeper_obj = serde_json::from_str::<serde_json::Value>(keeper)
+        .ok()
+        .and_then(|v| match v {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        });
+    let loser_obj = serde_json::from_str::<serde_json::Value>(loser)
+        .ok()
+        .and_then(|v| match v {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        });
+    match (keeper_obj, loser_obj) {
+        (Some(keeper_map), Some(loser_map)) => {
+            let mut merged = loser_map;
+            for (k, v) in keeper_map {
+                merged.insert(k, v); // keeper wins on conflict
+            }
+            serde_json::to_string(&merged).unwrap_or_else(|_| keeper.to_string())
+        }
+        // Either side is non-object → cannot safely union; keep keeper.
+        _ => keeper.to_string(),
     }
-    serde_json::to_string(&merged).unwrap_or_else(|_| keeper.to_string())
 }
 
 /// Decode embedding bytes (LE f32) into a `Vec<f32>`.
@@ -240,10 +277,17 @@ fn encode_embedding(v: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Merge two embeddings via confidence-weighted average.
+/// Merge two embeddings via weighted average.
+///
+/// `keeper_w` is the keeper's *running* accumulated weight (sum of every
+/// confidence it has absorbed so far, not just the original row's
+/// confidence). `loser_w` is the new loser's confidence. The caller is
+/// responsible for growing `keeper_w` after each successful merge so a
+/// keeper that absorbs N losers averages over the full history rather
+/// than re-blending pairwise from its original weight every time.
 ///
 /// - both present, same dim → weighted average bytes
-/// - both present, dim mismatch → keeper (the one with higher confidence)
+/// - both present, dim mismatch → keeper (the one with higher accum weight)
 /// - one present → that one
 /// - neither → `None`
 ///
@@ -580,8 +624,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let parsed: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&metadata).unwrap();
+        let parsed: HashMap<String, serde_json::Value> = serde_json::from_str(&metadata).unwrap();
         assert_eq!(
             parsed.get("loser_only").and_then(|v| v.as_str()),
             Some("value"),
@@ -613,6 +656,118 @@ mod tests {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         // Both axes should be > 0 since we blended (1,0,0,0) and (0,1,0,0).
-        assert!(emb[0] > 0.0 && emb[1] > 0.0, "weighted blend should mix both vectors");
+        assert!(
+            emb[0] > 0.0 && emb[1] > 0.0,
+            "weighted blend should mix both vectors"
+        );
+    }
+
+    /// Non-object metadata (JSON array, string, number, malformed) on
+    /// either side must NOT silently coerce the merged value to `{}`.
+    /// Pre-fix-fixup the code parsed both sides as a `HashMap<String, _>`
+    /// and `unwrap_or_default()`'d on failure — destroying whatever the
+    /// keeper had.
+    #[test]
+    fn test_merge_metadata_preserves_non_object_keeper() {
+        // Loser is a JSON array (legacy data). The keeper's object
+        // metadata must survive untouched, NOT be wiped to `{}`.
+        let merged = merge_metadata_json(r#"{"k":"v"}"#, r#"[1,2,3]"#);
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed["k"], "v", "keeper key must survive non-object loser");
+
+        // Keeper is a non-object value. We can't safely union, so the
+        // keeper must be returned verbatim — neither side's data lost.
+        let merged = merge_metadata_json(r#""legacy_string""#, r#"{"k":"v"}"#);
+        assert_eq!(
+            merged, r#""legacy_string""#,
+            "non-object keeper must be preserved verbatim"
+        );
+
+        // Malformed JSON on either side falls into the same branch.
+        let merged = merge_metadata_json(r#"{"k":"v"}"#, "not-json-at-all");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed["k"], "v");
+    }
+
+    /// #3537 follow-up: with three or more losers absorbed by the same
+    /// keeper, the resulting embedding must reflect a running confidence
+    /// -weighted average — not a chain of pairwise blends biased toward
+    /// whichever loser arrived last.
+    ///
+    /// We exploit a degenerate case to detect the bug deterministically:
+    /// keeper has confidence 0.9, two losers (each confidence 0.45) carry
+    /// IDENTICAL embeddings on a different axis from the keeper. With a
+    /// proper running average the keeper's accumulated weight after the
+    /// first merge becomes 0.9 + 0.45 = 1.35, so the second merge weighs
+    /// the keeper at 1.35 vs the loser at 0.45 — keeper still dominates.
+    /// Pre-fix the second merge would re-blend with the original 0.9
+    /// keeper weight, letting the loser axis grow disproportionately.
+    #[test]
+    fn test_merge_embeddings_running_weighted_average_across_multiple_losers() {
+        let engine = setup();
+        {
+            let conn = engine.conn.lock().unwrap();
+            // Keeper points along x with high confidence.
+            insert_memory_full(
+                &conn,
+                "k",
+                "the quick brown fox jumps over the lazy dog",
+                0.9,
+                "{}",
+                1,
+                Some(&[1.0_f32, 0.0]),
+            );
+            // Two losers with the same content + same embedding (along y).
+            // Lower confidence each.
+            insert_memory_full(
+                &conn,
+                "l1",
+                "the quick brown fox jumps over the lazy dog",
+                0.45,
+                "{}",
+                1,
+                Some(&[0.0_f32, 1.0]),
+            );
+            insert_memory_full(
+                &conn,
+                "l2",
+                "the quick brown fox jumps over the lazy dog",
+                0.45,
+                "{}",
+                1,
+                Some(&[0.0_f32, 1.0]),
+            );
+        }
+
+        let report = engine.consolidate().unwrap();
+        assert_eq!(report.memories_merged, 2);
+
+        let conn = engine.conn.lock().unwrap();
+        let emb_bytes: Vec<u8> = conn
+            .query_row("SELECT embedding FROM memories WHERE id = 'k'", [], |row| {
+                row.get::<_, Option<Vec<u8>>>(0)
+            })
+            .unwrap()
+            .expect("embedding present");
+        let emb: Vec<f32> = emb_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        // After running weighted average:
+        //   step 1: (1,0)*0.9 + (0,1)*0.45 / 1.35 = (0.667, 0.333)
+        //   step 2: (0.667, 0.333)*1.35 + (0,1)*0.45 / 1.8 = (0.5, 0.5)
+        // Pre-fix (pairwise re-blend with original 0.9 weight each step):
+        //   step 1: (0.667, 0.333)
+        //   step 2: re-blend with (0.9, 0.45) weights →
+        //     (0.667*0.9 + 0*0.45)/1.35 = 0.444 on x, similar drift on y
+        // The running-average path keeps x dominant; the buggy path lets
+        // x decay further. Assert x >= 0.45 — true under running avg
+        // (0.5), false under pre-fix pairwise (~0.44).
+        assert!(
+            emb[0] >= 0.45,
+            "running weighted average should keep keeper axis dominant; got {:?}",
+            emb
+        );
     }
 }

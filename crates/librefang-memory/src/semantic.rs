@@ -383,20 +383,23 @@ impl SemanticStore {
 
         // If we have a query embedding, re-rank by cosine similarity.
         // Non-comparable vectors (dim mismatch, zero magnitude) sort to
-        // the bottom (-1.0 sentinel) instead of being treated as 0.0,
-        // which would have ranked them above genuinely orthogonal hits.
+        // the bottom (NEG_INFINITY sentinel) instead of being treated as
+        // 0.0, which would have ranked them above genuinely orthogonal
+        // hits. We deliberately do NOT use -1.0: that is a valid cosine
+        // result for anti-similar vectors and would tie with the
+        // "non-comparable" bucket.
         if let Some(qe) = query_embedding {
             fragments.sort_by(|a, b| {
                 let sim_a = a
                     .embedding
                     .as_deref()
                     .and_then(|e| cosine_similarity(qe, e))
-                    .unwrap_or(-1.0);
+                    .unwrap_or(f32::NEG_INFINITY);
                 let sim_b = b
                     .embedding
                     .as_deref()
                     .and_then(|e| cosine_similarity(qe, e))
-                    .unwrap_or(-1.0);
+                    .unwrap_or(f32::NEG_INFINITY);
                 sim_b
                     .partial_cmp(&sim_a)
                     .unwrap_or(std::cmp::Ordering::Equal)
