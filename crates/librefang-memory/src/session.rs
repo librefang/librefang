@@ -1217,6 +1217,31 @@ impl SessionStore {
         query: &str,
         agent_id: Option<&AgentId>,
     ) -> LibreFangResult<Vec<SessionSearchResult>> {
+        // Backwards-compatible default: keep historical 50-row cap for
+        // callers that don't care about pagination (tests, internal kernel
+        // use). New paginated callers should use `search_sessions_paginated`.
+        self.search_sessions_paginated(query, agent_id, Some(50), 0)
+    }
+
+    /// Full-text search across session content using FTS5, with pagination.
+    ///
+    /// Pagination is pushed into SQLite via `LIMIT ?/OFFSET ?`, so unbounded
+    /// result sets never materialize in memory (#3691). Network-exposed
+    /// callers MUST pass `Some(n)` with a sane cap; `limit = None` is for
+    /// internal use only and produces an unbounded query (it is accepted
+    /// because some kernel paths already bound the result set by other
+    /// means, e.g. an agent_id partition known to be small).
+    ///
+    /// Results are ordered by FTS rank; `session_id` is used as a stable
+    /// tiebreaker so paginated windows do not duplicate or skip rows when
+    /// rank ties exist.
+    pub fn search_sessions_paginated(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<SessionSearchResult>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -1238,26 +1263,40 @@ impl SessionStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
+        // SQLite treats LIMIT < 0 as "no limit" — encode `None` that way so
+        // the query plan stays a single prepared statement either way.
+        // Clamp `usize` defensively: a value that would overflow i64 must
+        // saturate to i64::MAX (still bounded), never wrap to negative
+        // and silently become "no limit".
+        let limit_param: i64 = match limit {
+            Some(n) => i64::try_from(n).unwrap_or(i64::MAX),
+            None => -1,
+        };
+        let offset_param: i64 = i64::try_from(offset).unwrap_or(i64::MAX);
+
         let results = if let Some(aid) = agent_id {
             let mut stmt = conn
                 .prepare(
                     "SELECT session_id, agent_id, snippet(sessions_fts, 2, '<b>', '</b>', '...', 32), rank
                      FROM sessions_fts
                      WHERE content MATCH ?1 AND agent_id = ?2
-                     ORDER BY rank
-                     LIMIT 50",
+                     ORDER BY rank, session_id
+                     LIMIT ?3 OFFSET ?4",
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
-                .query_map(rusqlite::params![sanitized, aid.0.to_string()], |row| {
-                    Ok(SessionSearchResult {
-                        session_id: row.get(0)?,
-                        agent_id: row.get(1)?,
-                        snippet: row.get(2)?,
-                        rank: row.get(3)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![sanitized, aid.0.to_string(), limit_param, offset_param],
+                    |row| {
+                        Ok(SessionSearchResult {
+                            session_id: row.get(0)?,
+                            agent_id: row.get(1)?,
+                            snippet: row.get(2)?,
+                            rank: row.get(3)?,
+                        })
+                    },
+                )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()
@@ -1267,20 +1306,23 @@ impl SessionStore {
                     "SELECT session_id, agent_id, snippet(sessions_fts, 2, '<b>', '</b>', '...', 32), rank
                      FROM sessions_fts
                      WHERE content MATCH ?1
-                     ORDER BY rank
-                     LIMIT 50",
+                     ORDER BY rank, session_id
+                     LIMIT ?2 OFFSET ?3",
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
-                .query_map(rusqlite::params![sanitized], |row| {
-                    Ok(SessionSearchResult {
-                        session_id: row.get(0)?,
-                        agent_id: row.get(1)?,
-                        snippet: row.get(2)?,
-                        rank: row.get(3)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![sanitized, limit_param, offset_param],
+                    |row| {
+                        Ok(SessionSearchResult {
+                            session_id: row.get(0)?,
+                            agent_id: row.get(1)?,
+                            snippet: row.get(2)?,
+                            rank: row.get(3)?,
+                        })
+                    },
+                )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()
@@ -2145,6 +2187,87 @@ mod tests {
         // Empty query should return nothing
         let results = store.search_sessions("", None).unwrap();
         assert!(results.is_empty());
+    }
+
+    /// search_sessions_paginated must:
+    ///   - clamp result count to the requested LIMIT,
+    ///   - skip exactly OFFSET rows,
+    ///   - produce a contiguous, non-overlapping window across pages, and
+    ///   - return all rows (>50) when limit = None.
+    /// These guarantees are what makes #3691's network-side cap meaningful;
+    /// without them the SQL bind indices could silently drift and the
+    /// paginated route would still pass the existing FTS smoke test.
+    #[test]
+    fn test_fts_search_sessions_paginated() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Insert 75 sessions so we exceed the legacy 50-row hard cap and
+        // can prove an unbounded (limit=None) call returns all of them.
+        const TOTAL: usize = 75;
+        for i in 0..TOTAL {
+            let mut session = store.create_session(agent_id).unwrap();
+            session
+                .messages
+                .push(Message::user(&format!("needle session number {i}")));
+            store.save_session(&session).unwrap();
+        }
+
+        // Sanity: legacy 2-arg wrapper still caps at 50.
+        let legacy = store.search_sessions("needle", Some(&agent_id)).unwrap();
+        assert_eq!(legacy.len(), 50, "legacy wrapper must keep its 50-row cap");
+
+        // limit = None returns every matching row (no LIMIT clause).
+        let unbounded = store
+            .search_sessions_paginated("needle", Some(&agent_id), None, 0)
+            .unwrap();
+        assert_eq!(
+            unbounded.len(),
+            TOTAL,
+            "limit=None must not be silently capped"
+        );
+
+        // limit = N returns exactly N rows.
+        let page = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(10), 0)
+            .unwrap();
+        assert_eq!(page.len(), 10, "explicit limit must be honored");
+
+        // offset skips the requested number of rows: page1 + page2 must equal
+        // the first 20 rows of an unpaginated query, with no overlap.
+        let page1 = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(10), 0)
+            .unwrap();
+        let page2 = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(10), 10)
+            .unwrap();
+        let twenty = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(20), 0)
+            .unwrap();
+
+        let stitched: Vec<&String> = page1
+            .iter()
+            .chain(page2.iter())
+            .map(|r| &r.session_id)
+            .collect();
+        let reference: Vec<&String> = twenty.iter().map(|r| &r.session_id).collect();
+        assert_eq!(
+            stitched, reference,
+            "offset must produce contiguous, non-overlapping windows"
+        );
+
+        // offset past the end returns empty, never errors.
+        let past_end = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(10), 10_000)
+            .unwrap();
+        assert!(past_end.is_empty());
+
+        // limit = 0 returns empty (it's a valid SQL LIMIT 0, not a "no cap"
+        // sentinel — only None / negative produces unbounded).
+        let zero = store
+            .search_sessions_paginated("needle", Some(&agent_id), Some(0), 0)
+            .unwrap();
+        assert!(zero.is_empty(), "LIMIT 0 must return zero rows");
     }
 
     #[test]
