@@ -1027,28 +1027,77 @@ function CanvasPageInner() {
     setNodes(nds => nds.map(n => ({ ...n, selected: true })));
   }, [setNodes]);
 
-  // Auto layout (simple vertical arrangement)
+  // Auto layout — horizontal pipeline grouped by topological depth.
+  // Roots (no incoming edges) sit in column 0, each successor in
+  // max(predecessor depth) + 1. Within a column, nodes stack vertically
+  // by their original order. Matches the L→R flow direction implied by
+  // the new side handles + bezier edges.
   const autoLayout = useCallback(() => {
     pushHistory();
     const agentNodes = nodes.filter(n => n.type === "custom" && !n.hidden);
     const groupNodes = nodes.filter(n => n.type === "groupNode");
-    const x = 100;
-    let y = 80;
-    const gap = 100;
-    const positioned = new Map<string, { x: number; y: number }>();
-    agentNodes.forEach(n => {
-      positioned.set(n.id, { x, y });
-      y += (n.measured?.height || 80) + gap;
+    if (agentNodes.length === 0) return;
+
+    const idSet = new Set(agentNodes.map(n => n.id));
+    const incoming = new Map<string, number>();
+    const outgoing = new Map<string, string[]>();
+    agentNodes.forEach(n => { incoming.set(n.id, 0); outgoing.set(n.id, []); });
+    edges.forEach(e => {
+      if (idSet.has(e.source) && idSet.has(e.target)) {
+        outgoing.get(e.source)!.push(e.target);
+        incoming.set(e.target, (incoming.get(e.target) ?? 0) + 1);
+      }
     });
+
+    // Longest-path depth from any root. Re-enqueue successors so their
+    // depth updates after a deeper predecessor is discovered (cheap for
+    // workflow scale; ~dozens of nodes).
+    const depth = new Map<string, number>();
+    const queue: string[] = [];
+    agentNodes.forEach(n => {
+      if ((incoming.get(n.id) ?? 0) === 0) { depth.set(n.id, 0); queue.push(n.id); }
+    });
+    while (queue.length) {
+      const id = queue.shift()!;
+      const d = depth.get(id) ?? 0;
+      (outgoing.get(id) ?? []).forEach(next => {
+        const cur = depth.get(next) ?? -1;
+        if (d + 1 > cur) { depth.set(next, d + 1); queue.push(next); }
+      });
+    }
+    // Cycle / disconnected fallback: anything still unassigned goes to col 0.
+    agentNodes.forEach(n => { if (!depth.has(n.id)) depth.set(n.id, 0); });
+
+    // Bucket by column, preserving the user's original vertical order
+    // within a column so a rerun feels stable.
+    const cols = new Map<number, string[]>();
+    agentNodes
+      .slice()
+      .sort((a, b) => a.position.y - b.position.y)
+      .forEach(n => {
+        const d = depth.get(n.id) ?? 0;
+        if (!cols.has(d)) cols.set(d, []);
+        cols.get(d)!.push(n.id);
+      });
+
+    const COL_W = 260; // CustomNode max-w 220 + 40 horizontal gap
+    const ROW_H = 130; // typical node height ~100 + 30 vertical gap
+    const X0 = 80, Y0 = 80;
+    const positioned = new Map<string, { x: number; y: number }>();
+    cols.forEach((ids, col) => {
+      ids.forEach((id, i) => {
+        positioned.set(id, { x: X0 + col * COL_W, y: Y0 + i * ROW_H });
+      });
+    });
+
     setNodes(nds => nds.map(n => {
       const pos = positioned.get(n.id);
       return pos ? { ...n, position: pos } : n;
     }));
-    // Recalculate group bounds
     groupNodes.forEach(g => {
       setNodes(nds => recalcGroupBounds(nds, g.id));
     });
-  }, [nodes, pushHistory, setNodes, recalcGroupBounds]);
+  }, [nodes, edges, pushHistory, setNodes, recalcGroupBounds]);
 
   // Toast notification
   const showToast = useCallback((msg: string) => {
@@ -1369,10 +1418,14 @@ function CanvasPageInner() {
       wfEdges = layout.edges || [];
     } else {
       const steps: LoadedWorkflowStep[] = Array.isArray(detail.steps) ? (detail.steps as LoadedWorkflowStep[]) : [];
+      // Workflow has no saved layout → lay out steps as a horizontal
+      // chain. autoLayout() can refine this using DAG depth once edges
+      // exist, but the linear default already matches the new flow
+      // direction.
       wfNodes = steps.map((s, idx) => ({
         id: `node-${idx}`,
         type: "custom",
-        position: { x: 50, y: idx * 80 },
+        position: { x: 80 + idx * 260, y: 100 },
         data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent", agentId: s.agent?.id, agentName: s.agent?.name },
       }));
       const hasDag = steps.some((step) => Array.isArray(step.depends_on) && step.depends_on.length > 0);
@@ -1499,18 +1552,20 @@ function CanvasPageInner() {
   const addNode = useCallback((type: string) => {
     const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
     const defaultMode = NODE_MODE_MAP[type];
-    // Use functional update to read latest nodes, avoiding stale closures
+    // Use functional update to read latest nodes, avoiding stale closures.
+    // Nodes added from the palette extend the pipeline to the right —
+    // matches the horizontal flow of side handles + bezier edges.
     setNodes(nds => {
       const existing = nds.filter(n => n.type === "custom" && !n.hidden);
-      let maxY = 0;
+      let maxX = 0;
       for (const n of existing) {
-        const bottom = n.position.y + (n.measured?.height || 80);
-        if (bottom > maxY) maxY = bottom;
+        const right = n.position.x + (n.measured?.width || 200);
+        if (right > maxX) maxX = right;
       }
       const newNode: Node = {
         id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         type: "custom",
-        position: { x: 100, y: existing.length === 0 ? 80 : maxY + 40 },
+        position: { x: existing.length === 0 ? 80 : maxX + 40, y: 100 },
         data: {
           label: t(config.labelKey),
           description: t(config.descKey),

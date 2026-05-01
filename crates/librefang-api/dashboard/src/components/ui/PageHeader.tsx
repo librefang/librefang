@@ -118,18 +118,22 @@ export function PageHeader({ icon, title, subtitle, badge, actions, isFetching, 
   return (
     <>
       <header className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
           <div className="p-1.5 rounded-lg bg-brand/10 text-brand shrink-0">{icon}</div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-extrabold tracking-tight">{title}</h1>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 min-w-0">
+              {/* truncate + min-w-0 prevents per-character CJK wrap when a
+                  push-drawer squeezes the main column (#mcp drawer). */}
+              <h1 className="text-base font-extrabold tracking-tight truncate min-w-0">
+                {title}
+              </h1>
               {badge && (
-                <span className="inline-flex items-center rounded-md border border-border-subtle bg-main/40 px-1.5 py-0.5 text-[10px] font-semibold text-text-dim">
+                <span className="inline-flex items-center rounded-md border border-border-subtle bg-main/40 px-1.5 py-0.5 text-[10px] font-semibold text-text-dim shrink-0">
                   {badge}
                 </span>
               )}
             </div>
-            {subtitle && <p className="text-[11px] text-text-dim hidden sm:block">{subtitle}</p>}
+            {subtitle && <p className="text-[11px] text-text-dim hidden sm:block truncate">{subtitle}</p>}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
