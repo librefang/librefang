@@ -2704,6 +2704,7 @@ pub async fn list_agent_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -2715,6 +2716,25 @@ pub async fn list_agent_sessions(
             )
         }
     };
+    // Owner-scoping: non-admins can only list sessions for agents they
+    // authored. Mirrors the filter on `list_agents` so per-agent
+    // session metadata (cost, message count) doesn't leak.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin {
+            let entry = state.kernel.agent_registry().get(agent_id);
+            let owned = entry
+                .as_ref()
+                .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+                .unwrap_or(false);
+            if !owned {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+    }
     match state.kernel.list_agent_sessions(agent_id) {
         Ok(sessions) => (
             StatusCode::OK,

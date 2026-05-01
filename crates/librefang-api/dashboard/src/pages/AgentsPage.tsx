@@ -1214,32 +1214,25 @@ export function AgentsPage() {
       prompt_template?: string;
       enabled?: boolean;
     }>;
-    const embeddedTriggers: AgentTriggerSummary[] = Array.isArray(
-      (agent as AgentView).triggers,
-    )
-      ? ((agent as AgentView).triggers as AgentTriggerSummary[])
-      : [];
-    const triggers: AgentTriggerSummary[] = liveTriggers.length > 0
-      ? liveTriggers.map((t) => {
-          // Render the trigger pattern compactly. The full TriggerPattern
-          // shape is rich (event filters / regex / etc.); for the panel
-          // we only need a one-liner.
-          const patternStr = (() => {
-            if (!t.pattern) return undefined;
-            if (typeof t.pattern === "string") return t.pattern;
-            try {
-              return JSON.stringify(t.pattern);
-            } catch {
-              return undefined;
-            }
-          })();
-          return {
-            event_pattern: patternStr,
-            name: t.id,
-            description: t.prompt_template,
-          };
-        })
-      : embeddedTriggers;
+    const triggers: AgentTriggerSummary[] = liveTriggers.map((tr) => {
+      // Render the trigger pattern compactly. The full TriggerPattern shape
+      // is rich (event filters / regex / etc.); the detail panel only
+      // needs a one-liner — full pattern lives on the dedicated page.
+      const patternStr = (() => {
+        if (!tr.pattern) return undefined;
+        if (typeof tr.pattern === "string") return tr.pattern;
+        try {
+          return JSON.stringify(tr.pattern);
+        } catch {
+          return undefined;
+        }
+      })();
+      return {
+        event_pattern: patternStr,
+        name: tr.id,
+        description: tr.prompt_template,
+      };
+    });
     // Synthetic "last 14 runs" — backend doesn't expose per-fire history
     // through a single agent-scoped endpoint yet, so we visualise an
     // agent-id-seeded waveform as a placeholder. Wire up real run
