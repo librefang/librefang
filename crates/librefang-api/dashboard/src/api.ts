@@ -141,6 +141,11 @@ export interface ChannelItem {
   fields?: ChannelField[];
   /** Webhook endpoint path on the shared server (e.g. "/channels/feishu/webhook"). */
   webhook_endpoint?: string;
+  /** Messages exchanged through this channel in the last 24 hours.
+   *  Computed via a single grouped query on `usage_events` keyed by
+   *  the `channel` column. Surfaced as the `kind · N msgs/24h`
+   *  meta-line on the Channels page card. */
+  msgs_24h?: number;
 }
 
 export interface SkillItem {

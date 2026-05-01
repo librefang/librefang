@@ -287,7 +287,7 @@ export function WorkflowsPage() {
     const nodes = steps.map((s, idx) => ({
       id: `node-${idx}`,
       type: "custom",
-      position: { x: 50, y: idx * 160 },
+      position: { x: 50 + idx * 260, y: 100 },
       data: { label: s.name, prompt: s.prompt_template || "", nodeType: "agent" },
     }));
     const edges: CanvasTemplate["edges"] = [];
