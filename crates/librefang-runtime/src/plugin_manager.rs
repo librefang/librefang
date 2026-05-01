@@ -691,7 +691,15 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
     let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
 
     let info = match source {
-        PluginSource::Local { path } => install_from_local(path, &plugins),
+        PluginSource::Local { path } => {
+            // install_from_local walks/copies a directory tree synchronously;
+            // run it on the blocking pool so we don't stall the async runtime.
+            let path = path.clone();
+            let plugins = plugins.clone();
+            tokio::task::spawn_blocking(move || install_from_local(&path, &plugins))
+                .await
+                .map_err(|e| format!("install_from_local task panicked: {e}"))?
+        }
         PluginSource::Registry { name, github_repo } => {
             let repo = github_repo
                 .as_deref()
@@ -704,7 +712,9 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
     }?;
 
     // Check that all declared plugin dependencies are already installed.
-    let raw_toml = std::fs::read_to_string(info.path.join("plugin.toml")).unwrap_or_default();
+    let raw_toml = tokio::fs::read_to_string(info.path.join("plugin.toml"))
+        .await
+        .unwrap_or_default();
     let needs = extract_needs(&raw_toml);
     if let Err(e) = check_plugin_needs(&needs) {
         // Don't remove the partially-installed plugin — let the user decide.
@@ -890,7 +900,7 @@ async fn install_from_registry(
             .unwrap_or_default();
         let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
         if is_placeholder {
-            let _ = std::fs::remove_dir_all(&target_dir);
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
             return Err(
                 "Plugin registry public key is not configured — refusing to install plugin \
                  without signature verification. \
@@ -922,10 +932,11 @@ async fn install_from_registry(
     // hashes (e.g. during development) can install via Local or Git sources.
     {
         let manifest_path = target_dir.join("plugin.toml");
-        match std::fs::read_to_string(&manifest_path)
+        let manifest_opt = tokio::fs::read_to_string(&manifest_path)
+            .await
             .ok()
-            .and_then(|s| toml::from_str::<PluginManifest>(&s).ok())
-        {
+            .and_then(|s| toml::from_str::<PluginManifest>(&s).ok());
+        match manifest_opt {
             Some(manifest) => {
                 // Collect every hook script path declared in [hooks].
                 let declared_hooks: Vec<&str> = [
@@ -952,7 +963,7 @@ async fn install_from_registry(
                         // Hard error: registry plugins must declare integrity hashes for
                         // every hook script.  Without them, the hook content is unverified
                         // and could have been substituted after the manifest was signed.
-                        let _ = std::fs::remove_dir_all(&target_dir);
+                        let _ = tokio::fs::remove_dir_all(&target_dir).await;
                         return Err(format!(
                             "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
                              Registry-installed plugins must provide SHA-256 checksums for every \
@@ -968,7 +979,7 @@ async fn install_from_registry(
             }
             None => {
                 // Manifest could not be re-read after install — treat as integrity failure.
-                let _ = std::fs::remove_dir_all(&target_dir);
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
                 return Err(format!(
                     "Plugin '{name}': failed to re-read plugin.toml after install \
                      — cannot verify hook script integrity"
@@ -1230,8 +1241,12 @@ async fn install_from_git(
         return Err(format!("git clone failed: {stderr}"));
     }
 
-    // Validate the cloned repo has a plugin.toml with a safe name
-    let manifest = load_plugin_manifest(temp_dir.path())?;
+    // Validate the cloned repo has a plugin.toml with a safe name.
+    // load_plugin_manifest reads files synchronously; run on the blocking pool.
+    let manifest_dir = temp_dir.path().to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || load_plugin_manifest(&manifest_dir))
+        .await
+        .map_err(|e| format!("load_plugin_manifest task failed: {e}"))??;
     validate_plugin_name(&manifest.name)?;
     let target_dir = plugins_dir.join(&manifest.name);
 
@@ -1242,8 +1257,14 @@ async fn install_from_git(
         ));
     }
 
-    // Move (rename) from temp to plugins dir
-    copy_dir_recursive(temp_dir.path(), &target_dir)
+    // Move (rename) from temp to plugins dir.
+    // copy_dir_recursive walks/copies a directory tree synchronously; run on the
+    // blocking pool so we don't stall the async runtime.
+    let copy_src = temp_dir.path().to_path_buf();
+    let copy_dst = target_dir.clone();
+    tokio::task::spawn_blocking(move || copy_dir_recursive(&copy_src, &copy_dst))
+        .await
+        .map_err(|e| format!("copy_dir_recursive task failed: {e}"))?
         .map_err(|e| format!("Failed to install plugin: {e}"))?;
 
     // Remove .git directory to save space
@@ -2995,7 +3016,8 @@ async fn download_github_entry(
                 ));
             }
 
-            std::fs::write(&target_path, &content)
+            tokio::fs::write(&target_path, &content)
+                .await
                 .map_err(|e| format!("Failed to write {}: {e}", target_path.display()))?;
 
             debug!(
@@ -3005,7 +3027,8 @@ async fn download_github_entry(
             );
         }
         "dir" => {
-            std::fs::create_dir_all(&target_path)
+            tokio::fs::create_dir_all(&target_path)
+                .await
                 .map_err(|e| format!("Failed to create dir: {e}"))?;
 
             // Recursively list and download subdirectory
@@ -3367,7 +3390,8 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
     let was_disabled = plugin_dir.join(".disabled").exists();
 
     // Remove old version
-    std::fs::remove_dir_all(&plugin_dir)
+    tokio::fs::remove_dir_all(&plugin_dir)
+        .await
         .map_err(|e| format!("Failed to remove old version of '{name}': {e}"))?;
 
     // Reinstall
@@ -3386,7 +3410,7 @@ pub async fn upgrade_plugin(name: &str, source: &PluginSource) -> Result<PluginI
     // Restore disabled state if it was set
     if was_disabled {
         let marker = plugins_dir().join(name).join(".disabled");
-        let _ = std::fs::write(&marker, "");
+        let _ = tokio::fs::write(&marker, "").await;
     }
 
     info!(plugin = name, "Plugin upgraded");
@@ -3998,7 +4022,13 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
         return Err(format!("Plugin '{name}' is not installed"));
     }
 
-    let manifest = load_plugin_manifest_raw(&plugin_dir)?;
+    // load_plugin_manifest_raw reads plugin.toml synchronously; run on the
+    // blocking pool so we don't stall the async runtime.
+    let manifest_dir = plugin_dir.clone();
+    let manifest =
+        tokio::task::spawn_blocking(move || load_plugin_manifest_raw(&manifest_dir))
+            .await
+            .map_err(|e| format!("load_plugin_manifest_raw task failed: {e}"))??;
     let runtime = manifest
         .hooks
         .runtime

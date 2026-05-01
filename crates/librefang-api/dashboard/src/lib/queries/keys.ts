@@ -233,6 +233,7 @@ export const goalKeys = {
 export const networkKeys = {
   all: ["network"] as const,
   status: () => [...networkKeys.all, "status"] as const,
+  trustedPeers: () => [...networkKeys.all, "trusted-peers"] as const,
 };
 
 export const peerKeys = {

@@ -559,7 +559,7 @@ Yes. Agents can use the `agent_send`, `agent_spawn`, `agent_find`, and `agent_li
 
 ### Is my data sent to the cloud?
 
-Only LLM API calls go to the provider's servers. All agent data, memory, sessions, and configuration are stored locally in SQLite (`~/.librefang/data/librefang.db`). The OFP wire protocol uses HMAC-SHA256 mutual authentication for P2P communication.
+Only LLM API calls go to the provider's servers. All agent data, memory, sessions, and configuration are stored locally in SQLite (`~/.librefang/data/librefang.db`). The OFP wire protocol authenticates P2P traffic with two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (`peer_keypair.json` + `trusted_peers.json` in the data dir). See `/api/network/status` for the local fingerprint.
 
 ### How do I back up my data?
 
