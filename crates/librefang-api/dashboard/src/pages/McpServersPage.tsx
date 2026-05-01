@@ -201,17 +201,28 @@ function getTransportDetail(server: McpServerConfigured): string {
   return server.transport.url ?? "\u2014";
 }
 
-// Kernel-side names tools as `mcp_<server>_<tool>` and prepends
-// `[MCP:<server>] ` to descriptions so the LLM can disambiguate
+// Kernel-side names tools as `mcp_<normalized-server>_<normalized-tool>` and
+// prepends `[MCP:<server>] ` to descriptions so the LLM can disambiguate
 // across servers. Both prefixes are noise once we already show the
 // server's name as the page header \u2014 strip them for display, keep
 // the full names in `title=` for copy/inspect.
+//
+// `normalize_name` in crates/librefang-runtime-mcp/src/lib.rs does
+// `to_lowercase().replace('-', "_")`, so a server named `test-filesystem`
+// gets tool prefix `mcp_test_filesystem_`. Mirror that here or strip
+// silently fails for hyphenated names.
+function normalizeMcpName(name: string): string {
+  return name.toLowerCase().replace(/-/g, "_");
+}
+
 function stripMcpToolPrefix(toolName: string, serverName: string): string {
-  const prefix = `mcp_${serverName}_`;
+  const prefix = `mcp_${normalizeMcpName(serverName)}_`;
   return toolName.startsWith(prefix) ? toolName.slice(prefix.length) : toolName;
 }
 
 function stripMcpDescPrefix(description: string, serverName: string): string {
+  // The description prefix uses the raw server name, not the normalized one
+  // (kernel writes it as `[MCP:{server.name}]`). Match that exactly.
   const prefix = `[MCP:${serverName}] `;
   return description.startsWith(prefix) ? description.slice(prefix.length) : description;
 }

@@ -98,6 +98,8 @@ impl KernelConfig {
             "max_request_body_bytes",
             "terminal",
             "task_board",
+            "auto_dream",
+            "max_history_messages",
         ]
     }
 
@@ -137,11 +139,20 @@ impl KernelConfig {
             (
                 "memory",
                 &[
-                    "decay_rate",
-                    "consolidation_threshold",
-                    "embedding_provider",
+                    "sqlite_path",
                     "embedding_model",
+                    "consolidation_threshold",
+                    "decay_rate",
+                    "embedding_provider",
                     "embedding_api_key_env",
+                    "embedding_dimensions",
+                    "consolidation_interval_hours",
+                    "fts_only",
+                    "decay",
+                    "chunking",
+                    "vector_backend",
+                    "vector_store_url",
+                    "soft_delete_retention_days",
                 ],
             ),
             (
@@ -150,10 +161,14 @@ impl KernelConfig {
                     "enabled",
                     "auto_memorize",
                     "auto_retrieve",
-                    "extraction_model",
                     "max_retrieve",
+                    "extraction_threshold",
+                    "extraction_model",
+                    "extract_categories",
                     "session_ttl_hours",
+                    "duplicate_threshold",
                     "confidence_decay_rate",
+                    "max_memories_per_agent",
                 ],
             ),
             (
@@ -181,6 +196,7 @@ impl KernelConfig {
             (
                 "triggers",
                 &[
+                    "cooldown_secs",
                     "max_per_event",
                     "max_depth",
                     "max_workflow_secs",
