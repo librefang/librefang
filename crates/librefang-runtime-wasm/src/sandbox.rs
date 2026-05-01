@@ -1058,6 +1058,46 @@ mod tests {
         );
     }
 
+    /// Regression for #3532: when remaining fuel is below the per-method
+    /// reservation, the dispatch layer must reject the host call BEFORE
+    /// invoking the host function — otherwise the denial-of-wallet guard
+    /// is decorative. We pick `agent_send` (cost 100K) and a fuel limit
+    /// well below that so any remaining fuel after proxy startup still
+    /// can't cover the reservation, then assert the guest sees a
+    /// `host fuel exhausted` error rather than the call going through.
+    #[tokio::test]
+    async fn test_host_call_fuel_exhausted_blocks_dispatch() {
+        let sandbox = WasmSandbox::new().unwrap();
+        let input = serde_json::json!({
+            "method": "agent_send",
+            "params": {"target": "anyone", "message": "hi"}
+        });
+        // 50_000 < host_call_fuel_cost("agent_send") = 100_000, so even
+        // if proxy startup consumed zero fuel the reservation can't be
+        // met and the guard must fire before dispatch.
+        let config = SandboxConfig {
+            fuel_limit: 50_000,
+            ..Default::default()
+        };
+
+        let result = sandbox
+            .execute(
+                HOST_CALL_PROXY_WAT.as_bytes(),
+                input,
+                config,
+                None,
+                "test-agent",
+            )
+            .await
+            .unwrap();
+
+        let err_msg = result.output["error"].as_str().unwrap_or("");
+        assert!(
+            err_msg.contains("host fuel exhausted"),
+            "expected denial-of-wallet guard to fire, got: {err_msg}"
+        );
+    }
+
     #[tokio::test]
     async fn test_host_call_unknown_method() {
         let sandbox = WasmSandbox::new().unwrap();
