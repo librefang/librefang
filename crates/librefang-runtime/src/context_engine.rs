@@ -617,6 +617,8 @@ impl ContextEngine for DefaultContextEngine {
             messages: messages.to_vec(),
             context_window_tokens: context_window_tokens as u64,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         let mut compaction_config = self.compaction_config.clone();
@@ -5155,6 +5157,8 @@ ingest = "hooks/ingest.py"
             messages: vec![Message::user("Hello"), Message::assistant("Hi there")],
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         // Manually call compact once (mirrors what agent_loop does when

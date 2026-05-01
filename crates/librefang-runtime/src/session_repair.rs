@@ -58,111 +58,124 @@ pub fn validate_and_repair(messages: &[Message]) -> Vec<Message> {
 pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, RepairStats) {
     let mut stats = RepairStats::default();
 
-    // Phase 1: Collect all ToolUse IDs from assistant messages
-    let tool_use_ids: HashSet<String> = messages
-        .iter()
-        .flat_map(|m| match &m.content {
-            MessageContent::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            _ => vec![],
-        })
-        .collect();
+    // Optimization: skip tool-related phases (1, 2a-2d) when the history
+    // contains neither ToolUse nor ToolResult blocks. Only empty-message
+    // removal, same-role merge, and text-coalesce are relevant for
+    // plain-text sessions. We check both block kinds because orphan
+    // ToolResults (no matching ToolUse) still need to be filtered out.
+    let has_tool_blocks = messages.iter().any(message_has_tool_blocks);
 
-    // Phase 2: Filter orphaned ToolResults and empty messages
-    let mut cleaned: Vec<Message> = Vec::with_capacity(messages.len());
-    for msg in messages {
-        let new_content = match &msg.content {
-            MessageContent::Text(s) => {
-                if s.is_empty() {
+    let mut cleaned: Vec<Message>;
+    if has_tool_blocks {
+        // Phase 1: Collect all ToolUse IDs from assistant messages
+        let tool_use_ids: HashSet<String> = collect_tool_use_ids(messages);
+
+        // Phase 2: Filter orphaned ToolResults and empty messages
+        cleaned = Vec::with_capacity(messages.len());
+        for msg in messages {
+            let new_content = match &msg.content {
+                MessageContent::Text(s) if is_empty_text_content(s) => {
                     stats.empty_messages_removed += 1;
                     continue;
                 }
-                MessageContent::Text(s.clone())
-            }
-            MessageContent::Blocks(blocks) => {
-                let original_len = blocks.len();
-                let filtered: Vec<ContentBlock> = blocks
-                    .iter()
-                    .filter(|b| match b {
-                        ContentBlock::ToolResult { tool_use_id, .. } => {
-                            let keep = tool_use_ids.contains(tool_use_id);
-                            if !keep {
-                                stats.orphaned_results_removed += 1;
+                MessageContent::Text(s) => MessageContent::Text(s.clone()),
+                MessageContent::Blocks(blocks) => {
+                    let original_len = blocks.len();
+                    let filtered: Vec<ContentBlock> = blocks
+                        .iter()
+                        .filter(|b| match b {
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                let keep = tool_use_ids.contains(tool_use_id);
+                                if !keep {
+                                    stats.orphaned_results_removed += 1;
+                                }
+                                keep
                             }
-                            keep
+                            _ => true,
+                        })
+                        .cloned()
+                        .collect();
+                    if filtered.is_empty() {
+                        if original_len > 0 {
+                            debug!(
+                                role = ?msg.role,
+                                original_blocks = original_len,
+                                "Dropped message: all blocks filtered out"
+                            );
                         }
-                        _ => true,
-                    })
-                    .cloned()
-                    .collect();
-                if filtered.is_empty() {
-                    // Check if this is an aborted assistant message: all blocks were filtered
-                    // or the message was genuinely empty.
-                    if original_len > 0 {
-                        debug!(
-                            role = ?msg.role,
-                            original_blocks = original_len,
-                            "Dropped message: all blocks filtered out"
-                        );
+                        stats.empty_messages_removed += 1;
+                        continue;
                     }
-                    stats.empty_messages_removed += 1;
-                    continue;
+                    MessageContent::Blocks(filtered)
                 }
-                MessageContent::Blocks(filtered)
-            }
-        };
-        cleaned.push(Message {
-            role: msg.role,
-            content: new_content,
-            pinned: msg.pinned,
-            timestamp: msg.timestamp,
-        });
-    }
+            };
+            cleaned.push(Message {
+                role: msg.role,
+                content: new_content,
+                pinned: msg.pinned,
+                timestamp: msg.timestamp,
+            });
+        }
 
-    // Phase 2a: Rescue ToolResult blocks stuck in assistant-role messages.
-    // After a crash, ToolResult blocks may end up inside assistant messages
-    // instead of user messages. Extract them and place them in a proper
-    // user-role message immediately after the assistant message.
-    let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
-    stats.misplaced_results_rescued = rescued_count;
+        // Phase 2a: Rescue ToolResult blocks stuck in assistant-role messages.
+        let rescued_count = rescue_misplaced_tool_results(&mut cleaned);
+        stats.misplaced_results_rescued = rescued_count;
 
-    // Phase 2a1: Pair-aware positional validation of assistant tool_calls
-    // against the immediately-following user tool_results. This is the
-    // strict Moonshot/OpenAI wire contract and MUST run before Phases
-    // 2b/2c/2d/2e so it sees the raw pre-repair shape. The later phases
-    // become safety nets that usually find nothing to do.
-    stats.positional_synthetic_inserted = enforce_adjacent_tool_result_pairs(&mut cleaned);
+        // Phase 2a1: Pair-aware positional validation of assistant tool_calls
+        stats.positional_synthetic_inserted = enforce_adjacent_tool_result_pairs(&mut cleaned);
 
-    // Phase 2b: Reorder misplaced ToolResults
-    let reordered_count = reorder_tool_results(&mut cleaned);
-    stats.results_reordered = reordered_count;
+        // Phase 2b: Reorder misplaced ToolResults
+        let reordered_count = reorder_tool_results(&mut cleaned);
+        stats.results_reordered = reordered_count;
 
-    // Phase 2c: Insert synthetic error results for unmatched ToolUse blocks
-    let synthetic_count = insert_synthetic_results(&mut cleaned);
-    stats.synthetic_results_inserted = synthetic_count;
+        // Phase 2c: Insert synthetic error results for unmatched ToolUse blocks
+        let synthetic_count = insert_synthetic_results(&mut cleaned);
+        stats.synthetic_results_inserted = synthetic_count;
 
-    // Phase 2d: Deduplicate ToolResults
-    let dedup_count = deduplicate_tool_results(&mut cleaned);
-    stats.duplicates_removed = dedup_count;
+        // Phase 2d: Deduplicate ToolResults
+        let dedup_count = deduplicate_tool_results(&mut cleaned);
+        stats.duplicates_removed = dedup_count;
 
-    // Phase 2e: Skip aborted/errored assistant messages
-    // An assistant message with no content blocks (or only empty text) followed by
-    // a user message containing ToolResults indicates an interrupted tool-use.
-    // We remove such empty assistant messages to avoid broken state.
-    let pre_aborted_len = cleaned.len();
-    cleaned = remove_aborted_assistant_messages(cleaned);
-    let aborted_removed = pre_aborted_len - cleaned.len();
-    if aborted_removed > 0 {
-        stats.empty_messages_removed += aborted_removed;
-        debug!(
-            removed = aborted_removed,
-            "Removed aborted assistant messages"
-        );
+        // Phase 2e: Skip aborted/errored assistant messages
+        let pre_aborted_len = cleaned.len();
+        cleaned = remove_aborted_assistant_messages(cleaned);
+        let aborted_removed = pre_aborted_len - cleaned.len();
+        if aborted_removed > 0 {
+            stats.empty_messages_removed += aborted_removed;
+            debug!(
+                removed = aborted_removed,
+                "Removed aborted assistant messages"
+            );
+        }
+    } else {
+        // No tool use in session — only remove empty messages and
+        // aborted assistant messages (empty text / blank blocks).
+        cleaned = messages
+            .iter()
+            .filter(|m| {
+                if m.role == Role::Assistant && is_empty_or_blank_content(&m.content) {
+                    stats.empty_messages_removed += 1;
+                    return false;
+                }
+                match &m.content {
+                    MessageContent::Text(s) => {
+                        if is_empty_text_content(s) {
+                            stats.empty_messages_removed += 1;
+                            return false;
+                        }
+                        true
+                    }
+                    MessageContent::Blocks(b) => {
+                        if is_empty_blocks_content(b) {
+                            stats.empty_messages_removed += 1;
+                            return false;
+                        }
+                        true
+                    }
+                }
+            })
+            .cloned()
+            .collect();
     }
 
     // Phase 3: Merge consecutive same-role messages
@@ -297,13 +310,14 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
 ///
 /// After context trimming the drain boundary may land on an assistant turn,
 /// leaving it at position 0. Providers (especially Gemini) require the first
-/// message to be from the user. This function drops leading assistant messages
-/// and re-validates to clean up newly-orphaned ToolResults.
+/// message to be from the user. This function drops leading assistant turns so
+/// the history starts with a user turn.
 ///
-/// The loop handles the edge case where the first user turn consisted entirely
-/// of ToolResult blocks that became orphaned (dropped by `validate_and_repair`),
-/// which would re-expose another leading assistant turn.
-pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
+/// After draining, it removes ToolResult blocks whose ToolUse no longer
+/// survives. It intentionally does not run the full repair pipeline; callers
+/// should run full repair before this function if they need global
+/// normalization.
+pub(crate) fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
     loop {
         match messages.iter().position(|m| m.role == Role::User) {
             Some(0) | None => break,
@@ -313,7 +327,21 @@ pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
                     "Dropping leading assistant turn(s) to ensure history starts with user"
                 );
                 messages.drain(..i);
-                messages = validate_and_repair(&messages);
+                let surviving_tool_use_ids: HashSet<String> = collect_tool_use_ids(&messages);
+                for msg in &mut messages {
+                    if let MessageContent::Blocks(blocks) = &mut msg.content {
+                        blocks.retain(|b| match b {
+                            ContentBlock::ToolResult { tool_use_id, .. } => {
+                                surviving_tool_use_ids.contains(tool_use_id)
+                            }
+                            _ => true,
+                        });
+                    }
+                }
+                messages.retain(|m| match &m.content {
+                    MessageContent::Text(s) => !s.is_empty(),
+                    MessageContent::Blocks(b) => !b.is_empty(),
+                });
             }
         }
     }
@@ -910,16 +938,50 @@ fn remove_aborted_assistant_messages(messages: Vec<Message>) -> Vec<Message> {
 /// Check if a message's content is effectively empty (no blocks or only empty text).
 fn is_empty_or_blank_content(content: &MessageContent) -> bool {
     match content {
-        MessageContent::Text(s) => s.trim().is_empty(),
-        MessageContent::Blocks(blocks) => {
-            blocks.is_empty()
-                || blocks.iter().all(|b| match b {
-                    ContentBlock::Text { text, .. } => text.trim().is_empty(),
-                    ContentBlock::Unknown => true,
-                    _ => false,
-                })
-        }
+        MessageContent::Text(s) => is_empty_text_content(s),
+        MessageContent::Blocks(blocks) => is_empty_blocks_content(blocks),
     }
+}
+
+fn is_empty_text_content(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+fn is_empty_blocks_content(blocks: &[ContentBlock]) -> bool {
+    blocks.is_empty()
+        || blocks.iter().all(|b| match b {
+            ContentBlock::Text { text, .. } => is_empty_text_content(text),
+            ContentBlock::Unknown => true,
+            _ => false,
+        })
+}
+
+fn message_has_tool_blocks(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|b| {
+            matches!(
+                b,
+                ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+            )
+        }),
+        MessageContent::Text(_) => false,
+    }
+}
+
+fn collect_tool_use_ids(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            MessageContent::Blocks(blocks) => Some(blocks),
+            MessageContent::Text(_) => None,
+        })
+        .flat_map(|blocks| {
+            blocks.iter().filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        })
+        .collect()
 }
 
 /// Strip untrusted details from ToolResult content.
@@ -2832,6 +2894,86 @@ mod tests {
         match &result[0].content {
             MessageContent::Text(t) => assert_eq!(t, "real user turn"),
             other => panic!("expected text user turn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_free_fast_path_matches_full_path_shape() {
+        let messages = vec![
+            Message::user("first"),
+            Message::user("second"),
+            Message::assistant("   "),
+            Message::assistant("answer"),
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "attachment text".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "prompt".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+
+        let (fast_path, stats) = validate_and_repair_with_stats(&messages);
+
+        assert_eq!(stats.empty_messages_removed, 1);
+        assert_eq!(fast_path.len(), 3);
+        assert_eq!(fast_path[0].role, Role::User);
+        assert_eq!(fast_path[0].content.text_content(), "first\n\nsecond");
+        assert_eq!(fast_path[1].role, Role::Assistant);
+        assert_eq!(fast_path[1].content.text_content(), "answer");
+        assert_eq!(fast_path[2].role, Role::User);
+        assert_eq!(
+            fast_path[2].content.text_content(),
+            "attachment text\n\nprompt"
+        );
+    }
+
+    #[test]
+    fn ensure_starts_with_user_removes_tool_result_orphaned_by_drain() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("dropped")]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    tool_result_block("dropped", "old result"),
+                    ContentBlock::Text {
+                        text: "real turn".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::assistant("reply"),
+        ];
+
+        let result = ensure_starts_with_user(messages);
+
+        assert_eq!(result[0].role, Role::User);
+        match &result[0].content {
+            MessageContent::Blocks(blocks) => {
+                assert!(!blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })));
+                assert!(blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text == "real turn"
+                )));
+            }
+            other => panic!("expected block user message, got {other:?}"),
         }
     }
 }

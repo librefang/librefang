@@ -40,8 +40,9 @@ import { truncateId } from "../lib/string";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessions, useSessionDetails } from "../lib/queries/sessions";
-import { useMemorySearchOrList } from "../lib/queries/memory";
+import { useAgentKvMemory } from "../lib/queries/memory";
 import { useAuditRecent, useCronJobs } from "../lib/queries/runtime";
+import { useAgentTriggers } from "../lib/queries/schedules";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
 import { AgentManifestForm } from "../components/AgentManifestForm";
@@ -57,6 +58,7 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentSessions,
   useAgentStats,
   useAgentTemplates,
   useExperimentMetrics,
@@ -486,25 +488,35 @@ export function AgentsPage() {
   // `enabled` flag gates the network request on `detailAgent?.id`).
   // TanStack Query dedupes / caches across pages so revisiting an agent
   // is free.
-  const memoryListQuery = useMemorySearchOrList("");
+  // Per-agent KV memory (matches the design canvas's key/value/age rows).
+  // The previous useMemorySearchOrList(\"\") query returned global proactive
+  // memory, which is empty unless [proactive_memory] is enabled — so the
+  // tab read empty even when the agent had KV pairs.
+  const agentKvMemoryQuery = useAgentKvMemory(detailAgent?.id ?? "");
   const auditRecentQuery = useAuditRecent(120);
   const cronJobsQuery = useCronJobs(detailAgent?.id);
-  // Per-agent KPI rollup. Replaces a global /api/sessions scan that was
-  // capped by pagination and missed agents whose sessions weren't in
-  // the latest N rows.
+  // Per-agent KPI rollup (#4246) — replaces a global /api/sessions scan
+  // that was capped by pagination and missed agents whose sessions
+  // weren't in the latest N rows.
   const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
-  // Pick the latest session for the selected agent so the Conversation
-  // tab can stream in its messages without a separate per-agent route.
+  // Per-agent triggers — GET /api/triggers?agent_id=… so the Schedule
+  // tab's event-trigger cards don't depend on agent detail embedding
+  // them (which it currently doesn't).
+  const agentTriggersQuery = useAgentTriggers(detailAgent?.id ?? "");
+  // Per-agent session list — Conversation tab uses this directly. The
+  // global /api/sessions used previously was paginated to 50, so the
+  // agent's latest session was often not in the page.
+  const agentSessionsQuery = useAgentSessions(detailAgent?.id ?? "");
   const latestSessionForAgent = useMemo(() => {
-    if (!detailAgent?.id) return undefined;
+    const list = agentSessionsQuery.data ?? [];
+    if (list.length === 0) return undefined;
     let best: { session_id: string; ts: number } | undefined;
-    for (const s of sessionsQuery.data ?? []) {
-      if (s.agent_id !== detailAgent.id) continue;
+    for (const s of list) {
       const ts = s.created_at ? Date.parse(s.created_at) : 0;
       if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
     }
     return best?.session_id;
-  }, [sessionsQuery.data, detailAgent?.id]);
+  }, [agentSessionsQuery.data]);
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
   // Row-level aggregate only — detail-panel KPI reads from the per-agent
   // /stats endpoint (useAgentStats) which doesn't suffer from the global
@@ -1081,22 +1093,24 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Memory tab — KV row layout per design canvas
+  // ---------- Memory tab — per-agent KV row layout per design canvas
   const renderMemoryTab = (agent: AgentDetail) => {
-    const allItems = (memoryListQuery.data?.memories ?? []) as Array<{
-      id?: string;
-      content?: string;
-      category?: string | null;
-      created_at?: string;
-      agent_id?: string;
-    }>;
-    const scoped = allItems.filter((m) => !m.agent_id || m.agent_id === agent.id);
-    const rows = scoped.slice(0, 5);
+    const kv = agentKvMemoryQuery.data ?? [];
+    const rows = kv.slice(0, 8);
+    const formatValue = (v: unknown): string => {
+      if (typeof v === "string") return v;
+      if (v == null) return "—";
+      try {
+        return JSON.stringify(v);
+      } catch {
+        return String(v);
+      }
+    };
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.memory_label", { defaultValue: "Memory · sqlite" })} · {scoped.length}
+            {t("agents.detail.memory_label", { defaultValue: "Memory · sqlite" })} · {kv.length}
           </div>
           <Button
             variant="ghost"
@@ -1107,7 +1121,7 @@ export function AgentsPage() {
             {t("agents.detail.open_memory", { defaultValue: "Open" })}
           </Button>
         </div>
-        {memoryListQuery.isLoading ? (
+        {agentKvMemoryQuery.isLoading ? (
           <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
         ) : rows.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
@@ -1115,24 +1129,22 @@ export function AgentsPage() {
           </div>
         ) : (
           <div className="flex flex-col gap-1.5">
-            {rows.map((r, i) => {
-              const key = r.category || r.id || `row-${i}`;
-              const valueText = (r.content || "").replace(/\s+/g, " ").trim();
-              return (
-                <div
-                  key={r.id || `mem-${i}`}
-                  className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
-                >
-                  <div className="flex items-center justify-between gap-2 sm:contents">
-                    <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{key}</span>
-                    <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
-                      {r.created_at ? formatRelativeTime(r.created_at) : "—"}
-                    </span>
-                  </div>
-                  <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2">{valueText || "—"}</span>
+            {rows.map((r, i) => (
+              <div
+                key={`${r.key}-${i}`}
+                className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 px-3 py-2 rounded-md border border-border-subtle bg-main/40"
+              >
+                <div className="flex items-center justify-between gap-2 sm:contents">
+                  <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{r.key}</span>
+                  <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
+                    {r.created_at ? formatRelativeTime(r.created_at) : "—"}
+                  </span>
                 </div>
-              );
-            })}
+                <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2">
+                  {formatValue(r.value)}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1192,9 +1204,35 @@ export function AgentsPage() {
   // ---------- Schedule tab — trigger card + 14-run bar chart per design canvas
   const renderScheduleTab = (agent: AgentDetail) => {
     const cron = cronJobsQuery.data ?? [];
-    const triggers: AgentTriggerSummary[] = Array.isArray((agent as AgentView).triggers)
-      ? ((agent as AgentView).triggers as AgentTriggerSummary[])
-      : [];
+    // GET /api/agents/{id} doesn't embed triggers, so we hit the
+    // dedicated /api/triggers?agent_id=... endpoint here. Falling back
+    // to the (legacy) embedded-on-detail field if a future backend
+    // version ships it.
+    const liveTriggers = (agentTriggersQuery.data ?? []) as Array<{
+      id?: string;
+      pattern?: unknown;
+      prompt_template?: string;
+      enabled?: boolean;
+    }>;
+    const triggers: AgentTriggerSummary[] = liveTriggers.map((tr) => {
+      // Render the trigger pattern compactly. The full TriggerPattern shape
+      // is rich (event filters / regex / etc.); the detail panel only
+      // needs a one-liner — full pattern lives on the dedicated page.
+      const patternStr = (() => {
+        if (!tr.pattern) return undefined;
+        if (typeof tr.pattern === "string") return tr.pattern;
+        try {
+          return JSON.stringify(tr.pattern);
+        } catch {
+          return undefined;
+        }
+      })();
+      return {
+        event_pattern: patternStr,
+        name: tr.id,
+        description: tr.prompt_template,
+      };
+    });
     // Synthetic "last 14 runs" — backend doesn't expose per-fire history
     // through a single agent-scoped endpoint yet, so we visualise an
     // agent-id-seeded waveform as a placeholder. Wire up real run
