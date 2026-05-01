@@ -255,6 +255,10 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            docs/pnpm-lock.yaml
+            crates/librefang-api/dashboard/pnpm-lock.yaml
       - name: Run security audit
         run: |
           # Ignore known vulnerabilities without fix:
