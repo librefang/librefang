@@ -895,7 +895,9 @@ export function AgentsPage() {
             };
             const usdDelta = (cur: number, p: number): string => {
               const d = cur - p;
-              if (Math.abs(d) < 0.005 && p === 0 && cur === 0) return "—";
+              // Treat sub-cent moves as no-change rather than rendering
+              // "−$0.00" / "+$0.00", which looks like a real signal.
+              if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
               const sign = d >= 0 ? "+" : "−";
               return `${sign}$${Math.abs(d).toFixed(2)}`;
             };

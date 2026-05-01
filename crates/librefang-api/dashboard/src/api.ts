@@ -1086,8 +1086,10 @@ export interface AgentStats24h {
   active_now: number;
   samples: number;
   /** Same window-scoped fields, aggregated over the prior 24h (24-48h
-   *  ago). Used by the KPI tile subtext to render trend deltas. */
-  prev: {
+   *  ago). Optional so older backends that don't ship the field don't
+   *  break the type at runtime — the dashboard already gates on
+   *  `live?.prev` and falls back to non-delta subtext. */
+  prev?: {
     sessions_24h: number;
     cost_24h: number;
     p95_latency_ms: number;
