@@ -778,10 +778,14 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
                     return Ok(Zeroizing::new(key_str));
                 }
                 2 => {
-                    // v2: fingerprint = raw random_id (pre-#4159 legacy behavior).
-                    // We retain this read path for one release cycle so that
-                    // existing installs auto-migrate on first daemon restart
-                    // post-upgrade without losing vault access.
+                    // v2: pre-#4159 legacy. Two sub-paths could have produced
+                    // the wrap key:
+                    //   (a) raw random_id from .machine-id  (`legacy_v2_fingerprint`)
+                    //   (b) predictable hash on hosts where .machine-id could
+                    //       not be persisted (`legacy_v2_predictable_fingerprint`).
+                    // Try both — if (a) fails (read-only-FS install with no
+                    // .machine-id) we still recover the vault via (b) instead
+                    // of regressing to "unrecoverable" on upgrade.
                     warn!(
                         "Detected v2 keyring file (pre-#4159 format) — \
                          migrating to v3 (mixed fingerprint) on first load"
@@ -803,22 +807,30 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
                     )
                     .map_err(|e| format!("ciphertext decode: {e}"))?;
 
-                    // v2 fingerprint: raw random_id bytes, read from .machine-id.
-                    // This is the OLD behavior before this PR's SHA-512 mixing.
-                    let v2_fingerprint = legacy_v2_fingerprint()?;
-                    let wrapping_key = derive_wrapping_key(&v2_fingerprint, &salt)
-                        .map_err(|e| format!("kdf: {e}"))?;
+                    // Build the candidate list. `legacy_v2_fingerprint` may
+                    // legitimately fail (no .machine-id on a read-only FS);
+                    // fall through to the predictable fingerprint in that
+                    // case. The predictable derivation reproduces the exact
+                    // pre-#4159 SHA-256(os-secret || user || host || tag).
+                    let raw = legacy_v2_fingerprint().ok();
+                    let predictable = legacy_v2_predictable_fingerprint();
+                    let mut candidates: Vec<&[u8]> = Vec::with_capacity(2);
+                    if let Some(ref bytes) = raw {
+                        candidates.push(bytes.as_slice());
+                    }
+                    candidates.push(predictable.as_slice());
 
-                    let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
-                        .map_err(|e| format!("cipher init: {e}"))?;
-                    let nonce = Nonce::from_slice(&nonce_bytes);
-                    let plaintext = cipher
-                        .decrypt(nonce, ciphertext.as_slice())
-                        .map_err(|e| format!("decrypt: {e}"))?;
-                    let key_str = String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"))?;
+                    let key_str =
+                        try_decrypt_v2(&salt, &nonce_bytes, &ciphertext, &candidates).map_err(
+                            |e| {
+                                format!(
+                                    "v2 keyring decrypt failed across all legacy derivations: {e}; \
+                                     vault is unrecoverable — restore from backup or set LIBREFANG_VAULT_KEY"
+                                )
+                            },
+                        )?;
 
                     // Re-wrap with v3 fingerprint and atomically replace the file.
-                    // Mirror of store_keyring_key's atomic-write path.
                     if let Err(e) = store_keyring_key(&key_str) {
                         warn!("Failed to migrate keyring from v2 to v3 format: {e}");
                     } else {
@@ -900,6 +912,155 @@ fn legacy_v2_fingerprint() -> Result<Vec<u8>, String> {
     }
     // v2 used random_id directly (no mixing).
     Ok(bytes)
+}
+
+/// Reproduce the pre-#4159 `os_machine_secrets()` first-non-empty result.
+///
+/// The pre-#4159 predictable fingerprint hashed exactly **one** OS source — the
+/// first readable per platform, in the order Linux machine-id files / macOS
+/// IOPlatformUUID / Windows MachineGuid. This helper exists solely so the
+/// v2 → v3 migration can reconstruct a vault whose wrap key was derived
+/// without a persisted `.machine-id` (read-only filesystem path). Never used
+/// for new stores. See `legacy_v2_predictable_fingerprint` for the framing.
+#[cfg(not(test))]
+fn legacy_v2_first_os_secret() -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        for path in &["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.as_bytes().to_vec());
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(idx) = line.find("IOPlatformUUID") {
+                        if let Some(eq) = line[idx..].find('=') {
+                            let v = line[idx + eq + 1..].trim().trim_matches('"');
+                            if !v.is_empty() {
+                                return Some(v.as_bytes().to_vec());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("reg")
+            .args([
+                "query",
+                "HKLM\\SOFTWARE\\Microsoft\\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some(idx) = line.find("REG_SZ") {
+                        let v = line[idx + "REG_SZ".len()..].trim();
+                        if !v.is_empty() {
+                            return Some(v.as_bytes().to_vec());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Reproduce the pre-#4159 `predictable_machine_fingerprint()` derivation
+/// **byte-for-byte** so that v2 keyrings written via the read-only-FS fallback
+/// path (i.e. when no `.machine-id` could be persisted) can still be decrypted
+/// and re-wrapped to v3.
+///
+/// Without this helper, the v2 → v3 migration only handles vaults whose wrap
+/// key was derived from a persisted random_id; vaults derived from
+/// `predictable_machine_fingerprint()` (containers with ephemeral rootfs)
+/// would be unrecoverable on upgrade — a regression vs pre-#4159 behaviour.
+/// Never used for new stores; only invoked by the v2 branch of
+/// `load_keyring_key` after `legacy_v2_fingerprint()` fails.
+#[cfg(not(test))]
+fn legacy_v2_predictable_fingerprint() -> Vec<u8> {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    if let Some(secret) = legacy_v2_first_os_secret() {
+        hasher.update(b"os-secret:");
+        hasher.update(&secret);
+    }
+    if let Ok(user) = std::env::var("USERNAME").or_else(|_| std::env::var("USER")) {
+        hasher.update(b"user:");
+        hasher.update(user.as_bytes());
+    }
+    if let Ok(host) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+        hasher.update(b"host:");
+        hasher.update(host.as_bytes());
+    }
+    hasher.update(b"librefang-vault-v2");
+    hasher.finalize().to_vec()
+}
+
+/// Pure-function v2 keyring decryption: try each candidate fingerprint in
+/// order and return the first plaintext that decrypts cleanly.
+///
+/// Extracted from `load_keyring_key` so the dispatch logic can be exercised
+/// directly in tests instead of structurally re-implemented. The function has
+/// no filesystem side effects; callers inject the fingerprints they want
+/// tried (raw random_id first, predictable fallback second) and receive
+/// back the master key plaintext on success.
+///
+/// Returns `Err` only if every candidate fails.
+fn try_decrypt_v2(
+    salt: &[u8],
+    nonce_bytes: &[u8],
+    ciphertext: &[u8],
+    candidates: &[&[u8]],
+) -> Result<String, String> {
+    if candidates.is_empty() {
+        return Err("try_decrypt_v2: no candidate fingerprints supplied".to_string());
+    }
+    let mut last_err = String::from("try_decrypt_v2: all candidates exhausted");
+    for fp in candidates {
+        let wrapping_key = match derive_wrapping_key(fp, salt) {
+            Ok(k) => k,
+            Err(e) => {
+                last_err = format!("kdf: {e}");
+                continue;
+            }
+        };
+        let cipher = match Aes256Gcm::new_from_slice(wrapping_key.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("cipher init: {e}");
+                continue;
+            }
+        };
+        let nonce = Nonce::from_slice(nonce_bytes);
+        match cipher.decrypt(nonce, ciphertext) {
+            Ok(plaintext) => {
+                return String::from_utf8(plaintext).map_err(|e| format!("utf8: {e}"));
+            }
+            Err(e) => {
+                last_err = format!("decrypt: {e}");
+                continue;
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// Return a stable, unpredictable 32-byte machine secret used as the input
@@ -1853,5 +2014,111 @@ mod tests {
             bad.is_err(),
             "(isolation) v2 wrapping key must not decrypt v3 ciphertext"
         );
+    }
+
+    /// `try_decrypt_v2` must accept the FIRST candidate that decrypts cleanly
+    /// and stop. This is the happy path used by load_keyring_key when the
+    /// persisted random_id is intact.
+    #[test]
+    fn try_decrypt_v2_accepts_first_matching_candidate() {
+        let fp_correct = [0x42u8; 32];
+        let fp_wrong_a = [0x11u8; 32];
+        let fp_wrong_b = [0x22u8; 32];
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        let wk = derive_wrapping_key(&fp_correct, &salt).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
+        let plaintext = b"super-secret-master-key";
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        // Correct fingerprint first → success.
+        let recovered = try_decrypt_v2(
+            &salt,
+            &nonce_bytes,
+            &ciphertext,
+            &[&fp_correct, &fp_wrong_a, &fp_wrong_b],
+        )
+        .unwrap();
+        assert_eq!(recovered.as_bytes(), plaintext);
+    }
+
+    /// Critical regression: when the FIRST candidate fails (raw random_id
+    /// missing — the read-only-FS scenario), `try_decrypt_v2` must continue
+    /// to the predictable-fingerprint candidate and recover the vault. This
+    /// is the path that pre-#4159 v2 vaults written without a persisted
+    /// .machine-id rely on for upgrade.
+    #[test]
+    fn try_decrypt_v2_falls_through_to_predictable_candidate() {
+        let fp_raw_random_id = [0xAAu8; 32]; // would-be candidate (a)
+        let fp_predictable = [0xBBu8; 32]; // candidate (b) — actually used for write
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        // Vault was written with the predictable fingerprint (read-only FS path).
+        let wk = derive_wrapping_key(&fp_predictable, &salt).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
+        let plaintext = b"vault-key-from-readonly-fs-host";
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        // Caller injects raw random_id first, predictable second — same
+        // ordering as the production v2 branch in load_keyring_key.
+        let recovered = try_decrypt_v2(
+            &salt,
+            &nonce_bytes,
+            &ciphertext,
+            &[&fp_raw_random_id, &fp_predictable],
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.as_bytes(),
+            plaintext,
+            "fallback to predictable fingerprint must recover the vault"
+        );
+    }
+
+    /// All candidates wrong → hard error. Makes sure we don't return Ok with
+    /// some garbage plaintext when every fingerprint failed.
+    #[test]
+    fn try_decrypt_v2_returns_error_when_all_candidates_fail() {
+        let fp_correct = [0x42u8; 32];
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+
+        let wk = derive_wrapping_key(&fp_correct, &salt).unwrap();
+        let cipher = Aes256Gcm::new_from_slice(wk.as_ref()).unwrap();
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), b"plaintext".as_ref())
+            .unwrap();
+
+        let bad_a = [0x01u8; 32];
+        let bad_b = [0x02u8; 32];
+        let result = try_decrypt_v2(&salt, &nonce_bytes, &ciphertext, &[&bad_a, &bad_b]);
+        assert!(
+            result.is_err(),
+            "all-wrong candidates must produce an error, got: {result:?}"
+        );
+    }
+
+    /// Empty candidate list is a programmer error and must surface as an
+    /// explicit error rather than silently returning Ok("").
+    #[test]
+    fn try_decrypt_v2_rejects_empty_candidate_list() {
+        let mut salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut salt);
+        let nonce = [0u8; NONCE_LEN];
+        let ct = vec![0u8; 32];
+        let result = try_decrypt_v2(&salt, &nonce, &ct, &[]);
+        assert!(result.is_err());
     }
 }
