@@ -113,6 +113,21 @@ impl TrustedPeers {
         }
         let content = serde_json::to_string_pretty(&self.store)?;
         std::fs::write(&self.store_path, content)?;
+        // SECURITY (#3873): Tighten file perms to 0600 on Unix. The store
+        // contains every pubkey/fingerprint we trust — leakage doesn't
+        // forge signatures (pubkeys are public) but is reconnaissance
+        // value, exposing which nodes this daemon federates with.
+        // Mirrors the policy `keys.rs::PeerKeyManager` applies to
+        // `peer_keypair.json`. Best-effort; failure here is non-fatal.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&self.store_path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&self.store_path, perms);
+            }
+        }
         Ok(())
     }
 

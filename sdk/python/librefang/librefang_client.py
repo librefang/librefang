@@ -268,6 +268,9 @@ class _AgentsResource(_Resource):
     def set_agent_skills(self, id: str, **data):
         return self._c._request("PUT", f"/api/agents/{id}/skills", data)
 
+    def get_agent_stats(self, id: str):
+        return self._c._request("GET", f"/api/agents/{id}/stats")
+
     def stop_agent(self, id: str):
         return self._c._request("POST", f"/api/agents/{id}/stop")
 

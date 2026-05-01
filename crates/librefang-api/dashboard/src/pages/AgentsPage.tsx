@@ -57,6 +57,7 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentStats,
   useAgentTemplates,
   useExperimentMetrics,
   useExperiments,
@@ -488,6 +489,10 @@ export function AgentsPage() {
   const memoryListQuery = useMemorySearchOrList("");
   const auditRecentQuery = useAuditRecent(120);
   const cronJobsQuery = useCronJobs(detailAgent?.id);
+  // Per-agent KPI rollup. Replaces a global /api/sessions scan that was
+  // capped by pagination and missed agents whose sessions weren't in
+  // the latest N rows.
+  const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
   // Pick the latest session for the selected agent so the Conversation
   // tab can stream in its messages without a separate per-agent route.
   const latestSessionForAgent = useMemo(() => {
@@ -501,6 +506,9 @@ export function AgentsPage() {
     return best?.session_id;
   }, [sessionsQuery.data, detailAgent?.id]);
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
+  // Row-level aggregate only — detail-panel KPI reads from the per-agent
+  // /stats endpoint (useAgentStats) which doesn't suffer from the global
+  // /api/sessions pagination cap.
   const sessionsByAgent = useMemo(() => {
     const map = new Map<string, { sessions24h: number; cost24h: number }>();
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
@@ -516,6 +524,7 @@ export function AgentsPage() {
     }
     return map;
   }, [sessionsQuery.data]);
+
 
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
@@ -675,9 +684,30 @@ export function AgentsPage() {
     setDetailLoading(false);
   };
 
+  // Auto-select the first agent on desktop so the detail panel isn't blank
+  // on first paint. Skipped on mobile because the detail view is a full-
+  // screen overlay there — auto-opening it would block access to the list.
+  useEffect(() => {
+    if (detailAgent) return;
+    if (filteredAgents.length === 0) return;
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) return;
+    void selectAgent(filteredAgents[0]);
+    // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredAgents, detailAgent]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    // Prefer the row-embedded stats from /api/agents (single grouped SQL
+    // pass). Fall back to the global aggregation only if the backend is
+    // older and didn't ship the field.
+    const sessions24h = typeof agent.sessions_24h === "number"
+      ? agent.sessions_24h
+      : (sessionsByAgent.get(agent.id)?.sessions24h ?? 0);
+    const cost24h = typeof agent.cost_24h === "number"
+      ? agent.cost_24h
+      : (sessionsByAgent.get(agent.id)?.cost24h ?? 0);
+    const stats = { sessions24h, cost24h };
     const stateLower = (agent.state || "").toLowerCase();
     return (
       <button
@@ -709,7 +739,9 @@ export function AgentsPage() {
         <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
-          <span className="truncate min-w-0">{agent.profile || t("common.local", { defaultValue: "local" })}</span>
+          <span className="truncate min-w-0">
+            {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
+          </span>
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>
@@ -726,9 +758,7 @@ export function AgentsPage() {
     const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
     const detailCaps = (agent as AgentView).capabilities;
-    const skillsCount = Array.isArray(detailCaps?.skills) ? detailCaps.skills.length : 0;
     const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
@@ -831,21 +861,101 @@ export function AgentsPage() {
             </div>
           </div>
 
-          {/* KPI tiles */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
-            {[
-              { l: t("agents.kpi.sessions",  { defaultValue: "Sessions · 24h" }), v: String(stats.sessions24h),               m: stats.sessions24h > 0 ? "active" : "—" },
-              { l: t("agents.kpi.cost",      { defaultValue: "Cost · 24h" }),     v: `$${stats.cost24h.toFixed(2)}`,           m: stats.cost24h > 0 ? "billed" : "—" },
-              { l: t("agents.kpi.skills",    { defaultValue: "Skills" }),         v: String(skillsCount || "—"),               m: skillsCount > 0 ? `${skillsCount} installed` : "none" },
-              { l: t("agents.kpi.tools",     { defaultValue: "Tools" }),          v: String(toolsCount || "—"),                m: toolsCount > 0 ? `${toolsCount} configured` : "none" },
-            ].map((s) => (
-              <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
-                <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
-                <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
-                <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+          {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
+              Backed by GET /api/agents/{id}/stats so values are accurate even
+              when the agent hasn't appeared in the global session list page. */}
+          {(() => {
+            const live = agentStatsQuery.data;
+            const sessions24h = live?.sessions_24h ?? 0;
+            const cost24h = live?.cost_24h ?? 0;
+            const p95Ms = live?.p95_latency_ms ?? 0;
+            const samples = live?.samples ?? 0;
+            const activeNow = live?.active_now ?? 0;
+            const prev = live?.prev;
+            const skillNames: string[] = Array.isArray((agent as AgentView).skills)
+              ? ((agent as AgentView).skills as string[])
+              : Array.isArray((agent as AgentView).capabilities?.skills)
+                ? (((agent as AgentView).capabilities!.skills) as string[])
+                : [];
+            const toolsMeta = skillNames.length > 0
+              ? skillNames.slice(0, 3).join(" · ")
+              : toolsCount > 0
+                ? `${toolsCount} configured`
+                : "—";
+
+            // Trend deltas vs the prior 24h. Percent change for counts,
+            // signed dollar for cost, signed milliseconds for latency.
+            // When the prior period is empty we surface "new" instead of
+            // a divide-by-zero-induced "+∞%".
+            const pctDelta = (cur: number, p: number): string => {
+              if (p === 0) return cur > 0 ? "new" : "—";
+              const d = ((cur - p) / p) * 100;
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}${Math.abs(d).toFixed(0)}%`;
+            };
+            const usdDelta = (cur: number, p: number): string => {
+              const d = cur - p;
+              // Treat sub-cent moves as no-change rather than rendering
+              // "−$0.00" / "+$0.00", which looks like a real signal.
+              if (Math.abs(d) < 0.01) return cur === 0 && p === 0 ? "—" : "≈$0.00";
+              const sign = d >= 0 ? "+" : "−";
+              return `${sign}$${Math.abs(d).toFixed(2)}`;
+            };
+            const msDelta = (cur: number, p: number): string => {
+              if (cur === 0 && p === 0) return "—";
+              if (p === 0) return "new";
+              const d = cur - p;
+              const sign = d >= 0 ? "+" : "−";
+              return Math.abs(d) >= 1000
+                ? `${sign}${(Math.abs(d) / 1000).toFixed(1)}s`
+                : `${sign}${Math.abs(Math.round(d))}ms`;
+            };
+
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
+                {[
+                  {
+                    l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
+                    v: String(sessions24h),
+                    m: prev
+                      ? activeNow > 0
+                        ? `${activeNow} live · ${pctDelta(sessions24h, prev.sessions_24h)}`
+                        : pctDelta(sessions24h, prev.sessions_24h)
+                      : activeNow > 0 ? `${activeNow} live` : "—",
+                  },
+                  {
+                    l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
+                    v: `$${cost24h.toFixed(2)}`,
+                    m: prev ? usdDelta(cost24h, prev.cost_24h) : "—",
+                  },
+                  {
+                    l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
+                    v: p95Ms > 0
+                      ? p95Ms >= 1000
+                        ? `${(p95Ms / 1000).toFixed(2)}s`
+                        : `${Math.round(p95Ms)}ms`
+                      : "—",
+                    m: prev && (samples > 0 || prev.p95_latency_ms > 0)
+                      ? msDelta(p95Ms, prev.p95_latency_ms)
+                      : samples > 0
+                        ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
+                        : "—",
+                  },
+                  {
+                    l: t("agents.kpi.tools", { defaultValue: "Tools" }),
+                    v: String(toolsCount || "—"),
+                    m: toolsMeta,
+                  },
+                ].map((s) => (
+                  <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
+                    <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
+                    <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
+                    <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
