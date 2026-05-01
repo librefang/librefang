@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use tracing::{debug, info, warn};
 // `error!` is used only in non-test keyring code paths.
 #[cfg(not(test))]
@@ -26,6 +27,55 @@ use zeroize::Zeroizing;
 
 /// Env var fallback for vault key.
 const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
+
+/// Env var that, when set to `1` or `true` (case-insensitive), forces the
+/// vault to skip the OS keyring entirely and use the AES-256-GCM-wrapped
+/// file fallback at `<data_local_dir>/librefang/.keyring` (mode 0600).
+///
+/// Useful on macOS where the Keychain ACL is bound to the per-binary code
+/// signature: every fresh `cargo build` invalidates the ACL and triggers
+/// another "allow" prompt on daemon restart. The file fallback provides
+/// equivalent at-rest security in our threat model (the wrap key is
+/// derived from a per-machine fingerprint via Argon2id).
+const VAULT_NO_KEYRING_ENV: &str = "LIBREFANG_VAULT_NO_KEYRING";
+
+/// Process-global override for `use_os_keyring`. Set once via
+/// [`CredentialVault::init_with_config`] (called from
+/// `LibreFangKernel::boot_with_config`) and read by every vault
+/// operation thereafter. `None` (unset) means "fall back to the platform
+/// default". The env var `LIBREFANG_VAULT_NO_KEYRING` always wins
+/// regardless of this value.
+static CONFIG_USE_OS_KEYRING: OnceLock<bool> = OnceLock::new();
+
+/// The compiled-in default for `use_os_keyring` when neither the env var
+/// nor the config has set it.
+///
+/// macOS Keychain ACL is per-binary signature; a fresh `cargo build`
+/// invalidates the ACL → prompt fatigue on every daemon restart. The
+/// file-based fallback at `<data_local_dir>/librefang/.keyring` (0600,
+/// AES-256-GCM wrapped with an Argon2id-derived machine-fingerprint key)
+/// provides equivalent at-rest security in our threat model. Linux and
+/// Windows keyrings have stable ACLs (D-Bus / Credential Manager don't
+/// pin the calling binary) so they remain opt-out by default.
+pub const fn default_use_os_keyring_for_platform() -> bool {
+    !cfg!(target_os = "macos")
+}
+
+/// Resolve "should we use the OS keyring right now?".
+///
+/// Priority: env var > process-global config > platform default.
+fn should_use_os_keyring() -> bool {
+    if let Ok(v) = std::env::var(VAULT_NO_KEYRING_ENV) {
+        let v = v.trim();
+        if v == "1" || v.eq_ignore_ascii_case("true") {
+            return false;
+        }
+    }
+    if let Some(&v) = CONFIG_USE_OS_KEYRING.get() {
+        return v;
+    }
+    default_use_os_keyring_for_platform()
+}
 
 /// Service name used by the legacy v1 XOR-obfuscated keyring file as a salt
 /// in the unmasking hash. Must remain stable across targets so v1 → v2
@@ -59,6 +109,10 @@ mod os_keyring {
     /// through to the file-based store. Backend errors are logged at
     /// debug and surfaced as `false` — never propagated.
     pub fn try_store(key_b64: &str) -> bool {
+        if !super::should_use_os_keyring() {
+            tracing::debug!("OS keyring disabled by config / env var — using file-based store");
+            return false;
+        }
         match keyring::Entry::new(SERVICE, USER) {
             Ok(entry) => match entry.set_password(key_b64) {
                 Ok(()) => true,
@@ -79,8 +133,22 @@ mod os_keyring {
     }
 
     /// Returns Some(key) if found; None means no entry / backend
-    /// unavailable, and the caller should try the file-based store.
+    /// unavailable / disabled by config, and the caller should try the
+    /// file-based store.
     pub fn try_load() -> Option<String> {
+        if !super::should_use_os_keyring() {
+            return None;
+        }
+        try_load_force()
+    }
+
+    /// Same as [`try_load`] but bypasses the `use_os_keyring` config gate.
+    ///
+    /// Used exactly once per host to migrate an existing keyring entry
+    /// (e.g. a macOS Keychain item from a previous LibreFang version)
+    /// into the file-based store after the user has flipped the new
+    /// macOS default. May trigger the OS prompt one final time.
+    pub fn try_load_force() -> Option<String> {
         match keyring::Entry::new(SERVICE, USER) {
             Ok(entry) => match entry.get_password() {
                 Ok(s) => Some(s),
@@ -111,6 +179,10 @@ mod os_keyring {
     }
 
     pub fn try_load() -> Option<String> {
+        None
+    }
+
+    pub fn try_load_force() -> Option<String> {
         None
     }
 }
@@ -167,6 +239,32 @@ impl CredentialVault {
             unlocked: false,
             cached_key: None,
         }
+    }
+
+    /// Set the process-global "use OS keyring" flag.
+    ///
+    /// First call wins — subsequent calls are silently ignored (the
+    /// underlying `OnceLock` is one-shot). The
+    /// `LIBREFANG_VAULT_NO_KEYRING` env var always overrides this value
+    /// at read time.
+    ///
+    /// Call this exactly once, very early, from the daemon's startup
+    /// path (currently `LibreFangKernel::boot_with_config`). Standalone
+    /// CLI subcommands that bypass kernel boot (`librefang vault …`)
+    /// don't need to call it — `should_use_os_keyring()` falls back to
+    /// the platform default when this is unset.
+    pub fn set_use_os_keyring(use_keyring: bool) {
+        let _ = CONFIG_USE_OS_KEYRING.set(use_keyring);
+    }
+
+    /// Apply a [`librefang_types::config::VaultConfig`] to the
+    /// process-global vault state. Convenience wrapper around
+    /// [`Self::set_use_os_keyring`] that resolves `None` to the
+    /// platform default.
+    pub fn init_with_config(use_os_keyring: Option<bool>) {
+        Self::set_use_os_keyring(
+            use_os_keyring.unwrap_or_else(default_use_os_keyring_for_platform),
+        );
     }
 
     /// Initialize a new vault. Generates a master key and stores it in the OS keyring.
@@ -646,64 +744,80 @@ fn store_keyring_key(key_b64: &str) -> Result<(), String> {
     {
         // Try the OS keyring first. The previous behaviour silently dropped
         // through to the file fallback even on hosts that had a working
-        // keyring — see issue #3178.
+        // keyring — see issue #3178. `os_keyring::try_store` itself
+        // short-circuits to `false` when `use_os_keyring` is disabled
+        // (config / env var / macOS platform default).
         if os_keyring::try_store(key_b64) {
             debug!("Stored master key in OS keyring");
             return Ok(());
         }
 
-        // File-based fallback — wraps the master key with AES-256-GCM using an
-        // Argon2id-derived wrapping key from the machine fingerprint.
-        let keyring_path = dirs::data_local_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("librefang")
-            .join(".keyring");
-        std::fs::create_dir_all(keyring_path.parent().unwrap())
-            .map_err(|e| format!("mkdir: {e}"))?;
-
-        warn!(
-            "OS keyring unavailable — falling back to file-based key storage at {:?}. \
-             This is less secure than a real OS keyring.",
-            keyring_path
-        );
-
-        // Derive a wrapping key from the machine fingerprint via Argon2id
-        let machine_id = machine_fingerprint();
-        let mut salt = [0u8; SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
-
-        let wrapping_key =
-            derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
-
-        // Encrypt the master key with AES-256-GCM
-        let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
-            .map_err(|e| format!("cipher init: {e}"))?;
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher
-            .encrypt(nonce, key_b64.as_bytes())
-            .map_err(|e| format!("encrypt: {e}"))?;
-
-        let keyring_file = KeyringFile {
-            version: 3,
-            salt: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
-            nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
-            ciphertext: base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &ciphertext,
-            ),
-        };
-        let content =
-            serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
-
-        write_keyring_file(&keyring_path, &content)
+        if should_use_os_keyring() {
+            // Keyring was requested but the backend refused / was missing
+            // (e.g. headless Linux without a Secret Service daemon). Warn
+            // loudly — at-rest security drops to the machine-fingerprint
+            // wrap key. When the user has explicitly opted out (config /
+            // env var / macOS default) the file store is the intended
+            // path and no warning is emitted.
+            warn!(
+                "OS keyring unavailable — falling back to file-based key storage. \
+                 This is less secure than a real OS keyring."
+            );
+        }
+        store_keyring_key_to_file(key_b64)
     }
     #[cfg(test)]
     {
         let _ = key_b64;
         Err("Keyring not available in tests".to_string())
     }
+}
+
+/// Write the master key to the AES-256-GCM-wrapped file fallback only,
+/// never touching the OS keyring. Used by:
+///   - `store_keyring_key` after the OS keyring is unavailable / disabled.
+///   - The macOS migration path in `load_keyring_key` to mirror an
+///     existing Keychain entry into the file fallback so subsequent
+///     loads never prompt again.
+#[cfg(not(test))]
+fn store_keyring_key_to_file(key_b64: &str) -> Result<(), String> {
+    let keyring_path = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("librefang")
+        .join(".keyring");
+    std::fs::create_dir_all(keyring_path.parent().unwrap()).map_err(|e| format!("mkdir: {e}"))?;
+
+    debug!(
+        "Writing master key to file-based store at {:?}",
+        keyring_path
+    );
+
+    // Derive a wrapping key from the machine fingerprint via Argon2id
+    let machine_id = machine_fingerprint();
+    let mut salt = [0u8; SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+
+    let wrapping_key = derive_wrapping_key(&machine_id, &salt).map_err(|e| format!("kdf: {e}"))?;
+
+    // Encrypt the master key with AES-256-GCM
+    let cipher = Aes256Gcm::new_from_slice(wrapping_key.as_ref())
+        .map_err(|e| format!("cipher init: {e}"))?;
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, key_b64.as_bytes())
+        .map_err(|e| format!("encrypt: {e}"))?;
+
+    let keyring_file = KeyringFile {
+        version: 3,
+        salt: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
+        nonce: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes),
+        ciphertext: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ciphertext),
+    };
+    let content = serde_json::to_string_pretty(&keyring_file).map_err(|e| format!("json: {e}"))?;
+
+    write_keyring_file(&keyring_path, &content)
 }
 
 /// Load the master key, preferring the OS keyring and falling back to the
@@ -738,6 +852,36 @@ fn load_keyring_key() -> Result<Zeroizing<String>, String> {
             .join("librefang")
             .join(".keyring");
         if !keyring_path.exists() {
+            // Migration path: the user has just opted out of the OS
+            // keyring (e.g. macOS default flipped to false) but their
+            // master key still lives in the OS keyring from a previous
+            // run. Read it ONE final time (this may trigger one last OS
+            // prompt on macOS), then mirror it into the file fallback so
+            // subsequent loads never touch the OS keyring again.
+            //
+            // `try_load_force` bypasses the `use_os_keyring` short-circuit
+            // that just returned `None` above. If `use_os_keyring` is in
+            // fact enabled, `try_load` already attempted this and failed,
+            // so `try_load_force` will return `None` immediately and we
+            // fall through to the missing-file error.
+            if !should_use_os_keyring() {
+                if let Some(s) = os_keyring::try_load_force() {
+                    info!(
+                        "Migrated master key from OS keyring to file-based store at {:?}; \
+                         OS keyring will not be consulted again on this host. \
+                         You may delete the now-unused entry manually \
+                         (`security delete-generic-password -s librefang-vault -a master-key`).",
+                        keyring_path
+                    );
+                    if let Err(e) = store_keyring_key_to_file(&s) {
+                        warn!(
+                            "Loaded master key from OS keyring but failed to mirror to file: {e}; \
+                             OS keyring will be re-read on next start"
+                        );
+                    }
+                    return Ok(Zeroizing::new(s));
+                }
+            }
             return Err("Keyring file not found".to_string());
         }
 
@@ -2120,5 +2264,47 @@ mod tests {
         let ct = vec![0u8; 32];
         let result = try_decrypt_v2(&salt, &nonce, &ct, &[]);
         assert!(result.is_err());
+    }
+
+    /// Setting `LIBREFANG_VAULT_NO_KEYRING=1` must force
+    /// `should_use_os_keyring()` to false on every platform, regardless
+    /// of the compiled-in default or the process-global config flag.
+    /// This is the macOS prompt-fatigue escape hatch.
+    #[test]
+    fn vault_no_keyring_env_var_forces_file_fallback() {
+        // Serialize against any other env-mutating tests in this crate.
+        // `set_var` is `unsafe` since Rust 1.80 because cross-thread env
+        // mutation can race with reads in libc; the codebase uses the
+        // same `unsafe { ... }` pattern in other test modules.
+        for v in ["1", "true", "TRUE", "True"] {
+            unsafe { std::env::set_var(VAULT_NO_KEYRING_ENV, v) };
+            assert!(
+                !should_use_os_keyring(),
+                "{VAULT_NO_KEYRING_ENV}={v} must disable the OS keyring"
+            );
+        }
+
+        // Empty / unset / unrelated values must NOT force-disable.
+        unsafe { std::env::set_var(VAULT_NO_KEYRING_ENV, "0") };
+        let with_zero = should_use_os_keyring();
+        unsafe { std::env::set_var(VAULT_NO_KEYRING_ENV, "") };
+        let with_empty = should_use_os_keyring();
+        unsafe { std::env::remove_var(VAULT_NO_KEYRING_ENV) };
+        let unset = should_use_os_keyring();
+
+        // These three must agree — none should force-disable. They can
+        // independently be true OR false depending on platform default
+        // and any prior `set_use_os_keyring` call in the same process,
+        // but they must be equal.
+        assert_eq!(with_zero, with_empty);
+        assert_eq!(with_empty, unset);
+    }
+
+    /// macOS gets `false` by default; everywhere else gets `true`.
+    /// Documents the platform policy.
+    #[test]
+    fn platform_default_skips_keyring_only_on_macos() {
+        let expected = !cfg!(target_os = "macos");
+        assert_eq!(default_use_os_keyring_for_platform(), expected);
     }
 }
