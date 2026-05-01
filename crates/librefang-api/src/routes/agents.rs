@@ -29,6 +29,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .patch(patch_agent),
         )
         .route(
+            "/agents/{id}/stats",
+            axum::routing::get(get_agent_stats),
+        )
+        .route(
             "/agents/{id}/mode",
             axum::routing::put(set_agent_mode),
         )
@@ -968,6 +972,58 @@ pub async fn list_agents(
         limit,
     })
     .into_response()
+}
+
+/// GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.
+///
+/// Returns sessions/cost/P95-latency/active-now in a single round trip so
+/// the dashboard's per-agent KPI tiles don't have to scan the global
+/// `/api/sessions` page (which is paginated and was clipping data for
+/// agents that hadn't appeared in the latest N sessions).
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/stats",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "24-hour stats rollup", body = serde_json::Value),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn get_agent_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Reject requests for unknown agents so the dashboard can distinguish
+    // "agent gone" from "agent has no activity yet" (both would otherwise
+    // produce the all-zero stats payload).
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid agent id" })),
+            )
+                .into_response();
+        }
+    };
+    if state.kernel.agent_registry().get(agent_uuid).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "agent not found" })),
+        )
+            .into_response();
+    }
+
+    let substrate = state.kernel.memory_substrate();
+    match substrate.agent_stats_24h(&id) {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// Hard cap on inlined text-attachment length (chars). Mirrors the PDF

@@ -57,6 +57,7 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentStats,
   useAgentTemplates,
   useExperimentMetrics,
   useExperiments,
@@ -488,6 +489,10 @@ export function AgentsPage() {
   const memoryListQuery = useMemorySearchOrList("");
   const auditRecentQuery = useAuditRecent(120);
   const cronJobsQuery = useCronJobs(detailAgent?.id);
+  // Per-agent KPI rollup. Replaces a global /api/sessions scan that was
+  // capped by pagination and missed agents whose sessions weren't in
+  // the latest N rows.
+  const agentStatsQuery = useAgentStats(detailAgent?.id ?? "");
   // Pick the latest session for the selected agent so the Conversation
   // tab can stream in its messages without a separate per-agent route.
   const latestSessionForAgent = useMemo(() => {
@@ -524,13 +529,6 @@ export function AgentsPage() {
     return map;
   }, [sessionsQuery.data]);
 
-  /** P95 of an unsorted sample using nearest-rank. Returns 0 when empty. */
-  const p95Of = (xs: number[]): number => {
-    if (xs.length === 0) return 0;
-    const sorted = [...xs].sort((a, b) => a - b);
-    const rank = Math.ceil(0.95 * sorted.length) - 1;
-    return sorted[Math.max(0, Math.min(sorted.length - 1, rank))] ?? 0;
-  };
 
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
@@ -755,7 +753,6 @@ export function AgentsPage() {
     const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
     const detailCaps = (agent as AgentView).capabilities;
     const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
@@ -860,11 +857,16 @@ export function AgentsPage() {
           </div>
 
           {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
-              Subtext is data-derived ("N live", "$X/run", sample size, skill list)
-              so empty agents show "—" instead of stale state words. */}
+              Backed by GET /api/agents/{id}/stats so values are accurate even
+              when the agent hasn't appeared in the global session list page. */}
           {(() => {
-            const p95Ms = p95Of(stats.durations);
-            const avgCost = stats.sessions24h > 0 ? stats.cost24h / stats.sessions24h : 0;
+            const live = agentStatsQuery.data;
+            const sessions24h = live?.sessions_24h ?? 0;
+            const cost24h = live?.cost_24h ?? 0;
+            const p95Ms = live?.p95_latency_ms ?? 0;
+            const samples = live?.samples ?? 0;
+            const activeNow = live?.active_now ?? 0;
+            const avgCost = sessions24h > 0 ? cost24h / sessions24h : 0;
             const skillNames: string[] = Array.isArray((agent as AgentView).skills)
               ? ((agent as AgentView).skills as string[])
               : Array.isArray((agent as AgentView).capabilities?.skills)
@@ -880,16 +882,16 @@ export function AgentsPage() {
                 {[
                   {
                     l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
-                    v: String(stats.sessions24h),
-                    m: stats.activeNow > 0
-                      ? `${stats.activeNow} live`
-                      : stats.sessions24h > 0
+                    v: String(sessions24h),
+                    m: activeNow > 0
+                      ? `${activeNow} live`
+                      : sessions24h > 0
                         ? t("agents.kpi.sessions_idle", { defaultValue: "idle" })
                         : "—",
                   },
                   {
                     l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
-                    v: `$${stats.cost24h.toFixed(2)}`,
+                    v: `$${cost24h.toFixed(2)}`,
                     m: avgCost > 0 ? `$${avgCost.toFixed(2)}/run` : "—",
                   },
                   {
@@ -899,8 +901,8 @@ export function AgentsPage() {
                         ? `${(p95Ms / 1000).toFixed(2)}s`
                         : `${Math.round(p95Ms)}ms`
                       : "—",
-                    m: stats.durations.length > 0
-                      ? t("agents.kpi.samples", { count: stats.durations.length, defaultValue: "{{count}} samples" })
+                    m: samples > 0
+                      ? t("agents.kpi.samples", { count: samples, defaultValue: "{{count}} samples" })
                       : "—",
                   },
                   {

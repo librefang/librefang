@@ -305,6 +305,15 @@ impl MemorySubstrate {
         self.sessions.count_sessions()
     }
 
+    /// 24-hour KPI rollup for an individual agent — see
+    /// [`crate::session::SessionStore::agent_stats_24h`].
+    pub fn agent_stats_24h(
+        &self,
+        agent_id: &str,
+    ) -> LibreFangResult<crate::session::AgentStats24h> {
+        self.sessions.agent_stats_24h(agent_id)
+    }
+
     /// Delete a session by ID.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         self.sessions.delete_session(session_id)

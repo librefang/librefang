@@ -83,6 +83,26 @@ pub struct Session {
 
 /// Portable session export for hibernation / session state transfer.
 ///
+/// 24-hour rolling stats for a single agent. Returned by
+/// `SessionStore::agent_stats_24h` and surfaced via `GET /api/agents/{id}/stats`
+/// so the dashboard can render KPI tiles without scanning the global
+/// session list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStats24h {
+    /// Sessions whose `created_at` falls within the last 24 hours.
+    pub sessions_24h: u64,
+    /// Sum of `usage_events.cost_usd` for the agent in the last 24 hours.
+    pub cost_24h: f64,
+    /// Nearest-rank P95 of `usage_events.latency_ms` over 24h. `0` when
+    /// there are no samples.
+    pub p95_latency_ms: u64,
+    /// Sessions whose `updated_at` is within the last 5 minutes — a
+    /// liveness heuristic since the schema has no explicit flag.
+    pub active_now: u64,
+    /// Number of latency samples backing `p95_latency_ms`.
+    pub samples: u64,
+}
+
 /// Contains everything needed to reconstruct a session on another instance
 /// or after a context window hibernation cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,6 +621,83 @@ impl SessionStore {
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(total.max(0) as usize)
+    }
+
+    /// 24-hour rolling stats for a single agent. Powers the dashboard's
+    /// per-agent KPI tiles without forcing the client to scan the global
+    /// session list. All values are derived directly from indexed columns
+    /// (`sessions.agent_id`, `usage_events(agent_id, timestamp)`).
+    ///
+    /// `active_now` counts sessions whose `updated_at` falls within the
+    /// last 5 minutes — a heuristic stand-in for "currently streaming"
+    /// since the schema doesn't carry an explicit liveness flag.
+    pub fn agent_stats_24h(&self, agent_id: &str) -> LibreFangResult<AgentStats24h> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let now = chrono::Utc::now();
+        let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+        let cutoff_active = (now - chrono::Duration::minutes(5)).to_rfc3339();
+
+        let sessions_24h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND created_at >= ?2",
+                rusqlite::params![agent_id, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let active_now: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at >= ?2",
+                rusqlite::params![agent_id, cutoff_active],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // usage_events.cost_usd and latency_ms are present from migration v4/v14.
+        let cost_24h: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE agent_id = ?1 AND timestamp >= ?2",
+                rusqlite::params![agent_id, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT latency_ms FROM usage_events
+                 WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
+                 ORDER BY latency_ms ASC",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut latencies: Vec<i64> = Vec::new();
+        let rows = stmt
+            .query_map(rusqlite::params![agent_id, cutoff_24h], |row| row.get(0))
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for row in rows {
+            latencies.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+        }
+
+        // Nearest-rank P95 over the sorted-ascending latency array.
+        let p95_latency_ms: i64 = if latencies.is_empty() {
+            0
+        } else {
+            let rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
+            let idx = rank.saturating_sub(1).min(latencies.len() - 1);
+            latencies[idx]
+        };
+
+        Ok(AgentStats24h {
+            sessions_24h: sessions_24h.max(0) as u64,
+            cost_24h,
+            p95_latency_ms: p95_latency_ms.max(0) as u64,
+            active_now: active_now.max(0) as u64,
+            samples: latencies.len() as u64,
+        })
     }
 
     /// Paginated session listing. `limit = None` returns all rows from `offset` onward.

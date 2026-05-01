@@ -1071,6 +1071,20 @@ export async function getAgentDetail(agentId: string): Promise<AgentDetail> {
   return get<AgentDetail>(`/api/agents/${encodeURIComponent(agentId)}`);
 }
 
+/** 24-hour KPI rollup for one agent — backs the AgentsPage detail-panel
+ *  KPI tiles. See `GET /api/agents/{id}/stats`. */
+export interface AgentStats24h {
+  sessions_24h: number;
+  cost_24h: number;
+  p95_latency_ms: number;
+  active_now: number;
+  samples: number;
+}
+
+export async function getAgentStats(agentId: string): Promise<AgentStats24h> {
+  return get<AgentStats24h>(`/api/agents/${encodeURIComponent(agentId)}/stats`);
+}
+
 export async function patchAgentConfig(
   agentId: string,
   config: {
