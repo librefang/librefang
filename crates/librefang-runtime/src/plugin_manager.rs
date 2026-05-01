@@ -1241,8 +1241,12 @@ async fn install_from_git(
         return Err(format!("git clone failed: {stderr}"));
     }
 
-    // Validate the cloned repo has a plugin.toml with a safe name
-    let manifest = load_plugin_manifest(temp_dir.path())?;
+    // Validate the cloned repo has a plugin.toml with a safe name.
+    // load_plugin_manifest reads files synchronously; run on the blocking pool.
+    let manifest_dir = temp_dir.path().to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || load_plugin_manifest(&manifest_dir))
+        .await
+        .map_err(|e| format!("load_plugin_manifest task failed: {e}"))??;
     validate_plugin_name(&manifest.name)?;
     let target_dir = plugins_dir.join(&manifest.name);
 
@@ -1253,8 +1257,14 @@ async fn install_from_git(
         ));
     }
 
-    // Move (rename) from temp to plugins dir
-    copy_dir_recursive(temp_dir.path(), &target_dir)
+    // Move (rename) from temp to plugins dir.
+    // copy_dir_recursive walks/copies a directory tree synchronously; run on the
+    // blocking pool so we don't stall the async runtime.
+    let copy_src = temp_dir.path().to_path_buf();
+    let copy_dst = target_dir.clone();
+    tokio::task::spawn_blocking(move || copy_dir_recursive(&copy_src, &copy_dst))
+        .await
+        .map_err(|e| format!("copy_dir_recursive task failed: {e}"))?
         .map_err(|e| format!("Failed to install plugin: {e}"))?;
 
     // Remove .git directory to save space
@@ -4012,7 +4022,13 @@ pub async fn install_plugin_deps(name: &str) -> Result<Vec<String>, String> {
         return Err(format!("Plugin '{name}' is not installed"));
     }
 
-    let manifest = load_plugin_manifest_raw(&plugin_dir)?;
+    // load_plugin_manifest_raw reads plugin.toml synchronously; run on the
+    // blocking pool so we don't stall the async runtime.
+    let manifest_dir = plugin_dir.clone();
+    let manifest =
+        tokio::task::spawn_blocking(move || load_plugin_manifest_raw(&manifest_dir))
+            .await
+            .map_err(|e| format!("load_plugin_manifest_raw task failed: {e}"))??;
     let runtime = manifest
         .hooks
         .runtime
