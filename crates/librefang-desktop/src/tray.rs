@@ -1,8 +1,16 @@
 //! System tray setup for the LibreFang desktop app.
 //!
 //! Desktop-only: system tray is not available on iOS or Android.
+//!
+//! On Linux this module is also gated behind the `linux-tray` Cargo feature
+//! because Tauri's `tray-icon` feature transitively pulls a deprecated
+//! GTK3 stack with multiple unmaintained-crate advisories
+//! (RUSTSEC-2024-0411..0420 + 0429). See #3667.
 
-#![cfg(not(any(target_os = "ios", target_os = "android")))]
+#![cfg(all(
+    not(any(target_os = "ios", target_os = "android")),
+    any(not(target_os = "linux"), feature = "linux-tray")
+))]
 
 use librefang_kernel::config::librefang_home;
 use tauri::{

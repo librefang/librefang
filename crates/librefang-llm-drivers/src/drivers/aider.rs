@@ -100,6 +100,11 @@ impl AiderDriver {
 
 #[async_trait]
 impl LlmDriver for AiderDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "aider", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let prompt = Self::build_prompt(&request);
         let args = self.build_args(&prompt, &request.model);

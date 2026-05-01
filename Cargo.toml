@@ -63,7 +63,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 # OpenTelemetry
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"] }
+# `default-features = false` is critical: opentelemetry-otlp's default feature
+# set enables `http-proto` + `reqwest-blocking-client`, which forces
+# `opentelemetry-http` to pull `reqwest = "0.12"` alongside the workspace
+# `reqwest = "0.13"` direct dep — duplicating the entire HTTP stack
+# (rustls-platform-verifier 0.6 + 0.7, hyper-util, h2, …). We only ship
+# OTLP traces over gRPC (tonic), so the reqwest-based exporters are dead
+# weight. See #3679.
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
 tracing-opentelemetry = "0.32"
 
 # Prometheus metrics

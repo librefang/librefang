@@ -16,7 +16,7 @@ use librefang_types::i18n;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 use librefang_telemetry::metrics;
 
@@ -259,13 +259,34 @@ pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response
 }
 
 /// Middleware: inject a unique request ID and log the request/response.
+///
+/// The request_id is also published as a field on a per-request tracing
+/// span that wraps the downstream handler.  Any child span opened inside
+/// the handler — including the kernel orchestration spans and the
+/// `llm.complete` / `llm.stream` spans on each LLM driver — inherits this
+/// field automatically, so a single grep on `request_id=<uuid>` lights up
+/// the full execution path (HTTP → kernel → LLM provider).  This closes
+/// the propagation gap reported in #3775.
 pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let method = request.method().clone();
     let uri = request.uri().path().to_string();
     let start = Instant::now();
 
-    let mut response = next.run(request).await;
+    // Span wraps the entire downstream future so any `tracing::instrument`
+    // (or manual span) opened inside the handler chain becomes a child of
+    // this span and carries `request_id` for free.  `info_span!` (not
+    // `debug_span!`) so the span is recorded at the default subscriber
+    // level — debug-level spans get filtered out in release builds and
+    // the propagation guarantee disappears with them.
+    let request_span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        path = %uri,
+    );
+
+    let mut response = next.run(request).instrument(request_span).await;
 
     let elapsed = start.elapsed();
     let status = response.status().as_u16();
@@ -2272,6 +2293,36 @@ mod tests {
             response.status(),
             StatusCode::UNAUTHORIZED,
             "GET /a2a/tasks/{{id}} must require auth — it returns full task transcripts"
+        );
+    }
+
+    /// Regression for #3473 (dup of #3781): GET /a2a/tasks/{id}/status must
+    /// also require auth. The status endpoint exposes per-task progress
+    /// signals usable for side-channel inference even before the full
+    /// transcript is fetched, so it has to share the auth gate.
+    #[tokio::test]
+    async fn a2a_task_status_requires_auth() {
+        let app = Router::new()
+            .route("/a2a/tasks/{id}/status", get(|| async { "task status" }))
+            .layer(axum::middleware::from_fn_with_state(
+                with_key_state("secret"),
+                auth,
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/a2a/tasks/some-uuid-1234/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /a2a/tasks/{{id}}/status must require auth (#3473 dup of #3781)"
         );
     }
 

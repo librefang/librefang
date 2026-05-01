@@ -2202,7 +2202,7 @@ fn is_writable_config_path(path: &str) -> bool {
         "approval.auto_approve",
         "approval.totp_grace_period_secs",
     ];
-    if EXACT.iter().any(|p| *p == path) {
+    if EXACT.contains(&path) {
         return true;
     }
 
