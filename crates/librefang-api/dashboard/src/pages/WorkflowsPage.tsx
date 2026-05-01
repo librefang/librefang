@@ -22,8 +22,9 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { ScheduleModal } from "../components/ui/ScheduleModal";
 import {
   Layers, Trash2, FilePlus, Play, Search,
-  Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight,
+  Calendar, FileText, Activity, Bot, Loader2, Clock, ChevronRight,
   ChevronDown, FlaskConical, AlertCircle, CheckCircle2, SkipForward,
+  GitBranch, Eye, SearchX,
 } from "lucide-react";
 import {
   useWorkflows,
@@ -43,6 +44,23 @@ import { useUIStore } from "../lib/store";
 const categoryIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   creation: FileText, language: Bot, thinking: Activity, business: Calendar,
 };
+
+// Per-category accent — keeps templates visually grouped at a glance.
+// Uses Tailwind palette so it inherits dark/light theme via opacity.
+const categoryAccent: Record<string, { text: string; bg: string; ring: string; bar: string }> = {
+  devtools:     { text: "text-violet-500",  bg: "bg-violet-500/10",  ring: "ring-violet-500/30",  bar: "from-violet-500/15" },
+  productivity: { text: "text-sky-500",     bg: "bg-sky-500/10",     ring: "ring-sky-500/30",     bar: "from-sky-500/15" },
+  sre:          { text: "text-rose-500",    bg: "bg-rose-500/10",    ring: "ring-rose-500/30",    bar: "from-rose-500/15" },
+  sales:        { text: "text-emerald-500", bg: "bg-emerald-500/10", ring: "ring-emerald-500/30", bar: "from-emerald-500/15" },
+  research:     { text: "text-amber-500",   bg: "bg-amber-500/10",   ring: "ring-amber-500/30",   bar: "from-amber-500/15" },
+  admin:        { text: "text-slate-500",   bg: "bg-slate-500/10",   ring: "ring-slate-500/30",   bar: "from-slate-500/15" },
+  creation:     { text: "text-sky-500",     bg: "bg-sky-500/10",     ring: "ring-sky-500/30",     bar: "from-sky-500/15" },
+  language:     { text: "text-violet-500",  bg: "bg-violet-500/10",  ring: "ring-violet-500/30",  bar: "from-violet-500/15" },
+  thinking:     { text: "text-emerald-500", bg: "bg-emerald-500/10", ring: "ring-emerald-500/30", bar: "from-emerald-500/15" },
+  business:     { text: "text-amber-500",   bg: "bg-amber-500/10",   ring: "ring-amber-500/30",   bar: "from-amber-500/15" },
+};
+const fallbackAccent = { text: "text-text-dim", bg: "bg-main", ring: "ring-border-subtle", bar: "from-brand/10" };
+const accentFor = (cat?: string) => (cat && categoryAccent[cat]) || fallbackAccent;
 
 type CanvasTemplate = {
   nodes: Array<{
@@ -302,6 +320,27 @@ export function WorkflowsPage() {
   const tmplDesc = (tmpl: WorkflowTemplate) => tmpl.i18n?.[lang]?.description || tmpl.description;
 
   const hasWorkflows = workflows.length > 0;
+  const [tplCategory, setTplCategory] = useState<string>("all");
+  const tplCategories = useMemo(() => {
+    const map = new Map<string, number>();
+    apiTemplates.forEach((t) => {
+      const c = t.category || "uncategorized";
+      map.set(c, (map.get(c) ?? 0) + 1);
+    });
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [apiTemplates]);
+  const filteredTemplates = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return apiTemplates.filter((t) => {
+      if (tplCategory !== "all" && (t.category || "uncategorized") !== tplCategory) return false;
+      if (!q) return true;
+      const hay = `${tmplName(t)} ${tmplDesc(t) ?? ""} ${(t.tags ?? []).join(" ")}`.toLowerCase();
+      return hay.includes(q);
+    });
+  // tmplName / tmplDesc are stable per language change; depend on language token
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiTemplates, tplCategory, searchQuery, lang]);
+
   const getStepResultKey = (step: StepResultLike, index: number) =>
     step.id ?? step.step_id ?? step.step_name ?? step.name ?? ([step.agent_name, step.duration_ms, step.input_tokens, step.output_tokens].filter(Boolean).join(":") || index);
 
@@ -310,7 +349,15 @@ export function WorkflowsPage() {
       <PageHeader
         badge={t("workflows.automation_hub")}
         title={t("workflows.title")}
-        subtitle={t("workflows.subtitle")}
+        subtitle={
+          <span className="font-mono text-text-dim/70">
+            {t("workflows.flows_count", { defaultValue: "{{n}} flows", n: allWorkflows.length })}
+            <span className="px-1.5 text-text-dim/40">·</span>
+            {t("workflows.templates_count_meta", { defaultValue: "{{n}} templates", n: apiTemplates.length })}
+            <span className="px-1.5 text-text-dim/40">·</span>
+            <span className="text-text-dim/50">/api/workflows</span>
+          </span>
+        }
         isFetching={workflowsQuery.isFetching}
         onRefresh={() => void workflowsQuery.refetch()}
         icon={<Layers className="h-4 w-4" />}
@@ -362,35 +409,132 @@ export function WorkflowsPage() {
 
       {/* Templates Tab */}
       {activeTab === "templates" && (
-        <div id="workflows-panel-templates" role="tabpanel" aria-labelledby="workflows-tab-templates">
-          {apiTemplates.length > 0 ? (
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
-              {apiTemplates.map(tmpl => {
+        <div id="workflows-panel-templates" role="tabpanel" aria-labelledby="workflows-tab-templates" className="space-y-4">
+          {/* Search + category filter row */}
+          {apiTemplates.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={t("workflows.search_templates_placeholder", { defaultValue: "Search templates…" })}
+                leftIcon={<Search className="h-4 w-4" />}
+                className="sm:w-72"
+              />
+              <div className="flex items-center gap-1 flex-wrap">
+                {([["all", apiTemplates.length], ...tplCategories] as Array<[string, number]>).map(([id, count]) => {
+                  const active = tplCategory === id;
+                  const a = id === "all" ? fallbackAccent : accentFor(id);
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => setTplCategory(id)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border capitalize transition-colors ${
+                        active
+                          ? `${a.text} ${a.bg} border-current/40`
+                          : "text-text-dim border-border-subtle hover:text-text bg-surface"
+                      }`}
+                    >
+                      {id === "all" ? t("common.all", { defaultValue: "All" }) : id}
+                      <span className="font-mono text-[10px] text-text-dim/60">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {filteredTemplates.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {filteredTemplates.map((tmpl) => {
                 const Icon = categoryIconMap[tmpl.category || ""] || Layers;
+                const a = accentFor(tmpl.category);
                 const stepCount = tmpl.steps?.length ?? 0;
+                const requiredParams = (tmpl.parameters ?? []).filter((p) => p.required);
+                const optionalParams = (tmpl.parameters ?? []).filter((p) => !p.required);
                 return (
-                  <button key={tmpl.id} onClick={() => handleUseTemplate(tmpl)}
-                    className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
-                        <Icon className="w-5 h-5 text-brand" />
+                  <div
+                    key={tmpl.id}
+                    className="group flex flex-col rounded-2xl border border-border-subtle bg-surface overflow-hidden hover:border-brand/30 hover:shadow-md transition-colors"
+                  >
+                    <div className={`px-4 pt-3 pb-2.5 border-b border-border-subtle bg-gradient-to-br ${a.bar} to-transparent`}>
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${a.bg} ${a.text}`}>
+                          <Icon className="w-3 h-3" />
+                          {tmpl.category || "uncategorized"}
+                        </span>
+                        <span className="ml-auto font-mono text-[10px] text-text-dim/60">
+                          {stepCount} {t("workflows.steps_unit", { defaultValue: "steps" })}
+                        </span>
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{tmplName(tmpl)}</p>
-                        <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{tmplDesc(tmpl)}</p>
-                        <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
-                          {stepCount > 0 && <span>{stepCount} {t("workflows.nodes_unit")}</span>}
-                          {tmpl.tags && tmpl.tags.length > 0 && <span>{tmpl.tags[0]}</span>}
-                          <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
-                        </div>
-                      </div>
+                      <p className="mt-1.5 text-sm font-bold truncate">{tmplName(tmpl)}</p>
+                      <p className="mt-0.5 font-mono text-[10px] text-text-dim/60 truncate">{tmpl.id}</p>
                     </div>
-                  </button>
+                    <div className="px-4 py-3 flex-1">
+                      <p className="text-[11px] leading-snug text-text-dim line-clamp-3">{tmplDesc(tmpl)}</p>
+                      {(tmpl.parameters?.length ?? 0) > 0 && (
+                        <div className="mt-2.5">
+                          <p className="text-[9px] font-bold uppercase tracking-wider text-text-dim/50 mb-1">
+                            {t("workflows.parameters", { defaultValue: "Parameters" })} · {tmpl.parameters?.length}
+                          </p>
+                          <div className="flex flex-wrap gap-1">
+                            {[...requiredParams, ...optionalParams].slice(0, 6).map((p) => (
+                              <span
+                                key={p.name}
+                                className="font-mono text-[10px] px-1.5 py-0.5 rounded border border-border-subtle bg-main text-text-dim"
+                                title={p.description ?? p.name}
+                              >
+                                {p.name}{p.required ? <span className="text-rose-500 ml-0.5">*</span> : null}
+                              </span>
+                            ))}
+                            {(tmpl.parameters?.length ?? 0) > 6 && (
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 text-text-dim/60">
+                                +{(tmpl.parameters?.length ?? 0) - 6}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                      {tmpl.tags && tmpl.tags.length > 0 && (
+                        <div className="mt-2.5 flex flex-wrap gap-1">
+                          {tmpl.tags.slice(0, 5).map((tag) => (
+                            <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full border border-border-subtle text-text-dim/70">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div className="px-4 py-2.5 border-t border-border-subtle flex items-center gap-2">
+                      <Button
+                        variant="primary"
+                        className="flex-1 justify-center"
+                        onClick={() => handleUseTemplate(tmpl)}
+                        disabled={instantiateMutation.isPending}
+                      >
+                        {instantiateMutation.isPending
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <FilePlus className="w-3.5 h-3.5" />}
+                        <span className="text-[11px]">{t("workflows.use_template", { defaultValue: "Use template" })}</span>
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => handleUseTemplate(tmpl)}
+                        title={t("workflows.preview_template", { defaultValue: "Preview in canvas" })}
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </div>
                 );
               })}
             </div>
-          ) : (
+          ) : apiTemplates.length === 0 ? (
             <div className="py-12 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+          ) : (
+            <div className="py-12 text-center text-text-dim">
+              <SearchX className="w-7 h-7 mx-auto mb-2 text-text-dim/50" />
+              <p className="text-sm">{t("workflows.no_templates_match", { defaultValue: "No templates match." })}</p>
+            </div>
           )}
         </div>
       )}
@@ -415,82 +559,98 @@ export function WorkflowsPage() {
       {hasWorkflows ? (
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* Workflow List */}
-          <div className="space-y-2">
-            <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-1">
-              {t("workflows.all_workflows")} ({workflows.length})
+          <div className="space-y-1.5">
+            <h2 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-1.5 flex items-center gap-2">
+              <span>{t("workflows.all_workflows")}</span>
+              <span className="font-mono text-text-dim/40">{workflows.length}</span>
             </h2>
-            {workflows.map(wf => (
-              <div key={wf.id}
-                onClick={() => {
-                  setSelectedWorkflowId(wf.id);
-                }}
-                onDoubleClick={() => openWorkflow(wf.id)}
-                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-colors ${
-                  selectedWorkflowId === wf.id
-                    ? "border-brand bg-brand/5 shadow-sm"
-                    : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
-                }`}>
-                {/* Icon */}
-                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                  selectedWorkflowId === wf.id ? "bg-brand text-white" : "bg-main text-brand"
-                }`}>
-                  <Layers className="w-5 h-5" />
-                </div>
-                {/* Info */}
-                <div className="min-w-0 flex-1">
-                  {(() => {
-                    const schedule = getWorkflowSchedule(wf);
-                    const runCount = getWorkflowRunCount(wf);
-                    return (
-                      <>
-                   <div className="flex items-center gap-2">
-                     <h3 className="text-sm font-bold truncate">{wf.name}</h3>
-                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
-                       {t("workflows.steps_count", { count: Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0) })}
-                     </span>
-                   </div>
-                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
-                   <div className="flex items-center gap-3 mt-1.5 text-[9px] text-text-dim/50">
-                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDate(wf.created_at)}</span>
-                     <span className="flex items-center gap-1"><Play className="w-3 h-3" />{runCount} {t("workflows.runs_label", { defaultValue: "runs" })}</span>
-                     {schedule && (
-                       <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-full ${schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
-                         <Calendar className="w-3 h-3" />
-                         {schedule.cron}
-                       </span>
-                     )}
-                   </div>
-                      </>
-                    );
-                  })()}
-                </div>
-                {/* Actions */}
-                <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
-                  <button onClick={() => { setScheduleWorkflowId(wf.id); }}
-                    className={`p-2 rounded-lg transition-colors ${getWorkflowSchedule(wf) ? "text-success hover:text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
-                    title={t("nav.scheduler")}>
-                    <Calendar className="w-3.5 h-3.5" />
-                  </button>
-                  <button onClick={() => openWorkflow(wf.id)}
-                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors"
-                    title={t("canvas.ctx_edit")}>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                  {confirmDeleteId === wf.id ? (
-                    <div className="flex items-center gap-1">
-                      <button onClick={() => handleDelete(wf.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
-                      <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+            {workflows.map(wf => {
+              const schedule = getWorkflowSchedule(wf);
+              const runCount = getWorkflowRunCount(wf);
+              const stepCount = Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0);
+              const isSelected = selectedWorkflowId === wf.id;
+              const confirming = confirmDeleteId === wf.id;
+              return (
+                <div
+                  key={wf.id}
+                  onClick={() => setSelectedWorkflowId(wf.id)}
+                  onDoubleClick={() => openWorkflow(wf.id)}
+                  className={`group grid items-center gap-3 px-3.5 py-2.5 rounded-xl border cursor-pointer transition-colors
+                    grid-cols-[1fr_auto] sm:grid-cols-[1fr_120px_90px_auto]
+                    ${isSelected
+                      ? "border-brand bg-brand/5"
+                      : "border-border-subtle bg-surface hover:border-brand/30 hover:bg-main/40"}`}
+                >
+                  {/* Name + description */}
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <GitBranch className="w-3.5 h-3.5 text-brand shrink-0" />
+                      <span className="font-mono text-[13px] font-bold truncate">{wf.name}</span>
+                      <span className="font-mono text-[10px] text-text-dim/60 shrink-0">{stepCount} steps</span>
                     </div>
-                  ) : (
-                    <button onClick={() => handleDelete(wf.id)}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors"
-                      aria-label={t("common.delete")}>
-                      <Trash2 className="w-3.5 h-3.5" />
+                    <p className="text-[11px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
+                  </div>
+
+                  {/* Schedule pill — desktop */}
+                  <div className="hidden sm:flex items-center min-w-0">
+                    {schedule ? (
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono truncate ${schedule.enabled ? "bg-success/10 text-success" : "bg-main text-text-dim"}`}>
+                        <Calendar className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{schedule.cron}</span>
+                      </span>
+                    ) : (
+                      <span className="font-mono text-[10px] text-text-dim/40">no schedule</span>
+                    )}
+                  </div>
+
+                  {/* Run count + created — desktop */}
+                  <div className="hidden sm:block font-mono text-[10px] text-text-dim/70 leading-tight">
+                    <div className="flex items-center gap-1">
+                      <Play className="w-2.5 h-2.5" />
+                      {runCount} {t("workflows.runs_label", { defaultValue: "runs" })}
+                    </div>
+                    <div className="flex items-center gap-1 text-text-dim/50 mt-0.5">
+                      <Clock className="w-2.5 h-2.5" />
+                      {formatDate(wf.created_at)}
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-0.5 shrink-0" onClick={e => e.stopPropagation()}>
+                    <button onClick={() => setScheduleWorkflowId(wf.id)}
+                      className={`p-1.5 rounded-lg transition-colors ${schedule ? "text-success hover:bg-success/10" : "text-text-dim/40 hover:text-brand hover:bg-brand/10"}`}
+                      title={t("nav.scheduler")}>
+                      <Calendar className="w-3.5 h-3.5" />
                     </button>
-                  )}
+                    {confirming ? (
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => handleDelete(wf.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                        <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => handleDelete(wf.id)}
+                        className="p-1.5 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-colors"
+                        aria-label={t("common.delete")}>
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button onClick={() => openWorkflow(wf.id)}
+                      className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-colors"
+                      title={t("canvas.ctx_edit")}>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
+              );
+            })}
+            {workflows.length === 0 && searchQuery && (
+              <div className="py-10 text-center text-text-dim">
+                <SearchX className="w-7 h-7 mx-auto mb-2 text-text-dim/50" />
+                <p className="text-sm">
+                  {t("workflows.no_match", { defaultValue: "No workflows match." })}
+                </p>
               </div>
-            ))}
+            )}
           </div>
 
           {/* Right Panel: shown when a workflow is selected */}
