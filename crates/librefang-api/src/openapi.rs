@@ -368,6 +368,8 @@ use crate::types;
         routes::auto_dream::SetEnabledRequest,
         routes::agents::AgentStats24hView,
         routes::agents::AgentStatsPrevView,
+        routes::agents::AgentEventRowView,
+        routes::agents::AgentEventsResponse,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,
