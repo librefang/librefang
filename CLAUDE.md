@@ -38,23 +38,25 @@ net, not your plan.
 the model whether the session started in the main tree or a linked worktree,
 and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
 
-### Version-controlled git-side hooks (`.githooks/`)
+### Version-controlled git-side hooks (`scripts/hooks/`)
 
 These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
-- `pre-commit` — runs `cargo fmt -- --check` on staged Rust files; auto-formats
-  and asks you to re-stage if anything was off.
+- `pre-commit` — runs `cargo fmt --check` on staged Rust files; conditionally
+  regenerates `openapi.json` and SDKs when route signatures change.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).
 
-**Enable once per clone:**
+**Enable once per clone** by running setup:
 ```bash
-bash scripts/install-githooks.sh   # sets git config core.hooksPath .githooks
+just setup        # or: cargo xtask setup
 ```
-The `session-start-worktree-check.sh` banner will remind you if this is
-not yet configured.
+This sets `git config core.hooksPath scripts/hooks`, which makes the in-repo
+hooks active and keeps them current with `git pull` automatically. The
+`session-start-worktree-check.sh` banner reminds you if it isn't configured
+yet.
 
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
