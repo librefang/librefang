@@ -214,6 +214,47 @@ fn build_mcp_bridge_cfg(cfg: &KernelConfig) -> librefang_llm_driver::McpBridgeCo
 /// TTL for cached prompt metadata entries (30 seconds).
 const PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Best-effort load of the raw `config.toml` as a `toml::Value` for
+/// skill config-var injection.  Used **only** at boot and on
+/// `reload_config` — never on the per-message hot path (#3722).
+///
+/// A missing or unparseable file falls back to an empty table, matching
+/// the behaviour the inline read previously had on `read_to_string` /
+/// `from_str` errors.
+fn load_raw_config_toml(config_path: &Path) -> toml::Value {
+    let empty = || toml::Value::Table(toml::map::Map::new());
+    if !config_path.exists() {
+        return empty();
+    }
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Not on the hot path — surface the failure so a misconfigured
+            // file doesn't silently disable `[skills.config.*]` injection
+            // for the whole process lifetime.
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %e,
+                "failed to read raw config.toml for skill config injection; \
+                 falling back to empty table"
+            );
+            return empty();
+        }
+    };
+    match toml::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                path = %config_path.display(),
+                error = %e,
+                "failed to parse raw config.toml for skill config injection; \
+                 falling back to empty table"
+            );
+            empty()
+        }
+    }
+}
+
 /// Cached workspace context and identity files for an agent's workspace.
 #[derive(Clone, Debug)]
 struct CachedWorkspaceMetadata {
@@ -487,6 +528,14 @@ pub struct LibreFangKernel {
     data_dir_boot: PathBuf,
     /// Kernel configuration (atomically swappable for hot-reload).
     pub(crate) config: ArcSwap<KernelConfig>,
+    /// Cached raw `config.toml` value used for skill config-var injection.
+    ///
+    /// Refreshed once at boot and once per successful `reload_config` call —
+    /// **never** on the per-message hot path (#3722).  `KernelConfig` itself
+    /// is strongly-typed and does not preserve the open-ended
+    /// `[skills.config.<key>]` namespace that `resolve_config_vars`
+    /// walks, so we keep a separate `toml::Value` snapshot.
+    pub(crate) raw_config_toml: ArcSwap<toml::Value>,
     /// Agent registry.
     pub(crate) registry: AgentRegistry,
     /// Capability manager.
@@ -926,6 +975,32 @@ fn spawn_logged(
     fut: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
     crate::supervised_spawn::spawn_supervised(tag, fut)
+}
+
+/// SECURITY (#3533): reject manifest `module` strings that escape the
+/// LibreFang home dir. Centralised so every entry point that accepts a
+/// manifest goes through the same check — without this, hot-reload,
+/// `update_manifest`, and boot-time SQLite restore all bypassed the
+/// validation that lived inline in `spawn_agent_inner` and a hostile
+/// `agent.toml` (peer push, MCP-installed agent, skill bundle, or just
+/// edit on disk + restart) could ship `module = "python:/etc/passwd.py"`
+/// and have the host interpreter exec it under the agent's capabilities.
+///
+/// Returns `Err(KernelError)` ready to be `?`-propagated by callers; logs
+/// a `warn!` with the agent name so the rejection is visible to operators
+/// even when the caller chooses to skip-and-continue (e.g. the boot loop
+/// must not abort the whole process for one bad manifest).
+fn validate_manifest_module_path(manifest: &AgentManifest, agent_name: &str) -> KernelResult<()> {
+    if let Err(reason) = librefang_runtime::python_runtime::validate_module_string(&manifest.module)
+    {
+        warn!(agent = %agent_name, %reason, "Rejecting manifest — invalid module path");
+        return Err(KernelError::LibreFang(
+            librefang_types::error::LibreFangError::Internal(format!(
+                "Invalid module path: {reason}"
+            )),
+        ));
+    }
+    Ok(())
 }
 
 // ── Public Facade Getters ────────────────────────────────────────────
@@ -3213,10 +3288,17 @@ impl LibreFangKernel {
             std::sync::Arc::new(config.clone()),
             Arc::clone(&driver),
         );
+        // Pre-parse `config.toml` once at boot so the per-message hot path
+        // never has to re-read it (#3722). Errors here are non-fatal — the
+        // skill config injection layer treats a missing/invalid file as an
+        // empty table, which is the same semantics as the previous on-miss
+        // path.
+        let initial_raw_config_toml = load_raw_config_toml(&config.home_dir.join("config.toml"));
         let kernel = Self {
             home_dir_boot: config.home_dir.clone(),
             data_dir_boot: config.data_dir.clone(),
             config: ArcSwap::new(std::sync::Arc::new(config)),
+            raw_config_toml: ArcSwap::new(std::sync::Arc::new(initial_raw_config_toml)),
             registry: AgentRegistry::new(),
             capabilities: CapabilityManager::new(),
             event_bus: EventBus::new(),
@@ -3836,6 +3918,21 @@ impl LibreFangKernel {
                         }
                     }
 
+                    // SECURITY (#3533): skip any restored agent whose
+                    // on-disk `module` path escapes the LibreFang home
+                    // dir. Logging the rejection is enough — refusing to
+                    // boot the whole daemon for one bad manifest would
+                    // turn a CVE into a DoS, and the agent stays out of
+                    // the registry so no codepath can invoke it.
+                    if let Err(e) = validate_manifest_module_path(&restored_entry.manifest, &name) {
+                        tracing::error!(
+                            agent = %name,
+                            error = %e,
+                            "Refusing to restore agent with invalid module path; \
+                             check agent.toml for absolute paths or '..' traversal"
+                        );
+                        continue;
+                    }
                     if let Err(e) = kernel.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
@@ -4071,6 +4168,14 @@ system_prompt = "You are a helpful assistant."
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
         let name = manifest.name.clone();
+
+        // SECURITY (#3533): reject manifest `module` strings that escape
+        // the LibreFang home dir before any further work. See
+        // `validate_manifest_module_path` for the full rationale and the
+        // sibling enforcement points (boot restore, hot reload,
+        // update_manifest).
+        validate_manifest_module_path(&manifest, &name)?;
+
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves
         // session history associations in SQLite. Child agents spawned at
@@ -9437,6 +9542,14 @@ system_prompt = "You are a helpful assistant."
                     )))
                 })?;
 
+        // SECURITY (#3533): hot-reload is a separate code path from
+        // spawn — without this check an operator (or anyone with TOML
+        // write access) could swap a running agent's `module` for an
+        // absolute / `..`-traversing host path and have the next
+        // invocation exec it. Reject before touching the registry so
+        // the previous (validated) manifest stays in effect.
+        validate_manifest_module_path(&disk_manifest, &entry.name)?;
+
         // Preserve workspace if TOML leaves it unset — workspace is
         // populated at spawn time with the real directory path.
         if disk_manifest.workspace.is_none() {
@@ -9502,6 +9615,11 @@ system_prompt = "You are a helpful assistant."
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+
+        // SECURITY (#3533): same path-escape check as spawn / hot-reload.
+        // Without it, any caller with `update_manifest` access could
+        // swap a running agent's `module` to an arbitrary host script.
+        validate_manifest_module_path(&new_manifest, &entry.name)?;
 
         // Preserve invariants that the registry indices depend on.
         if new_manifest.workspace.is_none() {
@@ -11292,6 +11410,15 @@ system_prompt = "You are a helpful assistant."
             // edits even when no other hot action fires.
             self.taint_rules_swap
                 .store(std::sync::Arc::new(new_config.taint_rules.clone()));
+            // Refresh the cached raw `config.toml` snapshot (#3722) so
+            // skill config injection picks up `[skills.config.*]` edits
+            // without needing the per-message hot path to re-read the
+            // file. The strongly-typed `KernelConfig` does not preserve
+            // this open-ended namespace, so we keep the raw value
+            // separately.
+            let refreshed_raw = load_raw_config_toml(&config_path);
+            self.raw_config_toml
+                .store(std::sync::Arc::new(refreshed_raw));
             let new_config_arc = std::sync::Arc::new(new_config);
             self.config.store(std::sync::Arc::clone(&new_config_arc));
             // Rebuild the auxiliary LLM client so `[llm.auxiliary]` edits
@@ -15896,15 +16023,9 @@ system_prompt = "You are a helpful assistant."
         let skills = self.sorted_enabled_skills(skill_allowlist);
         let skill_count = skills.len();
         let skill_config_section = {
-            let config_path = self.home_dir_boot.join("config.toml");
-            let config_toml: toml::Value = if config_path.exists() {
-                std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|s| toml::from_str(&s).ok())
-                    .unwrap_or(toml::Value::Table(toml::map::Map::new()))
-            } else {
-                toml::Value::Table(toml::map::Map::new())
-            };
+            // Use the boot-time cached `config.toml` value — refreshed by
+            // `reload_config`, never read on this hot path (#3722).
+            let config_toml = self.raw_config_toml.load();
             let declared = librefang_skills::config_injection::collect_config_vars(&skills);
             let resolved =
                 librefang_skills::config_injection::resolve_config_vars(&declared, &config_toml);

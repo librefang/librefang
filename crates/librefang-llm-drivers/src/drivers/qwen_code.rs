@@ -934,6 +934,11 @@ impl QwenCodeDriver {
 
 #[async_trait]
 impl LlmDriver for QwenCodeDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "qwen_code", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // `prepared` cleans up its temp dir via `Drop`, so cancellation at
         // any await point below still releases the dir — no explicit
@@ -942,6 +947,11 @@ impl LlmDriver for QwenCodeDriver {
         self.complete_inner(&prepared, &request).await
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "qwen_code", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,

@@ -130,6 +130,63 @@ pub fn parse_python_module(module: &str) -> Option<&str> {
     module.strip_prefix("python:")
 }
 
+/// Validate an agent manifest `module` string before spawn (#3533).
+///
+/// Reject absolute paths, parent traversal (`..`), and Windows drive
+/// prefixes. The kernel's `resolve_module_path` would happily honor
+/// `python:/etc/some.py` and hand the host Python interpreter an
+/// arbitrary script — that is privilege escalation any time an
+/// agent.toml is sourced from a less-trusted location (skill bundle,
+/// peer push, MCP-installed agent, etc.). The script path must stay
+/// relative to the LibreFang home dir.
+pub fn validate_module_string(module: &str) -> Result<(), String> {
+    let payload = match module.split_once(':') {
+        Some((_, rest)) => rest,
+        None => module,
+    };
+    if payload.is_empty() {
+        return Err(format!("module path is empty: {module}"));
+    }
+    // Reject NUL / control bytes — they have no legitimate use in a
+    // relative script path and can confuse downstream interpreters.
+    if payload.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!(
+            "module path must not contain NUL or control characters: {module}"
+        ));
+    }
+    if payload.starts_with('/') || payload.starts_with('\\') {
+        return Err(format!(
+            "module path must be relative to the LibreFang home dir, not absolute: {module}"
+        ));
+    }
+    // Windows drive letter, e.g. "C:\\foo".
+    let bytes = payload.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(format!(
+            "module path must be relative, not a Windows drive path: {module}"
+        ));
+    }
+    // Normalize backslashes to forward slashes BEFORE component parsing.
+    // On Linux, `Path::components()` treats `..\..\etc` as a single
+    // filename and would let backslash-encoded traversal through; on
+    // Windows the same string is real traversal. Treat both consistently.
+    let normalized = payload.replace('\\', "/");
+    let p = std::path::Path::new(&normalized);
+    for component in p.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(format!(
+                "module path must not contain '..' traversal: {module}"
+            ));
+        }
+        if matches!(component, std::path::Component::RootDir) {
+            return Err(format!(
+                "module path must be relative to the LibreFang home dir: {module}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Run a Python agent script with the given message.
 ///
 /// Returns the script's text response.
@@ -480,6 +537,31 @@ mod tests {
         assert!(validate_script_path("agent.sh").is_err());
         assert!(validate_script_path("/bin/bash").is_err());
         assert!(validate_script_path("test.py").is_ok());
+    }
+
+    #[test]
+    fn test_validate_module_string_rejects_absolute_and_traversal() {
+        // Regression: #3533 — AgentSpawn must not allow arbitrary host paths.
+        assert!(validate_module_string("python:scripts/agent.py").is_ok());
+        assert!(validate_module_string("python:./agent.py").is_ok());
+        assert!(validate_module_string("wasm:skills/foo.wasm").is_ok());
+        assert!(validate_module_string("builtin:chat").is_ok());
+
+        assert!(validate_module_string("python:/etc/passwd.py").is_err());
+        assert!(validate_module_string("python:/tmp/evil.py").is_err());
+        assert!(validate_module_string("python:../../etc/shadow.py").is_err());
+        assert!(validate_module_string("python:scripts/../../etc/x.py").is_err());
+        assert!(validate_module_string("wasm:/abs/skill.wasm").is_err());
+        assert!(validate_module_string("python:C:\\Windows\\evil.py").is_err());
+        assert!(validate_module_string("python:").is_err());
+        // Backslash-encoded traversal must be rejected even on Linux,
+        // where `Path::components()` would otherwise treat it as one
+        // filename component.
+        assert!(validate_module_string("python:..\\..\\etc\\shadow.py").is_err());
+        assert!(validate_module_string("python:scripts\\..\\..\\etc\\x.py").is_err());
+        // NUL / control characters have no legitimate use here.
+        assert!(validate_module_string("python:agent\0.py").is_err());
+        assert!(validate_module_string("python:agent\n.py").is_err());
     }
 
     #[tokio::test]

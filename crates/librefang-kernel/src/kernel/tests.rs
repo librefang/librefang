@@ -5761,3 +5761,78 @@ fn resolve_cron_max_tokens_nonzero_passthrough() {
     assert_eq!(resolve_cron_max_tokens(Some(8192)), Some(8192));
     assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
 }
+
+/// Regression for #3533: `spawn_agent` must reject manifests whose
+/// `module` string escapes the LibreFang home dir. The pure-function
+/// `validate_module_string` is unit-tested in librefang-runtime, but
+/// this end-to-end test locks the wiring at the kernel boundary so a
+/// future refactor (e.g. moving the call out of `spawn_agent_inner`)
+/// fails loudly instead of silently re-opening the path-escape hole.
+#[test]
+fn test_spawn_agent_rejects_absolute_module_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-spawn-reject-abs");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let result = kernel.spawn_agent(AgentManifest {
+        name: "evil-abs".to_string(),
+        description: "tries to exec /etc/passwd.py".to_string(),
+        author: "test".to_string(),
+        module: "python:/etc/passwd.py".to_string(),
+        ..Default::default()
+    });
+
+    assert!(
+        result.is_err(),
+        "spawn must reject absolute module path; got {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid module path"),
+        "error should mention invalid module path, got: {err}"
+    );
+
+    kernel.shutdown();
+}
+
+/// Companion to the absolute-path rejection test: parent-traversal
+/// (`..`) must also be refused at the kernel spawn boundary. Same
+/// wiring-regression intent as `test_spawn_agent_rejects_absolute_module_path`.
+#[test]
+fn test_spawn_agent_rejects_parent_traversal_module_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-kernel-spawn-reject-traversal");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    let result = kernel.spawn_agent(AgentManifest {
+        name: "evil-traversal".to_string(),
+        description: "tries ../../etc/shadow.py".to_string(),
+        author: "test".to_string(),
+        module: "python:../../etc/shadow.py".to_string(),
+        ..Default::default()
+    });
+
+    assert!(
+        result.is_err(),
+        "spawn must reject '..' traversal; got {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Invalid module path"),
+        "error should mention invalid module path, got: {err}"
+    );
+
+    kernel.shutdown();
+}

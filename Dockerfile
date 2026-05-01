@@ -40,7 +40,12 @@ COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release --bin librefang && \
+    # `--features all-channels`: the published Docker image is the full
+    # daemon, so opt back in to every channel adapter. The CLI's `default`
+    # was slimmed to a "core-channels" subset (see #3655 / #3688) to keep
+    # developer cold-build time low; release/packaging pipelines re-enable
+    # the full set explicitly.
+    cargo build --release --bin librefang --features all-channels && \
     cp target/release/librefang /usr/local/bin/librefang
 
 FROM node:lts-bookworm-slim
