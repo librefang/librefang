@@ -2,6 +2,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import {
   listAgents,
   getAgentDetail,
+  getAgentStats,
   listAgentSessions,
   listAgentTemplates,
   listPromptVersions,
@@ -35,6 +36,14 @@ export const agentQueries = {
       queryFn: () => listAgentSessions(agentId),
       enabled: !!agentId,
       staleTime: 10_000,
+    }),
+  stats: (agentId: string) =>
+    queryOptions({
+      queryKey: agentKeys.stats(agentId),
+      queryFn: () => getAgentStats(agentId),
+      enabled: !!agentId,
+      staleTime: 15_000,
+      refetchInterval: 30_000,
     }),
   templates: () =>
     queryOptions({
@@ -74,6 +83,10 @@ export function useAgentDetail(agentId: string, options: QueryOverrides = {}) {
 
 export function useAgentSessions(agentId: string, options: QueryOverrides = {}) {
   return useQuery(withOverrides(agentQueries.sessions(agentId), options));
+}
+
+export function useAgentStats(agentId: string, options: QueryOverrides = {}) {
+  return useQuery(withOverrides(agentQueries.stats(agentId), options));
 }
 
 export function useAgentTemplates(options: QueryOverrides = {}) {

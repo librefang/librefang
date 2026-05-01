@@ -121,6 +121,37 @@ impl Session {
 
 /// Portable session export for hibernation / session state transfer.
 ///
+/// 24-hour rolling stats for a single agent. Returned by
+/// `SessionStore::agent_stats_24h` and surfaced via `GET /api/agents/{id}/stats`
+/// so the dashboard can render KPI tiles without scanning the global
+/// session list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStats24h {
+    /// Sessions whose `created_at` falls within the last 24 hours.
+    pub sessions_24h: u64,
+    /// Sum of `usage_events.cost_usd` for the agent in the last 24 hours.
+    pub cost_24h: f64,
+    /// Nearest-rank P95 of `usage_events.latency_ms` over 24h. `0` when
+    /// there are no samples.
+    pub p95_latency_ms: u64,
+    /// Sessions whose `updated_at` is within the last 5 minutes — a
+    /// liveness heuristic since the schema has no explicit flag.
+    pub active_now: u64,
+    /// Number of latency samples backing `p95_latency_ms`.
+    pub samples: u64,
+    /// Same fields aggregated over the prior 24-hour window (24-48h ago)
+    /// so the dashboard can render trend deltas without a second round trip.
+    pub prev: AgentStatsPrev,
+}
+
+/// Prior-period rollup mirroring [`AgentStats24h`]'s window-scoped fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStatsPrev {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
+}
+
 /// Contains everything needed to reconstruct a session on another instance
 /// or after a context window hibernation cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -643,6 +674,198 @@ impl SessionStore {
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(total.max(0) as usize)
+    }
+
+    /// 24-hour rolling stats for a single agent. Powers the dashboard's
+    /// per-agent KPI tiles without forcing the client to scan the global
+    /// session list. All values are derived directly from indexed columns
+    /// (`sessions.agent_id`, `usage_events(agent_id, timestamp)`).
+    ///
+    /// `active_now` counts sessions whose `updated_at` falls within the
+    /// last 5 minutes — a heuristic stand-in for "currently streaming"
+    /// since the schema doesn't carry an explicit liveness flag.
+    ///
+    /// The window comparisons (`created_at >= ?`, `timestamp >= ?`) are
+    /// string comparisons against `chrono::Utc::now().to_rfc3339()`.
+    /// This is only safe because the rest of the codebase writes
+    /// timestamps via `to_rfc3339()` in UTC, which is lexicographically
+    /// monotonic. If a writer ever inserts a non-UTC offset (e.g.
+    /// `+08:00`), this aggregator will silently miscount.
+    pub fn agent_stats_24h(&self, agent_id: &str) -> LibreFangResult<AgentStats24h> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let now = chrono::Utc::now();
+        let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+        let cutoff_48h = (now - chrono::Duration::hours(48)).to_rfc3339();
+        let cutoff_active = (now - chrono::Duration::minutes(5)).to_rfc3339();
+
+        // Sessions in [now-24h, now] vs the prior period [now-48h, now-24h).
+        let sessions_24h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND created_at >= ?2",
+                rusqlite::params![agent_id, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let prev_sessions_24h: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE agent_id = ?1 AND created_at >= ?2 AND created_at < ?3",
+                rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let active_now: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at >= ?2",
+                rusqlite::params![agent_id, cutoff_active],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // usage_events.cost_usd and latency_ms are present from migration v4/v14.
+        let cost_24h: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE agent_id = ?1 AND timestamp >= ?2",
+                rusqlite::params![agent_id, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let prev_cost_24h: f64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
+                 WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3",
+                rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // Pull latencies for both windows. Two prepared statements keep
+        // the index hits clean (agent_id, timestamp) and let us return
+        // the values pre-sorted ascending so P95 is just an indexed read.
+        let mut cur_lat: Vec<i64> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT latency_ms FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
+                     ORDER BY latency_ms ASC",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![agent_id, cutoff_24h], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            for row in rows {
+                cur_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            }
+        }
+        let mut prev_lat: Vec<i64> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT latency_ms FROM usage_events
+                     WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3 AND latency_ms > 0
+                     ORDER BY latency_ms ASC",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let rows = stmt
+                .query_map(rusqlite::params![agent_id, cutoff_48h, cutoff_24h], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            for row in rows {
+                prev_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            }
+        }
+
+        // Nearest-rank P95 over a sorted-ascending latency array.
+        let p95 = |latencies: &[i64]| -> i64 {
+            if latencies.is_empty() {
+                0
+            } else {
+                let rank = ((latencies.len() as f64) * 0.95).ceil() as usize;
+                let idx = rank.saturating_sub(1).min(latencies.len() - 1);
+                latencies[idx]
+            }
+        };
+
+        Ok(AgentStats24h {
+            sessions_24h: sessions_24h.max(0) as u64,
+            cost_24h,
+            p95_latency_ms: p95(&cur_lat).max(0) as u64,
+            active_now: active_now.max(0) as u64,
+            samples: cur_lat.len() as u64,
+            prev: AgentStatsPrev {
+                sessions_24h: prev_sessions_24h.max(0) as u64,
+                cost_24h: prev_cost_24h,
+                p95_latency_ms: p95(&prev_lat).max(0) as u64,
+            },
+        })
+    }
+
+    /// Bulk variant of `agent_stats_24h` covering only the cheap-to-aggregate
+    /// fields — `(sessions_24h, cost_24h)` — for every agent at once.
+    /// Used by the agent-list endpoint to embed row-level KPI without an
+    /// N+1 fan-out. P95 / active-now are intentionally excluded; row UI
+    /// only needs the two coarse counts and surfacing them via a single
+    /// query keeps the listing latency bounded.
+    pub fn agents_stats_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, (u64, f64)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let now = chrono::Utc::now();
+        let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+
+        let mut out: std::collections::HashMap<String, (u64, f64)> =
+            std::collections::HashMap::new();
+
+        // Pass 1: sessions_24h grouped by agent_id (uses idx on agent_id+created_at).
+        let mut stmt_s = conn
+            .prepare(
+                "SELECT agent_id, COUNT(*)
+                 FROM sessions WHERE created_at >= ?1
+                 GROUP BY agent_id",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows_s = stmt_s
+            .query_map(rusqlite::params![cutoff_24h], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for row in rows_s {
+            let (id, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.entry(id).or_insert((0, 0.0)).0 = n.max(0) as u64;
+        }
+
+        // Pass 2: cost_24h grouped by agent_id (uses idx on agent_id+timestamp).
+        let mut stmt_c = conn
+            .prepare(
+                "SELECT agent_id, COALESCE(SUM(cost_usd), 0.0)
+                 FROM usage_events WHERE timestamp >= ?1
+                 GROUP BY agent_id",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows_c = stmt_c
+            .query_map(rusqlite::params![cutoff_24h], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for row in rows_c {
+            let (id, c) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.entry(id).or_insert((0, 0.0)).1 = c;
+        }
+
+        Ok(out)
     }
 
     /// Paginated session listing. `limit = None` returns all rows from `offset` onward.
@@ -2055,5 +2278,279 @@ mod tests {
         assert_eq!(row["cost_usd"].as_f64(), Some(0.0));
         assert_eq!(row["total_tokens"].as_u64(), Some(0));
         assert!(row["duration_ms"].is_null());
+    }
+
+    /// agent_stats_24h must:
+    ///   - count only sessions whose created_at falls inside the 24h window,
+    ///   - sum only usage_events whose timestamp falls inside it,
+    ///   - return P95 latency via nearest-rank over events with latency > 0,
+    ///   - count active_now from sessions touched in the last 5 minutes,
+    ///   - scope every aggregate to the given agent_id.
+    #[test]
+    fn agent_stats_24h_aggregates_within_window() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
+
+        let agent_id = AgentId::new();
+        let other_agent = AgentId::new();
+
+        // Three sessions for the target agent: two recent (within 24h),
+        // one well outside the window. Plus one for an unrelated agent
+        // to verify scoping.
+        let now = chrono::Utc::now();
+        let recent_a = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let recent_b = (now - chrono::Duration::minutes(2)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
+
+        let insert_session = |id: &str, agent: &AgentId, created: &str, updated: &str| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
+                 VALUES (?1, ?2, x'90', 0, ?3, ?4)",
+                rusqlite::params![id, agent.0.to_string(), created, updated],
+            )
+            .unwrap();
+        };
+        let s_active = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_active, &agent_id, &recent_a, &recent_b); // updated_at within 5min
+        let s_idle = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_idle, &agent_id, &recent_a, &recent_a); // updated_at >5min ago
+        let s_stale = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_stale, &agent_id, &stale, &stale);
+        let s_other = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_other, &other_agent, &recent_a, &recent_b);
+
+        // Usage events: three within the window for the target agent
+        // (latencies 100/200/300 → P95 nearest-rank = ceil(0.95*3)=3 → 300),
+        // one outside the window (must be ignored), one for the other agent.
+        let insert_event = |agent: &AgentId, ts: &str, cost: f64, latency: i64| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
+                 VALUES (?1, ?2, ?3, 'm', 10, 20, ?4, 0, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent.0.to_string(),
+                    ts,
+                    cost,
+                    latency,
+                ],
+            )
+            .unwrap();
+        };
+        insert_event(&agent_id, &recent_a, 0.10, 100);
+        insert_event(&agent_id, &recent_b, 0.05, 200);
+        insert_event(&agent_id, &recent_b, 0.15, 300);
+        insert_event(&agent_id, &stale, 9.99, 999); // outside window
+        insert_event(&other_agent, &recent_a, 7.77, 777);
+
+        let stats = store.agent_stats_24h(&agent_id.0.to_string()).unwrap();
+        assert_eq!(stats.sessions_24h, 2, "only 2 sessions are within 24h");
+        assert!(
+            (stats.cost_24h - 0.30).abs() < 1e-9,
+            "cost_24h = 0.10 + 0.05 + 0.15"
+        );
+        assert_eq!(
+            stats.p95_latency_ms, 300,
+            "nearest-rank P95 of [100,200,300]"
+        );
+        assert_eq!(stats.samples, 3);
+        assert_eq!(stats.active_now, 1, "only s_active was touched within 5min");
+
+        // Other-agent scoping: querying with that agent's id must return
+        // only its own row, not leak the target agent's larger numbers.
+        let other_stats = store.agent_stats_24h(&other_agent.0.to_string()).unwrap();
+        assert_eq!(other_stats.sessions_24h, 1);
+        assert!((other_stats.cost_24h - 7.77).abs() < 1e-9);
+        assert_eq!(other_stats.samples, 1);
+
+        // Empty-history agent must produce all-zero stats, not error.
+        let empty_stats = store
+            .agent_stats_24h(&AgentId::new().0.to_string())
+            .unwrap();
+        assert_eq!(empty_stats.sessions_24h, 0);
+        assert_eq!(empty_stats.cost_24h, 0.0);
+        assert_eq!(empty_stats.p95_latency_ms, 0);
+        assert_eq!(empty_stats.samples, 0);
+        assert_eq!(empty_stats.active_now, 0);
+        assert_eq!(empty_stats.prev.sessions_24h, 0);
+        assert_eq!(empty_stats.prev.cost_24h, 0.0);
+        assert_eq!(empty_stats.prev.p95_latency_ms, 0);
+
+        // The original test seeded only the last-24h window. Prev should
+        // be all zero for the target agent; verifying that here so the
+        // delta computation in the dashboard never spuriously flips
+        // signs against a phantom prior period.
+        assert_eq!(stats.prev.sessions_24h, 0, "prev period had no sessions");
+        assert_eq!(stats.prev.cost_24h, 0.0);
+        assert_eq!(stats.prev.p95_latency_ms, 0);
+    }
+
+    /// Trend deltas: backend computes prior-window aggregates over
+    /// `[now-48h, now-24h)`. This test seeds events in BOTH windows
+    /// (with ≥1min margins from the cutoffs to stay deterministic
+    /// across the test runner's wall-clock drift) and verifies that:
+    /// - Activity inside `[now-24h, now]` lands in `cur`.
+    /// - Activity inside `[now-48h, now-24h)` lands in `prev`.
+    /// - Activity older than 48h is dropped from both.
+    /// - P95 is computed independently per window.
+    #[test]
+    fn agent_stats_24h_prev_window_boundaries() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
+        let agent_id = AgentId::new();
+
+        let now = chrono::Utc::now();
+        // Use 1-minute inset from each cutoff so the test stays stable
+        // even when wall-clock advances between seeding and querying.
+        let cur_near_24h =
+            (now - chrono::Duration::hours(24) + chrono::Duration::minutes(1)).to_rfc3339();
+        let cur_recent = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let prev_near_24h =
+            (now - chrono::Duration::hours(24) - chrono::Duration::minutes(1)).to_rfc3339();
+        let prev_near_48h =
+            (now - chrono::Duration::hours(48) + chrono::Duration::minutes(1)).to_rfc3339();
+        let outside = (now - chrono::Duration::hours(72)).to_rfc3339();
+
+        let insert_session = |id: &str, created: &str| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
+                 VALUES (?1, ?2, x'90', 0, ?3, ?3)",
+                rusqlite::params![id, agent_id.0.to_string(), created],
+            ).unwrap();
+        };
+        // Current window: 1 session 1min after the 24h cutoff.
+        insert_session(&uuid::Uuid::new_v4().to_string(), &cur_near_24h);
+        // Prior window: 2 sessions — one near each cutoff.
+        insert_session(&uuid::Uuid::new_v4().to_string(), &prev_near_24h);
+        insert_session(&uuid::Uuid::new_v4().to_string(), &prev_near_48h);
+        // Outside both windows: must not be counted anywhere.
+        insert_session(&uuid::Uuid::new_v4().to_string(), &outside);
+
+        let insert_event = |ts: &str, cost: f64, latency: i64| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
+                 VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent_id.0.to_string(),
+                    ts,
+                    cost,
+                    latency,
+                ],
+            ).unwrap();
+        };
+        // Current: $0.20 total, latencies [50, 150] → P95 nearest-rank = 150.
+        insert_event(&cur_near_24h, 0.10, 50);
+        insert_event(&cur_recent, 0.10, 150);
+        // Prior: $1.00 total, latencies [400, 500, 600] → P95 = 600.
+        insert_event(&prev_near_48h, 0.40, 400);
+        insert_event(&prev_near_24h, 0.30, 500);
+        insert_event(&prev_near_24h, 0.30, 600);
+        // Outside both: must be ignored.
+        insert_event(&outside, 99.99, 9999);
+
+        let stats = store.agent_stats_24h(&agent_id.0.to_string()).unwrap();
+
+        assert_eq!(stats.sessions_24h, 1);
+        assert!((stats.cost_24h - 0.20).abs() < 1e-9);
+        assert_eq!(stats.p95_latency_ms, 150);
+        assert_eq!(stats.samples, 2);
+
+        assert_eq!(stats.prev.sessions_24h, 2);
+        assert!(
+            (stats.prev.cost_24h - 1.00).abs() < 1e-9,
+            "prev cost = 0.40 + 0.30 + 0.30, got {}",
+            stats.prev.cost_24h
+        );
+        assert_eq!(stats.prev.p95_latency_ms, 600);
+    }
+
+    /// `agents_stats_24h_bulk` returns one row per agent with non-zero
+    /// 24h activity, scoped to the same 24h window as `agent_stats_24h`.
+    /// Verifies grouping correctness, scoping, and the join behavior
+    /// (sessions-only or events-only agents still appear).
+    #[test]
+    fn agents_stats_24h_bulk_groups_by_agent() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
+
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+        let agent_c = AgentId::new();
+
+        let now = chrono::Utc::now();
+        let recent = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
+
+        let insert_session = |agent: &AgentId, created: &str| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
+                 VALUES (?1, ?2, x'90', 0, ?3, ?3)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent.0.to_string(),
+                    created,
+                ],
+            ).unwrap();
+        };
+        let insert_event = |agent: &AgentId, ts: &str, cost: f64| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
+                 VALUES (?1, ?2, ?3, 'm', 1, 1, ?4, 0, 0)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent.0.to_string(),
+                    ts,
+                    cost,
+                ],
+            ).unwrap();
+        };
+
+        // A: 2 sessions + cost in window.
+        insert_session(&agent_a, &recent);
+        insert_session(&agent_a, &recent);
+        insert_event(&agent_a, &recent, 0.50);
+        insert_event(&agent_a, &recent, 0.25);
+
+        // B: events only, no sessions in window. Must still appear.
+        insert_event(&agent_b, &recent, 1.00);
+
+        // C: sessions only, no events. Must still appear.
+        insert_session(&agent_c, &recent);
+
+        // Stale data — must NOT appear in either pass.
+        insert_session(&agent_a, &stale);
+        insert_event(&agent_b, &stale, 99.99);
+
+        let bulk = store.agents_stats_24h_bulk().unwrap();
+
+        let a = bulk
+            .get(&agent_a.0.to_string())
+            .expect("agent_a should be in bulk map");
+        assert_eq!(a.0, 2, "agent_a sessions_24h");
+        assert!((a.1 - 0.75).abs() < 1e-9, "agent_a cost_24h");
+
+        let b = bulk
+            .get(&agent_b.0.to_string())
+            .expect("agent_b (events-only) should still appear");
+        assert_eq!(b.0, 0);
+        assert!((b.1 - 1.00).abs() < 1e-9);
+
+        let c = bulk
+            .get(&agent_c.0.to_string())
+            .expect("agent_c (sessions-only) should still appear");
+        assert_eq!(c.0, 1);
+        assert_eq!(c.1, 0.0);
+
+        // Agents with only stale activity are absent.
+        assert!(!bulk.contains_key(&AgentId::new().0.to_string()));
     }
 }
