@@ -5,11 +5,9 @@
 
 use axum::Router;
 use librefang_api::middleware;
-use librefang_api::routes::{self, AppState};
+use librefang_api::routes;
 use librefang_api::server::{read_daemon_info, DaemonInfo};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig, DEFAULT_API_LISTEN};
-use std::sync::Arc;
+use librefang_types::config::DEFAULT_API_LISTEN;
 use std::time::Instant;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -87,55 +85,9 @@ fn test_read_daemon_info_corrupt_json() {
 ///   5. Shut down and verify cleanup
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_daemon_lifecycle() {
-    let tmp = tempfile::tempdir().unwrap();
-    let daemon_info_path = tmp.path().join("daemon.json");
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel: kernel.clone(),
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let test = librefang_testing::TestAppState::new();
+    test.state.kernel.set_self_handle();
+    let state = test.state.clone();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -154,6 +106,9 @@ async fn test_full_daemon_lifecycle() {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
+
+    let (_state, tmp, _) = test.into_parts();
+    let daemon_info_path = tmp.path().join("daemon.json");
 
     // Write daemon info file (like run_daemon does)
     let daemon_info = DaemonInfo {
@@ -207,7 +162,7 @@ async fn test_full_daemon_lifecycle() {
     let _ = std::fs::remove_file(&daemon_info_path);
     assert!(!daemon_info_path.exists());
 
-    kernel.shutdown();
+    state.kernel.shutdown();
 }
 
 /// Test that stale daemon info is detected when no process is running at that PID.
@@ -237,52 +192,8 @@ fn test_stale_daemon_info_detection() {
 /// Test that the server starts and immediately responds to requests.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_server_immediate_responsiveness() {
-    let tmp = tempfile::tempdir().unwrap();
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
-    let kernel = Arc::new(kernel);
-
-    let state = Arc::new(AppState {
-        kernel: kernel.clone(),
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let test = librefang_testing::TestAppState::new();
+    let state = test.state.clone();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -294,6 +205,9 @@ async fn test_server_immediate_responsiveness() {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
+
+    // Keep TempDir alive while the server task can still access kernel paths.
+    let (_state, _tmp, _) = test.into_parts();
 
     // Hit health endpoint immediately — should respond fast
     let client = librefang_runtime::http_client::new_client();
@@ -311,6 +225,4 @@ async fn test_server_immediate_responsiveness() {
         "Health endpoint should respond in <1s, took {}ms",
         latency.as_millis()
     );
-
-    kernel.shutdown();
 }
