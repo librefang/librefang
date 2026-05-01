@@ -608,7 +608,7 @@ Per-agent opt-in can be toggled at runtime via `PUT /api/auto-dream/agents/{id}/
 
 ### `[network]`
 
-Configures the OFP (LibreFang Protocol) peer-to-peer networking layer with HMAC-SHA256 mutual authentication.
+Configures the OFP (LibreFang Protocol) peer-to-peer networking layer. Authentication has two layers: a `shared_secret` HMAC admission gate plus per-node Ed25519 identity with TOFU pinning (#3873). The Ed25519 keypair and trust pins live in `<data_dir>/peer_keypair.json` and `<data_dir>/trusted_peers.json`.
 
 ```toml
 [network]
@@ -625,7 +625,7 @@ shared_secret = "my-cluster-secret"
 | `bootstrap_peers` | list of strings | `[]` | Multiaddresses of bootstrap peers for DHT discovery. |
 | `mdns_enabled` | bool | `true` | Enable mDNS for automatic local network peer discovery. |
 | `max_peers` | u32 | `50` | Maximum number of simultaneously connected peers. |
-| `shared_secret` | string | `""` (empty) | Pre-shared secret for OFP HMAC-SHA256 mutual authentication. **Required** when `network_enabled = true`. Both sides must use the same secret. Redacted in logs. |
+| `shared_secret` | string | `""` (empty) | Pre-shared admission secret for OFP HMAC-SHA256. **Required** when `network_enabled = true`. Both sides must use the same value. Acts as a coarse "cluster password" gate; per-node identity is provided separately by the Ed25519 keypair persisted in the data dir, so a leaked `shared_secret` cannot impersonate a previously-pinned peer. Redacted in logs. |
 
 ---
 

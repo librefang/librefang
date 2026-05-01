@@ -2393,6 +2393,14 @@
     "connected": "已连接",
     "no_peers": "暂无连接节点",
     "no_peers_desc": "当前没有 OFP 节点连接到此实例。",
+    "identity_fingerprint": "身份指纹",
+    "identity_fingerprint_hint": "在 pin 之前先和远端运维做带外（OOB）比对。",
+    "identity_missing": "未加载 Ed25519 身份。OFP 正在以 HMAC-only 兼容模式运行；针对节点冒充的防御 (#3873) 暂未激活。",
+    "pinned_peers_count_one": "{{count}} 个 TOFU 已固定节点",
+    "pinned_peers_count_other": "{{count}} 个 TOFU 已固定节点",
+    "trusted_peers": "已信任节点",
+    "trusted_peers_pinned": "已 pin {{count}} 个",
+    "trusted_peer_fingerprint_hint": "已 pin 的 Ed25519 公钥 SHA-256 指纹。请带外比对确认。",
     "help": "Network 显示本实例在开放联邦协议（OFP）中的状态——已发现或被发现的对等 LibreFang 节点、本节点身份、使用的 OFP 版本。OFP 是 A2A 之下那一层：节点互相找到对方靠 OFP；连上之后说什么靠 A2A。\n\n使用步骤：\n\n1. 身份。node-id 和协议版本是本 LibreFang 实例对联邦的标识。\n\n2. 节点。显示每个已连接的对等节点和 online / offline 状态。空列表说明你还没在和任何人联邦。\n\n3. 状态。Online 表示 OFP 可达，本节点正在向外宣告自己。\n\n跟 A2A 的区别：\n\n  · Network —— 节点级联邦：外面有谁、连上了谁。\n  · A2A —— agent 级对话：那些节点上的 agent 能为彼此做什么。\n\n典型场景：\n\n  · 调试 A2A 前先确认两个 LibreFang 实例确实互相能看到。\n  · 读 node-id 发给对端做直连。\n\n注意事项：\n\n  · 联邦是可选且配置控制的。默认 \"no peers\" 是预期，除非你已配 peers。\n  · 网络状态是实时读，刷新即重新拉，无缓存。"
   },
   "a2a": {

@@ -110,8 +110,20 @@ http://example.com              ->  example.com:80
 
 **Source:** `librefang-wire/src/peer.rs`
 
-The LibreFang Wire Protocol (OFP) uses HMAC-SHA256 with nonce-based mutual
-authentication over TCP connections.
+The LibreFang Wire Protocol (OFP) authenticates every TCP connection in
+two layers:
+
+1. **HMAC admission** (`shared_secret`) — coarse cluster-password gate.
+2. **Per-peer Ed25519 identity** ([#3873](https://github.com/librefang/librefang/issues/3873)) — each
+   kernel persists its own Ed25519 keypair in
+   `<data_dir>/peer_keypair.json` and signs the handshake. Recipients
+   TOFU-pin the pubkey to the sender's `node_id` (persisted in
+   `<data_dir>/trusted_peers.json`) and reject any future handshake
+   that claims the same `node_id` with a different pubkey.
+
+A leaked `shared_secret` therefore no longer lets an attacker
+impersonate a previously-pinned peer — they would also need that
+peer's private key file.
 
 ### Pre-Shared Key Requirement
 
@@ -148,39 +160,70 @@ timing side-channel attacks.
 
 ### Handshake Protocol
 
+The same `auth_data` byte string is bound by **both** the HMAC and the
+Ed25519 signature, so identity verification piggybacks on the existing
+replay protection without protocol-level race windows.
+
+```
+auth_data = nonce | sender_node_id | recipient_node_id    // #3875
+```
+
 **Initiator (client):**
 
 1. Generate a random UUID nonce.
-2. Compute `auth_data = nonce + node_id`.
+2. Compute `auth_data` (above) using the expected `recipient_node_id`.
 3. Compute `auth_hmac = hmac_sign(shared_secret, auth_data)`.
-4. Send `Handshake { node_id, node_name, protocol_version, agents, nonce, auth_hmac }`.
+4. If this kernel has an Ed25519 identity loaded:
+   `identity_signature = ed25519_sign(private_key, auth_data)` and
+   include `public_key` (base64) plus `identity_signature` (base64) in
+   the handshake message.
+5. Send `Handshake { node_id, node_name, protocol_version, agents, nonce, auth_hmac, public_key?, identity_signature? }`.
 
 **Responder (server):**
 
 1. Receive the `Handshake` message.
-2. Verify the incoming HMAC: `hmac_verify(shared_secret, nonce + node_id, auth_hmac)`.
-3. If verification fails, return error code 403.
-4. Generate a new UUID nonce for the ack.
-5. Compute `ack_auth_data = ack_nonce + self.node_id`.
-6. Compute `ack_hmac = hmac_sign(shared_secret, ack_auth_data)`.
-7. Send `HandshakeAck { node_id, node_name, protocol_version, agents, nonce: ack_nonce, auth_hmac: ack_hmac }`.
+2. Verify the incoming HMAC over `auth_data`. Fail → 403.
+3. Verify the Ed25519 identity (#3873):
+   - **(public_key, identity_signature) both present:**
+     `ed25519_verify(public_key, auth_data, identity_signature)` MUST
+     succeed. Then enforce TOFU pinning:
+     - If `node_id` is already pinned to a different pubkey → reject.
+     - If new → pin pubkey to `node_id` (in memory + persistent
+       `trusted_peers.json`).
+   - **Both absent (legacy peer):** allowed only if no pin exists for
+     this `node_id`; if a pin exists, the dropped identity is treated
+     as a downgrade attack and rejected.
+   - **Mixed presence:** rejected (malformed).
+4. Record nonce in the replay tracker (HMAC- and identity-verified
+   first; ordering fix for [#3880](https://github.com/librefang/librefang/issues/3880)).
+5. Generate a new UUID `ack_nonce` and `ack_auth_data = ack_nonce | self.node_id | sender.node_id`.
+6. `ack_hmac = hmac_sign(shared_secret, ack_auth_data)`.
+7. If this kernel has an Ed25519 identity loaded, sign `ack_auth_data`
+   the same way and include `public_key` + `identity_signature`.
+8. Send `HandshakeAck { ..., nonce: ack_nonce, auth_hmac: ack_hmac, public_key?, identity_signature? }`.
 
 **Initiator (verification):**
 
 1. Receive `HandshakeAck`.
-2. Verify: `hmac_verify(shared_secret, ack_nonce + node_id, ack_hmac)`.
-3. If verification fails, return `WireError::HandshakeFailed`.
+2. Verify the ack HMAC over the corresponding `ack_auth_data`.
+3. Verify the ack's Ed25519 identity using the same TOFU rules as the
+   responder above.
+4. Both checks must pass before any subsequent message is processed.
 
 ### Security Properties
 
 | Property | How It Is Achieved |
 |----------|-------------------|
-| **Mutual authentication** | Both sides prove knowledge of the shared secret |
-| **Replay protection** | Random UUID nonces per handshake |
-| **Timing-attack resistance** | `subtle::ConstantTimeEq` for HMAC comparison |
+| **Mutual admission** | Both sides prove knowledge of `shared_secret` |
+| **Per-peer identity** ([#3873](https://github.com/librefang/librefang/issues/3873)) | Ed25519 sign-on-handshake + TOFU pin in `trusted_peers.json` |
+| **Cross-peer replay protection** ([#3875](https://github.com/librefang/librefang/issues/3875)) | `auth_data` binds `recipient_node_id` |
+| **Replay protection** | Random UUID nonces per handshake, time-windowed tracker |
+| **Timing-attack resistance** | `subtle::ConstantTimeEq` for HMAC comparison; constant-time Ed25519 verify |
 | **Mandatory secret** | OFP refuses to start with an empty `shared_secret` |
 | **Message size limit** | `MAX_MESSAGE_SIZE = 16 MB` prevents memory DoS |
 | **Protocol version check** | `PROTOCOL_VERSION` mismatch returns `WireError::VersionMismatch` |
+| **Pin map DoS bound** | `MAX_PIN_ENTRIES = 100_000`; hydration also capped |
+| **Trust file confidentiality** | `peer_keypair.json` and `trusted_peers.json` written with `0600` on Unix |
 
 ---
 

@@ -255,6 +255,15 @@ export interface AgentIdentity {
   color?: string;
 }
 
+/** Reason for the most recent automatic session reset.
+ *  Mirrors `librefang_types::config::SessionResetReason` — wire form is the
+ *  snake_case variant name. */
+export type SessionResetReason =
+  | "idle"
+  | "daily"
+  | "suspended"
+  | "manual";
+
 export interface AgentItem {
   id: string;
   name: string;
@@ -282,14 +291,36 @@ export interface AgentItem {
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
-  /** UUID of the parent agent that spawned this one, if any. */
-  parent_agent_id?: string;
-  /** UUIDs of child agents spawned by this agent. */
+  /** UUID of the parent agent that spawned this one, if any.
+   *  Wire field emitted by `GET /api/agents` is `parent_agent_id`; the raw
+   *  `AgentEntry` serde form is `parent`. Both are accepted so the type is
+   *  forward-compatible with endpoints that return the struct directly. */
+  parent_agent_id?: string | null;
+  /** Raw serde field from `AgentEntry::parent` — present on endpoints that
+   *  serialize the kernel struct directly. */
+  parent?: string | null;
+  /** UUIDs of child agents spawned by this agent (fork tree). */
   children?: string[];
   /** Active session UUID. */
   session_id?: string;
   /** Categorisation tags. */
   tags?: string[];
+  /** Whether onboarding (bootstrap) has been completed. */
+  onboarding_completed?: boolean;
+  /** RFC3339 timestamp of when onboarding completed, if any. */
+  onboarding_completed_at?: string | null;
+  /** When `true`, the next dispatch will hard-reset (wipe) the session
+   *  history before processing. Set by operator action or stuck-loop
+   *  recovery. */
+  force_session_wipe?: boolean;
+  /** When `true`, the agent was interrupted by restart/shutdown but
+   *  recovery is expected; the existing `session_id` is preserved. */
+  resume_pending?: boolean;
+  /** Reason for the most recent automatic session reset, if any. */
+  reset_reason?: SessionResetReason | null;
+  /** Sticky flag: `true` once the agent has processed at least one real
+   *  inbound message, channel event, or autonomous tick. */
+  has_processed_message?: boolean;
 }
 
 export interface PaginatedResponse<T> {
@@ -2797,7 +2828,18 @@ export interface NetworkStatusResponse {
   protocol_version?: string;
   listen_addr?: string;
   peer_count?: number;
+  // SECURITY (#3873): null when this node has no Ed25519 identity
+  // (HMAC-only legacy mode); operators should treat that as "new defense
+  // is dormant" and investigate.
+  identity_fingerprint?: string | null;
+  pinned_peers?: number;
   [key: string]: unknown;
+}
+
+export interface TrustedPeerItem {
+  node_id: string;
+  public_key: string;
+  fingerprint: string;
 }
 
 export interface PeerItem {
@@ -2817,6 +2859,13 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 
 export async function listPeers(): Promise<PeerItem[]> {
   const data = await get<{ peers?: PeerItem[] }>("/api/peers");
+  return data.peers ?? [];
+}
+
+export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
+  const data = await get<{ peers?: TrustedPeerItem[] }>(
+    "/api/network/trusted-peers",
+  );
   return data.peers ?? [];
 }
 
