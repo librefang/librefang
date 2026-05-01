@@ -1753,4 +1753,46 @@ mod tests {
             "expected streaming cap rejection or body-read failure, got: {err}"
         );
     }
+
+    /// Bug #3563: A2A must NOT follow redirects. Following them re-resolves
+    /// DNS for the redirect target, which a TTL-0 rebind could swap for an
+    /// internal IP after the entry-point SSRF check passed. The fix switched
+    /// the redirect policy to `Policy::none` and added an explicit
+    /// `is_redirection()` short-circuit; this test locks both decisions so a
+    /// future "let's just allow safe redirects" refactor (`Policy::limited`,
+    /// `Policy::custom`, …) fails loudly instead of silently re-opening the
+    /// rebind window.
+    #[tokio::test]
+    async fn discover_rejects_redirect_response() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                // Reply with a 302 to a benign-looking external URL. The
+                // target is irrelevant — `Policy::none` plus the explicit
+                // `is_redirection()` check must reject before any second
+                // request is made, so DNS for example.com is never resolved.
+                let response = "HTTP/1.1 302 Found\r\nLocation: http://example.com/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = A2aClient::new_with_allowlist(vec!["127.0.0.1".to_string()]);
+        let url = format!("http://{addr}");
+        let result = tokio::time::timeout(Duration::from_secs(5), client.discover(&url))
+            .await
+            .expect("client must terminate, not hang following redirect");
+        let _ = server.await;
+
+        let err = result.expect_err("discover() must reject 3xx redirect responses");
+        assert!(
+            err.contains("redirect not followed"),
+            "expected explicit redirect rejection, got: {err}"
+        );
+    }
 }
