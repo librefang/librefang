@@ -6,7 +6,33 @@
 
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::KernelConfig;
+use std::sync::Once;
 use tempfile::TempDir;
+
+/// Pin a deterministic vault master key for the test process the first
+/// time a mock kernel is built. Without this, parallel integration tests
+/// race on the process-shared `<data_local_dir>/librefang/.keyring` file
+/// (or OS keyring entry): one test's `init()` overwrites another's master
+/// key, and the loser's later `vault_get`/`vault_set` calls open a fresh
+/// `CredentialVault` whose `resolve_master_key` then loads the wrong key
+/// and fails to decrypt its own vault file (TOTP test flake on CI).
+///
+/// 32 zero bytes, base64-encoded — value is irrelevant, only stability is.
+static VAULT_KEY_INIT: Once = Once::new();
+const TEST_VAULT_KEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+fn ensure_test_vault_key() {
+    VAULT_KEY_INIT.call_once(|| {
+        if std::env::var_os("LIBREFANG_VAULT_KEY").is_none() {
+            // SAFETY: only runs once, before any kernel is booted in this
+            // process — no other thread can be reading the env at this point
+            // because all paths into the vault go through MockKernelBuilder
+            // (or `LibreFangKernel::boot_with_config`, which the builder
+            // owns the entry to).
+            std::env::set_var("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+        }
+    });
+}
 
 /// Test kernel builder.
 ///
@@ -61,6 +87,7 @@ impl MockKernelBuilder {
     /// Returns `(LibreFangKernel, TempDir)` — the caller must hold onto `TempDir`,
     /// otherwise the temp directory will be deleted on drop, invalidating kernel file paths.
     pub fn build(mut self) -> (LibreFangKernel, TempDir) {
+        ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("failed to create temp directory");
         let home_dir = tmp.path().to_path_buf();
         let data_dir = home_dir.join("data");
