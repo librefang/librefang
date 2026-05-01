@@ -37,38 +37,41 @@ fn check_tool(name: &str, install_hint: &str) -> bool {
 }
 
 fn install_git_hooks(root: &Path) {
+    // Point git's core.hooksPath at the version-controlled scripts/hooks/.
+    // This replaces the older copy-into-.git/hooks approach: hooks now stay
+    // in sync with `git pull` automatically (no stale per-clone copies), and
+    // any new hook added to the directory is active without a re-setup.
     let hooks_src = root.join("scripts/hooks");
-    let hooks_dst = root.join(".git/hooks");
-
     if !hooks_src.exists() {
         println!("  Skipping git hooks (scripts/hooks/ not found)");
         return;
     }
 
-    if let Ok(entries) = fs::read_dir(&hooks_src) {
-        for entry in entries.flatten() {
-            let src = entry.path();
-            if src.is_file() {
-                let name = entry.file_name();
-                let dst = hooks_dst.join(&name);
-                match fs::copy(&src, &dst) {
-                    Ok(_) => {
-                        // Make executable on Unix
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(0o755));
-                        }
-                        println!("  Installed hook: {}", name.to_string_lossy());
-                    }
-                    Err(e) => println!(
-                        "  Warning: failed to install {}: {}",
-                        name.to_string_lossy(),
-                        e
-                    ),
+    let status = Command::new("git")
+        .current_dir(root)
+        .args(["config", "core.hooksPath", "scripts/hooks"])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            let names: Vec<String> = fs::read_dir(&hooks_src)
+                .map(|it| {
+                    it.flatten()
+                        .filter(|e| e.path().is_file())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "  Set core.hooksPath = scripts/hooks (active: {})",
+                if names.is_empty() {
+                    "<none>".into()
+                } else {
+                    names.join(", ")
                 }
-            }
+            );
         }
+        _ => println!("  Warning: failed to set core.hooksPath; git hooks are not active"),
     }
 }
 
