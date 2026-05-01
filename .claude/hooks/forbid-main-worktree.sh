@@ -140,8 +140,32 @@ EOF
     if printf '%s' "$trimmed" | grep -qE '(^|[;&|`(]|&&|\|\|)[[:space:]]*git([[:space:]]+-C[[:space:]]+\S+)?[[:space:]]+(checkout|switch|merge|rebase|reset|commit|push|pull|cherry-pick|revert|am|apply|branch[[:space:]]+(-D|-d|-m|--delete|--force)|stash[[:space:]]+(pop|apply|drop|clear)|worktree[[:space:]]+(remove|prune)|clean|tag[[:space:]]+(-d|--delete))\b'; then
       block=1; reason="git mutation in main worktree"
     fi
-    if printf '%s' "$trimmed" | grep -qE '(^|[[:space:]])(cat|tee|printf|echo)[[:space:]].*[[:space:]]>[>]?[[:space:]]'; then
-      block=1; reason="${reason:+$reason; }shell write redirect in main worktree"
+    # Shell write redirect: only block if the redirect target path resolves
+    # *into the main worktree*. Writes to /tmp, /var/log, etc. are fine.
+    redirect_into_main="$(printf '%s' "$cmd" | python3 -c '
+import sys, re, os
+text = sys.stdin.read()
+repo = sys.argv[1] if len(sys.argv) > 1 else ""
+real_repo = os.path.realpath(repo) if repo else ""
+hit = False
+# Match >  or  >> followed by an unquoted or quoted path token.
+for m in re.finditer(r">>?\s*(?:\"([^\"]+)\"|\x27([^\x27]+)\x27|(\S+))", text):
+    p = m.group(1) or m.group(2) or m.group(3)
+    if not p:
+        continue
+    if p.startswith("/"):
+        ap = os.path.realpath(p)
+    elif real_repo:
+        ap = os.path.realpath(os.path.join(real_repo, p))
+    else:
+        continue
+    if real_repo and (ap == real_repo or ap.startswith(real_repo + "/")):
+        hit = True
+        break
+print("1" if hit else "0")
+' "$repo_root" 2>/dev/null || echo 0)"
+    if [ "$redirect_into_main" = "1" ]; then
+      block=1; reason="${reason:+$reason; }shell write redirect into main worktree"
     fi
     if printf '%s' "$trimmed" | grep -qE '(^|[[:space:]])(sed[[:space:]]+(-[a-zA-Z]*i[a-zA-Z]*|-i)|perl[[:space:]]+-[a-zA-Z]*pi[a-zA-Z]*)\b'; then
       block=1; reason="${reason:+$reason; }in-place edit in main worktree"

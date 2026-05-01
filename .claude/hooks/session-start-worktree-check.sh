@@ -42,7 +42,16 @@ esac
 if [ "$git_kind" = "main" ]; then
   msg="⚠️  Session starting in the librefang MAIN WORKTREE ($repo_root). Edits and mutating git commands here are blocked by .claude/hooks/forbid-main-worktree.sh. For any task that will modify files, FIRST run: git worktree add /tmp/librefang-<feature> -b <branch> origin/main, then continue from that path."
 else
-  msg="✅ Session starting in a librefang LINKED WORKTREE ($repo_root). Edits permitted; cargo build/test still forbidden — only cargo check / cargo clippy."
+  msg="✅ Session starting in a librefang LINKED WORKTREE ($repo_root). Edits permitted; cargo build/run/install still forbidden, cargo test only with -p <crate>."
+fi
+
+# Warn if .githooks/ is checked into the tree but not yet activated.
+# (commit-msg + pre-commit live there; user runs scripts/install-githooks.sh once.)
+hooks_path="$(git -C "$main_root" config --get core.hooksPath 2>/dev/null || true)"
+if [ -d "$main_root/.githooks" ] && [ "$hooks_path" != ".githooks" ]; then
+  msg="$msg
+
+🔧 git core.hooksPath is not pointing at .githooks/ yet — the version-controlled commit-msg / pre-commit hooks are inactive in this clone. Run once: \`bash scripts/install-githooks.sh\` (from the main worktree)."
 fi
 
 python3 - "$msg" <<'PY'

@@ -120,4 +120,36 @@ if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/;&|`(])rm[[:space:]]+([^|;&]*[[:
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# F. Daemon launch ban (`librefang start`, direct binary invocation)
+# ---------------------------------------------------------------------------
+# The librefang daemon binds 127.0.0.1:4545 by default. The user typically has
+# one running. AI launching another (or killing theirs and replacing) causes
+# port conflicts and clobbers the user's session. Per CLAUDE.md, the
+# "Live Integration Testing" flow is a HUMAN workflow.
+if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/;&|`(])(librefang(\.exe)?|target/(debug|release)/librefang(\.exe)?|\./target/(debug|release)/librefang(\.exe)?)[[:space:]]+(start|daemon)\b'; then
+  deny "Refusing — starting the librefang daemon is a HUMAN workflow per CLAUDE.md (port 4545 is typically already bound by the user's session). Ask the user to run it and report back, instead of launching it yourself."
+fi
+
+# ---------------------------------------------------------------------------
+# G. `cargo add` / `cargo remove` — dependency mutations require user OK
+# ---------------------------------------------------------------------------
+# Global CLAUDE.md: "禁止擅自加依赖". Block the cargo subcommands that add or
+# remove deps; force the AI to surface the change for explicit approval.
+if printf '%s' "$cmd" | grep -qE '(^|[[:space:]/;&|`(])cargo[[:space:]]+(add|rm|remove|upgrade)\b'; then
+  deny "Refusing — \`cargo add/remove/upgrade\` mutates Cargo.toml dependencies, which CLAUDE.md (global) forbids without explicit user approval. Surface the proposed dep change first and let the user run the command."
+fi
+
+# ---------------------------------------------------------------------------
+# H. \`gh pr merge\` and admin-bypass merges
+# ---------------------------------------------------------------------------
+# Always block merge bypasses (--admin) and disallow merging without explicit
+# user say-so — even regular \`gh pr merge <pr>\` is a publish-level action.
+if printf '%s' "$cmd" | grep -qE '\bgh[[:space:]]+pr[[:space:]]+merge\b'; then
+  if printf '%s' "$cmd" | grep -qE '(^|[[:space:]])--admin\b'; then
+    deny "Refusing \`gh pr merge --admin\`. The --admin flag bypasses branch protection — equivalent to force-pushing to main. Get explicit user confirmation."
+  fi
+  deny "Refusing \`gh pr merge\`. Merging is a publish-level action; ask the user to merge themselves rather than doing it from the AI session."
+fi
+
 exit 0
