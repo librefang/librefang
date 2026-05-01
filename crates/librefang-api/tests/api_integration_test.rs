@@ -1082,6 +1082,20 @@ async fn test_workflow_crud() {
     assert_eq!(workflows.len(), 1);
     assert_eq!(workflows[0]["name"], "test-workflow");
     assert_eq!(workflows[0]["steps"], 1);
+
+    // Run-aggregate fields are present on every list entry. The workflow
+    // has never run, so the dashboard expects last_run/success_rate to be
+    // explicitly null (not missing) and run_count to be zero — UI relies
+    // on this to render the "no runs" placeholder.
+    assert_eq!(workflows[0]["run_count"], 0);
+    assert!(
+        workflows[0]["last_run"].is_null(),
+        "last_run must be null before any run"
+    );
+    assert!(
+        workflows[0]["success_rate"].is_null(),
+        "success_rate must be null before any terminal run"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
