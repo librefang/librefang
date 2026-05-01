@@ -1,88 +1,85 @@
 // Visit Counter Worker
+// Storage: D1 (visit_counts table)
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+}
 
 export default {
   async fetch(request, env) {
+    if (request.method === 'OPTIONS') return new Response(null, { headers: CORS })
+
     const url = new URL(request.url)
     const path = url.pathname
-    const method = request.method
 
-    const cors = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    }
+    if (path === '/api/track' && request.method === 'POST')
+      return handleTrack(request, env)
 
-    if (method === 'OPTIONS') {
-      return new Response(null, { headers: cors })
-    }
+    if ((path === '/' || path === '/api') && request.method === 'GET')
+      return handleVisits(env)
 
-    // POST /api/track - track page visit
-    if (path === '/api/track' && method === 'POST') {
-      return handleTrack(request, env, cors)
-    }
-
-    // GET /api - get visit stats
-    if (path === '/' || path === '/api') {
-      return handleVisits(env, cors)
-    }
-
-    // GET /script.js - tracking script
-    if (path === '/script.js' && method === 'GET') {
-      return handleScript(cors)
-    }
+    if (path === '/script.js' && request.method === 'GET')
+      return handleScript()
 
     return new Response('Not Found', { status: 404 })
   },
 }
 
-async function handleTrack(request, env, cors) {
-  try {
-    await request.text()
+async function handleTrack(request, env) {
+  await request.text()
 
-    const today = new Date().toISOString().split('T')[0]
+  const today = isoDate()
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO visit_counts (date, count) VALUES (?, 1)
+       ON CONFLICT(date) DO UPDATE SET count = count + 1`,
+    ).bind(today),
+    env.DB.prepare(
+      `INSERT INTO visit_counts (date, count) VALUES ('__total__', 1)
+       ON CONFLICT(date) DO UPDATE SET count = count + 1`,
+    ),
+  ])
 
-    let total = parseInt(await env.VISIT_COUNTER.get('total') || '0', 10) || 0
-    let todayCount = parseInt(await env.VISIT_COUNTER.get('today_' + today) || '0', 10) || 0
+  const row = await env.DB.prepare(
+    `SELECT count FROM visit_counts WHERE date = '__total__'`,
+  ).first()
 
-    total++
-    todayCount++
-
-    await env.VISIT_COUNTER.put('total', String(total))
-    await env.VISIT_COUNTER.put('today_' + today, String(todayCount))
-
-    return new Response(JSON.stringify({ success: true, total }), {
-      headers: { 'Content-Type': 'application/json', ...cors }
-    })
-  } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', ...cors }
-    })
-  }
+  return json({ success: true, total: row?.count ?? 0 })
 }
 
-async function handleVisits(env, cors) {
-  const today = new Date().toISOString().split('T')[0]
-  const total = parseInt(await env.VISIT_COUNTER.get('total') || '0', 10) || 0
-  const todayCount = parseInt(await env.VISIT_COUNTER.get('today_' + today) || '0', 10) || 0
+async function handleVisits(env) {
+  const today = isoDate()
+  const [totalRow, todayRow] = await Promise.all([
+    env.DB.prepare(`SELECT count FROM visit_counts WHERE date = '__total__'`).first(),
+    env.DB.prepare(`SELECT count FROM visit_counts WHERE date = ?`).bind(today).first(),
+  ])
 
-  return new Response(JSON.stringify({ total, today: todayCount, date: today }), {
-    headers: { 'Content-Type': 'application/json', ...cors }
-  })
+  return json({ total: totalRow?.count ?? 0, today: todayRow?.count ?? 0, date: today })
 }
 
-function handleScript(cors) {
+function handleScript() {
   const script = `(function() {
-  var page = window.location.pathname || 'home';
   fetch('https://counter.librefang.ai/api/track', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ page: page }),
+    body: JSON.stringify({ page: window.location.pathname || 'home' }),
     keepalive: true
   }).catch(function() {});
 })();`
-
   return new Response(script, {
-    headers: { 'Content-Type': 'application/javascript', ...cors }
+    headers: { 'Content-Type': 'application/javascript', ...CORS },
+  })
+}
+
+function isoDate() {
+  return new Date().toISOString().split('T')[0]
+}
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...CORS },
   })
 }

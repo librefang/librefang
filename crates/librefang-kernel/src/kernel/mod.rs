@@ -94,7 +94,7 @@ pub(crate) fn resolve_cron_max_messages(raw: Option<usize>) -> Option<usize> {
 /// - `None`    → no cap
 /// - `Some(0)` → disable (treat as no cap)
 /// - `Some(n)` otherwise → use as-is
-pub(crate) fn resolve_cron_max_tokens(raw: Option<u32>) -> Option<u32> {
+pub(crate) fn resolve_cron_max_tokens(raw: Option<u64>) -> Option<u64> {
     match raw {
         Some(0) => None,
         other => other,
@@ -9686,13 +9686,9 @@ system_prompt = "You are a helpful assistant."
         if let Some(entry) = self.registry.get(agent_id) {
             if let Err(e) = self.memory.save_agent(&entry) {
                 if let Some((p_caps, p_allow, p_block, p_disabled)) = prev_tool_state {
-                    let _ = self.registry.restore_tool_state(
-                        agent_id,
-                        p_caps,
-                        p_allow,
-                        p_block,
-                        p_disabled,
-                    );
+                    let _ = self
+                        .registry
+                        .restore_tool_state(agent_id, p_caps, p_allow, p_block, p_disabled);
                 }
                 return Err(KernelError::LibreFang(e));
             }
