@@ -261,6 +261,11 @@ impl Default for EventBus {
 /// Without this helper, callers that exit on `Lagged` turn a transient
 /// burst into a permanent miss; callers that ignore `Lagged` lose triggers
 /// silently (issue #3630).
+///
+/// The payload is `Arc<Event>` because the broadcast bus shares one
+/// allocation across all subscribers (cheap fan-out). Read fields through
+/// the deref (`&event.payload`); never assume exclusive ownership — other
+/// listeners hold the same `Arc` concurrently.
 pub async fn recv_event_skipping_lag(
     rx: &mut broadcast::Receiver<Arc<Event>>,
     bus: &EventBus,

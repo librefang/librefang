@@ -2777,6 +2777,28 @@ mod tests {
         assert!(mgr.is_totp_code_used("987654"));
     }
 
+    /// `record_totp_code_used_for` MUST surface a DB write failure as `Err`,
+    /// not swallow it as `Ok`. The doc on the function spells out why: a
+    /// silent failure leaves the code out of the replay-detection table,
+    /// letting an attacker reuse the same code immediately. This test
+    /// simulates the failure by dropping the underlying table out from under
+    /// the manager (e.g. corrupted or mis-migrated audit DB).
+    #[test]
+    fn record_totp_code_used_for_surfaces_db_failure() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let conn = Arc::new(StdMutex::new(conn));
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), conn.clone());
+
+        conn.lock()
+            .unwrap()
+            .execute("DROP TABLE totp_used_codes", [])
+            .unwrap();
+
+        mgr.record_totp_code_used_for("999111", Some("approval:abc"))
+            .expect_err("DB write must surface as Err so the caller can return 500");
+    }
+
     // -----------------------------------------------------------------------
     // Per-session queue methods (Hermes-Agent parity)
     // -----------------------------------------------------------------------
