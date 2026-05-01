@@ -1543,8 +1543,13 @@ impl ProactiveMemoryStore {
                 let emb_b = embeddings.get(&all_items[j].id);
                 let similarity = match (emb_a, emb_b) {
                     (Some(a), Some(b)) => {
-                        // Vector cosine similarity (mem0-quality dedup)
-                        librefang_types::memory::cosine_similarity(a, b)
+                        // Vector cosine similarity (mem0-quality dedup).
+                        // Fall back to text similarity when vectors are not
+                        // comparable; treating that case as 0.0 would silently
+                        // suppress legitimate dedup candidates (#3536).
+                        librefang_types::memory::cosine_similarity(a, b).unwrap_or_else(|| {
+                            librefang_types::memory::text_similarity(&a_lower, &b_lower)
+                        })
                     }
                     _ => {
                         // Jaccard word overlap fallback
