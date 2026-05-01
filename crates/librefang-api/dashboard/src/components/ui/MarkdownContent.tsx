@@ -1,6 +1,20 @@
 import { memo, useMemo, type ComponentProps } from "react";
-import Markdown, { type Components } from "react-markdown";
+import Markdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+// Extend react-markdown's URL allowlist with deep-link schemes for native
+// apps the agent commonly references. Schemes outside the default allowlist
+// (http/https/mailto/tel/...) are stripped by `defaultUrlTransform`, which
+// would silently break `[note](obsidian://...)` links agents emit when
+// pointing at vault entries.
+const EXTRA_URL_SCHEMES = /^(obsidian|obsidian-advanced-uri):/i;
+
+const urlTransform = (url: string): string => {
+  if (EXTRA_URL_SCHEMES.test(url)) {
+    return url;
+  }
+  return defaultUrlTransform(url);
+};
 
 // react-markdown's plugin lists alias to `PluggableList` from `unified`,
 // but `unified` is not a direct dependency here (only pulled transitively
@@ -72,6 +86,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         remarkPlugins={plugins}
         rehypePlugins={rehypePlugins}
         components={merged}
+        urlTransform={urlTransform}
       >
         {children}
       </Markdown>
