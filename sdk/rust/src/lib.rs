@@ -410,6 +410,10 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/skills", id), Some(data), &[]).await
     }
 
+    pub async fn get_agent_stats(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/stats", id), None, &[]).await
+    }
+
     pub async fn stop_agent(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/stop", id), None, &[]).await
     }
