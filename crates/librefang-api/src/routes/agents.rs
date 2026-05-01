@@ -29,6 +29,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .patch(patch_agent),
         )
         .route(
+            "/agents/{id}/stats",
+            axum::routing::get(get_agent_stats),
+        )
+        .route(
             "/agents/{id}/mode",
             axum::routing::put(set_agent_mode),
         )
@@ -742,6 +746,7 @@ pub(crate) fn enrich_agent_json(
     catalog: &Option<
         std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
     >,
+    bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
     {
@@ -774,6 +779,22 @@ pub(crate) fn enrich_agent_json(
     let ready =
         matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
 
+    use librefang_types::agent::ScheduleMode;
+    let schedule = match &e.manifest.schedule {
+        ScheduleMode::Reactive => "manual".to_string(),
+        ScheduleMode::Periodic { cron } => cron.clone(),
+        ScheduleMode::Proactive { .. } => "proactive".to_string(),
+        ScheduleMode::Continuous {
+            check_interval_secs,
+        } => {
+            format!("continuous · {check_interval_secs}s")
+        }
+    };
+
+    let (sessions_24h, cost_24h) = bulk_stats
+        .and_then(|m| m.get(&e.id.to_string()).copied())
+        .unwrap_or((0, 0.0));
+
     serde_json::json!({
         "id": e.id.to_string(),
         "name": e.name,
@@ -789,6 +810,9 @@ pub(crate) fn enrich_agent_json(
         "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
+        "schedule": schedule,
+        "sessions_24h": sessions_24h,
+        "cost_24h": cost_24h,
         "identity": {
             "emoji": e.identity.emoji,
             "avatar_url": e.identity.avatar_url,
@@ -943,9 +967,14 @@ pub async fn list_agents(
         agents.into_iter().skip(offset).collect()
     };
 
+    // Bulk-fetch 24h sessions/cost so each row carries its own KPI without
+    // forcing the dashboard to re-aggregate from /api/sessions (which is
+    // pagination-clipped).
+    let bulk_stats = state.kernel.memory_substrate().agents_stats_24h_bulk().ok();
+
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e, &dm, &catalog))
+        .map(|e| enrich_agent_json(e, &dm, &catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {
@@ -955,6 +984,76 @@ pub async fn list_agents(
         limit,
     })
     .into_response()
+}
+
+/// GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.
+///
+/// Returns sessions/cost/P95-latency/active-now in a single round trip so
+/// the dashboard's per-agent KPI tiles don't have to scan the global
+/// `/api/sessions` page (which is paginated and was clipping data for
+/// agents that hadn't appeared in the latest N sessions).
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/stats",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "24-hour stats rollup", body = serde_json::Value),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn get_agent_stats(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid agent id" })),
+            )
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_uuid) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Owner-scoping: non-admin callers can only read stats for agents
+    // they authored. Mirrors the filter applied in `list_agents` so the
+    // detail-panel rollup can't leak per-agent cost / latency to other
+    // users on the same instance.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin
+            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    }
+
+    let substrate = state.kernel.memory_substrate();
+    match substrate.agent_stats_24h(&id) {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 /// Hard cap on inlined text-attachment length (chars). Mirrors the PDF
