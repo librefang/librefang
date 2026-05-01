@@ -85,15 +85,31 @@ if [ "$tool" = "Bash" ]; then
   if [ -n "$main_root" ]; then
     case "$main_root" in
       */librefang)
-        if printf '%s' "$cmd" | grep -qE '(^|[;&|`(]|&&|\|\|)[[:space:]]*cargo[[:space:]]+(build|test|run|install)\b'; then
+        # Always-banned cargo subcommands (long-running and shared-target).
+        if printf '%s' "$cmd" | grep -qE '(^|[;&|`(]|&&|\|\|)[[:space:]]*cargo[[:space:]]+(build|run|install)\b'; then
           cat >&2 <<EOF
-[forbid-main-worktree] Refusing Bash — \`cargo build/test/run/install\` is
-banned in this repo (target/ is shared across worktrees and contends with
-the user's other sessions). Use \`cargo check\` for compile verification;
-CI handles full build / test.
+[forbid-main-worktree] Refusing Bash — \`cargo build/run/install\` is
+banned in this repo (target/ is shared across worktrees and contends
+with the user's other sessions). Use \`cargo check\` for compile
+verification; CI handles full build.
 Command: $cmd
 EOF
           exit 2
+        fi
+        # Conditional: \`cargo test\` without --package / -p compiles & runs the
+        # whole workspace, which is the slow case we want to keep out of the AI's
+        # hands. Allow scoped \`cargo test -p <crate>\`.
+        if printf '%s' "$cmd" | grep -qE '(^|[;&|`(]|&&|\|\|)[[:space:]]*cargo[[:space:]]+test\b'; then
+          if ! printf '%s' "$cmd" | grep -qE '(^|[[:space:]])(-p|--package)([[:space:]]+|=)[[:alnum:]_-]+'; then
+            cat >&2 <<EOF
+[forbid-main-worktree] Refusing Bash — unscoped \`cargo test\` builds and
+runs the whole workspace, which is too slow / target-contending for the
+AI to invoke. Re-run with \`-p <crate>\` (or \`--package <crate>\`) so it's
+scoped to one crate. CI runs the full suite.
+Command: $cmd
+EOF
+            exit 2
+          fi
         fi
         ;;
     esac

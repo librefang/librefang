@@ -29,6 +29,8 @@
       "Bash(cargo fmt:*)",
       "Bash(cargo metadata:*)",
       "Bash(cargo tree:*)",
+      "Bash(cargo test -p:*)",
+      "Bash(cargo test --package:*)",
       "Bash(gh pr view:*)",
       "Bash(gh pr list:*)",
       "Bash(gh pr diff:*)",
@@ -39,7 +41,6 @@
     ],
     "deny": [
       "Bash(cargo build:*)",
-      "Bash(cargo test:*)",
       "Bash(cargo run:*)",
       "Bash(cargo install:*)"
     ]
