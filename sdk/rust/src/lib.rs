@@ -294,6 +294,10 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/deliveries", id), None, &[]).await
     }
 
+    pub async fn list_agent_events(&self, id: &str, limit: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/events", id), None, &[("limit", limit)]).await
+    }
+
     pub async fn list_agent_files(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/files", id), None, &[]).await
     }

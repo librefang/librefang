@@ -42,7 +42,7 @@ import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessions, useSessionDetails } from "../lib/queries/sessions";
 import { useAgentKvMemory } from "../lib/queries/memory";
-import { useAuditRecent, useCronJobs } from "../lib/queries/runtime";
+import { useCronJobs } from "../lib/queries/runtime";
 import { useAgentTriggers } from "../lib/queries/schedules";
 import { useProviders } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
@@ -59,6 +59,7 @@ import {
 import { generateManifestMarkdown } from "../lib/agentManifestMarkdown";
 import {
   agentQueries,
+  useAgentEvents,
   useAgentSessions,
   useAgentStats,
   useAgentTemplates,
@@ -494,7 +495,6 @@ export function AgentsPage() {
   // memory, which is empty unless [proactive_memory] is enabled — so the
   // tab read empty even when the agent had KV pairs.
   const agentKvMemoryQuery = useAgentKvMemory(detailAgent?.id ?? "");
-  const auditRecentQuery = useAuditRecent(120);
   const cronJobsQuery = useCronJobs(detailAgent?.id);
   // Per-agent KPI rollup (#4246) — replaces a global /api/sessions scan
   // that was capped by pagination and missed agents whose sessions
@@ -504,6 +504,12 @@ export function AgentsPage() {
   // tab's event-trigger cards don't depend on agent detail embedding
   // them (which it currently doesn't).
   const agentTriggersQuery = useAgentTriggers(detailAgent?.id ?? "");
+  // Per-agent recent turn events — backs the Logs tab. usage_events is
+  // turn-level (model dispatch, latency, tokens, cost) — exactly what
+  // the design's stderr-style log feed wants. The previous source
+  // (global audit) only had admin lifecycle entries, leaving the tab
+  // blank for almost every agent.
+  const agentEventsQuery = useAgentEvents(detailAgent?.id ?? "", 30);
   // Per-agent session list — Conversation tab uses this directly. The
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
@@ -1199,11 +1205,21 @@ export function AgentsPage() {
       : Array.isArray(view.capabilities?.skills)
         ? view.capabilities!.skills!
         : [];
+    // skills_mode: "all" means the manifest doesn't enumerate a skill
+    // allowlist — the agent uses every skill in the registry. The
+    // previous "0 installed" empty state was misleading: most agents
+    // ship with no allowlist precisely because they accept everything.
+    const skillsMode = (view as { skills_mode?: string }).skills_mode;
+    const usesAllSkills = skillsMode === "all" && skills.length === 0;
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })} · {skills.length}
+            {t("agents.detail.installed_skills", { defaultValue: "Installed skills" })}
+            {" · "}
+            {usesAllSkills
+              ? t("agents.detail.skills_all", { defaultValue: "all" })
+              : skills.length}
           </div>
           <Button
             variant="ghost"
@@ -1214,7 +1230,24 @@ export function AgentsPage() {
             {t("agents.detail.install_skill", { defaultValue: "Install" })}
           </Button>
         </div>
-        {skills.length === 0 ? (
+        {usesAllSkills ? (
+          <div
+            onClick={() => navigate({ to: "/skills" })}
+            className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
+          >
+            <Sparkles className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.skills_all_title", { defaultValue: "Using all available skills" })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.skills_all_desc", {
+                  defaultValue: "manifest doesn't pin an allowlist — every skill in the registry is available",
+                })}
+              </div>
+            </div>
+          </div>
+        ) : skills.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
             {t("agents.detail.no_skills", { defaultValue: "No skills installed for this agent." })}
           </div>
@@ -1332,9 +1365,36 @@ export function AgentsPage() {
             ))}
           </>
         ) : (
-          <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_schedule", { defaultValue: "Manual — no triggers or cron jobs configured." })}
-          </div>
+          // Honest empty state — most agents are reactive (no cron, no
+          // triggers) and the panel was previously rendering "Manual" as
+          // if it were a misconfiguration. Surface the manifest's actual
+          // schedule mode (also returned by GET /api/agents on list, but
+          // we re-derive from the detail response defensively).
+          (() => {
+            const mode = (agent as { schedule?: string }).schedule;
+            const isReactive = !mode || mode === "manual";
+            return (
+              <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+                <Zap className="w-4 h-4 text-brand/80 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[12.5px] font-medium text-text-main">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_title", { defaultValue: "Reactive" })
+                      : mode}
+                  </div>
+                  <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                    {isReactive
+                      ? t("agents.detail.schedule_reactive_desc", {
+                          defaultValue: "wakes on incoming messages and events — no cron or trigger pinned",
+                        })
+                      : t("agents.detail.schedule_no_triggers", {
+                          defaultValue: "schedule mode set but no cron jobs or event triggers configured",
+                        })}
+                  </div>
+                </div>
+              </div>
+            );
+          })()
         )}
 
         <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim mt-2">
@@ -1361,17 +1421,12 @@ export function AgentsPage() {
     );
   };
 
-  // ---------- Logs tab — terminal-style stderr tail per design canvas
-  const renderLogsTab = (agent: AgentDetail) => {
-    const audit = (auditRecentQuery.data?.entries ?? []) as Array<{
-      timestamp?: string;
-      action?: string;
-      agent_id?: string;
-      detail?: string;
-      target?: string;
-      level?: string;
-    }>;
-    const filtered = audit.filter((row) => !row.agent_id || row.agent_id === agent.id).slice(0, 12);
+  // ---------- Logs tab — terminal-style turn feed per design canvas
+  // Sourced from /api/agents/{id}/events (usage_events) so each row is
+  // a real LLM turn — model / latency / tokens / cost — instead of the
+  // global audit ledger, which is mostly admin lifecycle entries.
+  const renderLogsTab = (_agent: AgentDetail) => {
+    const events = agentEventsQuery.data ?? [];
     const fmtTime = (s?: string): string => {
       if (!s) return "—";
       try {
@@ -1385,31 +1440,24 @@ export function AgentsPage() {
         return s;
       }
     };
-    const levelOf = (row: { level?: string; action?: string }): "INFO" | "WARN" | "DEBUG" | "ERROR" => {
-      const lv = (row.level || "").toUpperCase();
-      if (lv === "WARN" || lv === "ERROR" || lv === "DEBUG" || lv === "INFO") return lv as never;
-      const action = (row.action || "").toLowerCase();
-      if (action.includes("fail") || action.includes("error") || action.includes("denied")) return "ERROR";
-      if (action.includes("warn") || action.includes("budget")) return "WARN";
-      return "INFO";
-    };
-    const levelColor = (lv: string) =>
-      lv === "WARN" ? "text-warning" :
-      lv === "ERROR" ? "text-error" :
-      lv === "DEBUG" ? "text-text-dim/60" : "text-success";
+    // Token shorthand (1.2k tok) — keeps the line fitting the design.
+    const fmtTokens = (n: number): string =>
+      n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+    const formatLine = (e: typeof events[number]): string =>
+      `turn · ${e.model} · in=${fmtTokens(e.input_tokens)} out=${fmtTokens(e.output_tokens)} · ${e.latency_ms}ms · $${e.cost_usd.toFixed(4)}`;
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <div className="text-[11px] uppercase font-semibold tracking-[0.08em] text-text-dim">
-            {t("agents.detail.stderr_tail", { defaultValue: "stderr · tail" })}
+            {t("agents.detail.events_tail", { defaultValue: "events · tail" })} · {events.length}
           </div>
           <Button
             variant="ghost"
             size="sm"
             leftIcon={<Copy className="h-3.5 w-3.5" />}
             onClick={() => {
-              const text = filtered
-                .map((r) => `${fmtTime(r.timestamp)} ${levelOf(r)} ${r.action ?? ""} ${r.detail ?? ""}`)
+              const text = events
+                .map((e) => `${fmtTime(e.timestamp)} INFO ${e.provider || "—"} ${formatLine(e)}`)
                 .join("\n");
               void navigator.clipboard?.writeText(text);
               addToast(t("common.copied", { defaultValue: "Copied" }), "success");
@@ -1418,28 +1466,27 @@ export function AgentsPage() {
             {t("common.copy", { defaultValue: "Copy" })}
           </Button>
         </div>
-        {auditRecentQuery.isLoading ? (
+        {agentEventsQuery.isLoading ? (
           <div className="text-[12px] text-text-dim italic">{t("common.loading", { defaultValue: "Loading…" })}</div>
-        ) : filtered.length === 0 ? (
+        ) : events.length === 0 ? (
           <div className="rounded-md border border-border-subtle bg-main/40 p-4 text-[12px] text-text-dim italic">
-            {t("agents.detail.no_logs", { defaultValue: "No recent log entries for this agent." })}
+            {t("agents.detail.no_logs", { defaultValue: "No turns recorded yet for this agent." })}
           </div>
         ) : (
           <div
             className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-auto -mx-3 sm:mx-0"
             style={{ background: "rgba(2,6,23,0.6)" }}
           >
-            {filtered.map((row, i) => {
-              const lv = levelOf(row);
-              return (
-                <div key={i} className="flex gap-2.5 min-w-max sm:min-w-0">
-                  <span className="text-text-dim/60 shrink-0">{fmtTime(row.timestamp)}</span>
-                  <span className={`${levelColor(lv)} w-12 shrink-0`}>{lv}</span>
-                  <span className="text-accent w-24 shrink-0 truncate">{row.action || "—"}</span>
-                  <span className="text-text-dim min-w-0 truncate">{row.detail || row.target || ""}</span>
-                </div>
-              );
-            })}
+            {events.map((e, i) => (
+              <div key={`${e.timestamp}-${i}`} className="flex gap-2.5 min-w-max sm:min-w-0">
+                <span className="text-text-dim/60 shrink-0">{fmtTime(e.timestamp)}</span>
+                <span className="text-success w-12 shrink-0">INFO</span>
+                <span className="text-accent w-24 shrink-0 truncate">{e.provider || "agent"}</span>
+                <span className="text-text-dim min-w-0 truncate" title={formatLine(e)}>
+                  {formatLine(e)}
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </div>

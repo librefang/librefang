@@ -707,6 +707,51 @@
         }
       }
     },
+    "/api/agents/{id}/events": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/events — Recent turn-level events for one agent.",
+        "description": "Backs the dashboard's agent-detail Logs tab. Returns rows sourced\nfrom `usage_events` (newest first) so the panel shows real\noperational data — model dispatch, latency, tokens, cost — instead\nof the audit ledger, which is mostly admin lifecycle entries.",
+        "operationId": "list_agent_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max rows (default 30, max 200)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent agent events",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/files": {
       "get": {
         "tags": [

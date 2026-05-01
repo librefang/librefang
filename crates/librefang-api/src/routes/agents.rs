@@ -33,6 +33,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(get_agent_stats),
         )
         .route(
+            "/agents/{id}/events",
+            axum::routing::get(list_agent_events),
+        )
+        .route(
             "/agents/{id}/mode",
             axum::routing::put(set_agent_mode),
         )
@@ -779,17 +783,7 @@ pub(crate) fn enrich_agent_json(
     let ready =
         matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
 
-    use librefang_types::agent::ScheduleMode;
-    let schedule = match &e.manifest.schedule {
-        ScheduleMode::Reactive => "manual".to_string(),
-        ScheduleMode::Periodic { cron } => cron.clone(),
-        ScheduleMode::Proactive { .. } => "proactive".to_string(),
-        ScheduleMode::Continuous {
-            check_interval_secs,
-        } => {
-            format!("continuous · {check_interval_secs}s")
-        }
-    };
+    let schedule = format_schedule_mode(&e.manifest.schedule);
 
     let (sessions_24h, cost_24h) = bulk_stats
         .and_then(|m| m.get(&e.id.to_string()).copied())
@@ -1093,6 +1087,86 @@ pub async fn get_agent_stats(
     let substrate = state.kernel.memory_substrate();
     match substrate.agent_stats_24h(&id) {
         Ok(stats) => Json(AgentStats24hView::from(stats)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/agents/{id}/events — Recent turn-level events for one agent.
+///
+/// Backs the dashboard's agent-detail Logs tab. Returns rows sourced
+/// from `usage_events` (newest first) so the panel shows real
+/// operational data — model dispatch, latency, tokens, cost — instead
+/// of the audit ledger, which is mostly admin lifecycle entries.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/events",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("limit" = Option<u32>, Query, description = "Max rows (default 30, max 200)"),
+    ),
+    responses(
+        (status = 200, description = "Recent agent events", body = serde_json::Value),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn list_agent_events(
+    State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let agent_uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => librefang_types::agent::AgentId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid agent id" })),
+            )
+                .into_response();
+        }
+    };
+    let entry = match state.kernel.agent_registry().get(agent_uuid) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    };
+    // Mirror the owner-scoping on /stats and /sessions — turn-level
+    // event data carries token counts and cost, so it shouldn't leak.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin
+            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    }
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(30)
+        .min(200);
+
+    let substrate = state.kernel.memory_substrate();
+    match substrate
+        .usage()
+        .list_agent_events_recent(agent_uuid, limit)
+    {
+        Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -2325,6 +2399,7 @@ pub async fn get_agent(
             },
             "skills": entry.manifest.skills,
             "skills_mode": skill_assignment_mode(&entry.manifest),
+            "schedule": format_schedule_mode(&entry.manifest.schedule),
             "skills_disabled": entry.manifest.skills_disabled,
             "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
@@ -4810,6 +4885,22 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
         "all"
     } else {
         "allowlist"
+    }
+}
+
+/// Render a ScheduleMode as the short string the dashboard's Schedule
+/// tab displays (and what `enrich_agent_json` already exposes on the
+/// agent list). Both endpoints go through this helper so they can't
+/// drift apart.
+fn format_schedule_mode(schedule: &librefang_types::agent::ScheduleMode) -> String {
+    use librefang_types::agent::ScheduleMode;
+    match schedule {
+        ScheduleMode::Reactive => "manual".to_string(),
+        ScheduleMode::Periodic { cron } => cron.clone(),
+        ScheduleMode::Proactive { .. } => "proactive".to_string(),
+        ScheduleMode::Continuous {
+            check_interval_secs,
+        } => format!("continuous · {check_interval_secs}s"),
     }
 }
 
