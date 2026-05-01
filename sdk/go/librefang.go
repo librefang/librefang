@@ -434,6 +434,10 @@ func (r *AgentsResource) SetAgentSkills(id string, data map[string]interface{}) 
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/skills", id), data, nil)
 }
 
+func (r *AgentsResource) GetAgentStats(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/stats", id), nil, nil)
+}
+
 func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", id), nil, nil)
 }
