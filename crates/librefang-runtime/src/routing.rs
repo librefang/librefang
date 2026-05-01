@@ -187,7 +187,7 @@ mod tests {
     fn make_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> CompletionRequest {
         CompletionRequest {
             model: "placeholder".to_string(),
-            messages,
+            messages: std::sync::Arc::new(messages),
             tools,
             max_tokens: 4096,
             temperature: 0.7,

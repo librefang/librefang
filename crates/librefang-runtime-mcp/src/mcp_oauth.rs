@@ -163,17 +163,23 @@ pub fn extract_metadata_url(params: &HashMap<String, String>, server_url: &str) 
     Some(url_str.clone())
 }
 
-/// Return `true` when the given host string resolves to a network range that
-/// must not be reachable via OAuth metadata fetches (SSRF defence-in-depth).
+/// Return `true` when the given host string is a literal IP address or
+/// known internal hostname that must not be reachable via OAuth metadata
+/// fetches (SSRF defence-in-depth).  No DNS resolution is performed —
+/// only the literal value is matched.  A public hostname that DNS-rebinds
+/// to an internal IP at fetch time is out of scope; mitigate at the
+/// network layer.
 ///
-/// Blocked ranges:
-/// * Exact hostnames: `localhost`, `metadata.google.internal`
+/// Blocked values:
+/// * Exact hostnames:   `localhost`, `metadata.google.internal`
 /// * IPv4 loopback      127.0.0.0/8
 /// * IPv4 private       10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-/// * IPv4 link-local    169.254.0.0/16
+/// * IPv4 link-local    169.254.0.0/16 (covers IMDS 169.254.169.254)
 /// * IPv6 loopback      ::1
 /// * IPv6 unique-local  fc00::/7
 /// * IPv6 link-local    fe80::/10
+/// * IPv4-mapped IPv6   `::ffff:x.x.x.x` when the embedded v4 is private
+/// * NAT64              `64:ff9b::x.x.x.x` when the embedded v4 is private
 fn is_ssrf_blocked_host(host: &str) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -253,14 +259,40 @@ fn is_ssrf_blocked_host(host: &str) -> bool {
 
 /// Validate a full URL string against the SSRF block list (#3623).
 ///
-/// Parses the URL, extracts the host, and delegates to [`is_ssrf_blocked_host`].
+/// In order, the function:
+/// 1. Parses the URL.
+/// 2. Rejects non-`http`/`https` schemes — `file://`, `ftp://`, etc. would
+///    otherwise reach `reqwest` and be served from the local filesystem or
+///    a bare-TCP gateway.
+/// 3. Rejects URLs with a userinfo component (`user[:pass]@host`).  The
+///    `url` crate's `host_str()` correctly returns the part after `@`, so
+///    the IMDS-literal form `http://allowed.com@169.254.169.254/` is
+///    already caught by the host check in step 4.  Userinfo is rejected
+///    separately because RFC 6749 never sanctions it on OAuth endpoints,
+///    and a metadata document that contains it is anomalous input —
+///    likely phishing-shape (`http://user@public.example.com/`, where
+///    the host check passes), a credential-smuggling attempt, or
+///    accidental pollution that would leak into logs and reqwest's
+///    connection-pool key.  (PR #4099 / #3527 closed a related but
+///    distinct host-extraction bug on the wasm fetch path.)
+/// 4. Delegates the host check to [`is_ssrf_blocked_host`].
+///
 /// Returns `Ok(())` when the URL is safe, or `Err(reason)` when blocked.
 ///
 /// Public so callers outside this module (e.g. the kernel OAuth provider's
-/// `try_refresh`) can re-validate stored endpoint URLs before making outbound
-/// requests against values written before policy tightened.
+/// `try_refresh`, the API-layer token exchange) can re-validate stored
+/// endpoint URLs before making outbound requests against values written
+/// before policy tightened.
 pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
     let parsed = Url::parse(url_str).map_err(|e| format!("invalid URL: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("scheme '{scheme}' is not allowed")),
+    }
+    // Reject userinfo on OAuth endpoints — see doc comment.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URLs with userinfo are not permitted".to_string());
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
@@ -273,8 +305,9 @@ pub fn is_ssrf_blocked_url(url_str: &str) -> Result<(), String> {
 /// Construct the `.well-known/oauth-authorization-server` URL for a given server URL.
 ///
 /// Parses the URL, extracts the origin, and appends the well-known path.
-/// Returns `None` if the origin resolves to a private/loopback/link-local
-/// host (SSRF guard — see `is_ssrf_blocked_host`).
+/// Returns `None` when the origin's host is a literal private / loopback /
+/// link-local address or a known internal hostname (SSRF guard — see
+/// `is_ssrf_blocked_host`).  No DNS resolution is performed.
 pub fn well_known_url(server_url: &str) -> Option<String> {
     let parsed = Url::parse(server_url).ok()?;
     // Block SSRF before constructing the well-known URL.
@@ -440,10 +473,13 @@ struct AuthorizationServerMetadata {
 /// (RFC 8414). Extracts the required endpoints and converts to our internal type.
 ///
 /// SECURITY (#3623): All discovered endpoint URLs are validated through the
-/// SSRF guard (`is_ssrf_blocked_host`) before being returned.  A malicious
-/// MCP server could otherwise point any of these endpoints at loopback,
-/// link-local, or RFC 1918 addresses to trigger server-side requests to
-/// internal services.
+/// SSRF guard (`is_ssrf_blocked_url`) before being returned.  This rejects
+/// non-http/https schemes, URLs with a userinfo component, and any literal
+/// IP or known internal hostname (loopback, link-local, RFC 1918, IMDS,
+/// IPv4-mapped IPv6, NAT64, …) — a malicious MCP server could otherwise
+/// point an endpoint at an internal service or attach userinfo that leaks
+/// into logs and reqwest's connection-pool key.  DNS resolution is out
+/// of scope; mitigate rebinding at the network layer.
 pub fn parse_authorization_server_metadata(
     body: &str,
     server_url: &str,
@@ -451,7 +487,9 @@ pub fn parse_authorization_server_metadata(
     let raw: AuthorizationServerMetadata =
         serde_json::from_str(body).map_err(|e| format!("Failed to parse metadata JSON: {e}"))?;
 
-    // SSRF guard — validate every discovered endpoint URL.
+    // SSRF guard — validate every discovered endpoint URL. Use the shared
+    // `is_ssrf_blocked_url` so scheme + userinfo + host checks stay in sync
+    // across every callsite (parser, kernel try_refresh, API token-exchange).
     for (label, url_str) in [
         (
             "authorization_endpoint",
@@ -459,24 +497,13 @@ pub fn parse_authorization_server_metadata(
         ),
         ("token_endpoint", raw.token_endpoint.as_str()),
     ] {
-        let parsed = Url::parse(url_str).map_err(|e| format!("{label} is not a valid URL: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| format!("{label} has no host"))?;
-        if is_ssrf_blocked_host(host) {
-            return Err(format!("SSRF: {label} host '{host}' is a blocked address"));
+        if let Err(reason) = is_ssrf_blocked_url(url_str) {
+            return Err(format!("SSRF: {label} rejected: {reason}"));
         }
     }
     if let Some(reg_ep) = raw.registration_endpoint.as_deref() {
-        let parsed = Url::parse(reg_ep)
-            .map_err(|e| format!("registration_endpoint is not a valid URL: {e}"))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| "registration_endpoint has no host".to_string())?;
-        if is_ssrf_blocked_host(host) {
-            return Err(format!(
-                "SSRF: registration_endpoint host '{host}' is a blocked address"
-            ));
+        if let Err(reason) = is_ssrf_blocked_url(reg_ep) {
+            return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
         }
     }
 
@@ -1106,5 +1133,67 @@ mod tests {
         let ids: Vec<String> = (0..10).map(|_| generate_flow_id()).collect();
         let unique: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
         assert_eq!(unique.len(), ids.len(), "duplicate flow IDs generated");
+    }
+
+    // -- #3623: is_ssrf_blocked_url scheme + userinfo coverage --
+
+    #[test]
+    fn is_ssrf_blocked_url_rejects_userinfo() {
+        // The first two URLs are also caught by the host check (host_str()
+        // returns the IMDS literal / loopback after the @, per RFC 3986),
+        // so they exercise belt-and-suspenders defense.  The third case is
+        // the unique regression point for this guard: host_str() is
+        // "example.com" (public), the host check passes, and *only* the
+        // userinfo guard rejects.  If anyone removes the guard in a future
+        // refactor, this assertion is what fails.
+        assert!(is_ssrf_blocked_url("http://allowed.com@169.254.169.254/").is_err());
+        assert!(is_ssrf_blocked_url("http://user:pass@127.0.0.1/x").is_err());
+        assert!(is_ssrf_blocked_url("http://user@example.com/").is_err());
+    }
+
+    #[test]
+    fn is_ssrf_blocked_url_rejects_non_http_schemes() {
+        assert!(is_ssrf_blocked_url("file:///etc/passwd").is_err());
+        assert!(is_ssrf_blocked_url("ftp://example.com/x").is_err());
+        assert!(is_ssrf_blocked_url("gopher://example.com/").is_err());
+    }
+
+    #[test]
+    fn is_ssrf_blocked_url_allows_plain_public() {
+        assert!(is_ssrf_blocked_url("https://auth.example.com/token").is_ok());
+        assert!(is_ssrf_blocked_url("http://auth.example.com:8443/authorize").is_ok());
+    }
+
+    #[test]
+    fn parse_authorization_server_metadata_rejects_userinfo_endpoint() {
+        // Userinfo on OAuth metadata is anomalous (RFC 6749 doesn't
+        // sanction it).  The post-`@` host here is public — `host_str()`
+        // returns "auth.example.com" and the host check passes — so this
+        // test fails ONLY if the userinfo guard is removed.  Pairs with
+        // `is_ssrf_blocked_url_rejects_userinfo` to lock the parser-level
+        // wiring at the same isolated regression point.
+        let body = r#"{
+            "authorization_endpoint": "https://user@auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token"
+        }"#;
+        let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
+        assert!(
+            result.is_err(),
+            "userinfo authorization_endpoint must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_authorization_server_metadata_rejects_imds_registration_endpoint() {
+        let body = r#"{
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/token",
+            "registration_endpoint": "http://169.254.169.254/latest/api/token"
+        }"#;
+        let result = parse_authorization_server_metadata(body, "https://server.com/mcp");
+        assert!(
+            result.is_err(),
+            "registration_endpoint pointing at IMDS must be rejected"
+        );
     }
 }

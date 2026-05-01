@@ -261,6 +261,9 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
 
         // Poll for input (50ms = 20fps spinner)
         if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+            // Resize events fall through to the next loop iteration so the next
+            // `terminal.draw(...)` picks up the new size automatically (#3638).
+            // Anything else (Mouse/FocusGained/Paste here) we currently ignore.
             if let Ok(CtEvent::Key(key)) = event::read() {
                 if key.kind != KeyEventKind::Press {
                     continue;

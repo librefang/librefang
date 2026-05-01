@@ -49,8 +49,14 @@ impl AnthropicDriver {
     ) -> Self {
         let client = match proxy_url {
             Some(url) => librefang_http::proxied_client_with_override(url).unwrap_or_else(|e| {
-                tracing::warn!(url, error = %e, "Invalid per-provider proxy URL, using global proxy");
-                librefang_http::proxied_client()
+                // Use the bounded fallback so a global client without a per-request
+                // total timeout cannot leave a request hanging indefinitely (#3756).
+                tracing::warn!(
+                    url,
+                    error = %e,
+                    "Invalid per-provider proxy URL; falling back to global proxy with bounded timeout"
+                );
+                librefang_http::proxied_client_fallback()
             }),
             None => librefang_http::proxied_client(),
         };
@@ -428,9 +434,12 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
@@ -560,9 +569,12 @@ impl LlmDriver for AnthropicDriver {
             }
 
             if !resp.status().is_success() {
+                // #3723: never silently swallow the body. If reading the
+                // payload fails, surface the IO error in the message so
+                // callers get something better than a blank string.
                 let body = resp.text().await.unwrap_or_else(|e| {
                     tracing::warn!("failed to read Anthropic error body: {e}");
-                    String::new()
+                    format!("<failed to read body: {e}>")
                 });
                 let message = serde_json::from_str::<ApiErrorResponse>(&body)
                     .map(|e| e.error.message)
@@ -592,11 +604,13 @@ impl LlmDriver for AnthropicDriver {
             let mut blocks: Vec<ContentBlockAccum> = Vec::new();
             let mut stop_reason = StopReason::EndTurn;
             let mut usage = TokenUsage::default();
+            // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+            let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                buffer.push_str(&utf8.decode(&chunk));
 
                 while let Some(pos) = buffer.find("\n\n") {
                     let event_text = buffer[..pos].to_string();
@@ -750,6 +764,8 @@ impl LlmDriver for AnthropicDriver {
                                     "tool_use" => StopReason::ToolUse,
                                     "max_tokens" => StopReason::MaxTokens,
                                     "stop_sequence" => StopReason::StopSequence,
+                                    // Anthropic refusals (#3450).
+                                    "refusal" => StopReason::ContentFiltered,
                                     _ => StopReason::EndTurn,
                                 };
                             }
@@ -761,6 +777,11 @@ impl LlmDriver for AnthropicDriver {
                     }
                 }
             }
+
+            // End-of-stream: drain any partial codepoint the decoder is
+            // still buffering so a CJK character truncated by the final
+            // chunk surfaces as U+FFFD instead of vanishing (#3448).
+            buffer.push_str(&utf8.finish());
 
             // Build CompletionResponse from accumulated blocks
             let mut content = Vec::new();
@@ -1151,6 +1172,8 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::MaxTokens,
         "stop_sequence" => StopReason::StopSequence,
+        // Anthropic refusals (#3450).
+        "refusal" => StopReason::ContentFiltered,
         _ => StopReason::EndTurn,
     };
 
@@ -1367,7 +1390,7 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![tool_a, tool_b],
             max_tokens: 100,
             temperature: 0.0,
@@ -1405,7 +1428,7 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1445,13 +1468,13 @@ mod tests {
     fn multi_turn_rolling_window_stamps_last_three() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
+            ]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1494,14 +1517,14 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3"),
                 Message::assistant("a3 (last)"),
-            ],
+            ]),
             tools: vec![tool.clone(), tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1548,7 +1571,7 @@ mod tests {
         }]);
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![tool_result_msg],
+            messages: std::sync::Arc::new(vec![tool_result_msg]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1584,7 +1607,7 @@ mod tests {
     fn system_block_always_stamped_when_caching_on() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")], // dummy: api requires >=1 user msg
+            messages: std::sync::Arc::new(vec![Message::user("hi")]), // dummy: api requires >=1 user msg
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1620,11 +1643,11 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2 (last)"),
-            ],
+            ]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1666,7 +1689,7 @@ mod tests {
     fn ttl_default_omits_ttl_field_and_skips_beta_header() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1698,7 +1721,7 @@ mod tests {
     fn test_messages_cache_control_absent_when_caching_off() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,
@@ -1804,13 +1827,13 @@ mod tests {
         };
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message::user("u1"),
                 Message::assistant("a1"),
                 Message::user("u2"),
                 Message::assistant("a2"),
                 Message::user("u3 (last)"),
-            ],
+            ]),
             tools: vec![tool],
             max_tokens: 100,
             temperature: 0.0,
@@ -1895,7 +1918,7 @@ mod tests {
     fn test_tools_cache_control_empty_tools_list() {
         let request = CompletionRequest {
             model: "claude-sonnet-4-5".to_string(),
-            messages: vec![Message::user("hi")],
+            messages: std::sync::Arc::new(vec![Message::user("hi")]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,

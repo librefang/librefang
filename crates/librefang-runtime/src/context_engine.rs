@@ -137,18 +137,44 @@ pub struct PluginEvent {
     pub source_plugin: String,
 }
 
+/// Rate-limit window between consecutive `error!` logs from
+/// [`PluginEventBus::record_consumer_lag`]. Must stay in sync with the
+/// hardcoded `10` in `librefang_kernel::event_bus::EventBus::record_consumer_lag`
+/// (search for `from_secs(10)` in `crates/librefang-kernel/src/event_bus.rs`)
+/// so the two buses behave identically.
+const LAG_WARN_INTERVAL_SECS: u64 = 10;
+
 /// A simple in-process event bus for plugin events.
 ///
 /// Backed by a `tokio::sync::broadcast` channel so multiple engines can
 /// receive the same event without coordination.
 pub struct PluginEventBus {
     tx: tokio::sync::broadcast::Sender<PluginEvent>,
+    /// Total events dropped by consumers due to broadcast lag. Mirrors
+    /// the kernel `EventBus` counter so plugin-side `on_event` misses
+    /// stop being silently swallowed (issue #3630).
+    dropped_count: std::sync::atomic::AtomicU64,
+    /// Rate-limit timestamp for the lag warning log.
+    last_drop_warn: std::sync::Mutex<std::time::Instant>,
 }
 
 impl PluginEventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(capacity);
-        Self { tx }
+        // Initialise the rate-limit timestamp far enough in the past that
+        // the FIRST lag burst after startup is always logged. Without this,
+        // a fresh process that immediately sees lag would only bump the
+        // counter and stay silent for the first 10 s — defeating the
+        // "make lag visible" goal of #3630.
+        // checked_sub: CLOCK_MONOTONIC can be <(LAG_WARN_INTERVAL_SECS+1) s on boot; fallback forfeits warmup, not correctness.
+        let warmup = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS + 1))
+            .unwrap_or_else(std::time::Instant::now);
+        Self {
+            tx,
+            dropped_count: std::sync::atomic::AtomicU64::new(0),
+            last_drop_warn: std::sync::Mutex::new(warmup),
+        }
     }
 
     /// Publish an event to all subscribers.
@@ -159,6 +185,34 @@ impl PluginEventBus {
     /// Subscribe to the event stream.
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<PluginEvent> {
         self.tx.subscribe()
+    }
+
+    /// Total events that consumers dropped due to broadcast lag.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Record that a consumer lagged and dropped `n` events. Bumps
+    /// `dropped_count` and emits a rate-limited `error!` log. Mirrors
+    /// `librefang_kernel::event_bus::EventBus::record_consumer_lag`.
+    pub fn record_consumer_lag(&self, n: u64, context: &'static str) {
+        let total = self
+            .dropped_count
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed)
+            + n;
+        if let Ok(mut last) = self.last_drop_warn.lock() {
+            if last.elapsed() >= std::time::Duration::from_secs(LAG_WARN_INTERVAL_SECS) {
+                tracing::error!(
+                    lagged = n,
+                    total_dropped = total,
+                    context = context,
+                    "Plugin event bus: consumer lagged behind broadcast queue, events dropped — \
+                     receiver should be drained faster or buffer increased",
+                );
+                *last = std::time::Instant::now();
+            }
+        }
     }
 }
 
@@ -1244,7 +1298,12 @@ impl ScriptableContextEngine {
                             });
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(plugin = %plugin_name, skipped = n, "on_event: broadcast lagged, some events skipped");
+                            // Route through the bus's lag counter so plugin
+                            // on_event misses are observable in
+                            // `dropped_count()` and emit a rate-limited
+                            // error! log (#3630). The previous per-listener
+                            // warn! was silent in aggregate metrics.
+                            bus.record_consumer_lag(n, "plugin.on_event");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -4559,6 +4618,33 @@ mod tests {
         let config = ContextEngineConfig::default();
         let engine = DefaultContextEngine::new(config.clone(), make_memory(), None);
         assert!(engine.bootstrap(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn plugin_bus_record_consumer_lag_increments_dropped_count() {
+        // Mirrors `EventBus::record_consumer_lag_increments_dropped_count`
+        // from librefang-kernel — the two impls drift apart silently
+        // unless both are tested. Counter accounting only; the rate-
+        // limited error! log is exercised but not asserted on.
+        let bus = PluginEventBus::new(8);
+        assert_eq!(bus.dropped_count(), 0);
+        bus.record_consumer_lag(7, "test");
+        assert_eq!(bus.dropped_count(), 7);
+        bus.record_consumer_lag(3, "test");
+        assert_eq!(bus.dropped_count(), 10);
+    }
+
+    /// Warmup regression guard: first lag burst must advance `last_drop_warn` (#3630).
+    #[tokio::test]
+    async fn plugin_bus_first_lag_burst_advances_warn_timestamp() {
+        let bus = PluginEventBus::new(8);
+        let before = *bus.last_drop_warn.lock().unwrap();
+        bus.record_consumer_lag(1, "test_first_burst");
+        let after = *bus.last_drop_warn.lock().unwrap();
+        assert!(
+            after > before,
+            "first lag burst must advance last_drop_warn — warmup regression"
+        );
     }
 
     #[tokio::test]

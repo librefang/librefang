@@ -138,6 +138,7 @@ pub fn apply_context_guard(
         msg_idx: usize,
         block_idx: usize,
         char_len: usize,
+        is_delegation: bool,
     }
 
     let mut locations: Vec<ToolResultLoc> = Vec::new();
@@ -146,13 +147,17 @@ pub fn apply_context_guard(
     for (msg_idx, msg) in messages.iter().enumerate() {
         if let MessageContent::Blocks(blocks) = &msg.content {
             for (block_idx, block) in blocks.iter().enumerate() {
-                if let ContentBlock::ToolResult { content, .. } = block {
+                if let ContentBlock::ToolResult {
+                    content, tool_name, ..
+                } = block
+                {
                     let len = content.chars().count();
                     total_chars += len;
                     locations.push(ToolResultLoc {
                         msg_idx,
                         block_idx,
                         char_len: len,
+                        is_delegation: tool_name == "agent_send",
                     });
                 }
             }
@@ -196,11 +201,17 @@ pub fn apply_context_guard(
 
     // Second pass: compact oldest results until under headroom
     // (locations are already in chronological order)
-    let compact_target = 2000; // compact to 2K chars each
+    const COMPACT_DEFAULT: usize = 2_000;
+    const COMPACT_DELEGATION: usize = 8_000; // agent_send results need more context (#4135)
     for loc in &locations {
         if total_chars <= headroom {
             break;
         }
+        let compact_target = if loc.is_delegation {
+            COMPACT_DELEGATION
+        } else {
+            COMPACT_DEFAULT
+        };
         if loc.char_len <= compact_target {
             continue;
         }
@@ -508,5 +519,69 @@ mod tests {
         assert!(result.contains("[COMPACTED:"));
         // Result should be valid UTF-8 and shorter than original
         assert!(result.len() < content.len() + 100); // original + marker overhead
+    }
+
+    #[test]
+    fn test_context_guard_delegation_higher_floor() {
+        // Budget sized so first pass (single_max) doesn't trigger but second pass does:
+        // single_max = 50% * 6000 * 2.0 = 6000 chars (> 5K, no first-pass truncation)
+        // headroom  = 75% * 6000 * 2.0 = 9000 chars (< 10K total, triggers second pass)
+        let budget = ContextBudget::new(6000);
+        let big_result = "x".repeat(5000); // 5K chars — above 2K default, below 8K delegation floor
+
+        let mut messages = vec![
+            // Normal tool result — should be compacted to 2K
+            Message {
+                role: librefang_types::message::Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    tool_name: "shell_exec".to_string(),
+                    content: big_result.clone(),
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+            // agent_send result — should NOT be compacted (5K < 8K floor)
+            Message {
+                role: librefang_types::message::Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t2".to_string(),
+                    tool_name: "agent_send".to_string(),
+                    content: big_result,
+                    is_error: false,
+                    status: librefang_types::tool::ToolExecutionStatus::default(),
+                    approval_request_id: None,
+                }]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+
+        apply_context_guard(&mut messages, &budget, &[]);
+
+        // Normal result should be compacted (well below 5K)
+        if let MessageContent::Blocks(blocks) = &messages[0].content {
+            if let ContentBlock::ToolResult { content, .. } = &blocks[0] {
+                assert!(
+                    content.chars().count() < 3000,
+                    "Normal tool result should be compacted to ~2K, got {}",
+                    content.chars().count()
+                );
+            }
+        }
+
+        // agent_send result should be preserved (5K is under 8K floor)
+        if let MessageContent::Blocks(blocks) = &messages[1].content {
+            if let ContentBlock::ToolResult { content, .. } = &blocks[0] {
+                assert!(
+                    content.chars().count() >= 4000,
+                    "agent_send result should be preserved at 5K (under 8K floor), got {}",
+                    content.chars().count()
+                );
+            }
+        }
     }
 }

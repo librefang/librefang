@@ -89,6 +89,11 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
 
                     // Detect unknown top-level fields before deserialization.
                     let unknown_fields = KernelConfig::detect_unknown_fields(&root_value);
+                    // Detect unknown fields in known nested sections (#3460):
+                    // typos like `[memory] decay_ratee = 0.1` previously
+                    // deserialised into the section's `Default`, silently
+                    // dropping the operator's intent.
+                    let unknown_nested = KernelConfig::detect_unknown_nested_fields(&root_value);
 
                     // Check if strict_config is set in the raw TOML (before
                     // deserializing the full struct) so we can decide whether
@@ -99,11 +104,18 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
 
-                    if !unknown_fields.is_empty() {
+                    let mut all_unknown: Vec<String> = unknown_fields
+                        .iter()
+                        .cloned()
+                        .chain(unknown_nested.iter().cloned())
+                        .collect();
+                    all_unknown.sort();
+
+                    if !all_unknown.is_empty() {
                         if is_strict {
                             tracing::error!(
                                 path = %config_path.display(),
-                                fields = %unknown_fields.join(", "),
+                                fields = %all_unknown.join(", "),
                                 "strict_config is enabled and config contains unknown fields, using defaults"
                             );
                             return KernelConfig {
@@ -111,7 +123,7 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                                 ..KernelConfig::default()
                             };
                         }
-                        for field in &unknown_fields {
+                        for field in &all_unknown {
                             tracing::warn!(field, "Unknown config field (ignored)");
                         }
                     }
@@ -763,6 +775,55 @@ mod tests {
         let config = load_config(Some(&root));
         assert_eq!(config.log_level, "info"); // default, not "warn"
         assert!(config.users.is_empty());
+    }
+
+    /// Regression for #3460: nested typos like `[memory] decay_ratee` were
+    /// previously silently swallowed by `#[serde(default)]` because only
+    /// top-level field names were checked. The loader must now warn about
+    /// typos in known sections (warn-only by default, reject in strict mode).
+    #[test]
+    fn test_nested_typo_detected_in_warn_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "[memory]").unwrap();
+        writeln!(f, "decay_ratee = 0.42").unwrap(); // typo: extra 'e'
+        writeln!(f, "[queue.concurrency]").unwrap();
+        writeln!(f, "trigger_laneeee = 99").unwrap(); // typo
+        drop(f);
+
+        // Tolerant: still loads with defaults for the typo'd fields.
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "debug");
+        // Defaults preserved (the typos didn't take effect).
+        assert!(
+            (config.memory.decay_rate
+                - librefang_types::config::KernelConfig::default()
+                    .memory
+                    .decay_rate)
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn test_nested_typo_rejected_in_strict_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "strict_config = true").unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        writeln!(f, "[budget]").unwrap();
+        writeln!(f, "max_hourly_usdd = 5.0").unwrap(); // typo
+        drop(f);
+
+        let config = load_config(Some(&root));
+        // Falls back to defaults because strict mode rejected the typo.
+        assert_eq!(config.log_level, "info");
+        assert!(config.strict_config);
     }
 
     #[test]

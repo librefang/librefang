@@ -345,7 +345,7 @@ mod tests {
     fn test_request() -> CompletionRequest {
         CompletionRequest {
             model: "test-model".to_string(),
-            messages: vec![],
+            messages: std::sync::Arc::new(vec![]),
             tools: vec![],
             max_tokens: 100,
             temperature: 0.0,

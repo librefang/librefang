@@ -158,6 +158,9 @@ impl ChannelBridgeHandle for MockHandle {
     async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
         Err("mock: spawn not implemented".to_string())
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -734,6 +737,9 @@ impl ChannelBridgeHandle for MockStreamingHandle {
     async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
         Err("mock: spawn not implemented".to_string())
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +948,9 @@ impl ChannelBridgeHandle for MockProgressHandle {
         });
         Ok((rx, status_rx))
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 /// Verify that a non-streaming adapter (Discord/Slack/Matrix/...) receives
@@ -1137,6 +1146,9 @@ impl ChannelBridgeHandle for MockKernelErrorHandle {
         });
         Ok((rx, status_rx))
     }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
+    }
 }
 
 /// Exercises the Telegram-path 4th outcome introduced in V2:
@@ -1283,6 +1295,9 @@ impl ChannelBridgeHandle for MockKernelOkHandle {
             let _ = status_tx.send(Ok(()));
         });
         Ok((rx, status_rx))
+    }
+    fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+        // Test mock: no event bus to forward to.
     }
 }
 

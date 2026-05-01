@@ -73,6 +73,11 @@ pub enum HotAction {
     /// previous policy is still being enforced. Supersedes the M6
     /// `ReloadUsers` action that only rebuilt the channel-binding index.
     ReloadAuth,
+    /// `[queue.concurrency]` changed — resize the global lane semaphores
+    /// so a smaller `trigger_lane` actually rate-limits new work (#3628).
+    /// Per-agent caps are NOT touched — see
+    /// `docs/architecture/trigger-dispatch-concurrency.md` for why.
+    UpdateQueueConcurrency,
 }
 
 // ---------------------------------------------------------------------------
@@ -282,23 +287,6 @@ pub fn build_reload_plan_with_caps(
             .push("vault config changed".to_string());
     }
 
-    // Queue concurrency config — lane semaphores and per-agent caps are
-    // created once at kernel boot and cannot be resized at runtime without
-    // draining all in-flight tasks. Surfacing a restart-required diagnostic
-    // prevents silent no-ops (issue #3628).
-    if field_changed(&old.queue.concurrency, &new.queue.concurrency) {
-        plan.restart_required = true;
-        plan.restart_reasons.push(
-            "queue.concurrency.* changed — lane semaphores are fixed at boot; \
-             restart the daemon to apply the new concurrency limits"
-                .to_string(),
-        );
-        warn!(
-            "config reload: queue.concurrency.* changed but cannot be applied \
-             at runtime — restart the daemon to pick up new lane/per-agent limits"
-        );
-    }
-
     // ----- Hot-reloadable fields -----
 
     if field_changed(&old.channels, &new.channels) {
@@ -380,6 +368,13 @@ pub fn build_reload_plan_with_caps(
 
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
+    }
+
+    // #3628 — resize the lane semaphores when `[queue.concurrency]`
+    // changes. Without this the new caps are written into `self.config`
+    // but the live semaphores were sized at boot and never updated.
+    if field_changed(&old.queue.concurrency, &new.queue.concurrency) {
+        plan.hot_actions.push(HotAction::UpdateQueueConcurrency);
     }
 
     if field_changed(&old.sanitize, &new.sanitize) {
@@ -656,6 +651,28 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::UpdateCronConfig));
+    }
+
+    /// Regression for #3628: changes to `[queue.concurrency]` must produce
+    /// an `UpdateQueueConcurrency` hot action so the lane semaphores get
+    /// resized. Without this the new caps were stored on `self.config` but
+    /// the live semaphores remained sized at boot.
+    #[test]
+    fn test_queue_concurrency_hot_reload_emits_resize_action() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.queue.concurrency.trigger_lane = a.queue.concurrency.trigger_lane.saturating_add(4);
+        let plan = build_reload_plan(&a, &b);
+        assert!(
+            !plan.restart_required,
+            "queue.concurrency must be hot-reloadable"
+        );
+        assert!(
+            plan.hot_actions
+                .contains(&HotAction::UpdateQueueConcurrency),
+            "expected UpdateQueueConcurrency in {:?}",
+            plan.hot_actions,
+        );
     }
 
     #[test]

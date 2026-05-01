@@ -1243,7 +1243,7 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
-    const DEFAULT_LIMIT: usize = 100;
+    const DEFAULT_LIMIT: usize = 50;
     const MAX_LIMIT: usize = 500;
 
     fn effective_limit(&self) -> usize {
@@ -1263,7 +1263,7 @@ impl PaginationParams {
     path = "/api/sessions",
     tag = "sessions",
     params(
-        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
@@ -1274,19 +1274,18 @@ pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
-    match state.kernel.memory_substrate().list_sessions() {
-        Ok(all_sessions) => {
-            let total = all_sessions.len();
-            let offset = pagination.effective_offset();
-            let limit = pagination.effective_limit();
-            let items: Vec<_> = all_sessions.into_iter().skip(offset).take(limit).collect();
-            Json(serde_json::json!({
-                "sessions": items,
-                "total": total,
-                "offset": offset,
-                "limit": limit,
-            }))
-        }
+    let offset = pagination.effective_offset();
+    let limit = pagination.effective_limit();
+    let substrate = state.kernel.memory_substrate();
+    // Push pagination into SQLite so we don't deserialize every session blob (#3485).
+    let total = substrate.count_sessions().unwrap_or(0);
+    match substrate.list_sessions_paginated(Some(limit), offset) {
+        Ok(items) => Json(serde_json::json!({
+            "sessions": items,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        })),
         Err(_) => Json(serde_json::json!({
             "sessions": [],
             "total": 0,
@@ -1606,7 +1605,7 @@ fn approval_to_json(
     path = "/api/approvals",
     tag = "approvals",
     params(
-        ("limit" = Option<usize>, Query, description = "Max items (default 100, max 500)"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses((status = 200, description = "Paginated list of pending and recent approvals", body = serde_json::Value))
@@ -1890,10 +1889,22 @@ pub async fn approve_request(
                     // Replay-prevention check (#3359): reject a code that was
                     // already used within the last 60 seconds (two TOTP windows).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state
+                        // Atomic check + record (#3584) preserves fail-secure
+                        // on DB persist failure (#3372): Err(false) = DB write
+                        // dropped; Err(true) = already locked out, fall through
+                        // to "already used" response so the lockout state is
+                        // not leaked here.
+                        if let Err(false) = state
                             .kernel
                             .approvals()
-                            .check_and_record_totp_failure("api_admin");
+                            .check_and_record_totp_failure("api_admin")
+                        {
+                            return ApiErrorResponse::internal(
+                                "Failed to persist TOTP failure counter",
+                            )
+                            .into_json_tuple()
+                            .into_response();
+                        }
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -1906,8 +1917,41 @@ pub async fn approve_request(
                         &totp_issuer,
                     ) {
                         Ok(true) => {
-                            // Mark this code as used to prevent replay within the window.
-                            state.kernel.approvals().record_totp_code_used(code);
+                            // SECURITY (#3360): Bind the consumed code to the
+                            // approval id it authorized. The replay window is
+                            // still global (`is_totp_code_used` keys on the
+                            // hash alone) so the code is single-use across
+                            // all actions; the binding only documents *which*
+                            // action used it for post-incident audit.
+                            //
+                            // Fail-secure (#3372 parity): if the DB write
+                            // fails the code is NOT in the replay table and
+                            // could be reused, so reject with 500 rather than
+                            // silently approving.
+                            if state
+                                .kernel
+                                .approvals()
+                                .record_totp_code_used_for(code, Some(&format!("approval:{uuid}")))
+                                .is_err()
+                            {
+                                return ApiErrorResponse::internal(
+                                    "Failed to persist TOTP used-code record",
+                                )
+                                .into_json_tuple()
+                                .into_response();
+                            }
+                            // Audit trail: write the binding alongside the
+                            // approval resolution so an auditor can correlate
+                            // (totp_code_hash, approval_uuid) without joining
+                            // tables.
+                            state.kernel.audit().record_with_context(
+                                "system",
+                                librefang_runtime::audit::AuditAction::AuthAttempt,
+                                format!("totp_used_for_approval:{uuid}"),
+                                "totp_verified",
+                                None,
+                                Some("api".to_string()),
+                            );
                             true
                         }
                         Ok(false) => {
@@ -2547,10 +2591,21 @@ pub async fn totp_setup(
                 } else {
                     // TOTP code — check replay before verifying (#3359).
                     if state.kernel.approvals().is_totp_code_used(code) {
-                        let _ = state
+                        // Atomic check + record (#3584) preserves fail-secure
+                        // on DB persist failure (#3372): Err(false) = DB write
+                        // dropped; Err(true) = already locked out, fall through
+                        // to "already used" response so the lockout state is
+                        // not leaked here.
+                        if let Err(false) = state
                             .kernel
                             .approvals()
-                            .check_and_record_totp_failure(SETUP_LOCKOUT_KEY);
+                            .check_and_record_totp_failure(SETUP_LOCKOUT_KEY)
+                        {
+                            return ApiErrorResponse::internal(
+                                "Failed to persist TOTP failure counter",
+                            )
+                            .into_json_tuple();
+                        }
                         return ApiErrorResponse::bad_request(
                             "TOTP code has already been used. Wait for the next 30-second window.",
                         )
@@ -2690,10 +2745,18 @@ pub async fn totp_confirm(
 
     // Replay-prevention check (#3359): reject a code already used in the last 60 s.
     if state.kernel.approvals().is_totp_code_used(&body.code) {
-        let _ = state
+        // Atomic check + record (#3584) preserves fail-secure on DB persist
+        // failure (#3372): Err(false) = DB write dropped; Err(true) = already
+        // locked out, fall through to "already used" response so the lockout
+        // state is not leaked here.
+        if let Err(false) = state
             .kernel
             .approvals()
-            .check_and_record_totp_failure("api_admin");
+            .check_and_record_totp_failure("api_admin")
+        {
+            return ApiErrorResponse::internal("Failed to persist TOTP failure counter")
+                .into_json_tuple();
+        }
         return ApiErrorResponse::bad_request(
             "TOTP code has already been used. Wait for the next 30-second window.",
         )

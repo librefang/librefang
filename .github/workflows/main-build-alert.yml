@@ -1,0 +1,110 @@
+name: Main Build Alert
+
+# Watch the main CI workflow. If a push to `main` ends in failure, open
+# (or comment on) a tracking issue so the breakage is visible immediately
+# instead of festering until the next PR runs into it.
+#
+# Why this exists: PR CI runs against the PR's own commit, not against
+# `PR + current main`, so two PRs that are individually green can produce
+# a red main when merged in sequence (incident: #4179). Without a signal
+# at merge time, the breakage stays invisible until the next PR opens.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    # Only act on main pushes; ignore PR check completions (those still
+    # arrive via the same workflow_run event).
+    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' }}
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            const conclusion = process.env.CONCLUSION;
+            const runUrl = process.env.RUN_URL;
+            const headSha = process.env.HEAD_SHA;
+            const shortSha = headSha.slice(0, 7);
+            const label = 'main-red';
+
+            // Ensure the label exists; ignore "already_exists" 422.
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label,
+                color: 'b60205',
+                description: 'Main branch CI is failing',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+              per_page: 5,
+            });
+
+            if (conclusion === 'success') {
+              // Auto-close any open red-main issue when CI goes green again.
+              for (const issue of open) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `Main CI green again on ${shortSha} (${runUrl}). Auto-closing.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed',
+                });
+              }
+              return;
+            }
+
+            if (conclusion !== 'failure' && conclusion !== 'timed_out' && conclusion !== 'cancelled') {
+              return; // skipped/neutral/etc — nothing to do
+            }
+
+            const body = [
+              `Main CI **${conclusion}** on commit ${shortSha}.`,
+              ``,
+              `Run: ${runUrl}`,
+              ``,
+              `Every open PR will inherit this failure on its next CI run.`,
+              `Either land a fix (preferred) or revert the offending merge.`,
+            ].join('\n');
+
+            if (open.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[main red] CI ${conclusion} on ${shortSha}`,
+                body,
+                labels: [label],
+              });
+            }

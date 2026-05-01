@@ -172,6 +172,19 @@ pub fn proxied_client() -> reqwest::Client {
         .expect("HTTP client with proxy/TLS config should always build")
 }
 
+/// Build a fallback [`reqwest::Client`] used when a per-provider proxy override
+/// is invalid. Identical to [`proxied_client`] but also enforces a total
+/// per-request timeout so a stuck upstream cannot wedge the agent loop
+/// indefinitely (#3756). Callers should `tracing::warn!` before invoking.
+pub fn proxied_client_fallback() -> reqwest::Client {
+    proxied_client_builder()
+        // Total per-request budget on top of connect/read timeouts. 300s aligns
+        // with the read_timeout already set in build_http_client.
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .expect("HTTP fallback client with proxy/TLS config should always build")
+}
+
 /// Build a [`reqwest::Client`] that routes all traffic through the given proxy URL,
 /// ignoring the global proxy config. Used for per-provider proxy overrides.
 ///

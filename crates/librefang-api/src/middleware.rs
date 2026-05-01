@@ -108,6 +108,10 @@ fn is_owner_only_write(method: &axum::http::Method, path: &str) -> bool {
             | "/api/approvals/totp/setup"
             | "/api/approvals/totp/confirm"
             | "/api/approvals/totp/revoke"
+            // A2A discover registers a remote agent into the pending registry,
+            // expanding the trust surface; restrict to Owner so non-Owner API keys
+            // cannot fill the registry or stage impersonation attempts (#3483).
+            | "/api/a2a/discover"
     ) {
         return true;
     }
@@ -715,19 +719,38 @@ pub async fn auth(
             .unwrap_or_default();
     }
 
-    // Check Authorization: Bearer <token> header, then fallback to X-API-Key
+    // Check Authorization: Bearer <token> header, then fallback to X-API-Key,
+    // then fallback to Sec-WebSocket-Protocol: bearer.<token> for WS upgrades.
+    // Browsers cannot set custom headers on WebSocket handshakes, so the
+    // dashboard encodes the session token as a sub-protocol entry — this must
+    // be checked here for non-loopback connections (Docker bridge, LAN) where
+    // the loopback fast-path above is not taken.
     let bearer_token = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
-    let api_token = bearer_token.or_else(|| {
-        request
-            .headers()
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-    });
+    let api_token = bearer_token
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+        })
+        .or_else(|| {
+            // WS upgrade fallback: Sec-WebSocket-Protocol: bearer.<token>
+            request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    v.split(',')
+                        .map(str::trim)
+                        .find(|p| p.starts_with("bearer."))
+                        .and_then(|p| p.strip_prefix("bearer."))
+                })
+        });
 
     // Cookie-based session token — only accepted for SPA shell navigation
     // (`/dashboard/*`). API endpoints still require a Bearer/header token so

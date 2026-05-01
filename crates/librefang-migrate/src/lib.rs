@@ -86,4 +86,10 @@ pub enum MigrateError {
     /// understand.
     #[error("Unsupported openclaw.json schema version {0}; supported versions are 1 and 2")]
     UnsupportedVersion(u32),
+    /// #3798 — staging directory from a previous failed migration is still
+    /// present; refuse to overwrite without explicit cleanup.
+    #[error(
+        "Staging directory from a previous failed migration exists: {0:?}; remove it and retry"
+    )]
+    StagingExists(PathBuf),
 }

@@ -4,8 +4,8 @@
     "title": "LibreFang API",
     "description": "LibreFang Agent Operating System — REST API for managing AI agents, tools, workflows, and more.",
     "license": {
-      "name": "Apache-2.0",
-      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
     },
     "version": "2026.4.28-beta7"
   },
@@ -2173,7 +2173,7 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Max items (default 100, max 500)",
+            "description": "Max items (default 50, max 500)",
             "required": false,
             "schema": {
               "type": "integer",
@@ -6875,7 +6875,7 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Max items (default 100, max 500)",
+            "description": "Max items (default 50, max 500)",
             "required": false,
             "schema": {
               "type": "integer",

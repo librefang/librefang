@@ -118,7 +118,33 @@ impl QqAdapter {
 }
 
 /// Strip markdown formatting to plain text for QQ.
+///
+/// All regexes are compiled once via `LazyLock` — this fires on every
+/// outbound QQ message and per-pattern `Regex::new` was hundreds of
+/// microseconds wasted per call (#3491).
 fn strip_markdown(text: &str) -> String {
+    use std::sync::LazyLock;
+    static RE_CODEBLOCK: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"```\w*\n?([\s\S]*?)```").unwrap());
+    static RE_INLINE: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"`([^`]+)`").unwrap());
+    static RE_BOLD: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"\*\*([^*]+)\*\*").unwrap());
+    static RE_ITALIC: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"\*([^*]+)\*").unwrap());
+    static RE_HEADING: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"(?m)^#{1,6}\s+").unwrap());
+    static RE_TABLE_SEP: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"(?m)^\|[-:| ]+\|$").unwrap());
+    static RE_LINK: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap());
+    static RE_QUOTE: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"(?m)^>\s?").unwrap());
+    static RE_HR: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"(?m)^---+$").unwrap());
+    static RE_NEWLINES: LazyLock<regex_lite::Regex> =
+        LazyLock::new(|| regex_lite::Regex::new(r"\n{3,}").unwrap());
+
     let mut s = text.to_string();
     // Remove <think>...</think> reasoning tags
     while let Some(start) = s.find("<think>") {
@@ -128,36 +154,16 @@ fn strip_markdown(text: &str) -> String {
             break;
         }
     }
-    // Code blocks: keep content, remove fences
-    let re_codeblock = regex_lite::Regex::new(r"```\w*\n?([\s\S]*?)```").unwrap();
-    s = re_codeblock.replace_all(&s, "$1").to_string();
-    // Inline code
-    let re_inline = regex_lite::Regex::new(r"`([^`]+)`").unwrap();
-    s = re_inline.replace_all(&s, "$1").to_string();
-    // Bold
-    let re_bold = regex_lite::Regex::new(r"\*\*([^*]+)\*\*").unwrap();
-    s = re_bold.replace_all(&s, "$1").to_string();
-    // Italic
-    let re_italic = regex_lite::Regex::new(r"\*([^*]+)\*").unwrap();
-    s = re_italic.replace_all(&s, "$1").to_string();
-    // Headings
-    let re_heading = regex_lite::Regex::new(r"(?m)^#{1,6}\s+").unwrap();
-    s = re_heading.replace_all(&s, "").to_string();
-    // Table separator rows
-    let re_table_sep = regex_lite::Regex::new(r"(?m)^\|[-:| ]+\|$").unwrap();
-    s = re_table_sep.replace_all(&s, "").to_string();
-    // Links
-    let re_link = regex_lite::Regex::new(r"\[([^\]]+)\]\([^)]+\)").unwrap();
-    s = re_link.replace_all(&s, "$1").to_string();
-    // Blockquotes
-    let re_quote = regex_lite::Regex::new(r"(?m)^>\s?").unwrap();
-    s = re_quote.replace_all(&s, "").to_string();
-    // Horizontal rules
-    let re_hr = regex_lite::Regex::new(r"(?m)^---+$").unwrap();
-    s = re_hr.replace_all(&s, "").to_string();
-    // Excess newlines
-    let re_newlines = regex_lite::Regex::new(r"\n{3,}").unwrap();
-    s = re_newlines.replace_all(&s, "\n\n").to_string();
+    s = RE_CODEBLOCK.replace_all(&s, "$1").to_string();
+    s = RE_INLINE.replace_all(&s, "$1").to_string();
+    s = RE_BOLD.replace_all(&s, "$1").to_string();
+    s = RE_ITALIC.replace_all(&s, "$1").to_string();
+    s = RE_HEADING.replace_all(&s, "").to_string();
+    s = RE_TABLE_SEP.replace_all(&s, "").to_string();
+    s = RE_LINK.replace_all(&s, "$1").to_string();
+    s = RE_QUOTE.replace_all(&s, "").to_string();
+    s = RE_HR.replace_all(&s, "").to_string();
+    s = RE_NEWLINES.replace_all(&s, "\n\n").to_string();
     s.trim().to_string()
 }
 

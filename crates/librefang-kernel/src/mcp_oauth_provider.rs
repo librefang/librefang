@@ -119,7 +119,7 @@ impl KernelOAuthProvider {
 
         let client_id = self.vault_get(&Self::vault_key(server_url, "client_id"));
 
-        let client = reqwest::Client::new();
+        let client = librefang_extensions::http_client::new_client();
         let mut params = vec![
             ("grant_type", "refresh_token".to_string()),
             ("refresh_token", refresh_token.to_string()),
@@ -160,7 +160,17 @@ impl KernelOAuthProvider {
         redirect_uri: &str,
         _server_url: &str,
     ) -> Result<String, String> {
-        let client = reqwest::Client::new();
+        // SSRF guard (#3623): registration_endpoint may have come from a
+        // discovered metadata document or a vault entry written before policy
+        // tightened.  Re-check before POSTing — the parser also checks, but
+        // this is the actual outbound-request site and the cheapest place to
+        // be sure.
+        if let Err(reason) =
+            librefang_runtime::mcp_oauth::is_ssrf_blocked_url(registration_endpoint)
+        {
+            return Err(format!("SSRF: registration_endpoint rejected: {reason}"));
+        }
+        let client = librefang_extensions::http_client::new_client();
 
         let body = serde_json::json!({
             "client_name": "LibreFang",
