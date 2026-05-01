@@ -248,6 +248,17 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: pnpm/action-setup@903f9c1a6ebcba6cf41d87230be49611ac97822e # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: |
+            web/pnpm-lock.yaml
+            docs/pnpm-lock.yaml
+            crates/librefang-api/dashboard/pnpm-lock.yaml
       - name: Run security audit
         run: |
           # Ignore known vulnerabilities without fix:
@@ -273,7 +284,8 @@ jobs:
             --ignore RUSTSEC-2026-0049 \
             --ignore RUSTSEC-2026-0098 \
             --ignore RUSTSEC-2026-0099 \
-            --ignore RUSTSEC-2026-0104
+            --ignore RUSTSEC-2026-0104 \
+            --web
 
   # ── Secrets scanning (independent) ─────────────────────────────────────────────
   secrets:

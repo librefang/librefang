@@ -921,6 +921,11 @@ fn should_refresh_after_forbidden(body: &str) -> bool {
 
 #[async_trait::async_trait]
 impl crate::llm_driver::LlmDriver for ChatGptDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "chatgpt", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let api_request = Self::build_responses_request(&request);
 
@@ -958,6 +963,11 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         Self::stream_sse(http_resp, None).await
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "chatgpt", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
