@@ -373,11 +373,47 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     let workflows = engine.list_workflows().await;
     let all_runs = engine.list_runs(None).await;
 
-    // Count runs per workflow
-    let mut run_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for r in &all_runs {
-        *run_counts.entry(r.workflow_id.to_string()).or_default() += 1;
+    // Per-workflow run aggregates: total count, completed/failed counts (used
+    // for success_rate over terminal runs only — including running/paused
+    // would deflate the rate while a long run is in flight), and the most
+    // recent run summary for the row badge. Computed in one pass over
+    // `all_runs` to avoid N+1 scans across O(workflows × runs).
+    struct RunAgg<'a> {
+        total: usize,
+        completed: usize,
+        failed: usize,
+        latest: Option<&'a librefang_kernel::workflow::WorkflowRun>,
     }
+    let mut agg: std::collections::HashMap<String, RunAgg> = std::collections::HashMap::new();
+    for r in &all_runs {
+        let entry = agg.entry(r.workflow_id.to_string()).or_insert(RunAgg {
+            total: 0,
+            completed: 0,
+            failed: 0,
+            latest: None,
+        });
+        entry.total += 1;
+        match &r.state {
+            librefang_kernel::workflow::WorkflowRunState::Completed => entry.completed += 1,
+            librefang_kernel::workflow::WorkflowRunState::Failed => entry.failed += 1,
+            _ => {}
+        }
+        match entry.latest {
+            None => entry.latest = Some(r),
+            Some(prev) if r.started_at > prev.started_at => entry.latest = Some(r),
+            _ => {}
+        }
+    }
+
+    let state_kind = |s: &librefang_kernel::workflow::WorkflowRunState| -> &'static str {
+        match s {
+            librefang_kernel::workflow::WorkflowRunState::Pending => "pending",
+            librefang_kernel::workflow::WorkflowRunState::Running => "running",
+            librefang_kernel::workflow::WorkflowRunState::Paused { .. } => "paused",
+            librefang_kernel::workflow::WorkflowRunState::Completed => "completed",
+            librefang_kernel::workflow::WorkflowRunState::Failed => "failed",
+        }
+    };
 
     // Load cron jobs to find workflow-bound schedules
     let all_cron_jobs = state.kernel.cron().list_all_jobs();
@@ -401,14 +437,32 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
                     "last_run": j.last_run.map(|t| t.to_rfc3339()),
                 })
             });
+            let wf_agg = agg.get(&wid);
+            let run_count = wf_agg.map(|a| a.total).unwrap_or(0);
+            let last_run_json = wf_agg.and_then(|a| a.latest).map(|r| {
+                serde_json::json!({
+                    "state": state_kind(&r.state),
+                    "started_at": r.started_at.to_rfc3339(),
+                    "completed_at": r.completed_at.map(|t| t.to_rfc3339()),
+                })
+            });
+            // success_rate is null until at least one run reached a terminal
+            // state — surfacing 0% on a workflow with only in-flight runs
+            // would be misleading.
+            let success_rate = wf_agg.and_then(|a| {
+                let terminal = a.completed + a.failed;
+                (terminal > 0).then(|| a.completed as f32 / terminal as f32)
+            });
             serde_json::json!({
                 "id": wid,
                 "name": w.name,
                 "description": w.description,
                 "steps": w.steps.len(),
-                "run_count": run_counts.get(&wid).copied().unwrap_or(0),
+                "run_count": run_count,
                 "created_at": w.created_at.to_rfc3339(),
                 "schedule": schedule_json,
+                "last_run": last_run_json,
+                "success_rate": success_rate,
             })
         })
         .collect();
