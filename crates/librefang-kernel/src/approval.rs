@@ -1103,6 +1103,16 @@ impl ApprovalManager {
             .map_err(|e| format!("Invalid recovery codes JSON: {e}"))?;
         let normalized = code.trim().to_lowercase();
         let needle = normalized.as_bytes();
+        // Pre-normalize stored codes once instead of per-iteration: keeps the
+        // hot loop free of heap allocation and string-case work, and the
+        // length-mismatch branch below operates on stable values rather than
+        // a freshly-allocated `String` whose timing could vary with allocator
+        // state. The recovery-code length is non-secret (format is fixed and
+        // public), so branching on `len()` does not leak.
+        let candidates: Vec<Vec<u8>> = codes
+            .iter()
+            .map(|c| c.to_lowercase().into_bytes())
+            .collect();
 
         // Scan all codes in constant time: accumulate a match bit and the matched
         // index without branching on content. matched_idx is updated via bitmask
@@ -1110,10 +1120,9 @@ impl ApprovalManager {
         // We branch only on the final aggregated bit after the full scan.
         let mut matched_idx: usize = 0;
         let mut found: subtle::Choice = 0u8.into();
-        for (i, stored_code) in codes.iter().enumerate() {
-            let candidate = stored_code.to_lowercase();
+        for (i, candidate) in candidates.iter().enumerate() {
             let eq: subtle::Choice = if needle.len() == candidate.len() {
-                needle.ct_eq(candidate.as_bytes())
+                needle.ct_eq(candidate.as_slice())
             } else {
                 0u8.into()
             };
@@ -1241,9 +1250,19 @@ impl ApprovalManager {
             let failures = self.totp_failures.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((count, lockout_start)) = failures.get(sender_id) {
                 if *count >= TOTP_MAX_FAILURES {
+                    // Defense in depth: if the counter is already at threshold
+                    // but `lockout_start` is `None`, treat it as locked. The
+                    // normal write path always sets `lockout_start = Some(now)`
+                    // when the counter reaches the threshold (see
+                    // `record_totp_failure`), and the SQLite load path
+                    // back-fills `Instant::now()` if the persisted row is
+                    // missing it. The only way to reach `count >= MAX &&
+                    // lockout_start.is_none()` is direct DB tampering — falling
+                    // through would let an attacker reset the lockout window
+                    // by zeroing the `locked_at` column, so refuse instead.
                     let still_locked = lockout_start
                         .map(|t| t.elapsed().as_secs() < TOTP_LOCKOUT_SECS)
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if still_locked {
                         return Err(true);
                     }
@@ -3313,6 +3332,38 @@ mod tests {
         let upper = codes[0].to_uppercase();
         let (matched4, _) = ApprovalManager::verify_recovery_code(&json, &upper).unwrap();
         assert!(matched4, "uppercase variant of a valid code must match");
+    }
+
+    /// Inputs whose length does not match any stored code must be rejected
+    /// without panicking and without consuming a code. The constant-time
+    /// scan branches only on `len()` (a non-secret), so timing differences
+    /// here don't leak — but we still need to lock the *behavior*: empty
+    /// input, oversized garbage, multi-byte UTF-8, and the legacy 9-char
+    /// format against a vault of 19-char codes must all return `Ok(false)`.
+    #[test]
+    fn test_recovery_code_rejects_length_mismatch_inputs() {
+        let codes = ApprovalManager::generate_recovery_codes();
+        let json = serde_json::to_string(&codes).unwrap();
+
+        let bogus = [
+            "",
+            "x",
+            "1234-5678",                     // legacy length, won't match new vault
+            "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF", // way too long
+            &"a".repeat(1024),               // pathological length
+            "café-café-café-café",           // multi-byte UTF-8, byte-len != 19
+        ];
+        for input in bogus {
+            let (matched, remaining_json) = ApprovalManager::verify_recovery_code(&json, input)
+                .unwrap_or_else(|e| panic!("verify must not error on input {input:?}: {e}"));
+            assert!(!matched, "length-mismatch input must not match: {input:?}");
+            let remaining: Vec<String> = serde_json::from_str(&remaining_json).unwrap();
+            assert_eq!(
+                remaining.len(),
+                8,
+                "no code may be consumed on a length-mismatch reject (input: {input:?})"
+            );
+        }
     }
 
     #[test]
