@@ -167,7 +167,7 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
     drop(cfg);
 
-    let (node_id, listen_address, connected_peers, total_peers) =
+    let (node_id, listen_address, connected_peers, total_peers, identity_fingerprint, pinned_peers) =
         if let Some(peer_node) = state.kernel.peer_node_ref() {
             let registry = peer_node.registry();
             (
@@ -175,17 +175,27 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                 peer_node.local_addr().to_string(),
                 registry.connected_count(),
                 registry.total_count(),
+                peer_node.identity_fingerprint(),
+                peer_node.pinned_peer_count(),
             )
         } else {
-            (String::new(), String::new(), 0, 0)
+            (String::new(), String::new(), 0, 0, None, 0)
         };
 
+    // SECURITY (#3873): Surface this node's Ed25519 identity fingerprint
+    // and the count of TOFU-pinned peers so operators can verify their
+    // own identity is loaded (not silently HMAC-only) and watch the pin
+    // map populate as peers are encountered. The fingerprint is the
+    // out-of-band-comparable value — share it on a side channel so a
+    // remote operator can check the value their kernel pinned.
     Json(serde_json::json!({
         "enabled": enabled,
         "node_id": node_id,
         "listen_address": listen_address,
         "connected_peers": connected_peers,
         "total_peers": total_peers,
+        "identity_fingerprint": identity_fingerprint,
+        "pinned_peers": pinned_peers,
     }))
 }
 

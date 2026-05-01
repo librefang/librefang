@@ -508,6 +508,24 @@ impl PeerNode {
         &self.registry
     }
 
+    /// SECURITY (#3873): Stable hex SHA-256 fingerprint of this node's
+    /// Ed25519 public key. `None` when this node was started without an
+    /// identity (HMAC-only legacy mode). The fingerprint is the value an
+    /// operator compares out-of-band with a remote peer to verify the
+    /// pubkey before TOFU pins it.
+    pub fn identity_fingerprint(&self) -> Option<String> {
+        self.keypair.as_ref().map(|kp| kp.fingerprint())
+    }
+
+    /// SECURITY (#3873): Number of remote nodes this PeerNode currently
+    /// has Ed25519 pubkeys pinned for. Includes pins hydrated from the
+    /// persistent trust store at startup plus any added during this
+    /// daemon's lifetime. Surfaced via `/api/network/status` so operators
+    /// can see at a glance whether TOFU pinning is actually populating.
+    pub fn pinned_peer_count(&self) -> usize {
+        self.pinned_pubkeys.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
     /// SECURITY (#3873): If this node has an Ed25519 identity, return
     /// `(Some(public_key_b64), Some(signature_b64))` over `auth_data`. With
     /// no identity configured returns `(None, None)` and the recipient gets
