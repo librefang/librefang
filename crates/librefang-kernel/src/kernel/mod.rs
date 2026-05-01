@@ -928,6 +928,32 @@ fn spawn_logged(
     crate::supervised_spawn::spawn_supervised(tag, fut)
 }
 
+/// SECURITY (#3533): reject manifest `module` strings that escape the
+/// LibreFang home dir. Centralised so every entry point that accepts a
+/// manifest goes through the same check — without this, hot-reload,
+/// `update_manifest`, and boot-time SQLite restore all bypassed the
+/// validation that lived inline in `spawn_agent_inner` and a hostile
+/// `agent.toml` (peer push, MCP-installed agent, skill bundle, or just
+/// edit on disk + restart) could ship `module = "python:/etc/passwd.py"`
+/// and have the host interpreter exec it under the agent's capabilities.
+///
+/// Returns `Err(KernelError)` ready to be `?`-propagated by callers; logs
+/// a `warn!` with the agent name so the rejection is visible to operators
+/// even when the caller chooses to skip-and-continue (e.g. the boot loop
+/// must not abort the whole process for one bad manifest).
+fn validate_manifest_module_path(manifest: &AgentManifest, agent_name: &str) -> KernelResult<()> {
+    if let Err(reason) = librefang_runtime::python_runtime::validate_module_string(&manifest.module)
+    {
+        warn!(agent = %agent_name, %reason, "Rejecting manifest — invalid module path");
+        return Err(KernelError::LibreFang(
+            librefang_types::error::LibreFangError::Internal(format!(
+                "Invalid module path: {reason}"
+            )),
+        ));
+    }
+    Ok(())
+}
+
 // ── Public Facade Getters ────────────────────────────────────────────
 // These provide a stable API surface for external crates (librefang-api,
 // librefang-desktop) to access kernel internals. When all external call
@@ -3836,6 +3862,21 @@ impl LibreFangKernel {
                         }
                     }
 
+                    // SECURITY (#3533): skip any restored agent whose
+                    // on-disk `module` path escapes the LibreFang home
+                    // dir. Logging the rejection is enough — refusing to
+                    // boot the whole daemon for one bad manifest would
+                    // turn a CVE into a DoS, and the agent stays out of
+                    // the registry so no codepath can invoke it.
+                    if let Err(e) = validate_manifest_module_path(&restored_entry.manifest, &name) {
+                        tracing::error!(
+                            agent = %name,
+                            error = %e,
+                            "Refusing to restore agent with invalid module path; \
+                             check agent.toml for absolute paths or '..' traversal"
+                        );
+                        continue;
+                    }
                     if let Err(e) = kernel.registry.register(restored_entry) {
                         tracing::warn!(agent = %name, "Failed to restore agent: {e}");
                     } else {
@@ -4073,20 +4114,11 @@ system_prompt = "You are a helpful assistant."
         let name = manifest.name.clone();
 
         // SECURITY (#3533): reject manifest `module` strings that escape
-        // the LibreFang home dir (absolute paths, `..` traversal, drive
-        // letters). Without this a hostile agent.toml could ship
-        // `module = "python:/etc/passwd.py"` and the host interpreter
-        // would happily exec it under the agent's capabilities.
-        if let Err(reason) =
-            librefang_runtime::python_runtime::validate_module_string(&manifest.module)
-        {
-            warn!(agent = %name, %reason, "Rejecting spawn — invalid module path");
-            return Err(KernelError::LibreFang(
-                librefang_types::error::LibreFangError::Internal(format!(
-                    "Invalid module path: {reason}"
-                )),
-            ));
-        }
+        // the LibreFang home dir before any further work. See
+        // `validate_manifest_module_path` for the full rationale and the
+        // sibling enforcement points (boot restore, hot reload,
+        // update_manifest).
+        validate_manifest_module_path(&manifest, &name)?;
 
         // Use a deterministic agent ID derived from the agent name so the
         // same agent gets the same UUID across daemon restarts. This preserves
@@ -9454,6 +9486,14 @@ system_prompt = "You are a helpful assistant."
                     )))
                 })?;
 
+        // SECURITY (#3533): hot-reload is a separate code path from
+        // spawn — without this check an operator (or anyone with TOML
+        // write access) could swap a running agent's `module` for an
+        // absolute / `..`-traversing host path and have the next
+        // invocation exec it. Reject before touching the registry so
+        // the previous (validated) manifest stays in effect.
+        validate_manifest_module_path(&disk_manifest, &entry.name)?;
+
         // Preserve workspace if TOML leaves it unset — workspace is
         // populated at spawn time with the real directory path.
         if disk_manifest.workspace.is_none() {
@@ -9519,6 +9559,11 @@ system_prompt = "You are a helpful assistant."
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
+
+        // SECURITY (#3533): same path-escape check as spawn / hot-reload.
+        // Without it, any caller with `update_manifest` access could
+        // swap a running agent's `module` to an arbitrary host script.
+        validate_manifest_module_path(&new_manifest, &entry.name)?;
 
         // Preserve invariants that the registry indices depend on.
         if new_manifest.workspace.is_none() {

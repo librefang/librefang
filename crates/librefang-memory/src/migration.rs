@@ -71,36 +71,60 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
 
-    // Audit-trail consistency check (#3538): user_version must match the
-    // count of distinct rows in `migrations`. A mismatch means an earlier
-    // migration applied schema changes without recording the audit row,
-    // which silently breaks `SELECT version FROM migrations` operator
-    // tooling. Log loudly but don't fail boot — pre-fix DBs in the wild
-    // already drift, and refusing to start would be worse than warning.
+    // Audit-trail consistency (#3538): user_version must match the count
+    // of distinct rows in `migrations`. Drift means an earlier migration
+    // applied DDL without recording its audit row — operator tooling
+    // that lists `SELECT version FROM migrations` then misses those
+    // versions silently. Backfill the missing rows in place so a
+    // pre-fix DB self-heals on next boot instead of spamming `error!`
+    // every restart, and log a single warn line summarising the rescue.
+    // Idempotent: a clean DB inserts nothing because every version
+    // already has its row.
     let final_version = get_schema_version(conn);
-    match conn.query_row(
-        "SELECT COUNT(DISTINCT version) FROM migrations",
-        [],
-        |row| row.get::<_, i64>(0),
-    ) {
-        Ok(row_count) if (row_count as u32) != final_version => {
-            tracing::error!(
-                user_version = final_version,
-                audit_rows = row_count,
-                "Migration audit drift: user_version != count(migrations); \
-                 some migration applied DDL without recording its audit row"
-            );
+    let mut backfilled: u32 = 0;
+    let mut backfill_failed = false;
+    for v in 1..=final_version {
+        let exists: i64 = match conn.query_row(
+            "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+            [v],
+            |row| row.get(0),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    version = v,
+                    error = %e,
+                    "Migration audit query failed; cannot verify drift for this version"
+                );
+                backfill_failed = true;
+                break;
+            }
+        };
+        if exists == 0 {
+            if let Err(e) = conn.execute(
+                "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+                 VALUES (?1, datetime('now'), 'audit-row backfill (#3538)')",
+                [v],
+            ) {
+                tracing::error!(
+                    version = v,
+                    error = %e,
+                    "Migration audit backfill failed for this version"
+                );
+                backfill_failed = true;
+                break;
+            }
+            backfilled += 1;
         }
-        Ok(_) => {}
-        Err(e) => {
-            // The `migrations` table is created by v1; a query failure
-            // here means something is structurally wrong. Surface it
-            // instead of silently treating it as "no drift".
-            tracing::error!(
-                error = %e,
-                "Migration audit query failed; cannot verify user_version vs migrations"
-            );
-        }
+    }
+    if backfilled > 0 && !backfill_failed {
+        tracing::warn!(
+            user_version = final_version,
+            backfilled,
+            "Migration audit drift detected and self-healed: inserted \
+             missing audit rows for migrations that previously applied DDL \
+             without recording their audit row (#3538)"
+        );
     }
 
     Ok(())
@@ -1067,6 +1091,53 @@ mod tests {
                 "migration v{v} is applied (user_version={user_version}) but has no audit row"
             );
         }
+    }
+
+    /// Regression for #3538 follow-up: a DB whose migrations table is
+    /// already drifted (some audit rows missing) must self-heal on the
+    /// next `run_migrations` call instead of warning forever. Simulates
+    /// a pre-fix prod DB by deleting v13/v17/v18 audit rows after
+    /// migrate, then re-runs and asserts the rows are back. Idempotent
+    /// behaviour: a second run inserts nothing.
+    #[test]
+    fn test_run_migrations_backfills_drifted_audit_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Simulate the historical drift: v13 / v17 / v18 audit rows
+        // missing while user_version is at the current latest.
+        for v in [13u32, 17u32, 18u32] {
+            conn.execute("DELETE FROM migrations WHERE version = ?1", [v])
+                .unwrap();
+        }
+
+        // Re-run: migrate_vN bodies do not re-execute (user_version is
+        // already at the head), so the only path that can heal the
+        // missing rows is the backfill at the end of run_migrations.
+        run_migrations(&conn).unwrap();
+
+        for v in [13u32, 17u32, 18u32] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [v],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "audit row for v{v} should have been backfilled, but found {count}"
+            );
+        }
+
+        // Idempotent: a second backfill pass adds nothing.
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, after, "second backfill must be a no-op");
     }
 
     #[test]
