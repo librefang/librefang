@@ -409,12 +409,7 @@ impl LlmDriver for AnthropicDriver {
                         "Anthropic HTTP 429",
                     )
                 } else {
-                    resp.headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO)
+                    crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
@@ -426,15 +421,24 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                // Honor the server-supplied Retry-After when surfacing
+                // the final error after retries are exhausted; only
+                // fall back to 5 s if the header was absent / invalid.
+                let retry_after_ms = u64::try_from(retry_after.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1);
+                let retry_after_ms = if retry_after.is_zero() {
+                    5000
+                } else {
+                    retry_after_ms
+                };
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 
@@ -549,12 +553,7 @@ impl LlmDriver for AnthropicDriver {
                         "Anthropic HTTP 429 (stream)",
                     )
                 } else {
-                    resp.headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(std::time::Duration::from_secs)
-                        .unwrap_or(std::time::Duration::ZERO)
+                    crate::retry_after::parse_retry_after(resp.headers(), 0)
                 };
                 if attempt < max_retries {
                     let delay = standard_retry_delay(attempt + 1, retry_after);
@@ -566,15 +565,24 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                // Honor the server-supplied Retry-After when surfacing
+                // the final error after retries are exhausted; only
+                // fall back to 5 s if the header was absent / invalid.
+                let retry_after_ms = u64::try_from(retry_after.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1);
+                let retry_after_ms = if retry_after.is_zero() {
+                    5000
+                } else {
+                    retry_after_ms
+                };
                 return Err(if status == 429 {
                     LlmError::RateLimited {
-                        retry_after_ms: 5000,
+                        retry_after_ms,
                         message: None,
                     }
                 } else {
-                    LlmError::Overloaded {
-                        retry_after_ms: 5000,
-                    }
+                    LlmError::Overloaded { retry_after_ms }
                 });
             }
 

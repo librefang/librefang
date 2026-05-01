@@ -747,26 +747,32 @@ impl LlmDriver for BedrockDriver {
             match classify_response_status(status) {
                 StatusAction::Success => {}
                 StatusAction::Retry => {
+                    // Honor any server-supplied Retry-After header; fall
+                    // back to a 5 s default when missing/invalid.
+                    let retry_after_ms =
+                        crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                     if attempt < max_retries {
                         let retry_ms = (attempt + 1) as u64 * 2000;
+                        // Wait at least the server's Retry-After, but
+                        // never less than the in-loop exponential
+                        // schedule.
+                        let wait_ms = retry_ms.max(retry_after_ms);
                         tracing::warn!(
                             status,
-                            retry_ms,
+                            wait_ms,
                             attempt,
                             "Bedrock transient failure, retrying"
                         );
-                        tokio::time::sleep(std::time::Duration::from_millis(retry_ms)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
                     return Err(if status == 429 {
                         LlmError::RateLimited {
-                            retry_after_ms: 5000,
+                            retry_after_ms,
                             message: None,
                         }
                     } else {
-                        LlmError::Overloaded {
-                            retry_after_ms: 5000,
-                        }
+                        LlmError::Overloaded { retry_after_ms }
                     });
                 }
                 StatusAction::Auth => {
