@@ -12,6 +12,7 @@ import {
   useRejectApproval,
   useModifyAndRetryApproval,
 } from "../lib/mutations/approvals";
+import { useListNav } from "../lib/useListNav";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ErrorState } from "../components/ui/ErrorState";
@@ -415,6 +416,15 @@ function HistoryTab() {
 /*  Pending card                                                      */
 /* ------------------------------------------------------------------ */
 
+type CardElementProps = {
+  ref: (el: HTMLElement | null) => void;
+  tabIndex: number;
+  "aria-selected": boolean;
+  "data-listnav-index": number;
+  onMouseEnter: () => void;
+  onClick: () => void;
+};
+
 function PendingCard({
   approval,
   totpEnforced,
@@ -423,6 +433,8 @@ function PendingCard({
   onDeny,
   isEditing,
   onToggleEdit,
+  navProps,
+  selected,
 }: {
   approval: ApprovalItem;
   totpEnforced: boolean;
@@ -431,6 +443,8 @@ function PendingCard({
   onDeny: () => void;
   isEditing: boolean;
   onToggleEdit: () => void;
+  navProps: CardElementProps;
+  selected: boolean;
 }) {
   const { t } = useTranslation();
   const now = useNow(30_000);
@@ -442,6 +456,13 @@ function PendingCard({
   const tools = approval.tool_name ? [approval.tool_name] : [];
 
   return (
+    <div
+      {...navProps}
+      role="option"
+      className={`outline-none rounded-2xl transition-shadow ${
+        selected ? "ring-2 ring-brand/50" : ""
+      }`}
+    >
     <Card padding="none" className="overflow-hidden">
       {/* Risk-tinted header */}
       <div
@@ -526,6 +547,7 @@ function PendingCard({
         {isEditing && <EditAndApproveForm id={approval.id} onDone={onToggleEdit} />}
       </div>
     </Card>
+    </div>
   );
 }
 
@@ -564,6 +586,20 @@ export function ApprovalsPage() {
         .some((s) => (s as string).toLowerCase().includes(q)),
     );
   }, [pendingApprovals, filter]);
+
+  // j/k vim-nav over the visible pending list. Esc closes (in priority
+  // order) the TOTP modal → the open filter input → clears row selection.
+  const nav = useListNav({
+    items: filteredPending,
+    disabled: activeTab !== "pending",
+    onEscape: () => {
+      if (totpFor) setTotpFor(null);
+      else if (filterOpen) {
+        setFilter("");
+        setFilterOpen(false);
+      }
+    },
+  });
 
   async function executeApprove(id: string, totpCode?: string) {
     setPendingId(id);
@@ -718,8 +754,8 @@ export function ApprovalsPage() {
             }
           />
         ) : (
-          <div className="flex flex-col gap-3">
-            {filteredPending.map((a) => (
+          <div className="flex flex-col gap-3" role="listbox" aria-label={t("approvals.tabPending")}>
+            {filteredPending.map((a, i) => (
               <PendingCard
                 key={a.id}
                 approval={a}
@@ -729,6 +765,8 @@ export function ApprovalsPage() {
                 onApprove={() => handleApprove(a)}
                 onDeny={() => void executeReject(a.id)}
                 onToggleEdit={() => setEditingId(editingId === a.id ? null : a.id)}
+                navProps={nav.getItemProps(i)}
+                selected={nav.selectedIndex === i}
               />
             ))}
           </div>
