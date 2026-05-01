@@ -4,6 +4,17 @@ on:
   pull_request_target:
     types: [closed]
 
+# Tighten the default GITHUB_TOKEN scope. This workflow only:
+#   - reads PR metadata from the event payload
+#   - issues a read-only GitHub Search API call
+#   - posts to a Discord webhook
+# It never writes to the repository, never opens / labels / comments on PRs,
+# and never checks out untrusted code. Anything more than read is excess
+# privilege under `pull_request_target`. See #3547.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   assign-role:
     if: github.event.pull_request.merged == true
