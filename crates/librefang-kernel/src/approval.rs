@@ -2863,11 +2863,33 @@ mod tests {
         mgr.record_totp_code_used_for(
             "987654",
             Some("approval:11111111-1111-1111-1111-111111111111"),
-        );
+        )
+        .expect("record TOTP code");
         // Same code claimed for a different approval — must still be flagged
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.
         assert!(mgr.is_totp_code_used("987654"));
+    }
+
+    /// `record_totp_code_used_for` MUST surface a DB write failure as `Err`,
+    /// not swallow it as `Ok`. A silent failure leaves the code out of the
+    /// replay-detection table, letting an attacker reuse the same code
+    /// immediately. Simulate the failure by dropping the underlying table
+    /// out from under the manager (e.g. a corrupted/mis-migrated audit DB).
+    #[test]
+    fn record_totp_code_used_for_surfaces_db_failure() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let conn = Arc::new(StdMutex::new(conn));
+        let mgr = ApprovalManager::new_with_db(ApprovalPolicy::default(), conn.clone());
+
+        conn.lock()
+            .unwrap()
+            .execute("DROP TABLE totp_used_codes", [])
+            .unwrap();
+
+        mgr.record_totp_code_used_for("999111", Some("approval:abc"))
+            .expect_err("DB write must surface as Err so the caller can return 500");
     }
 
     // -----------------------------------------------------------------------
