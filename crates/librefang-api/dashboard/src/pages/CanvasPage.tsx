@@ -196,7 +196,11 @@ const NODE_TYPES = [
 // Node types that require an agent binding
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
 
-// Custom node component — n8n style
+// Custom node component — design language: dense card with a left
+// colored stripe (per node-type), an UPPERCASE kind label row, a mono
+// title, and a status pulse dot. Handles sit on the left/right edges
+// (horizontal flow). Existing layouts positioned for the previous
+// vertical flow will edge-route diagonally — accepted by design.
 function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type: string; t: (key: string) => string }) {
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
@@ -205,70 +209,93 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
   const missingAgent = needsAgent && !data.agentId;
 
-  const borderColor = runState === "done" ? "#10b981"
-    : runState === "running" ? config.color
-      : missingAgent ? "#f59e0b"
-        : "transparent";
+  // Status dot: pulsing color while running, success when done, warning
+  // for missing agent, idle dim otherwise. Mirrors the design's top-right
+  // indicator.
+  const statusColor = runState === "running" ? config.color
+    : runState === "done" ? "#10b981"
+    : missingAgent ? "#f59e0b"
+    : "#94a3b8";
+  const isPulse = runState === "running";
+
+  // Outer ring tightens visually around the running/done node while
+  // staying out of the way otherwise.
   const ringStyle = runState === "running"
-    ? { boxShadow: `0 0 0 3px ${config.color}40, 0 8px 24px ${config.color}30` }
+    ? { boxShadow: `0 0 0 1.5px ${config.color}55, 0 0 24px -8px ${config.color}` }
     : runState === "done"
-      ? { boxShadow: `0 0 0 3px #10b98140, 0 4px 12px #10b98120` }
+      ? { boxShadow: `0 0 0 1.5px #10b98155` }
       : missingAgent
-        ? { boxShadow: "0 0 0 2px #f59e0b30" }
-        : { boxShadow: "0 2px 8px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)" };
+        ? { boxShadow: `0 0 0 1px #f59e0b55` }
+        : { boxShadow: "0 4px 12px -4px rgba(0,0,0,0.5)" };
 
   return (
     <div
-      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-200 border border-border-subtle hover:scale-[1.02] hover:shadow-lg ${runState === "running" ? "animate-pulse" : ""
-        }`}
-      style={{ border: `2px ${missingAgent ? "dashed" : "solid"} ${borderColor}`, ...ringStyle }}
+      className="rounded-lg bg-surface min-w-[170px] max-w-[220px] overflow-hidden relative transition-all duration-150 border border-border-subtle hover:border-text-dim/40"
+      style={{
+        borderLeft: `2px solid ${config.color}`,
+        ...ringStyle,
+      }}
     >
-      {/* Target Handle */}
+      {/* Target handle — left edge */}
       {!isStart && (
-        <Handle type="target" position={Position.Top}
-          className="w-3! h-3! rounded-full! border-2! border-surface!"
-          style={{ backgroundColor: config.color }} />
+        <Handle type="target" position={Position.Left}
+          className="w-2! h-2! rounded-full! border-2! bg-surface!"
+          style={{ borderColor: config.color }} />
       )}
 
-      {/* Header: icon circle + label */}
-      <div className="flex items-center gap-2.5 px-3 py-2.5" style={{ backgroundColor: `${config.color}15` }}>
-        <div
-          className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0 transition-colors"
-          style={{ backgroundColor: config.color }}
+      {/* Header row: kind label + status dot */}
+      <div className="flex items-center gap-1.5 px-3 pt-2">
+        <span
+          className="text-[9px] font-bold uppercase tracking-[0.08em] font-mono"
+          style={{ color: config.color }}
         >
-          {runState === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> :
-            runState === "done" ? "✓" : config.icon}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-bold text-text truncate leading-tight">{data.label || t(config.labelKey)}</p>
-          <p className="text-[9px] text-text-dim truncate leading-tight mt-0.5">{data.description || t(config.descKey)}</p>
-        </div>
+          {t(config.labelKey)}
+        </span>
+        <span className="ml-auto inline-flex items-center justify-center">
+          {runState === "running" ? <Loader2 className="w-2.5 h-2.5 animate-spin" style={{ color: statusColor }} />
+            : runState === "done" ? <Check className="w-2.5 h-2.5" style={{ color: statusColor }} />
+            : <span
+                className={`w-1.5 h-1.5 rounded-full ${isPulse ? "animate-pulse" : ""}`}
+                style={{ background: statusColor }}
+              />}
+        </span>
       </div>
 
-      {/* Agent badge / missing warning */}
-      {data.agentName ? (
-        <div className="px-3 py-1.5 border-t border-border-subtle/50 flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
-          <span className="text-[9px] font-semibold text-text-dim truncate">{data.agentName}</span>
-        </div>
-      ) : missingAgent ? (
-        <div className="px-3 py-1 border-t border-warning/30 flex items-center gap-1.5">
-          <span className="text-[9px] font-semibold text-warning">{t("canvas.click_to_assign")}</span>
-        </div>
-      ) : null}
+      {/* Title + sub */}
+      <div className="px-3 pt-1 pb-2">
+        <p className="font-mono text-[12px] font-medium truncate leading-tight">
+          {data.label || t(config.labelKey)}
+        </p>
+        {(data.description || config.descKey) && (
+          <p className="font-mono text-[10px] text-text-dim/70 truncate leading-tight mt-0.5">
+            {data.description || t(config.descKey)}
+          </p>
+        )}
+      </div>
 
-      {/* Depends-on badge */}
-      {data.dependsOn && data.dependsOn.length > 0 && (
-        <div className="px-3 py-1 border-t border-border-subtle/50 flex items-center gap-1.5">
-          <span className="text-[9px] text-text-dim/60">⬆ {data.dependsOn.length} dep{data.dependsOn.length > 1 ? "s" : ""}</span>
+      {/* Inline meta strip — agent binding, missing warning, deps */}
+      {(data.agentName || missingAgent || (data.dependsOn && data.dependsOn.length > 0)) && (
+        <div className="px-3 pb-2 flex items-center gap-2 flex-wrap text-[9px] font-mono">
+          {data.agentName && (
+            <span className="inline-flex items-center gap-1 text-text-dim/80">
+              <span className="w-1 h-1 rounded-full bg-success" />
+              <span className="truncate max-w-[120px]">{data.agentName}</span>
+            </span>
+          )}
+          {missingAgent && (
+            <span className="text-warning font-semibold">{t("canvas.click_to_assign")}</span>
+          )}
+          {data.dependsOn && data.dependsOn.length > 0 && (
+            <span className="text-text-dim/50">↑{data.dependsOn.length}</span>
+          )}
         </div>
       )}
 
-      {/* Source Handle */}
+      {/* Source handle — right edge */}
       {!isEnd && (
-        <Handle type="source" position={Position.Bottom}
-          className="w-3! h-3! rounded-full! border-2! border-surface!"
-          style={{ backgroundColor: config.color }} />
+        <Handle type="source" position={Position.Right}
+          className="w-2! h-2! rounded-full! border-2! bg-surface!"
+          style={{ borderColor: config.color }} />
       )}
     </div>
   );
