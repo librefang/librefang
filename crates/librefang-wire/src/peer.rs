@@ -8,6 +8,7 @@
 //! The [`PeerHandle`] trait abstracts the kernel's ability to respond to
 //! remote requests (agent messages, discovery, etc.).
 
+use crate::keys::{verify_signature, Ed25519KeyPair};
 use crate::message::*;
 use crate::registry::{PeerEntry, PeerRegistry, PeerState};
 
@@ -353,14 +354,56 @@ pub struct PeerNode {
     session_key: std::sync::Mutex<Option<String>>,
     /// SECURITY (#3876): Per-peer message and token rate limiter.
     rate_limiter: Arc<PeerRateLimiter>,
+    /// SECURITY (#3873): Optional Ed25519 identity for this node. When
+    /// present, every outbound handshake also carries `public_key` plus an
+    /// Ed25519 signature over the same `nonce|node_id|recipient_node_id`
+    /// byte string the HMAC covers. `None` keeps legacy HMAC-only behavior
+    /// for backward compatibility while the federation rolls forward.
+    keypair: Option<Arc<Ed25519KeyPair>>,
+    /// SECURITY (#3873): In-memory TOFU pin map. Keyed on remote `node_id`,
+    /// value is the base64 Ed25519 public key first observed for that ID.
+    /// Subsequent handshakes from the same `node_id` MUST present the same
+    /// public key or are rejected — a leaked `shared_secret` no longer lets
+    /// an attacker spoof a different node_id, because they would also need
+    /// that node's private key. Persistence across restarts ships in PR-3
+    /// (TrustedPeers store + admin/UI).
+    ///
+    /// Bounded at [`MAX_PIN_ENTRIES`] to prevent a peer that *does* hold
+    /// `shared_secret` from flooding fresh node_ids and exhausting memory.
+    /// Once capped, NEW pins are refused; existing pins (and their
+    /// mismatch-detection guarantee) remain intact.
+    pinned_pubkeys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
+
+/// SECURITY (#3873): Hard cap on TOFU pin entries — see field doc.
+/// 100k peers is well above any realistic federation size.
+const MAX_PIN_ENTRIES: usize = 100_000;
 
 impl PeerNode {
     /// Create and start listening on the configured address.
+    ///
+    /// Legacy entry point — no Ed25519 identity is presented. The handshake
+    /// will still verify any pubkey/signature pair sent by the **remote**
+    /// peer, but this node itself authenticates only with the shared HMAC.
+    /// Prefer [`PeerNode::start_with_identity`] in production.
     pub async fn start(
         config: PeerConfig,
         registry: PeerRegistry,
         handle: Arc<dyn PeerHandle>,
+    ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
+        Self::start_with_identity(config, registry, handle, None).await
+    }
+
+    /// Like [`start`] but binds an Ed25519 keypair to this node. Every
+    /// outbound handshake will then carry the public key and a signature
+    /// over the auth data, and every successful inbound handshake from a
+    /// peer that also presents an identity will TOFU-pin the remote pubkey
+    /// to its `node_id`.
+    pub async fn start_with_identity(
+        config: PeerConfig,
+        registry: PeerRegistry,
+        handle: Arc<dyn PeerHandle>,
+        keypair: Option<Ed25519KeyPair>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
         // SECURITY: Require shared_secret for OFP
         if config.shared_secret.is_empty() {
@@ -373,8 +416,14 @@ impl PeerNode {
         let local_addr = listener.local_addr()?;
 
         info!(
-            "OFP: listening on {} (node_id={})",
-            local_addr, config.node_id
+            "OFP: listening on {} (node_id={}, identity={})",
+            local_addr,
+            config.node_id,
+            if keypair.is_some() {
+                "ed25519"
+            } else {
+                "hmac-only"
+            }
         );
 
         let rate_limiter = Arc::new(PeerRateLimiter::new(
@@ -389,6 +438,8 @@ impl PeerNode {
             nonce_tracker: NonceTracker::new(),
             session_key: std::sync::Mutex::new(None),
             rate_limiter,
+            keypair: keypair.map(Arc::new),
+            pinned_pubkeys: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
 
         let node_clone = Arc::clone(&node);
@@ -412,6 +463,96 @@ impl PeerNode {
     /// Get a reference to the peer registry.
     pub fn registry(&self) -> &PeerRegistry {
         &self.registry
+    }
+
+    /// SECURITY (#3873): If this node has an Ed25519 identity, return
+    /// `(Some(public_key_b64), Some(signature_b64))` over `auth_data`. With
+    /// no identity configured returns `(None, None)` and the recipient gets
+    /// only HMAC authentication.
+    fn sign_identity(&self, auth_data: &[u8]) -> (Option<String>, Option<String>) {
+        match &self.keypair {
+            Some(kp) => (Some(kp.public_key().to_string()), Some(kp.sign(auth_data))),
+            None => (None, None),
+        }
+    }
+
+    /// SECURITY (#3873): Verify the remote peer's identity claim and enforce
+    /// TOFU pinning.
+    ///
+    /// Outcomes for `(public_key, signature)`:
+    /// - `(Some, Some)`: signature MUST verify under `public_key` over
+    ///   `auth_data`; on success, pubkey is pinned to `peer_node_id` (or
+    ///   compared against an existing pin — mismatch is rejected).
+    /// - `(None, None)`: legacy peer. Allowed only if no pin exists yet for
+    ///   this `peer_node_id`; if the peer was previously seen WITH an
+    ///   identity, dropping it now is treated as a downgrade attack and
+    ///   rejected.
+    /// - Any partial / mismatched combination is rejected.
+    fn verify_and_pin_identity(
+        &self,
+        peer_node_id: &str,
+        public_key: &Option<String>,
+        signature: &Option<String>,
+        auth_data: &[u8],
+    ) -> Result<(), WireError> {
+        match (public_key, signature) {
+            (Some(pk), Some(sig)) => {
+                verify_signature(pk, auth_data, sig).map_err(|e| {
+                    WireError::HandshakeFailed(format!(
+                        "Ed25519 identity signature invalid for node {peer_node_id}: {e}"
+                    ))
+                })?;
+                let mut pins = self
+                    .pinned_pubkeys
+                    .lock()
+                    .map_err(|_| WireError::HandshakeFailed("pin map poisoned".into()))?;
+                match pins.get(peer_node_id) {
+                    Some(pinned) if pinned != pk => Err(WireError::HandshakeFailed(format!(
+                        "TOFU pin mismatch for node {peer_node_id}: refusing to accept new public key"
+                    ))),
+                    Some(_) => Ok(()),
+                    None => {
+                        if pins.len() >= MAX_PIN_ENTRIES {
+                            return Err(WireError::HandshakeFailed(format!(
+                                "TOFU pin map full ({MAX_PIN_ENTRIES} entries) — refusing to pin new node {peer_node_id}"
+                            )));
+                        }
+                        pins.insert(peer_node_id.to_string(), pk.clone());
+                        info!(
+                            "OFP: pinned Ed25519 public key for {} (fingerprint {})",
+                            peer_node_id,
+                            crate::keys::fingerprint_of_pubkey(pk)
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            (None, None) => {
+                let pins = self
+                    .pinned_pubkeys
+                    .lock()
+                    .map_err(|_| WireError::HandshakeFailed("pin map poisoned".into()))?;
+                if pins.contains_key(peer_node_id) {
+                    Err(WireError::HandshakeFailed(format!(
+                        "downgrade rejected: node {peer_node_id} previously authenticated with Ed25519 but now omits identity"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(WireError::HandshakeFailed(
+                "Ed25519 identity fields must both be present or both absent".into(),
+            )),
+        }
+    }
+
+    /// Test-only: read-only view of the in-memory TOFU pin map.
+    #[cfg(test)]
+    pub(crate) fn pinned_pubkeys_snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.pinned_pubkeys
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Connect to a remote peer and perform the handshake.
@@ -453,6 +594,7 @@ impl PeerNode {
             our_nonce, self.config.node_id, recipient_node_id
         );
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
+        let (our_pubkey, our_identity_sig) = self.sign_identity(auth_data.as_bytes());
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -463,6 +605,8 @@ impl PeerNode {
                 agents: handle.local_agents(),
                 nonce: our_nonce.clone(),
                 auth_hmac,
+                public_key: our_pubkey,
+                identity_signature: our_identity_sig,
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -477,6 +621,8 @@ impl PeerNode {
                 agents,
                 nonce: ack_nonce,
                 auth_hmac: ack_hmac,
+                public_key: ack_pubkey,
+                identity_signature: ack_identity_sig,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     return Err(WireError::VersionMismatch {
@@ -500,6 +646,15 @@ impl PeerNode {
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
                 }
+
+                // SECURITY (#3873): Verify Ed25519 identity signature (if
+                // present) over the same auth_data and TOFU-pin the pubkey.
+                self.verify_and_pin_identity(
+                    node_id,
+                    ack_pubkey,
+                    ack_identity_sig,
+                    expected_ack_data.as_bytes(),
+                )?;
 
                 // SECURITY (#3880): Record nonce AFTER successful HMAC
                 // verification. Recording before verification allows any TCP
@@ -598,6 +753,7 @@ impl PeerNode {
         let our_nonce = uuid::Uuid::new_v4().to_string();
         let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
+        let (our_pubkey, our_identity_sig) = self.sign_identity(auth_data.as_bytes());
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -608,6 +764,8 @@ impl PeerNode {
                 agents: handle.local_agents(),
                 nonce: our_nonce.clone(),
                 auth_hmac,
+                public_key: our_pubkey,
+                identity_signature: our_identity_sig,
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -620,6 +778,8 @@ impl PeerNode {
                 nonce: ack_nonce,
                 auth_hmac: ack_hmac,
                 protocol_version,
+                public_key: ack_pubkey,
+                identity_signature: ack_identity_sig,
                 ..
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
@@ -641,6 +801,13 @@ impl PeerNode {
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
                 }
+                // SECURITY (#3873): Verify Ed25519 identity + TOFU pin.
+                self.verify_and_pin_identity(
+                    ack_node_id,
+                    ack_pubkey,
+                    ack_identity_sig,
+                    expected_ack_data.as_bytes(),
+                )?;
                 // SECURITY (#3880): Record nonce AFTER HMAC verification.
                 if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
                     return Err(WireError::HandshakeFailed(replay_err));
@@ -733,6 +900,8 @@ impl PeerNode {
                 agents,
                 nonce,
                 auth_hmac,
+                public_key: peer_pubkey,
+                identity_signature: peer_identity_sig,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     let err_resp = WireMessage {
@@ -782,6 +951,27 @@ impl PeerNode {
                     ));
                 }
 
+                // SECURITY (#3873): Verify Ed25519 identity (if present) and
+                // enforce the in-memory TOFU pin. A leaked shared_secret no
+                // longer lets an attacker spoof a different node_id once a
+                // peer's pubkey has been pinned during a prior handshake.
+                if let Err(e) = node.verify_and_pin_identity(
+                    node_id,
+                    peer_pubkey,
+                    peer_identity_sig,
+                    expected_data.as_bytes(),
+                ) {
+                    let err_resp = WireMessage {
+                        id: msg.id.clone(),
+                        kind: WireMessageKind::Response(WireResponse::Error {
+                            code: 403,
+                            message: "Ed25519 identity verification failed".to_string(),
+                        }),
+                    };
+                    write_message(&mut writer, &err_resp).await?;
+                    return Err(e);
+                }
+
                 // SECURITY (#3880): Record nonce only after HMAC is verified.
                 if let Err(replay_err) = node.nonce_tracker.check_and_record(nonce) {
                     let err_resp = WireMessage {
@@ -802,6 +992,7 @@ impl PeerNode {
                 let ack_nonce = uuid::Uuid::new_v4().to_string();
                 let ack_auth_data = format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
                 let ack_hmac = hmac_sign(&node.config.shared_secret, ack_auth_data.as_bytes());
+                let (our_pubkey, our_identity_sig) = node.sign_identity(ack_auth_data.as_bytes());
 
                 let ack = WireMessage {
                     id: msg.id.clone(),
@@ -812,6 +1003,8 @@ impl PeerNode {
                         agents: handle.local_agents(),
                         nonce: ack_nonce.clone(),
                         auth_hmac: ack_hmac,
+                        public_key: our_pubkey,
+                        identity_signature: our_identity_sig,
                     }),
                 };
                 write_message(&mut writer, &ack).await?;
@@ -1760,5 +1953,212 @@ mod tests {
             !hmac_verify(secret, wrong_recipient_data.as_bytes(), &sig),
             "HMAC must differ when recipient_node_id differs"
         );
+    }
+
+    // ----- #3873: per-peer Ed25519 identity + TOFU pinning -----
+
+    fn test_config(node_id: &str, node_name: &str) -> PeerConfig {
+        PeerConfig {
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            node_id: node_id.to_string(),
+            node_name: node_name.to_string(),
+            shared_secret: "test-secret-for-unit-tests".to_string(),
+            max_messages_per_peer_per_minute: 0,
+            max_llm_tokens_per_peer_per_hour: None,
+        }
+    }
+
+    /// Two nodes with Ed25519 keypairs complete a handshake AND each pins
+    /// the other's pubkey to its node_id. This is the success path for #3873.
+    #[tokio::test]
+    async fn issue_3873_two_identity_nodes_handshake_and_pin() {
+        let kp1 = Ed25519KeyPair::generate().unwrap();
+        let kp2 = Ed25519KeyPair::generate().unwrap();
+        let kp1_pub = kp1.public_key().to_string();
+        let kp2_pub = kp2.public_key().to_string();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (n1, _t1) = PeerNode::start_with_identity(
+            test_config("node-A", "kernel-A"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp1),
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (n2, _t2) = PeerNode::start_with_identity(
+            test_config("node-B", "kernel-B"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp2),
+        )
+        .await
+        .unwrap();
+
+        n2.connect_to_peer_with_id(n1.local_addr(), h2, "node-A")
+            .await
+            .expect("identity-bearing handshake must succeed");
+
+        // Each node pinned the other's pubkey to its node_id.
+        let pins_on_n2 = n2.pinned_pubkeys_snapshot();
+        assert_eq!(pins_on_n2.get("node-A"), Some(&kp1_pub));
+        let pins_on_n1 = n1.pinned_pubkeys_snapshot();
+        assert_eq!(pins_on_n1.get("node-B"), Some(&kp2_pub));
+    }
+
+    /// A peer that previously authenticated with an Ed25519 identity cannot
+    /// later impersonate the same node_id with a different keypair — this is
+    /// exactly the attack #3873 closes off (compromised shared_secret on its
+    /// own no longer lets you spoof another node).
+    #[tokio::test]
+    async fn issue_3873_pubkey_change_rejected_after_first_pin() {
+        let kp_legit = Ed25519KeyPair::generate().unwrap();
+        let kp_attacker = Ed25519KeyPair::generate().unwrap();
+
+        let r_server = PeerRegistry::new();
+        let h_server = Arc::new(TestHandle::new());
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            h_server.clone(),
+            None, // server has no identity itself; that's fine
+        )
+        .await
+        .unwrap();
+
+        // 1st handshake: legitimate "client-A" connects with kp_legit. Pinned.
+        let (legit, _t2) = PeerNode::start_with_identity(
+            test_config("client-A", "legit"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_legit),
+        )
+        .await
+        .unwrap();
+        legit
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake establishes pin");
+
+        // 2nd handshake: attacker reuses node_id "client-A" but with a
+        // different keypair. The server has the legitimate pubkey pinned and
+        // must reject.
+        let (attacker, _t3) = PeerNode::start_with_identity(
+            test_config("client-A", "spoof"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_attacker),
+        )
+        .await
+        .unwrap();
+        let res = attacker
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "second handshake with mismatched pubkey for same node_id MUST be rejected"
+        );
+    }
+
+    /// A node that authenticated with Ed25519 cannot subsequently downgrade
+    /// to HMAC-only — that would let an attacker who only has shared_secret
+    /// impersonate nodes whose pubkey was previously pinned.
+    #[tokio::test]
+    async fn issue_3873_downgrade_to_hmac_only_rejected_after_pin() {
+        let kp = Ed25519KeyPair::generate().unwrap();
+
+        let r_server = PeerRegistry::new();
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // First, "node-X" connects WITH identity → pinned.
+        let (with_id, _t2) = PeerNode::start_with_identity(
+            test_config("node-X", "with"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp),
+        )
+        .await
+        .unwrap();
+        with_id
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake establishes pin");
+
+        // Then a different process claims node_id "node-X" but ships no
+        // identity (HMAC-only). Must be rejected.
+        let (no_id, _t3) = PeerNode::start_with_identity(
+            test_config("node-X", "downgrade"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        let res = no_id
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "downgrade from Ed25519 identity to HMAC-only for the same node_id MUST be rejected"
+        );
+    }
+
+    /// Backward compatibility: a legacy peer (no Ed25519 identity) can still
+    /// successfully handshake with a server that has no prior pin.
+    #[tokio::test]
+    async fn issue_3873_legacy_peer_first_contact_still_works() {
+        let r_server = PeerRegistry::new();
+        let (server, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r_server.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        let (legacy, _t2) = PeerNode::start_with_identity(
+            test_config("legacy", "L"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        legacy
+            .connect_to_peer_with_id(
+                server.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("legacy peers (no identity) must still interoperate");
+        assert!(server.pinned_pubkeys_snapshot().is_empty());
     }
 }
