@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Synthetic `SenderContext.channel` value the cron dispatcher uses for
 /// `[[cron_jobs]]` fires. Matched in [`KernelHandle::resolve_user_tool_decision`]
@@ -13797,7 +13797,35 @@ system_prompt = "You are a helpful assistant."
                 .unwrap_or_else(|_| "0.0.0.0:9090".parse().unwrap())
         };
 
-        let node_id = uuid::Uuid::new_v4().to_string();
+        // SECURITY (#3873): Load (or generate + persist) this node's
+        // Ed25519 keypair AND a stable node_id from the data directory.
+        // Both are bundled in `peer_keypair.json` so a daemon restart
+        // resumes under the same OFP identity. Falling back to a fresh
+        // `Uuid::new_v4()` per restart — the prior behavior — silently
+        // defeated TOFU pinning, since legitimate peers always presented
+        // a "new" node_id and the mismatch-detection branch never fired.
+        let mut key_mgr = librefang_wire::keys::PeerKeyManager::new(self.data_dir_boot.clone());
+        let (keypair, node_id) = match key_mgr.load_or_generate() {
+            Ok(kp) => {
+                let kp = kp.clone();
+                let id = key_mgr
+                    .node_id()
+                    .expect("node_id is Some after successful load_or_generate")
+                    .to_string();
+                (Some(kp), id)
+            }
+            Err(e) => {
+                // Identity load failed — refuse to start OFP rather than
+                // silently degrading to ephemeral identity, which would
+                // lose TOFU continuity without operator awareness.
+                error!(
+                    error = %e,
+                    data_dir = %self.data_dir_boot.display(),
+                    "OFP: failed to load or generate peer identity; OFP networking will not start",
+                );
+                return;
+            }
+        };
         let node_name = gethostname().unwrap_or_else(|| "librefang-node".to_string());
 
         let peer_config = PeerConfig {
@@ -13813,7 +13841,9 @@ system_prompt = "You are a helpful assistant."
 
         let handle: Arc<dyn librefang_wire::peer::PeerHandle> = self.self_arc();
 
-        match PeerNode::start(peer_config, registry.clone(), handle.clone()).await {
+        match PeerNode::start_with_identity(peer_config, registry.clone(), handle.clone(), keypair)
+            .await
+        {
             Ok((node, _accept_task)) => {
                 let addr = node.local_addr();
                 info!(
