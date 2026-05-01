@@ -862,7 +862,8 @@ impl LlmDriver for GeminiDriver {
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
                 .json(&gemini_request);
-            if let Some(secs) = self.request_timeout_secs {
+            // Per-request timeout overrides the driver-level default when set.
+            if let Some(secs) = request.timeout_secs.or(self.request_timeout_secs) {
                 req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
             }
             let resp = req_builder
@@ -990,7 +991,8 @@ impl LlmDriver for GeminiDriver {
                 .header("x-goog-api-key", self.api_key.as_str())
                 .header("content-type", "application/json")
                 .json(&gemini_request);
-            if let Some(secs) = self.request_timeout_secs {
+            // Per-request timeout overrides the driver-level default when set.
+            if let Some(secs) = request.timeout_secs.or(self.request_timeout_secs) {
                 req_builder = req_builder.timeout(std::time::Duration::from_secs(secs));
             }
             let resp = req_builder
