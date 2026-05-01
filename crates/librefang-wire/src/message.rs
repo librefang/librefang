@@ -56,6 +56,21 @@ pub enum WireRequest {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// SECURITY (#3873): Sender's Ed25519 public key (base64). Optional
+        /// for backward compatibility with peers that do not yet provision a
+        /// keypair — those fall back to HMAC-only authentication and no
+        /// TOFU pin is established.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_key: Option<String>,
+        /// SECURITY (#3873): Ed25519 signature (base64) over the same
+        /// `nonce|node_id|recipient_node_id` byte string the HMAC covers,
+        /// signed with the sender's private key. Verified against
+        /// `public_key`; on first contact the pubkey is pinned to `node_id`
+        /// (TOFU) and subsequent handshakes from the same `node_id` MUST
+        /// present the same pubkey or are rejected. Optional only when
+        /// `public_key` is also absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_signature: Option<String>,
     },
     /// Discover agents matching a query on the remote peer.
     #[serde(rename = "discover")]
@@ -98,6 +113,12 @@ pub enum WireResponse {
         /// HMAC-SHA256(shared_secret, nonce + node_id).
         #[serde(default)]
         auth_hmac: String,
+        /// SECURITY (#3873): See `WireRequest::Handshake::public_key`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        public_key: Option<String>,
+        /// SECURITY (#3873): See `WireRequest::Handshake::identity_signature`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity_signature: Option<String>,
     },
     /// Discovery results.
     #[serde(rename = "discover_result")]
@@ -221,6 +242,8 @@ mod tests {
                 }],
                 nonce: "test-nonce".to_string(),
                 auth_hmac: "test-hmac".to_string(),
+                public_key: None,
+                identity_signature: None,
             }),
         };
         let json = serde_json::to_string_pretty(&msg).unwrap();
