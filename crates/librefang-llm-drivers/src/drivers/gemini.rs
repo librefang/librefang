@@ -822,6 +822,11 @@ pub(crate) async fn stream_gemini_sse(
 
 #[async_trait]
 impl LlmDriver for GeminiDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "gemini", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (contents, system_instruction) = convert_messages(&request.messages, &request.system);
         let tools = convert_tools(&request);
@@ -937,6 +942,11 @@ impl LlmDriver for GeminiDriver {
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "gemini", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,
