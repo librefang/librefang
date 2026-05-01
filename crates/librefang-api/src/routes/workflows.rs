@@ -1055,16 +1055,59 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
 #[utoipa::path(get, path = "/api/triggers", tag = "workflows", params(("agent_id" = Option<String>, Query, description = "Filter by agent ID")), responses((status = 200, description = "List triggers", body = serde_json::Value)))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let agent_filter = params
         .get("agent_id")
         .and_then(|id| id.parse::<AgentId>().ok());
 
+    // Owner-scoping: non-admins can't see triggers for agents they don't
+    // author. Two enforcement points:
+    //   1. With ?agent_id=... — verify the caller owns that agent.
+    //   2. Without — post-filter the trigger list by author.
+    let restrict_to: Option<String> = match api_user.as_ref() {
+        Some(u) if u.0.role < librefang_kernel::auth::UserRole::Admin => Some(u.0.name.clone()),
+        _ => None,
+    };
+    if let (Some(ref user_name), Some(aid)) = (restrict_to.as_ref(), agent_filter) {
+        let owns = state
+            .kernel
+            .agent_registry()
+            .get(aid)
+            .as_ref()
+            .map(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
+            .unwrap_or(false);
+        if !owns {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"triggers": [], "total": 0})),
+            )
+                .into_response();
+        }
+    }
+
     let triggers = state.kernel.list_triggers(agent_filter);
-    let list: Vec<serde_json::Value> = triggers.iter().map(trigger_to_json).collect();
+    let list: Vec<serde_json::Value> = if let Some(ref user_name) = restrict_to {
+        // No explicit agent_id — fall back to per-trigger owner check.
+        let owned_ids: std::collections::HashSet<librefang_types::agent::AgentId> = state
+            .kernel
+            .agent_registry()
+            .list()
+            .iter()
+            .filter(|e| e.manifest.author.eq_ignore_ascii_case(user_name))
+            .map(|e| e.id)
+            .collect();
+        triggers
+            .iter()
+            .filter(|tr| owned_ids.contains(&tr.agent_id))
+            .map(trigger_to_json)
+            .collect()
+    } else {
+        triggers.iter().map(trigger_to_json).collect()
+    };
     let total = list.len();
-    Json(serde_json::json!({"triggers": list, "total": total}))
+    Json(serde_json::json!({"triggers": list, "total": total})).into_response()
 }
 
 #[utoipa::path(get, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger detail", body = serde_json::Value), (status = 404, description = "Not found")))]
