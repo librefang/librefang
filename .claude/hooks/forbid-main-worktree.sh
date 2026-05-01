@@ -69,6 +69,37 @@ fi
 
 read -r repo_root kind <<<"$(detect_git "$target_dir" || true)"
 [ -n "${repo_root:-}" ] || exit 0
+
+# For Bash, also resolve the *toplevel* of the main repo (so cargo bans apply
+# whether we are in the main tree or a linked worktree — they share target/).
+toplevel=""; main_root=""
+if [ "$tool" = "Bash" ]; then
+  toplevel="$(git -C "$target_dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$toplevel" ]; then
+    main_root="$(git -C "$toplevel" worktree list --porcelain 2>/dev/null \
+      | awk '/^worktree / {print $2; exit}')"
+    [ -n "$main_root" ] || main_root="$toplevel"
+  fi
+
+  # Cargo build/test/run/install: banned anywhere in the librefang repo.
+  if [ -n "$main_root" ]; then
+    case "$main_root" in
+      */librefang)
+        if printf '%s' "$cmd" | grep -qE '(^|[;&|`(]|&&|\|\|)[[:space:]]*cargo[[:space:]]+(build|test|run|install)\b'; then
+          cat >&2 <<EOF
+[forbid-main-worktree] Refusing Bash — \`cargo build/test/run/install\` is
+banned in this repo (target/ is shared across worktrees and contends with
+the user's other sessions). Use \`cargo check\` for compile verification;
+CI handles full build / test.
+Command: $cmd
+EOF
+          exit 2
+        fi
+        ;;
+    esac
+  fi
+fi
+
 [ "${kind:-}" = "main" ] || exit 0
 
 case "$repo_root" in

@@ -1,5 +1,22 @@
 # LibreFang — Agent Instructions
 
+## ⚠️ Before any work: verify you are in a worktree, not the main tree
+
+The very first action in any task that will edit files **must** be:
+```bash
+pwd && git rev-parse --git-dir
+```
+If `pwd` ends in `/Workspace/libre/librefang` (or wherever the user keeps the
+main clone) **and** `git rev-parse --git-dir` prints `.git` (a directory, not
+a `gitdir: ...` file), you are in the main worktree. **Stop.** Run:
+```bash
+git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
+```
+and continue all work from that path. The `forbid-main-worktree` hook
+(`.claude/hooks/forbid-main-worktree.sh`) will block edits and mutating git
+commands targeted at the main tree if you forget — but the hook is a safety
+net, not your plan.
+
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
@@ -26,7 +43,13 @@ cargo clippy --workspace --all-targets -- -D warnings  # Zero warnings
 ```
 
 ## MANDATORY: Live Integration Testing
-**After implementing any new endpoint, feature, or wiring change, you MUST run live integration tests.** Unit tests alone are not enough — they can pass while the feature is actually dead code. Live tests catch:
+**This section is a HUMAN workflow.** Claude must NOT execute these steps —
+they require `cargo build` and starting a long-lived daemon, both forbidden
+to the AI per the rules above. Claude's role is to prepare exact commands /
+payloads and ask the user to run them, then read the user's pasted output.
+Do not auto-spawn the daemon or `cargo build --release` yourself.
+
+**After implementing any new endpoint, feature, or wiring change, the user MUST run live integration tests.** Unit tests alone are not enough — they can pass while the feature is actually dead code. Live tests catch:
 - Missing route registrations in server.rs
 - Config fields not being deserialized from TOML
 - Type mismatches between kernel and API layers
