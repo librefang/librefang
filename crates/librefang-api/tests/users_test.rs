@@ -9,16 +9,15 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use librefang_api::routes::{self, AppState};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig, UserConfig};
+use librefang_testing::{MockKernelBuilder, TestAppState};
+use librefang_types::config::UserConfig;
 use std::sync::Arc;
-use std::time::Instant;
 use tower::ServiceExt;
 
 struct Harness {
     app: Router,
     _state: Arc<AppState>,
-    _tmp: tempfile::TempDir,
+    _test: TestAppState,
 }
 
 async fn boot() -> Harness {
@@ -26,12 +25,8 @@ async fn boot() -> Harness {
 }
 
 async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
-    let tmp = tempfile::tempdir().expect("temp dir");
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        users: seed,
-        default_model: DefaultModelConfig {
+    let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
+        cfg.default_model = librefang_types::config::DefaultModelConfig {
             provider: "ollama".to_string(),
             model: "test-model".to_string(),
             api_key_env: "OLLAMA_API_KEY".to_string(),
@@ -39,47 +34,16 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
             message_timeout_secs: 300,
             extra_params: std::collections::HashMap::new(),
             cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
+        };
+        cfg.users = seed;
+    }));
+
     // Persist the seed config so persist_users round-trips through a real
     // file on disk (mirrors how the daemon runs in production).
-    let config_path = tmp.path().join("config.toml");
-    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    let config_path = test.tmp_path().join("config.toml");
+    let test = test.with_config_path(config_path);
 
-    let kernel = LibreFangKernel::boot_with_config(config).expect("boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-users-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
-
+    let state = test.state.clone();
     let app = Router::new()
         .nest("/api", routes::users::router())
         .with_state(state.clone());
@@ -87,7 +51,7 @@ async fn boot_with_seed_users(seed: Vec<UserConfig>) -> Harness {
     Harness {
         app,
         _state: state,
-        _tmp: tmp,
+        _test: test,
     }
 }
 
@@ -563,7 +527,7 @@ async fn users_create_refuses_to_overwrite_corrupt_config_toml() {
     // Corrupt the on-disk config file — kernel still has the previous
     // good copy in memory, but the next `persist_users` call has to
     // round-trip through the file.
-    let config_path = h._tmp.path().join("config.toml");
+    let config_path = h._test.tmp_path().join("config.toml");
     std::fs::write(&config_path, "this is not [[ valid TOML\nbroken = =\n")
         .expect("seed corrupt config");
 
