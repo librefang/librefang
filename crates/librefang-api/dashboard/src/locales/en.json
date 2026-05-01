@@ -2239,7 +2239,48 @@
     "batch_disabled_totp": "Batch approve disabled when TOTP is enforced",
     "goToAgent": "Go to Agent",
     "totpPlaceholder": "000000 / 0000-0000",
-    "totpLabel": "TOTP"
+    "totpLabel": "TOTP",
+    "tabHistory": "History",
+    "pendingCount": "{{count}} pending",
+    "filter": "Filter",
+    "filterPlaceholder": "Filter by agent, tool, or action…",
+    "noFilterMatch": "No requests match this filter.",
+    "autoRules": "Auto-rules",
+    "requestedAgo": "requested {{ago}} ago",
+    "approveWithTotp": "Approve with TOTP",
+    "editApprove": "Edit & approve",
+    "editApproveTitle": "Edit and approve",
+    "editApproveSubmit": "Submit & approve",
+    "deny": "Deny",
+    "risk": {
+      "high": "high risk",
+      "medium": "medium risk",
+      "low": "low risk"
+    },
+    "history": {
+      "empty": "No history yet",
+      "emptyDesc": "Resolved approvals will appear here.",
+      "decisions": {
+        "approved": "Approved",
+        "denied": "Denied",
+        "edited": "Edited"
+      },
+      "cols": {
+        "decision": "Decision",
+        "agent": "Agent",
+        "action": "Action",
+        "risk": "Risk",
+        "resolvedBy": "Resolved by",
+        "when": "When"
+      }
+    },
+    "totp": {
+      "modalTitle": "Confirm with TOTP",
+      "modalSubtitle": "High-risk action requires 2FA",
+      "modalContext": "wants to run: {{action}}. Enter the 6-digit code from your authenticator (or a 8-digit recovery code).",
+      "expiresHint": "Codes refresh every 30 seconds.",
+      "confirm": "Confirm & approve"
+    }
   },
   "wizard": {
     "welcome": "Welcome to LibreFang",
