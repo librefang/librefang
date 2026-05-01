@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Supported media types for understanding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MediaType {
     Image,
     Audio,
@@ -24,6 +25,7 @@ impl std::fmt::Display for MediaType {
 /// Source of media content.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
+#[non_exhaustive]
 pub enum MediaSource {
     /// Path to a local file.
     FilePath { path: String },
@@ -198,6 +200,7 @@ impl MediaAttachment {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum ImageGenModel {
     #[default]
     DallE3,
@@ -364,6 +367,7 @@ pub struct GeneratedImage {
 /// What media capabilities a driver supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MediaCapability {
     ImageGeneration,
     TextToSpeech,
@@ -385,6 +389,7 @@ impl std::fmt::Display for MediaCapability {
 /// Status of an async media generation task (e.g. video).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
+#[non_exhaustive]
 pub enum MediaTaskStatus {
     Pending,
     Queued,

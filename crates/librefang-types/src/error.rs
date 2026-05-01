@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Top-level error type for the LibreFang system.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum LibreFangError {
     /// The requested agent was not found.
     #[error("Agent not found: {0}")]

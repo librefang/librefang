@@ -13,6 +13,7 @@ use thiserror::Error;
 
 /// Error type for LLM driver operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum LlmError {
     /// HTTP request failed.
     #[error("HTTP error: {0}")]
@@ -311,6 +312,7 @@ pub const PHASE_RESPONSE_COMPLETE: &str = "response_complete";
 
 /// Events emitted during streaming LLM completion.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StreamEvent {
     /// Incremental text content.
     TextDelta { text: String },
@@ -361,6 +363,7 @@ pub enum StreamEvent {
 /// hooks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LlmFamily {
     /// Anthropic Claude family (direct API, Anthropic-compatible providers,
     /// Claude Code CLI).
