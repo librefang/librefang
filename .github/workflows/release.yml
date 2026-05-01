@@ -91,7 +91,10 @@ jobs:
           # marker would tag the merge with vX while the binary inside reports
           # the workspace version, producing artifacts whose `librefang --version`
           # disagrees with the GitHub Release name. See #3545.
-          WS_VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
           if [ "${TAG#v}" != "$WS_VERSION" ]; then
             echo "::error::PR-body release-tag $TAG does not match [workspace.package].version $WS_VERSION"
             exit 1
@@ -168,7 +171,10 @@ jobs:
       - name: Verify tag matches workspace version
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          WS_VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          # Scope to the [workspace.package] section so a future top-level
+          # [package] block or any other left-anchored `version = ...` line
+          # cannot shadow the real workspace version.
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
           if [ "${TAG#v}" != "$WS_VERSION" ]; then
             echo "::error::pushed tag $TAG does not match [workspace.package].version $WS_VERSION"
             exit 1
@@ -865,14 +871,16 @@ jobs:
             exit 1
           fi
 
-          # Sanity check: keep this in sync with the cli_* entries in `needs:`
-          # above. A drift means a new platform was added without wiring its
-          # sibling into the manifest, or a job silently failed to upload its
-          # .sha256. Either way, refuse to publish a partial manifest.
+          # Exact-match sanity check: must equal the count of cli_* entries
+          # in `needs:` above. Drift in either direction is a bug — adding a
+          # new cli_* job without bumping this constant would silently publish
+          # a manifest missing the new platform's hash; dropping a job without
+          # decrementing it would block all releases until corrected (which is
+          # the desired loud failure). Update both together.
           EXPECTED_PLATFORMS=8
           ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
-          if [ "$ACTUAL" -lt "$EXPECTED_PLATFORMS" ]; then
-            echo "::error::expected at least $EXPECTED_PLATFORMS .sha256 siblings (one per cli_* job in needs:), got $ACTUAL"
+          if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
+            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings (one per cli_* job in needs:), got $ACTUAL"
             cat asset-list.txt
             exit 1
           fi
