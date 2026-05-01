@@ -6,7 +6,15 @@ license.workspace = true
 description = "CLI tool for the LibreFang Agent OS"
 
 [features]
-default = ["librefang-api/all-channels", "telemetry"]
+# Default = telemetry + a small "core-channels" set (telegram / discord /
+# slack / webhook / ntfy). Heavy / unmaintained adapters (matrix, email/imap,
+# google-chat, bluesky, mqtt, …) stay opt-in via `--features all-channels`.
+# Cuts cold `cargo build -p librefang-cli` time substantially and avoids
+# dragging `matrix-sdk-crypto`, `lettre`, `imap`, `rsa`, `rumqttc`,
+# `nostr-sdk`, … into every developer build. Release CI passes
+# `--features all-channels` explicitly so published binaries still ship the
+# full set. See #3688.
+default = ["librefang-api/core-channels", "telemetry"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 # Android target: exclude channel-email (rustls-connector 0.23.0 + rustls-platform-verifier 0.7.0

@@ -67,7 +67,12 @@ metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
 
 [features]
-default = ["all-channels", "telemetry"]
+# Default = a small "core-channels" set + telemetry. Heavy / unmaintained
+# adapters (matrix, email/imap, google-chat, bluesky, mqtt, …) stay opt-in
+# via `--features all-channels` so plain `cargo build` and downstream
+# library users don't pay the compile-time cost. Release / packaging
+# pipelines opt in to `all-channels` explicitly. See #3655 / #3688.
+default = ["core-channels", "telemetry"]
 
 # OpenTelemetry tracing export + Prometheus metrics
 telemetry = [
@@ -124,6 +129,19 @@ channel-ntfy = ["librefang-channels/channel-ntfy"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
+
+# Small curated default set: 5 light adapters covering the most common
+# integration points. Pulls no heavy/unmaintained transitive deps —
+# everything here is plain HTTP. Used by `librefang-api`'s `default` and
+# forwarded by `librefang-cli`'s `default`. Anything bigger should opt in
+# via `all-channels` (or pick individual channels).
+core-channels = [
+    "channel-telegram",
+    "channel-discord",
+    "channel-slack",
+    "channel-webhook",
+    "channel-ntfy",
+]
 
 all-channels = [
     "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
