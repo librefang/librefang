@@ -35,10 +35,16 @@ pub enum KeyError {
 
 /// Persisted shape on disk. Both halves are base64-encoded; the file MUST be
 /// kept readable only by the daemon user (caller's responsibility).
+///
+/// `node_id` was added in PR-3 of #3873. Files written by PR-1 are missing
+/// the field — `load_or_generate` materializes a UUID and rewrites the file
+/// in that case so subsequent restarts see a stable identity.
 #[derive(Serialize, Deserialize)]
 struct PersistedKeyPair {
     public_key: String,
     private_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
 }
 
 /// An Ed25519 keypair owned by this node.
@@ -139,11 +145,15 @@ pub fn fingerprint_of_pubkey(public_key: &str) -> String {
 }
 
 /// Loads `<data_dir>/peer_keypair.json` if present, otherwise generates a
-/// fresh keypair and persists it. The file stores both public and private
-/// halves base64-encoded.
+/// fresh keypair + node_id and persists them. The file stores the keypair
+/// (both halves base64) **and** the node_id together so a daemon restart
+/// resumes under the same OFP identity — without this, every restart
+/// minted a new `Uuid::new_v4()` for the node_id and the TOFU pin map
+/// from #3873 had no stable key to bind against.
 pub struct PeerKeyManager {
     key_path: PathBuf,
     keypair: Option<Ed25519KeyPair>,
+    node_id: Option<String>,
 }
 
 impl PeerKeyManager {
@@ -151,14 +161,20 @@ impl PeerKeyManager {
         Self {
             key_path: data_dir.join("peer_keypair.json"),
             keypair: None,
+            node_id: None,
         }
     }
 
+    /// Load the persisted identity if present, otherwise generate a fresh
+    /// one and write it to disk. After this returns successfully, both
+    /// [`PeerKeyManager::keypair`] and [`PeerKeyManager::node_id`] are
+    /// guaranteed to be `Some`.
     pub fn load_or_generate(&mut self) -> Result<&Ed25519KeyPair, KeyError> {
         if let Some(ref kp) = self.keypair {
             return Ok(kp);
         }
-        let kp = if self.key_path.exists() {
+
+        let (kp, node_id, needs_rewrite) = if self.key_path.exists() {
             let raw = std::fs::read_to_string(&self.key_path)?;
             let persisted: PersistedKeyPair = serde_json::from_str(&raw)?;
             let priv_bytes = B64
@@ -174,18 +190,34 @@ impl PeerKeyManager {
             if derived_pub != persisted.public_key {
                 return Err(KeyError::InvalidFormat);
             }
-            Ed25519KeyPair {
-                public_key: persisted.public_key,
-                private_key_bytes: seed,
-            }
+            // Migrate PR-1 files (no node_id field) by minting one and
+            // marking the file for rewrite.
+            let (node_id, rewrite) = match persisted.node_id {
+                Some(id) if !id.is_empty() => (id, false),
+                _ => (uuid::Uuid::new_v4().to_string(), true),
+            };
+            (
+                Ed25519KeyPair {
+                    public_key: persisted.public_key,
+                    private_key_bytes: seed,
+                },
+                node_id,
+                rewrite,
+            )
         } else {
             let kp = Ed25519KeyPair::generate()?;
+            let node_id = uuid::Uuid::new_v4().to_string();
+            (kp, node_id, true)
+        };
+
+        if needs_rewrite {
             if let Some(parent) = self.key_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             let persisted = PersistedKeyPair {
                 public_key: kp.public_key.clone(),
                 private_key: B64.encode(kp.private_key_bytes),
+                node_id: Some(node_id.clone()),
             };
             let serialized = serde_json::to_string_pretty(&persisted)?;
             std::fs::write(&self.key_path, serialized)?;
@@ -200,8 +232,9 @@ impl PeerKeyManager {
                     let _ = std::fs::set_permissions(&self.key_path, perms);
                 }
             }
-            kp
-        };
+        }
+
+        self.node_id = Some(node_id);
         Ok(self.keypair.insert(kp))
     }
 
@@ -211,6 +244,12 @@ impl PeerKeyManager {
 
     pub fn public_key(&self) -> Option<&str> {
         self.keypair.as_ref().map(|kp| kp.public_key())
+    }
+
+    /// Stable node_id persisted alongside the keypair. `Some` after a
+    /// successful [`load_or_generate`].
+    pub fn node_id(&self) -> Option<&str> {
+        self.node_id.as_deref()
     }
 }
 
@@ -300,5 +339,49 @@ mod tests {
         assert_eq!(kp.fingerprint(), fingerprint_of_pubkey(kp.public_key()));
         let other = Ed25519KeyPair::generate().unwrap();
         assert_ne!(kp.fingerprint(), other.fingerprint());
+    }
+
+    /// PR-3: node_id MUST persist across restarts. Without this the kernel
+    /// fell back to `Uuid::new_v4()` per startup and TOFU pinning had no
+    /// stable key to bind against.
+    #[test]
+    fn manager_persists_node_id_across_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr_a = PeerKeyManager::new(tmp.path().to_path_buf());
+        let _ = mgr_a.load_or_generate().unwrap();
+        let id_a = mgr_a.node_id().unwrap().to_string();
+        assert!(!id_a.is_empty());
+
+        let mut mgr_b = PeerKeyManager::new(tmp.path().to_path_buf());
+        let _ = mgr_b.load_or_generate().unwrap();
+        assert_eq!(mgr_b.node_id(), Some(id_a.as_str()));
+    }
+
+    /// PR-3 backward compat: a PR-1-format file (no `node_id` field) must
+    /// still load successfully. The manager mints a fresh node_id and
+    /// rewrites the file so subsequent restarts see a stable identity.
+    #[test]
+    fn manager_migrates_legacy_file_without_node_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("peer_keypair.json");
+        // Hand-craft a PR-1-shaped file (only public_key + private_key).
+        let kp = Ed25519KeyPair::generate().unwrap();
+        let legacy = serde_json::json!({
+            "public_key": kp.public_key(),
+            "private_key": B64.encode(kp.private_key_bytes),
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let mut mgr = PeerKeyManager::new(tmp.path().to_path_buf());
+        let loaded = mgr.load_or_generate().unwrap();
+        assert_eq!(loaded.public_key(), kp.public_key());
+        let migrated_id = mgr.node_id().unwrap().to_string();
+        assert!(!migrated_id.is_empty());
+
+        // File must have been rewritten with the new field — a second mgr
+        // sees the same node_id without minting a fresh one.
+        let mut mgr2 = PeerKeyManager::new(tmp.path().to_path_buf());
+        let _ = mgr2.load_or_generate().unwrap();
+        assert_eq!(mgr2.node_id(), Some(migrated_id.as_str()));
     }
 }
