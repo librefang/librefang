@@ -13827,8 +13827,17 @@ system_prompt = "You are a helpful assistant."
 
         let handle: Arc<dyn librefang_wire::peer::PeerHandle> = self.self_arc();
 
-        match PeerNode::start_with_identity(peer_config, registry.clone(), handle.clone(), keypair)
-            .await
+        // SECURITY (#3873, PR-4): Pass data_dir so the persistent
+        // TrustedPeers store is hydrated on boot and updated whenever a
+        // new peer is pinned via TOFU. Pins now survive daemon restarts.
+        match PeerNode::start_with_identity(
+            peer_config,
+            registry.clone(),
+            handle.clone(),
+            keypair,
+            Some(self.data_dir_boot.clone()),
+        )
+        .await
         {
             Ok((node, _accept_task)) => {
                 let addr = node.local_addr();

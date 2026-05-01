@@ -301,6 +301,10 @@ class AgentsResource {
     return this._c._request("PUT", `/api/agents/${id}/skills`, data, undefined);
   }
 
+  async getAgentStats(id) {
+    return this._c._request("GET", `/api/agents/${id}/stats`);
+  }
+
   async stopAgent(id) {
     return this._c._request("POST", `/api/agents/${id}/stop`);
   }
