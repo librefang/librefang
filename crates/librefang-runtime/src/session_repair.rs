@@ -317,7 +317,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
 /// survives. It intentionally does not run the full repair pipeline; callers
 /// should run full repair before this function if they need global
 /// normalization.
-pub fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
+pub(crate) fn ensure_starts_with_user(mut messages: Vec<Message>) -> Vec<Message> {
     loop {
         match messages.iter().position(|m| m.role == Role::User) {
             Some(0) | None => break,
@@ -2894,6 +2894,86 @@ mod tests {
         match &result[0].content {
             MessageContent::Text(t) => assert_eq!(t, "real user turn"),
             other => panic!("expected text user turn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_free_fast_path_matches_full_path_shape() {
+        let messages = vec![
+            Message::user("first"),
+            Message::user("second"),
+            Message::assistant("   "),
+            Message::assistant("answer"),
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "attachment text".to_string(),
+                        provider_metadata: None,
+                    },
+                    ContentBlock::Text {
+                        text: "prompt".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+        ];
+
+        let (fast_path, stats) = validate_and_repair_with_stats(&messages);
+
+        assert_eq!(stats.empty_messages_removed, 1);
+        assert_eq!(fast_path.len(), 3);
+        assert_eq!(fast_path[0].role, Role::User);
+        assert_eq!(fast_path[0].content.text_content(), "first\n\nsecond");
+        assert_eq!(fast_path[1].role, Role::Assistant);
+        assert_eq!(fast_path[1].content.text_content(), "answer");
+        assert_eq!(fast_path[2].role, Role::User);
+        assert_eq!(
+            fast_path[2].content.text_content(),
+            "attachment text\n\nprompt"
+        );
+    }
+
+    #[test]
+    fn ensure_starts_with_user_removes_tool_result_orphaned_by_drain() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![tool_use_block("dropped")]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![
+                    tool_result_block("dropped", "old result"),
+                    ContentBlock::Text {
+                        text: "real turn".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+                pinned: false,
+                timestamp: None,
+            },
+            Message::assistant("reply"),
+        ];
+
+        let result = ensure_starts_with_user(messages);
+
+        assert_eq!(result[0].role, Role::User);
+        match &result[0].content {
+            MessageContent::Blocks(blocks) => {
+                assert!(!blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })));
+                assert!(blocks.iter().any(|block| matches!(
+                    block,
+                    ContentBlock::Text { text, .. } if text == "real turn"
+                )));
+            }
+            other => panic!("expected block user message, got {other:?}"),
         }
     }
 }

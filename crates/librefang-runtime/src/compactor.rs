@@ -966,7 +966,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig::default();
         assert!(!needs_compaction(&session, &config));
@@ -984,7 +984,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig::default();
         assert!(needs_compaction(&session, &config));
@@ -1036,7 +1036,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -1132,7 +1132,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig {
             threshold: 5,
@@ -1206,7 +1206,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig {
             threshold: 30,
@@ -1335,7 +1335,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let config = CompactionConfig {
             threshold: 10,

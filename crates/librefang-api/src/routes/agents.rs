@@ -1198,7 +1198,7 @@ pub fn inject_attachments_into_session(
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         },
     };
 

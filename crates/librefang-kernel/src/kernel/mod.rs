@@ -4984,7 +4984,7 @@ system_prompt = "You are a helpful assistant."
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
 
         info!(
@@ -6142,7 +6142,7 @@ system_prompt = "You are a helpful assistant."
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         });
 
         // Lifecycle: emit SessionCreated only when get_session returned None.
@@ -7714,7 +7714,7 @@ system_prompt = "You are a helpful assistant."
                 context_window_tokens: 0,
                 label: None,
                 messages_generation: 0,
-                last_repaired_generation: 0,
+                last_repaired_generation: None,
             });
         // Evaluate the global session reset policy against this agent's
         // last_active timestamp.  The `force_session_wipe` flag on the entry
@@ -9052,7 +9052,7 @@ system_prompt = "You are a helpful assistant."
             context_window_tokens: export.context_window_tokens,
             label: export.label,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         self.memory
             .save_session(&new_session)
@@ -10092,7 +10092,7 @@ system_prompt = "You are a helpful assistant."
                 context_window_tokens: 0,
                 label: None,
                 messages_generation: 0,
-                last_repaired_generation: 0,
+                last_repaired_generation: None,
             });
 
         let config = CompactionConfig::from_toml(&cfg.compaction);
@@ -10222,7 +10222,7 @@ system_prompt = "You are a helpful assistant."
                 context_window_tokens: 0,
                 label: None,
                 messages_generation: 0,
-                last_repaired_generation: 0,
+                last_repaired_generation: None,
             });
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins

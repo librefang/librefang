@@ -83,9 +83,9 @@ pub struct Session {
     /// Used to skip redundant repair passes when the history hasn't changed.
     pub messages_generation: u64,
     /// The `messages_generation` value at the time of the last successful
-    /// repair pass. When this equals `messages_generation` the next call to
-    /// `prepare_llm_messages` can skip repair entirely.
-    pub last_repaired_generation: u64,
+    /// repair pass. `None` means the session was cold-loaded or freshly
+    /// constructed and must be repaired once before skip logic can apply.
+    pub last_repaired_generation: Option<u64>,
 }
 
 impl Session {
@@ -112,6 +112,9 @@ impl Session {
 
     /// Mark messages as mutated when code must use Vec APIs directly.
     pub fn mark_messages_mutated(&mut self) {
+        // `u64` wraparound would require 2^64 message-history mutations in one
+        // process; that is operationally unreachable, so wrapping keeps the hot
+        // path infallible without affecting the repair-skip invariant in practice.
         self.messages_generation = self.messages_generation.wrapping_add(1);
     }
 }
@@ -243,7 +246,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label,
                     messages_generation: 0,
-                    last_repaired_generation: 0,
+                    last_repaired_generation: None,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -288,7 +291,7 @@ impl SessionStore {
                         context_window_tokens: tokens as u64,
                         label,
                         messages_generation: 0,
-                        last_repaired_generation: 0,
+                        last_repaired_generation: None,
                     },
                     created_at,
                 )))
@@ -741,7 +744,7 @@ impl SessionStore {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         self.save_session(&session)?;
         Ok(session)
@@ -804,7 +807,7 @@ impl SessionStore {
                     context_window_tokens: tokens as u64,
                     label: lbl,
                     messages_generation: 0,
-                    last_repaired_generation: 0,
+                    last_repaired_generation: None,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -868,7 +871,7 @@ impl SessionStore {
             context_window_tokens: 0,
             label: label.map(|s| s.to_string()),
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         self.save_session(&session)?;
         Ok(session)

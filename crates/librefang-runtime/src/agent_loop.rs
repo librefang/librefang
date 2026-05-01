@@ -1480,10 +1480,7 @@ fn strip_prior_image_data(messages: &mut [Message]) -> bool {
         if Some(i) == last_user_idx {
             continue;
         }
-        if msg.content.has_images() {
-            mutated = true;
-        }
-        msg.content.strip_images();
+        mutated |= msg.content.strip_images();
     }
 
     mutated
@@ -2486,12 +2483,12 @@ fn prepare_llm_messages(
     );
 
     let (mut messages, repair_stats) = if session.last_repaired_generation
-        == session.messages_generation
+        == Some(session.messages_generation)
     {
         (llm_messages, crate::session_repair::RepairStats::default())
     } else {
         let (msgs, stats) = crate::session_repair::validate_and_repair_with_stats(&llm_messages);
-        session.last_repaired_generation = session.messages_generation;
+        session.last_repaired_generation = Some(session.messages_generation);
         (msgs, stats)
     };
 
@@ -3483,13 +3480,17 @@ pub async fn run_agent_loop(
                 .await;
 
             let had_soft_compression = !compression_events.is_empty();
-            let mut needs_repair = had_soft_compression;
+            let mut hard_trimmed = false;
 
             if had_soft_compression {
                 messages = compressed;
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
             }
 
-            // Hard-trim only if still above threshold after soft compression.
+            // Hard-trim only if still above threshold after soft compression
+            // and repair. Keep the pre-existing ordering so token estimation
+            // and recovery boundaries are computed on provider-valid history.
             let remaining_tokens = crate::compactor::estimate_token_count(
                 &messages,
                 Some(&system_prompt),
@@ -3506,16 +3507,17 @@ pub async fn run_agent_loop(
                 if recovery == RecoveryStage::FinalError {
                     warn!("Context overflow unrecoverable — suggest /reset or /compact");
                 }
-                needs_repair = needs_repair || recovery != RecoveryStage::None;
+                hard_trimmed = recovery != RecoveryStage::None;
             }
 
-            // Single repair pass after all mutations (compress + trim).
-            if needs_repair {
+            // Repair again only if hard trim ran; trimming can cut across a
+            // tool-call boundary even when the pre-trim history was valid.
+            if hard_trimmed {
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                if had_soft_compression {
-                    session.set_messages(messages.clone());
-                }
+            }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -4850,10 +4852,12 @@ pub async fn run_agent_loop_streaming(
                 .await;
 
             let had_soft_compression = !compression_events.is_empty();
-            let mut needs_repair = had_soft_compression;
+            let mut hard_trimmed = false;
 
             if had_soft_compression {
                 messages = compressed;
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
             }
 
             let remaining_tokens = crate::compactor::estimate_token_count(
@@ -4869,18 +4873,18 @@ pub async fn run_agent_loop_streaming(
                     available_tools,
                     ctx_window,
                 );
-                needs_repair = needs_repair || r != RecoveryStage::None;
+                hard_trimmed = r != RecoveryStage::None;
                 r
             } else {
                 RecoveryStage::None
             };
 
-            if needs_repair {
+            if hard_trimmed {
                 messages = crate::session_repair::validate_and_repair(&messages);
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                if had_soft_compression {
-                    session.set_messages(messages.clone());
-                }
+            }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
             recovery
@@ -6326,8 +6330,11 @@ mod tests {
     use super::*;
     use crate::llm_driver::{CompletionResponse, LlmError};
     use async_trait::async_trait;
+    use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
+    use rusqlite::Connection;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_max_iterations_constant() {
@@ -6760,7 +6767,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig {
             mode: librefang_types::config::PrivacyMode::Redact,
@@ -6805,7 +6812,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig::default();
         let filter = crate::pii_filter::PiiFilter::new(&privacy.redact_patterns);
@@ -6880,7 +6887,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut tool_result_blocks = Vec::new();
@@ -6908,7 +6915,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -6966,7 +6973,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -7106,7 +7113,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = session.messages.clone();
         let mut staged = StagedToolUseTurn {
@@ -7312,7 +7319,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_b: Vec<Message> = Vec::new();
         let mut staged_b = StagedToolUseTurn {
@@ -7418,7 +7425,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_a = session_a.messages.clone();
         let mut staged_a = StagedToolUseTurn {
@@ -7609,7 +7616,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7680,7 +7687,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7741,6 +7748,124 @@ mod tests {
         assert_eq!(tail[0].role, Role::User);
         assert_eq!(tail[0].content.text_content(), "current turn");
         assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
+    }
+
+    fn orphan_tool_result_message(tool_use_id: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                tool_name: "noop".to_string(),
+                content: "orphan".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn message_contains_tool_result(message: &Message, expected_id: &str) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == expected_id
+                )
+            }),
+            MessageContent::Text(_) => false,
+        }
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_cold_load_triggers_repair() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let messages = vec![
+            orphan_tool_result_message("missing"),
+            Message::user("real turn"),
+        ];
+
+        let conn = Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        store
+            .save_session(&Session {
+                id: session_id,
+                agent_id,
+                messages,
+                context_window_tokens: 0,
+                label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+            })
+            .unwrap();
+
+        let mut loaded = store.get_session(session_id).unwrap().unwrap();
+        assert_eq!(loaded.last_repaired_generation, None);
+
+        let prepared = prepare_llm_messages(
+            &manifest,
+            &mut loaded,
+            "real turn",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(
+            loaded.last_repaired_generation,
+            Some(loaded.messages_generation)
+        );
+        assert_eq!(prepared.repair_stats.orphaned_results_removed, 1);
+        assert!(!prepared
+            .messages
+            .iter()
+            .any(|message| message_contains_tool_result(message, "missing")));
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_generation_skip_equivalence() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: vec![Message::user("hello"), Message::assistant("hi")],
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+
+        let first = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+        let first_generation = session.messages_generation;
+        let second = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(first.messages.len(), second.messages.len());
+        for (left, right) in first.messages.iter().zip(&second.messages) {
+            assert_eq!(left.role, right.role);
+            assert_eq!(left.content.text_content(), right.content.text_content());
+        }
+        assert_eq!(session.messages_generation, first_generation);
+        assert_eq!(
+            second.repair_stats,
+            crate::session_repair::RepairStats::default()
+        );
+        assert_eq!(session.last_repaired_generation, Some(first_generation));
     }
 
     /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
@@ -7827,7 +7952,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -8183,7 +8308,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8246,7 +8371,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8308,7 +8433,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -8361,7 +8486,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8419,7 +8544,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8479,7 +8604,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8541,7 +8666,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8603,7 +8728,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8742,7 +8867,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -8798,7 +8923,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -8860,7 +8985,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -9636,7 +9761,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -9718,7 +9843,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -9782,7 +9907,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -10094,7 +10219,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -10155,7 +10280,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10215,7 +10340,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -10278,7 +10403,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10353,7 +10478,7 @@ mod tests {
             context_window_tokens: 0,
             label: None,
             messages_generation: 0,
-            last_repaired_generation: 0,
+            last_repaired_generation: None,
         }
     }
 
