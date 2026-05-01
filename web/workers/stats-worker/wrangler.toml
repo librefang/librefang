@@ -1,11 +1,12 @@
 name = "librefang-github-stats"
 main = "index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-01-01"
 account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
 
-[[kv_namespaces]]
-binding = "KV"
-id = "5d12c668469a4dd39f3b2b378cc20036"
+[[d1_databases]]
+binding = "DB"
+database_name = "librefang-marketplace"
+database_id = "91df0bc6-e658-4463-9eba-22d5476d420a"
 
 # Runs daily at UTC 00:00
 [triggers]

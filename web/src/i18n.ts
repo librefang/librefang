@@ -146,7 +146,9 @@ export interface Translation {
     lastUpdated: string
     copyLink: string
     trending: string
-    sort?: { label: string; popular: string; nameAsc: string; nameDesc: string; trending: string }
+    sort?: { label: string; popular: string; nameAsc: string; nameDesc: string; trending: string; downloads?: string }
+    downloads?: string
+    thisWeek?: string
     onThisPage: string
     previous: string
     next: string
@@ -427,7 +429,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Zaktualizowano',
       copyLink: 'Skopiuj link do tej sekcji',
       trending: 'Na czasie',
-      sort: { label: 'Sortuj', popular: 'Popularne', nameAsc: 'Nazwa A–Z', nameDesc: 'Nazwa Z–A', trending: 'Najczęściej klikane' },
+      downloads: 'pobrań',
+      thisWeek: 'w tym tygodniu',
+      sort: { label: 'Sortuj', popular: 'Popularne', nameAsc: 'Nazwa A–Z', nameDesc: 'Nazwa Z–A', trending: 'Najczęściej klikane', downloads: 'Najczęściej pobierane' },
       onThisPage: 'Na tej stronie',
       previous: 'Poprzednia',
       next: 'Następna',
@@ -698,7 +702,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Updated',
       copyLink: 'Copy link to this section',
       trending: 'Trending',
-      sort: { label: 'Sort', popular: 'Popular', nameAsc: 'Name A–Z', nameDesc: 'Name Z–A', trending: 'Most clicked' },
+      downloads: 'downloads',
+      thisWeek: 'this week',
+      sort: { label: 'Sort', popular: 'Popular', nameAsc: 'Name A–Z', nameDesc: 'Name Z–A', trending: 'Most clicked', downloads: 'Most downloaded' },
       onThisPage: 'On this page',
       previous: 'Previous',
       next: 'Next',
@@ -944,7 +950,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新于',
       copyLink: '复制此段链接',
       trending: '热门',
-      sort: { label: '排序', popular: '热门优先', nameAsc: '名称 A–Z', nameDesc: '名称 Z–A', trending: '点击量' },
+      downloads: '次下载',
+      thisWeek: '本周新增',
+      sort: { label: '排序', popular: '热门优先', nameAsc: '名称 A–Z', nameDesc: '名称 Z–A', trending: '点击量', downloads: '下载量最多' },
       onThisPage: '本页导航',
       previous: '上一个',
       next: '下一个',
@@ -1190,7 +1198,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新於',
       copyLink: '複製此段連結',
       trending: '熱門',
-      sort: { label: '排序', popular: '熱門優先', nameAsc: '名稱 A–Z', nameDesc: '名稱 Z–A', trending: '點擊量' },
+      downloads: '次下載',
+      thisWeek: '本週新增',
+      sort: { label: '排序', popular: '熱門優先', nameAsc: '名稱 A–Z', nameDesc: '名稱 Z–A', trending: '點擊量', downloads: '下載量最多' },
       onThisPage: '本頁導覽',
       previous: '上一個',
       next: '下一個',
@@ -1436,7 +1446,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '更新',
       copyLink: 'このセクションのリンクをコピー',
       trending: '人気',
-      sort: { label: '並び替え', popular: '人気順', nameAsc: '名前 A–Z', nameDesc: '名前 Z–A', trending: 'クリック数' },
+      downloads: 'ダウンロード',
+      thisWeek: '今週',
+      sort: { label: '並び替え', popular: '人気順', nameAsc: '名前 A–Z', nameDesc: '名前 Z–A', trending: 'クリック数', downloads: 'ダウンロード数順' },
       onThisPage: 'このページ',
       previous: '前へ',
       next: '次へ',
@@ -1682,7 +1694,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: '업데이트',
       copyLink: '이 섹션 링크 복사',
       trending: '인기',
-      sort: { label: '정렬', popular: '인기순', nameAsc: '이름 A–Z', nameDesc: '이름 Z–A', trending: '클릭수' },
+      downloads: '다운로드',
+      thisWeek: '이번 주',
+      sort: { label: '정렬', popular: '인기순', nameAsc: '이름 A–Z', nameDesc: '이름 Z–A', trending: '클릭수', downloads: '다운로드 많은 순' },
       onThisPage: '이 페이지',
       previous: '이전',
       next: '다음',
@@ -1928,7 +1942,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Aktualisiert',
       copyLink: 'Link zu diesem Abschnitt kopieren',
       trending: 'Beliebt',
-      sort: { label: 'Sortieren', popular: 'Beliebt', nameAsc: 'Name A–Z', nameDesc: 'Name Z–A', trending: 'Meistgeklickt' },
+      downloads: 'Downloads',
+      thisWeek: 'diese Woche',
+      sort: { label: 'Sortieren', popular: 'Beliebt', nameAsc: 'Name A–Z', nameDesc: 'Name Z–A', trending: 'Meistgeklickt', downloads: 'Meistgeladen' },
       onThisPage: 'Auf dieser Seite',
       previous: 'Zurück',
       next: 'Weiter',
@@ -2174,7 +2190,9 @@ export const translations: Record<string, Translation> = {
       lastUpdated: 'Actualizado',
       copyLink: 'Copiar enlace a esta sección',
       trending: 'Tendencia',
-      sort: { label: 'Ordenar', popular: 'Populares', nameAsc: 'Nombre A–Z', nameDesc: 'Nombre Z–A', trending: 'Más clics' },
+      downloads: 'descargas',
+      thisWeek: 'esta semana',
+      sort: { label: 'Ordenar', popular: 'Populares', nameAsc: 'Nombre A–Z', nameDesc: 'Nombre Z–A', trending: 'Más clics', downloads: 'Más descargados' },
       onThisPage: 'En esta página',
       previous: 'Anterior',
       next: 'Siguiente',
