@@ -17,40 +17,9 @@
 //! requiring back-dated timestamps (which would need test-only access
 //! to the AuditLog internals).
 
-use librefang_kernel::LibreFangKernel;
 use librefang_runtime::audit::AuditAction;
-use librefang_types::config::{AuditRetentionConfig, DefaultModelConfig, KernelConfig};
+use librefang_testing::MockKernelBuilder;
 use std::sync::Arc;
-
-fn test_config(name: &str) -> KernelConfig {
-    let tmp = std::env::temp_dir().join(format!("librefang-audit-retention-{name}"));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let mut cfg = KernelConfig {
-        home_dir: tmp.clone(),
-        data_dir: tmp.join("data"),
-        default_model: DefaultModelConfig {
-            provider: "groq".to_string(),
-            model: "llama-3.3-70b-versatile".to_string(),
-            api_key_env: "GROQ_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-    cfg.audit.retention = AuditRetentionConfig {
-        trim_interval_secs: Some(1),
-        // Empty per-action map — we exercise the in-memory cap path,
-        // which is independent of action timestamps. Default = preserve
-        // forever for any action not listed.
-        retention_days_by_action: Default::default(),
-        max_in_memory_entries: Some(10),
-    };
-    cfg
-}
 
 // `start_background_agents` reaches into kernel paths that call
 // `tokio::task::block_in_place` (e.g. the synchronous toml_edit /
@@ -60,8 +29,16 @@ fn test_config(name: &str) -> KernelConfig {
 // at kernel/mod.rs:3610.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_kernel_boot_with_retention_config_starts_trim_task() {
-    let cfg = test_config("trim-task");
-    let kernel = Arc::new(LibreFangKernel::boot_with_config(cfg).expect("kernel boots"));
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "groq".to_string();
+            c.default_model.model = "llama-3.3-70b-versatile".to_string();
+            c.default_model.api_key_env = "GROQ_API_KEY".to_string();
+            c.audit.retention.trim_interval_secs = Some(1);
+            c.audit.retention.max_in_memory_entries = Some(10);
+        })
+        .build();
+    let kernel = Arc::new(kernel);
 
     // Seed 50 audit entries — well over the cap of 10. Use RoleChange
     // so no per-action retention rule could kick in (we want the cap

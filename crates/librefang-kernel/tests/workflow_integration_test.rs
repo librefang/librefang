@@ -17,27 +17,9 @@ use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
 };
 use librefang_kernel::LibreFangKernel;
+use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::AgentManifest;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
-
-fn test_config(provider: &str, model: &str, api_key_env: &str) -> KernelConfig {
-    let tmp = tempfile::tempdir().unwrap();
-    KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: provider.to_string(),
-            model: model.to_string(),
-            api_key_env: api_key_env.to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    }
-}
 
 fn spawn_test_agent(
     kernel: &LibreFangKernel,
@@ -73,8 +55,13 @@ memory_write = ["self.*"]
 /// Test that workflow registration and agent resolution work at the kernel level.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_workflow_register_and_resolve() {
-    let config = test_config("ollama", "test-model", "OLLAMA_API_KEY");
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test-model".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+        })
+        .build();
     let kernel = Arc::new(kernel);
 
     // Spawn agents
@@ -193,8 +180,13 @@ memory_write = ["self.*"]
 /// Test workflow with agent referenced by ID.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_workflow_agent_by_id() {
-    let config = test_config("ollama", "test-model", "OLLAMA_API_KEY");
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test-model".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+        })
+        .build();
 
     let manifest: AgentManifest = toml::from_str(
         r#"
@@ -255,8 +247,13 @@ memory_write = ["self.*"]
 async fn test_trigger_registration_with_kernel() {
     use librefang_kernel::triggers::TriggerPattern;
 
-    let config = test_config("ollama", "test-model", "OLLAMA_API_KEY");
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "ollama".to_string();
+            c.default_model.model = "test-model".to_string();
+            c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
+        })
+        .build();
 
     let manifest: AgentManifest = toml::from_str(
         r#"
@@ -330,8 +327,13 @@ async fn test_workflow_e2e_with_groq() {
         return;
     }
 
-    let config = test_config("groq", "llama-3.3-70b-versatile", "GROQ_API_KEY");
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let (kernel, _tmp) = MockKernelBuilder::new()
+        .with_config(|c| {
+            c.default_model.provider = "groq".to_string();
+            c.default_model.model = "llama-3.3-70b-versatile".to_string();
+            c.default_model.api_key_env = "GROQ_API_KEY".to_string();
+        })
+        .build();
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
 
