@@ -1,5 +1,61 @@
 # LibreFang — Agent Instructions
 
+## ⚠️ Before any work: verify you are in a worktree, not the main tree
+
+The very first action in any task that will edit files **must** be:
+```bash
+pwd && git rev-parse --git-dir
+```
+If `pwd` ends in `/Workspace/libre/librefang` (or wherever the user keeps the
+main clone) **and** `git rev-parse --git-dir` prints `.git` (a directory, not
+a `gitdir: ...` file), you are in the main worktree. **Stop.** Run:
+```bash
+git worktree add /tmp/librefang-<feature> -b <feature-branch> origin/main
+```
+and continue all work from that path. The `forbid-main-worktree` hook
+(`.claude/hooks/forbid-main-worktree.sh`) will block edits and mutating git
+commands targeted at the main tree if you forget — but the hook is a safety
+net, not your plan.
+
+### Other AI safety hooks (`.claude/hooks/`)
+
+`guard-bash-safety.sh` (PreToolUse on Bash) blocks:
+- Force-push to `main` / `master` (incl. `+main` refspec) — get explicit user OK first
+- `--no-verify` / `--no-gpg-sign` on commit/push/rebase/merge/am/cherry-pick/pull
+- Staging known-sensitive files (`.env*`, `*.pem`, `*.p12`, `id_rsa`, `id_ed25519`,
+  `credentials*`, `secrets*`, `vault_*.key`); also broad `git add -A` / `git add .`
+  (CLAUDE.md global rule: stage specific paths)
+- Commit messages containing Claude attribution (`Co-Authored-By: Claude`,
+  `🤖 Generated with [Claude Code]`, etc.)
+- `rm -rf` against dangerous targets (`/`, `~`, `$HOME`, `target`, `.git`,
+  `/Users`, `/usr`, `/etc`, `/var`, `/opt`, …)
+- Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
+  (port 4545 contention with the user's session — Live Integration Testing is human-only)
+- `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
+- `gh pr merge` and `gh pr merge --admin` (publish-level + branch-protection bypass)
+
+`session-start-worktree-check.sh` (SessionStart) emits a banner telling
+the model whether the session started in the main tree or a linked worktree,
+and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
+
+### Version-controlled git-side hooks (`.githooks/`)
+
+These run inside `git` itself (regardless of which tool invoked the commit),
+giving defense in depth on top of the Claude Code PreToolUse layer.
+
+- `pre-commit` — runs `cargo fmt -- --check` on staged Rust files; auto-formats
+  and asks you to re-stage if anything was off.
+- `commit-msg` — rejects commit messages containing Claude / Anthropic
+  attribution (catches heredocs and `git commit -F file` that the PreToolUse
+  Bash hook cannot see).
+
+**Enable once per clone:**
+```bash
+bash scripts/install-githooks.sh   # sets git config core.hooksPath .githooks
+```
+The `session-start-worktree-check.sh` banner will remind you if this is
+not yet configured.
+
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`
@@ -16,15 +72,27 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`
 
 ## Build & Verify Workflow
-After every feature implementation, run ALL THREE checks:
+**Do NOT run `cargo build`, `cargo run`, or `cargo install` locally.**
+**`cargo test` is allowed only when scoped with `-p <crate>` / `--package <crate>`** —
+the unscoped, workspace-wide form is blocked because it contends with the user's
+other sessions on the shared `target/` directory. Full workspace build / test
+runs in CI.
+
+After every change, run:
 ```bash
-cargo build --workspace --lib          # Must compile (use --lib if exe is locked)
-cargo test --workspace                 # All tests must pass (currently 2100+)
+cargo check --workspace --lib                          # Compile-check only
 cargo clippy --workspace --all-targets -- -D warnings  # Zero warnings
+cargo test -p <crate>                                  # Only when verifying behavior in one crate
 ```
 
 ## MANDATORY: Live Integration Testing
-**After implementing any new endpoint, feature, or wiring change, you MUST run live integration tests.** Unit tests alone are not enough — they can pass while the feature is actually dead code. Live tests catch:
+**This section is a HUMAN workflow.** Claude must NOT execute these steps —
+they require `cargo build` and starting a long-lived daemon, both forbidden
+to the AI per the rules above. Claude's role is to prepare exact commands /
+payloads and ask the user to run them, then read the user's pasted output.
+Do not auto-spawn the daemon or `cargo build --release` yourself.
+
+**After implementing any new endpoint, feature, or wiring change, the user MUST run live integration tests.** Unit tests alone are not enough — they can pass while the feature is actually dead code. Live tests catch:
 - Missing route registrations in server.rs
 - Config fields not being deserialized from TOML
 - Type mismatches between kernel and API layers
