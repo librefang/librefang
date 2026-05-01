@@ -208,7 +208,8 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
             "Session repair applied before save"
         );
     }
-    session.messages = repaired;
+    session.set_messages(repaired);
+    session.last_repaired_generation = Some(session.messages_generation);
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
@@ -411,7 +412,10 @@ fn safe_trim_messages(
     agent_name: &str,
     user_message: &str,
     max_history: usize,
-) {
+) -> (bool, bool) {
+    let mut working_mutated = false;
+    let mut session_mutated = false;
+
     // Trim the persistent session messages first so the truncated version is
     // saved back to the database, preventing reload-OOM on next boot.
     if session_messages.len() > max_history {
@@ -435,6 +439,7 @@ fn safe_trim_messages(
         );
 
         session_messages.drain(..trim_point);
+        session_mutated = true;
 
         for (i, msg) in rescued.into_iter().enumerate() {
             session_messages.insert(i, msg);
@@ -442,8 +447,10 @@ fn safe_trim_messages(
     }
 
     if messages.len() <= max_history {
-        return;
+        return (working_mutated, session_mutated);
     }
+
+    working_mutated = true;
 
     let desired_trim = messages.len() - max_history;
 
@@ -501,6 +508,8 @@ fn safe_trim_messages(
         *messages = system_msgs;
         messages.push(Message::user(user_message));
     }
+
+    (working_mutated, session_mutated)
 }
 
 /// Strip base64 data from image blocks in session messages that the LLM has
@@ -508,10 +517,14 @@ fn safe_trim_messages(
 ///
 /// Each image block (~56K tokens of base64) is replaced with a small text
 /// note so the conversation context is preserved without token bloat.
-fn strip_processed_image_data(messages: &mut [Message]) {
+fn strip_processed_image_data(messages: &mut [Message]) -> bool {
+    let mut mutated = false;
+
     for msg in messages.iter_mut() {
-        msg.content.strip_images();
+        mutated |= msg.content.strip_images();
     }
+
+    mutated
 }
 
 fn accumulate_token_usage(total_usage: &mut TokenUsage, usage: &TokenUsage) {
@@ -778,7 +791,7 @@ impl StagedToolUseTurn {
         self.committed = true;
 
         // Step 1: push the assistant message carrying the tool_use blocks.
-        session.messages.push(self.assistant_msg.clone());
+        session.push_message(self.assistant_msg.clone());
         messages.push(self.assistant_msg.clone());
 
         // Step 2: degenerate-case short-circuit — if no result blocks
@@ -1277,7 +1290,7 @@ fn handle_mid_turn_signal(
     };
     if let Some(text) = injected_text {
         let inject_msg = Message::user(&text);
-        session.messages.push(inject_msg.clone());
+        session.push_message(inject_msg.clone());
         messages.push(inject_msg);
     }
     Some(flushed_outcomes)
@@ -1414,7 +1427,7 @@ fn finalize_tool_use_results(
         pinned: pin_this,
         timestamp: Some(chrono::Utc::now()),
     };
-    session.messages.push(tool_results_msg.clone());
+    session.push_message(tool_results_msg.clone());
     messages.push(tool_results_msg);
 
     outcome_summary
@@ -1472,7 +1485,7 @@ fn apply_approval_resolution_signal(
         false
     }
 
-    let mut matched = false;
+    let mut session_matched = false;
     for msg in session.messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1481,10 +1494,14 @@ fn apply_approval_resolution_signal(
             result_is_error,
             result_status,
         ) {
-            matched = true;
+            session_matched = true;
             break;
         }
     }
+    if session_matched {
+        session.mark_messages_mutated();
+    }
+    let mut matched = session_matched;
     for msg in messages.iter_mut().rev() {
         if patch_message_blocks(
             msg,
@@ -1506,11 +1523,13 @@ fn apply_approval_resolution_signal(
 /// previous turns (e.g. images that survived a crash or session reload).
 /// The last user message is preserved so the LLM can see any freshly
 /// attached image on the current turn.
-fn strip_prior_image_data(messages: &mut [Message]) {
+fn strip_prior_image_data(messages: &mut [Message]) -> bool {
     // Find the index of the last user message
     let last_user_idx = messages
         .iter()
         .rposition(|m| m.role == Role::User && m.content.has_images());
+
+    let mut mutated = false;
 
     for (i, msg) in messages.iter_mut().enumerate() {
         // Skip the last user message that contains images — it hasn't been
@@ -1518,8 +1537,10 @@ fn strip_prior_image_data(messages: &mut [Message]) {
         if Some(i) == last_user_idx {
             continue;
         }
-        msg.content.strip_images();
+        mutated |= msg.content.strip_images();
     }
+
+    mutated
 }
 
 /// Strip a provider prefix from a model ID before sending to the API.
@@ -1981,9 +2002,7 @@ fn push_filtered_user_message(
                 );
             }
         }
-        session
-            .messages
-            .push(Message::user_with_blocks(filtered_blocks));
+        session.push_message(Message::user_with_blocks(filtered_blocks));
     } else {
         let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
         let final_message = if prefix.is_empty() {
@@ -1991,7 +2010,7 @@ fn push_filtered_user_message(
         } else {
             format!("{prefix}{filtered_message}")
         };
-        session.messages.push(Message::user(&final_message));
+        session.push_message(Message::user(&final_message));
     }
 }
 
@@ -2500,12 +2519,17 @@ fn prepare_llm_messages(
     memory_context_msg: Option<String>,
     max_history: usize,
 ) -> PreparedMessages {
-    let llm_messages: Vec<Message> = session
-        .messages
-        .iter()
-        .filter(|m| m.role != Role::System)
-        .cloned()
-        .collect();
+    let has_system_messages = session.messages.iter().any(|m| m.role == Role::System);
+    let llm_messages: Vec<Message> = if has_system_messages {
+        session
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .cloned()
+            .collect()
+    } else {
+        session.messages.clone()
+    };
 
     debug!(
         agent = %manifest.name,
@@ -2515,8 +2539,15 @@ fn prepare_llm_messages(
         "Pre-repair message snapshot (prepare_llm_messages)"
     );
 
-    let (mut messages, repair_stats) =
-        crate::session_repair::validate_and_repair_with_stats(&llm_messages);
+    let (mut messages, repair_stats) = if session.last_repaired_generation
+        == Some(session.messages_generation)
+    {
+        (llm_messages, crate::session_repair::RepairStats::default())
+    } else {
+        let (msgs, stats) = crate::session_repair::validate_and_repair_with_stats(&llm_messages);
+        session.last_repaired_generation = Some(session.messages_generation);
+        (msgs, stats)
+    };
 
     if let Some(cc_msg) = manifest
         .metadata
@@ -2537,7 +2568,7 @@ fn prepare_llm_messages(
         );
     }
 
-    safe_trim_messages(
+    let (_working_trimmed, session_trimmed) = safe_trim_messages(
         &mut messages,
         &mut session.messages,
         &manifest.name,
@@ -2545,8 +2576,11 @@ fn prepare_llm_messages(
         max_history,
     );
     let new_messages_start = session.messages.len().saturating_sub(1);
-    strip_prior_image_data(&mut messages);
-    strip_prior_image_data(&mut session.messages);
+    let _working_stripped = strip_prior_image_data(&mut messages);
+    let session_stripped = strip_prior_image_data(&mut session.messages);
+    if session_trimmed || session_stripped {
+        session.mark_messages_mutated();
+    }
 
     PreparedMessages {
         messages,
@@ -2892,8 +2926,7 @@ async fn finalize_successful_end_turn(
     mut end_turn: FinalizeEndTurnResultData,
 ) -> LibreFangResult<AgentLoopResult> {
     ctx.session
-        .messages
-        .push(Message::assistant(end_turn.final_response.clone()));
+        .push_message(Message::assistant(end_turn.final_response.clone()));
 
     let keep_recent = ctx
         .manifest
@@ -2901,7 +2934,11 @@ async fn finalize_successful_end_turn(
         .as_ref()
         .and_then(|a| a.heartbeat_keep_recent)
         .unwrap_or(10);
+    let before_prune_len = ctx.session.messages.len();
     crate::session_repair::prune_heartbeat_turns(&mut ctx.session.messages, keep_recent);
+    if ctx.session.messages.len() != before_prune_len {
+        ctx.session.mark_messages_mutated();
+    }
 
     // Fork turns are ephemeral — skip the persist so the parent agent's
     // canonical session history isn't polluted by derivative calls like
@@ -3503,39 +3540,26 @@ pub async fn run_agent_loop(
                     opts.aux_client.as_deref(),
                 )
                 .await;
-            if !compression_events.is_empty() {
+
+            let had_soft_compression = !compression_events.is_empty();
+            let mut hard_trimmed = false;
+
+            if had_soft_compression {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
-                // Ensure history starts with a user turn after soft compression.
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                // Keep session.messages in sync with the compressed LLM working copy
-                // so subsequent turns don't re-read the uncompressed history.
-                session.messages = messages.clone();
-                // Re-estimate after soft compression; only invoke hard trim if still
-                // above the 70% threshold used by recover_from_overflow.
-                let remaining_tokens = crate::compactor::estimate_token_count(
-                    &messages,
-                    Some(&system_prompt),
-                    Some(available_tools),
-                );
-                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
-                if remaining_tokens > hard_trim_threshold {
-                    let recovery = recover_from_overflow(
-                        &mut messages,
-                        &system_prompt,
-                        available_tools,
-                        ctx_window,
-                    );
-                    if recovery == RecoveryStage::FinalError {
-                        warn!("Context overflow unrecoverable — suggest /reset or /compact");
-                    }
-                    if recovery != RecoveryStage::None {
-                        messages = crate::session_repair::validate_and_repair(&messages);
-                        // Ensure history starts with a user turn after overflow recovery.
-                        messages = crate::session_repair::ensure_starts_with_user(messages);
-                    }
-                }
-            } else {
+            }
+
+            // Hard-trim only if still above threshold after soft compression
+            // and repair. Keep the pre-existing ordering so token estimation
+            // and recovery boundaries are computed on provider-valid history.
+            let remaining_tokens = crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            );
+            let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+            if remaining_tokens > hard_trim_threshold {
                 let recovery = recover_from_overflow(
                     &mut messages,
                     &system_prompt,
@@ -3545,11 +3569,17 @@ pub async fn run_agent_loop(
                 if recovery == RecoveryStage::FinalError {
                     warn!("Context overflow unrecoverable — suggest /reset or /compact");
                 }
-                if recovery != RecoveryStage::None {
-                    messages = crate::session_repair::validate_and_repair(&messages);
-                    // Ensure history starts with a user turn after overflow recovery.
-                    messages = crate::session_repair::ensure_starts_with_user(messages);
-                }
+                hard_trimmed = recovery != RecoveryStage::None;
+            }
+
+            // Repair again only if hard trim ran; trimming can cut across a
+            // tool-call boundary even when the pre-trim history was valid.
+            if hard_trimmed {
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
+            }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
             }
             apply_context_guard(&mut messages, &context_budget, available_tools);
         }
@@ -3637,8 +3667,10 @@ pub async fn run_agent_loop(
         };
 
         // Strip image base64 from earlier messages (LLM already processed them)
-        strip_processed_image_data(&mut messages);
-        strip_processed_image_data(&mut session.messages);
+        let _ = strip_processed_image_data(&mut messages);
+        if strip_processed_image_data(&mut session.messages) {
+            session.mark_messages_mutated();
+        }
 
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
@@ -4068,7 +4100,7 @@ pub async fn run_agent_loop(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
-                    session.messages.push(Message::assistant(&text));
+                    session.push_message(Message::assistant(&text));
                     if !opts.is_fork {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
@@ -4121,9 +4153,9 @@ pub async fn run_agent_loop(
                 }
                 // Model hit token limit — add partial response and continue
                 let text = response.text();
-                session.messages.push(Message::assistant(&text));
+                session.push_message(Message::assistant(&text));
                 messages.push(Message::assistant(&text));
-                session.messages.push(Message::user("Please continue."));
+                session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit, continuing");
             }
@@ -4142,7 +4174,7 @@ pub async fn run_agent_loop(
                     iteration,
                     "LLM response blocked by provider safety / content filter"
                 );
-                session.messages.push(Message::assistant(&partial));
+                session.push_message(Message::assistant(&partial));
                 if !opts.is_fork {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
@@ -4874,8 +4906,6 @@ pub async fn run_agent_loop_streaming(
                 .await?;
             result.recovery
         } else {
-            // LLM-based soft compression first, then hard overflow recovery.
-            // Routes through the aux client when one is wired (issue #3314).
             let (compressed, compression_events) = context_compressor
                 .compress_if_needed_with_aux(
                     messages.clone(),
@@ -4887,55 +4917,44 @@ pub async fn run_agent_loop_streaming(
                     opts.aux_client.as_deref(),
                 )
                 .await;
-            if !compression_events.is_empty() {
+
+            let had_soft_compression = !compression_events.is_empty();
+            let mut hard_trimmed = false;
+
+            if had_soft_compression {
                 messages = compressed;
                 messages = crate::session_repair::validate_and_repair(&messages);
-                // Ensure history starts with a user turn after soft compression.
                 messages = crate::session_repair::ensure_starts_with_user(messages);
-                // Keep session.messages in sync with the compressed LLM working copy
-                // so subsequent turns don't re-read the uncompressed history.
-                session.messages = messages.clone();
-                // Re-estimate after soft compression; only invoke hard trim if still
-                // above the 70% threshold used by recover_from_overflow.
-                let remaining_tokens = crate::compactor::estimate_token_count(
-                    &messages,
-                    Some(&system_prompt),
-                    Some(available_tools),
-                );
-                let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
-                let recovery = if remaining_tokens > hard_trim_threshold {
-                    let r = recover_from_overflow(
-                        &mut messages,
-                        &system_prompt,
-                        available_tools,
-                        ctx_window,
-                    );
-                    if r != RecoveryStage::None {
-                        messages = crate::session_repair::validate_and_repair(&messages);
-                        // Ensure history starts with a user turn after overflow recovery.
-                        messages = crate::session_repair::ensure_starts_with_user(messages);
-                    }
-                    r
-                } else {
-                    RecoveryStage::None
-                };
-                apply_context_guard(&mut messages, &context_budget, available_tools);
-                recovery
-            } else {
-                let recovery = recover_from_overflow(
+            }
+
+            let remaining_tokens = crate::compactor::estimate_token_count(
+                &messages,
+                Some(&system_prompt),
+                Some(available_tools),
+            );
+            let hard_trim_threshold = (ctx_window as f64 * 0.70) as usize;
+            let recovery = if remaining_tokens > hard_trim_threshold {
+                let r = recover_from_overflow(
                     &mut messages,
                     &system_prompt,
                     available_tools,
                     ctx_window,
                 );
-                if recovery != RecoveryStage::None {
-                    messages = crate::session_repair::validate_and_repair(&messages);
-                    // Ensure history starts with a user turn after overflow recovery.
-                    messages = crate::session_repair::ensure_starts_with_user(messages);
-                }
-                apply_context_guard(&mut messages, &context_budget, available_tools);
-                recovery
+                hard_trimmed = r != RecoveryStage::None;
+                r
+            } else {
+                RecoveryStage::None
+            };
+
+            if hard_trimmed {
+                messages = crate::session_repair::validate_and_repair(&messages);
+                messages = crate::session_repair::ensure_starts_with_user(messages);
             }
+            if had_soft_compression {
+                session.set_messages(messages.clone());
+            }
+            apply_context_guard(&mut messages, &context_budget, available_tools);
+            recovery
         };
         match &recovery {
             RecoveryStage::None => {}
@@ -5054,7 +5073,7 @@ pub async fn run_agent_loop_streaming(
                          The user's request could not be completed. \
                          Any partial output was already sent to the user.]"
                     );
-                    session.messages.push(Message::assistant(note));
+                    session.push_message(Message::assistant(note));
                     repair_session_before_save(session, agent_id_str.as_str(), "streaming_timeout");
                     if !opts.is_fork {
                         if let Err(save_err) = memory.save_session_async(session).await {
@@ -5086,8 +5105,10 @@ pub async fn run_agent_loop_streaming(
         };
 
         // Strip image base64 from earlier messages (LLM already processed them)
-        strip_processed_image_data(&mut messages);
-        strip_processed_image_data(&mut session.messages);
+        let _ = strip_processed_image_data(&mut messages);
+        if strip_processed_image_data(&mut session.messages) {
+            session.mark_messages_mutated();
+        }
 
         // Recover tool calls output as text (streaming path)
         let mut tools_recovered_from_text = false;
@@ -5539,7 +5560,7 @@ pub async fn run_agent_loop_streaming(
                     let (cleaned_text, parsed_directives) =
                         crate::reply_directives::parse_directives(&text);
                     let text = cleaned_text;
-                    session.messages.push(Message::assistant(&text));
+                    session.push_message(Message::assistant(&text));
                     if !opts.is_fork {
                         if let Err(e) = memory.save_session_async(session).await {
                             warn!("Failed to save session on max continuations: {e}");
@@ -5592,9 +5613,9 @@ pub async fn run_agent_loop_streaming(
                     });
                 }
                 let text = response.text();
-                session.messages.push(Message::assistant(&text));
+                session.push_message(Message::assistant(&text));
                 messages.push(Message::assistant(&text));
-                session.messages.push(Message::user("Please continue."));
+                session.push_message(Message::user("Please continue."));
                 messages.push(Message::user("Please continue."));
                 warn!(iteration, "Max tokens hit (streaming), continuing");
             }
@@ -5611,7 +5632,7 @@ pub async fn run_agent_loop_streaming(
                     iteration,
                     "LLM response blocked by provider safety / content filter (streaming)"
                 );
-                session.messages.push(Message::assistant(&partial));
+                session.push_message(Message::assistant(&partial));
                 if !opts.is_fork {
                     if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on content filter: {e}");
@@ -6376,8 +6397,11 @@ mod tests {
     use super::*;
     use crate::llm_driver::{CompletionResponse, LlmError};
     use async_trait::async_trait;
+    use librefang_memory::session::SessionStore;
     use librefang_types::tool::ToolCall;
+    use rusqlite::Connection;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_max_iterations_constant() {
@@ -6809,6 +6833,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig {
             mode: librefang_types::config::PrivacyMode::Redact,
@@ -6852,6 +6878,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let privacy = librefang_types::config::PrivacyConfig::default();
         let filter = crate::pii_filter::PiiFilter::new(&privacy.redact_patterns);
@@ -6925,6 +6953,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut tool_result_blocks = Vec::new();
@@ -6951,6 +6981,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -7007,6 +7039,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -7145,6 +7179,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = session.messages.clone();
         let mut staged = StagedToolUseTurn {
@@ -7349,6 +7385,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_b: Vec<Message> = Vec::new();
         let mut staged_b = StagedToolUseTurn {
@@ -7453,6 +7491,8 @@ mod tests {
             }],
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages_a = session_a.messages.clone();
         let mut staged_a = StagedToolUseTurn {
@@ -7642,6 +7682,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7711,6 +7753,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         for i in 0..13 {
@@ -7771,6 +7815,124 @@ mod tests {
         assert_eq!(tail[0].role, Role::User);
         assert_eq!(tail[0].content.text_content(), "current turn");
         assert_eq!(new_messages_start, session.messages.len().saturating_sub(1));
+    }
+
+    fn orphan_tool_result_message(tool_use_id: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                tool_name: "noop".to_string(),
+                content: "orphan".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::default(),
+                approval_request_id: None,
+            }]),
+            pinned: false,
+            timestamp: None,
+        }
+    }
+
+    fn message_contains_tool_result(message: &Message, expected_id: &str) -> bool {
+        match &message.content {
+            MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == expected_id
+                )
+            }),
+            MessageContent::Text(_) => false,
+        }
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_cold_load_triggers_repair() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let session_id = librefang_types::agent::SessionId::new();
+        let messages = vec![
+            orphan_tool_result_message("missing"),
+            Message::user("real turn"),
+        ];
+
+        let conn = Connection::open_in_memory().unwrap();
+        librefang_memory::migration::run_migrations(&conn).unwrap();
+        let store = SessionStore::new(Arc::new(Mutex::new(conn)));
+        store
+            .save_session(&Session {
+                id: session_id,
+                agent_id,
+                messages,
+                context_window_tokens: 0,
+                label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
+            })
+            .unwrap();
+
+        let mut loaded = store.get_session(session_id).unwrap().unwrap();
+        assert_eq!(loaded.last_repaired_generation, None);
+
+        let prepared = prepare_llm_messages(
+            &manifest,
+            &mut loaded,
+            "real turn",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(
+            loaded.last_repaired_generation,
+            Some(loaded.messages_generation)
+        );
+        assert_eq!(prepared.repair_stats.orphaned_results_removed, 1);
+        assert!(!prepared
+            .messages
+            .iter()
+            .any(|message| message_contains_tool_result(message, "missing")));
+    }
+
+    #[test]
+    fn test_prepare_llm_messages_generation_skip_equivalence() {
+        let manifest = test_manifest();
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: vec![Message::user("hello"), Message::assistant("hi")],
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+
+        let first = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+        let first_generation = session.messages_generation;
+        let second = prepare_llm_messages(
+            &manifest,
+            &mut session,
+            "hello",
+            None,
+            DEFAULT_MAX_HISTORY_MESSAGES,
+        );
+
+        assert_eq!(first.messages.len(), second.messages.len());
+        for (left, right) in first.messages.iter().zip(&second.messages) {
+            assert_eq!(left.role, right.role);
+            assert_eq!(left.content.text_content(), right.content.text_content());
+        }
+        assert_eq!(session.messages_generation, first_generation);
+        assert_eq!(
+            second.repair_stats,
+            crate::session_repair::RepairStats::default()
+        );
+        assert_eq!(session.last_repaired_generation, Some(first_generation));
     }
 
     /// Verifies that AgentLoopResult exposes a usable `new_messages_start`
@@ -7856,6 +8018,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let mut messages = Vec::new();
         let mut staged = StagedToolUseTurn {
@@ -8210,6 +8374,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8271,6 +8437,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8331,6 +8499,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -8382,6 +8552,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8438,6 +8610,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8496,6 +8670,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -8556,6 +8732,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(DirectiveDriver {
@@ -8616,6 +8794,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyAfterToolUseDriver::new());
@@ -8753,6 +8933,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyThenNormalDriver::new());
@@ -8807,6 +8989,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysEmptyDriver);
@@ -8867,6 +9051,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(EmptyMaxTokensDriver);
@@ -9641,6 +9827,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -9721,6 +9909,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(NormalDriver);
@@ -9783,6 +9973,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(TextToolCallDriver::new());
@@ -10093,6 +10285,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -10152,6 +10346,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10210,6 +10406,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(FailThenTextDriver::new());
@@ -10271,6 +10469,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
         let manifest = test_manifest();
         let driver: Arc<dyn LlmDriver> = Arc::new(AlwaysFailingToolDriver);
@@ -10344,6 +10544,8 @@ mod tests {
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         }
     }
 

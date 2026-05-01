@@ -4989,6 +4989,8 @@ system_prompt = "You are a helpful assistant."
             messages: Vec::new(),
             context_window_tokens: 0,
             label: Some("ephemeral /btw".to_string()),
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
 
         info!(
@@ -6145,6 +6147,8 @@ system_prompt = "You are a helpful assistant."
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         });
 
         // Lifecycle: emit SessionCreated only when get_session returned None.
@@ -7715,9 +7719,9 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
             });
-
-        // ── Session auto-reset policy check ────────────────────────────────
         // Evaluate the global session reset policy against this agent's
         // last_active timestamp.  The `force_session_wipe` flag on the entry
         // acts as an operator-forced hard-wipe signal that always wins
@@ -7753,7 +7757,10 @@ system_prompt = "You are a helpful assistant."
                         event = "session_reset",
                         "Auto-resetting session per policy"
                     );
-                    session.messages.clear();
+                    if !session.messages.is_empty() {
+                        session.messages.clear();
+                        session.mark_messages_mutated();
+                    }
                     // Persist the cleared session immediately so the next
                     // invocation loads an empty transcript from storage rather
                     // than re-loading the stale pre-reset messages.  Without
@@ -8378,6 +8385,7 @@ system_prompt = "You are a helpful assistant."
                 .rposition(|msg| msg.role == librefang_types::message::Role::Assistant)
                 .map(|idx| {
                     session.messages.remove(idx);
+                    session.mark_messages_mutated();
                     true
                 })
                 .unwrap_or(false);
@@ -9049,14 +9057,14 @@ system_prompt = "You are a helpful assistant."
             messages: export.messages,
             context_window_tokens: export.context_window_tokens,
             label: export.label,
+            messages_generation: 0,
+            last_repaired_generation: None,
         };
-
         self.memory
             .save_session(&new_session)
             .map_err(KernelError::LibreFang)?;
 
         info!(
-            agent_id = %agent_id,
             new_session_id = %new_session.id.0,
             imported_messages = new_session.messages.len(),
             "Imported session from export"
@@ -9112,7 +9120,7 @@ system_prompt = "You are a helpful assistant."
         // Phase 1: System-position injections.
         for inj in &all_injections {
             if inj.position == InjectionPosition::System && condition_met(&inj.condition) {
-                session.messages.push(Message::system(inj.content.clone()));
+                session.push_message(Message::system(inj.content.clone()));
                 debug!(
                     session_id = %session.id.0,
                     injection = %inj.name,
@@ -9124,7 +9132,7 @@ system_prompt = "You are a helpful assistant."
         // Phase 2: Legacy reset_prompt.
         if let Some(ref prompt) = cfg.session.reset_prompt {
             if !prompt.is_empty() {
-                session.messages.push(Message::system(prompt.clone()));
+                session.push_message(Message::system(prompt.clone()));
                 debug!(
                     session_id = %session.id.0,
                     "Injected session reset prompt"
@@ -9135,7 +9143,7 @@ system_prompt = "You are a helpful assistant."
         // Phase 3: AfterReset-position injections.
         for inj in &all_injections {
             if inj.position == InjectionPosition::AfterReset && condition_met(&inj.condition) {
-                session.messages.push(Message::system(inj.content.clone()));
+                session.push_message(Message::system(inj.content.clone()));
                 debug!(
                     session_id = %session.id.0,
                     injection = %inj.name,
@@ -9155,7 +9163,7 @@ system_prompt = "You are a helpful assistant."
         let pre_before_user_len = session.messages.len();
         for inj in &all_injections {
             if inj.position == InjectionPosition::BeforeUser && condition_met(&inj.condition) {
-                session.messages.push(Message::system(inj.content.clone()));
+                session.push_message(Message::system(inj.content.clone()));
                 debug!(
                     session_id = %session.id.0,
                     injection = %inj.name,
@@ -9174,6 +9182,7 @@ system_prompt = "You are a helpful assistant."
                 let after_len = session.messages.len();
                 if after_len > pre_before_user_len {
                     session.messages.truncate(pre_before_user_len);
+                    session.mark_messages_mutated();
                 }
                 tracing::error!(
                     session_id = %session.id.0,
@@ -10088,6 +10097,8 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
             });
 
         let config = CompactionConfig::from_toml(&cfg.compaction);
@@ -10164,7 +10175,7 @@ system_prompt = "You are a helpful assistant."
 
         // Also update the regular session with the repaired messages
         let mut updated_session = session;
-        updated_session.messages = repaired_messages;
+        updated_session.set_messages(repaired_messages);
         self.memory
             .save_session(&updated_session)
             .map_err(KernelError::LibreFang)?;
@@ -10216,8 +10227,9 @@ system_prompt = "You are a helpful assistant."
                 messages: Vec::new(),
                 context_window_tokens: 0,
                 label: None,
+                messages_generation: 0,
+                last_repaired_generation: None,
             });
-
         let system_prompt = &entry.manifest.model.system_prompt;
         // Use the agent's actual filtered tools instead of all builtins
         let tools = self.available_tools(agent_id);
@@ -13488,6 +13500,7 @@ system_prompt = "You are a helpful assistant."
                                                         let excess =
                                                             session.messages.len() - max_msgs;
                                                         session.messages.drain(0..excess);
+                                                        session.mark_messages_mutated();
                                                     }
                                                 }
                                                 if let Some(max_tok) = max_tokens {
@@ -13504,6 +13517,7 @@ system_prompt = "You are a helpful assistant."
                                                             break;
                                                         }
                                                         session.messages.remove(0);
+                                                        session.mark_messages_mutated();
                                                     }
                                                 }
                                                 let _ = kernel_job.memory.save_session(&session);
@@ -19301,6 +19315,7 @@ impl LibreFangKernel {
 
             let mut replaced = false;
             let mut already_final = false;
+            let mut messages_mutated = false;
             'outer: for msg in &mut session.messages {
                 let blocks = match &mut msg.content {
                     MessageContent::Blocks(blocks) => blocks,
@@ -19323,6 +19338,7 @@ impl LibreFangKernel {
                                 *status = result.status;
                                 *approval_request_id = None;
                                 replaced = true;
+                                messages_mutated = true;
                                 break 'outer;
                             }
 
@@ -19360,7 +19376,12 @@ impl LibreFangKernel {
                         }
                     }
                     replaced = true;
+                    messages_mutated = true;
                 }
+            }
+
+            if messages_mutated {
+                session.mark_messages_mutated();
             }
 
             replaced || already_final

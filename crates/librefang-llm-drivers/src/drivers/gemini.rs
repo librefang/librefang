@@ -880,13 +880,7 @@ impl LlmDriver for GeminiDriver {
                 // 503 (model overloaded) is a server-capacity issue, not
                 // an account-level rate limit — don't persist a key-wide
                 // lockout for it.
-                let retry_after_ms = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|secs| secs * 1000)
-                    .unwrap_or(5000);
+                let retry_after_ms = crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                 if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,
@@ -1012,13 +1006,7 @@ impl LlmDriver for GeminiDriver {
                 // 503 (model overloaded) is a server-capacity issue, not
                 // an account-level rate limit — don't persist a key-wide
                 // lockout for it.
-                let retry_after_ms = resp
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|secs| secs * 1000)
-                    .unwrap_or(5000);
+                let retry_after_ms = crate::retry_after::parse_retry_after_ms(resp.headers(), 5000);
                 if status == 429 {
                     crate::shared_rate_guard::record_429_from_headers(
                         guard_provider,

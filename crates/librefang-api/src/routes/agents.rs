@@ -992,6 +992,45 @@ pub async fn list_agents(
     .into_response()
 }
 
+/// 24-hour KPI rollup view returned by `GET /api/agents/{id}/stats`.
+/// Mirrors [`librefang_memory::session::AgentStats24h`] — defined here as a
+/// view so we can derive `utoipa::ToSchema` without forcing utoipa into the
+/// memory crate. Generated SDKs and the OpenAPI spec pick up this shape.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentStats24hView {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
+    pub active_now: u64,
+    pub samples: u64,
+    pub prev: AgentStatsPrevView,
+}
+
+/// Prior 24-48h window scoped fields backing the KPI tile trend deltas.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentStatsPrevView {
+    pub sessions_24h: u64,
+    pub cost_24h: f64,
+    pub p95_latency_ms: u64,
+}
+
+impl From<librefang_memory::session::AgentStats24h> for AgentStats24hView {
+    fn from(s: librefang_memory::session::AgentStats24h) -> Self {
+        Self {
+            sessions_24h: s.sessions_24h,
+            cost_24h: s.cost_24h,
+            p95_latency_ms: s.p95_latency_ms,
+            active_now: s.active_now,
+            samples: s.samples,
+            prev: AgentStatsPrevView {
+                sessions_24h: s.prev.sessions_24h,
+                cost_24h: s.prev.cost_24h,
+                p95_latency_ms: s.prev.p95_latency_ms,
+            },
+        }
+    }
+}
+
 /// GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.
 ///
 /// Returns sessions/cost/P95-latency/active-now in a single round trip so
@@ -1004,7 +1043,7 @@ pub async fn list_agents(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "24-hour stats rollup", body = serde_json::Value),
+        (status = 200, description = "24-hour stats rollup", body = AgentStats24hView),
         (status = 404, description = "Agent not found")
     )
 )]
@@ -1053,7 +1092,7 @@ pub async fn get_agent_stats(
 
     let substrate = state.kernel.memory_substrate();
     match substrate.agent_stats_24h(&id) {
-        Ok(stats) => Json(stats).into_response(),
+        Ok(stats) => Json(AgentStats24hView::from(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -1302,6 +1341,8 @@ pub fn inject_attachments_into_session(
             messages: Vec::new(),
             context_window_tokens: 0,
             label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
         },
     };
 
@@ -1319,7 +1360,7 @@ pub fn inject_attachments_into_session(
         })
         .collect();
 
-    session.messages.push(Message {
+    session.push_message(Message {
         role: Role::User,
         content: MessageContent::Blocks(attachment_blocks),
         pinned: false,
@@ -2665,6 +2706,7 @@ pub async fn list_agent_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -2676,6 +2718,25 @@ pub async fn list_agent_sessions(
             )
         }
     };
+    // Owner-scoping: non-admins can only list sessions for agents they
+    // authored. Mirrors the filter on `list_agents` so per-agent
+    // session metadata (cost, message count) doesn't leak.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin {
+            let entry = state.kernel.agent_registry().get(agent_id);
+            let owned = entry
+                .as_ref()
+                .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+                .unwrap_or(false);
+            if !owned {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
+                );
+            }
+        }
+    }
     match state.kernel.list_agent_sessions(agent_id) {
         Ok(sessions) => (
             StatusCode::OK,
