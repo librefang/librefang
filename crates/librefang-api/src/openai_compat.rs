@@ -538,7 +538,11 @@ async fn stream_response(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(stream_rx);
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response())
 }
 
