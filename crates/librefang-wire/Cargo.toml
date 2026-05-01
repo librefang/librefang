@@ -21,6 +21,8 @@ hex = { workspace = true }
 subtle = { workspace = true }
 dashmap = { workspace = true }
 ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
 base64 = { workspace = true }
 rand_core = { version = "0.6", features = ["getrandom"] }
 

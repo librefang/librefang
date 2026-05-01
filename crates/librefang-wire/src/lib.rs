@@ -51,6 +51,7 @@
 //! threats. Re-implementing TLS on top of that adds maintenance burden
 //! without changing the supported deployment model.
 
+pub mod kex;
 pub mod keys;
 pub mod message;
 pub mod peer;
