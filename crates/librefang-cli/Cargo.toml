@@ -15,6 +15,10 @@ description = "CLI tool for the LibreFang Agent OS"
 # `--features all-channels` explicitly so published binaries still ship the
 # full set. See #3688.
 default = ["librefang-api/core-channels", "telemetry"]
+# Note: `all-channels` does NOT imply `telemetry` — release CI builds with
+# `--features all-channels` (without `--no-default-features`), so default's
+# `telemetry` is still active. If you build with `--no-default-features
+# --features all-channels`, add `telemetry` explicitly.
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
 # Android target: exclude channel-email (rustls-connector 0.23.0 + rustls-platform-verifier 0.7.0

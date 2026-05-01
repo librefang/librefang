@@ -131,10 +131,12 @@ channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
 
 # Small curated default set: 5 light adapters covering the most common
-# integration points. Pulls no heavy/unmaintained transitive deps —
-# everything here is plain HTTP. Used by `librefang-api`'s `default` and
-# forwarded by `librefang-cli`'s `default`. Anything bigger should opt in
-# via `all-channels` (or pick individual channels).
+# integration points. Each member only uses the workspace HTTP stack
+# (`reqwest` + `rustls`) — no heavy/unmaintained transitive deps at the
+# time of writing. If you add a member, double-check its dep tree before
+# growing this set. Used by `librefang-api`'s `default` and forwarded by
+# `librefang-cli`'s `default`. Anything bigger should opt in via
+# `all-channels` (or pick individual channels).
 core-channels = [
     "channel-telegram",
     "channel-discord",
