@@ -2766,7 +2766,7 @@ mod tests {
     #[test]
     fn issue_3360_totp_code_single_use_across_actions() {
         let mgr = make_manager_with_db();
-        mgr.record_totp_code_used_for(
+        let _ = mgr.record_totp_code_used_for(
             "987654",
             Some("approval:11111111-1111-1111-1111-111111111111"),
         );
