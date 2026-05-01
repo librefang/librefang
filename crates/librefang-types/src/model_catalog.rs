@@ -7,6 +7,7 @@ use std::fmt;
 /// A model's capability tier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ModelTier {
     /// Cutting-edge, most capable models (e.g. Claude Opus, GPT-4.1).
     Frontier,
@@ -39,6 +40,7 @@ impl fmt::Display for ModelTier {
 /// Provider authentication status.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AuthStatus {
     /// API key is present and confirmed valid via a live API probe.
     ValidatedKey,
@@ -106,6 +108,7 @@ impl fmt::Display for AuthStatus {
 /// catalog TOML.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Modality {
     /// Chat / completion / reasoning model. Default when the field is absent.
     #[default]
@@ -249,6 +252,7 @@ impl Default for ModelCatalogEntry {
 /// Model type classification.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ModelType {
     /// Conversational / text generation model.
     #[default]

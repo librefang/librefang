@@ -103,6 +103,12 @@ impl MediaEngine {
                     url
                 ));
             }
+            other => {
+                return Err(format!(
+                    "Unsupported audio source variant for transcription: {:?}",
+                    other
+                ));
+            }
         };
 
         // Derive a proper filename with extension for Whisper to detect format.
@@ -243,6 +249,7 @@ impl MediaEngine {
                     MediaType::Image => engine.describe_image(&attachment).await,
                     MediaType::Audio => engine.transcribe_audio(&attachment).await,
                     MediaType::Video => engine.describe_video(&attachment).await,
+                    other => Err(format!("Unsupported media type: {}", other)),
                 }
             });
             handles.push(handle);
