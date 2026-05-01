@@ -65,13 +65,28 @@ impl ConsolidationEngine {
             rows.filter_map(|r| r.ok()).collect()
         };
 
+        // One outer transaction wraps every merge in this run so we pay a
+        // single fsync at the end instead of M (one per pair). Pre-fix
+        // each pair opened its own `unchecked_transaction`; with WAL that
+        // costs one fsync per commit, and `MAX_MERGES_PER_RUN = 100`
+        // means up to 100 fsyncs back-to-back. Per-pair atomicity (loser
+        // soft-delete + keeper update applied together) is preserved
+        // automatically — both writes for a pair land in the same outer
+        // tx, so a mid-pair failure rolls the whole batch back via the
+        // `?` propagation below. Consolidate is idempotent and the next
+        // run will pick up where this one left off, which makes
+        // all-or-nothing safe here.
+        let outer_tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
         'agents: for agent_id in &agent_ids {
             // Pull every column needed to merge state correctly. Pre-fix
             // we only loaded id/content/confidence and dropped the loser
             // entirely — losing metadata, access_count, and embedding
             // (#3537). Now we union metadata, sum access_count, and
             // confidence-weight embeddings before soft-deleting.
-            let mut stmt = conn
+            let mut stmt = outer_tx
                 .prepare(
                     "SELECT id, content, confidence, metadata, access_count, embedding \
                      FROM memories \
@@ -123,8 +138,9 @@ impl ConsolidationEngine {
                         //   - embedding: running confidence-weighted average
                         //                across all losers absorbed so far
                         //   - confidence: max(keeper, loser)
-                        // All writes wrapped in a single tx so we never
-                        // soft-delete the loser without applying the merge.
+                        // Per-pair atomicity comes from the outer tx —
+                        // both writes land in the same batch, and any
+                        // mid-pair `?` aborts the whole consolidate run.
                         let keeper_id = rows[i].0.clone();
                         let loser_id = rows[j].0.clone();
                         let merged_access = rows[i].4.saturating_add(rows[j].4);
@@ -141,48 +157,46 @@ impl ConsolidationEngine {
                         );
                         let merged_confidence = rows[i].2.max(rows[j].2);
 
-                        let tx = conn
-                            .unchecked_transaction()
+                        outer_tx
+                            .execute(
+                                "UPDATE memories SET deleted = 1 WHERE id = ?1",
+                                rusqlite::params![loser_id],
+                            )
                             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                        tx.execute(
-                            "UPDATE memories SET deleted = 1 WHERE id = ?1",
-                            rusqlite::params![loser_id],
-                        )
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                         match merged_embedding.as_ref() {
                             Some(bytes) => {
-                                tx.execute(
-                                    "UPDATE memories SET confidence = ?1, \
-                                     access_count = ?2, metadata = ?3, \
-                                     embedding = ?4 WHERE id = ?5",
-                                    rusqlite::params![
-                                        merged_confidence,
-                                        merged_access,
-                                        &merged_metadata,
-                                        bytes,
-                                        keeper_id,
-                                    ],
-                                )
-                                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                                outer_tx
+                                    .execute(
+                                        "UPDATE memories SET confidence = ?1, \
+                                         access_count = ?2, metadata = ?3, \
+                                         embedding = ?4 WHERE id = ?5",
+                                        rusqlite::params![
+                                            merged_confidence,
+                                            merged_access,
+                                            &merged_metadata,
+                                            bytes,
+                                            keeper_id,
+                                        ],
+                                    )
+                                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                             }
                             None => {
-                                tx.execute(
-                                    "UPDATE memories SET confidence = ?1, \
-                                     access_count = ?2, metadata = ?3 \
-                                     WHERE id = ?4",
-                                    rusqlite::params![
-                                        merged_confidence,
-                                        merged_access,
-                                        &merged_metadata,
-                                        keeper_id,
-                                    ],
-                                )
-                                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                                outer_tx
+                                    .execute(
+                                        "UPDATE memories SET confidence = ?1, \
+                                         access_count = ?2, metadata = ?3 \
+                                         WHERE id = ?4",
+                                        rusqlite::params![
+                                            merged_confidence,
+                                            merged_access,
+                                            &merged_metadata,
+                                            keeper_id,
+                                        ],
+                                    )
+                                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                             }
                         }
-                        tx.commit()
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                         // Update the in-memory row so subsequent merges
                         // against the same keeper see the accumulated state.
@@ -211,6 +225,14 @@ impl ConsolidationEngine {
                 }
             }
         }
+
+        // Single commit for the whole batch — collapses up to
+        // MAX_MERGES_PER_RUN fsyncs into one. If no merges happened the
+        // outer tx is still committed (a no-op write), which is cheaper
+        // than guarding the commit on `memories_merged > 0`.
+        outer_tx
+            .commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

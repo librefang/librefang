@@ -13,6 +13,10 @@ use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     MemoryFilter, MemoryFragment, MemoryId, MemoryModality, MemorySource, VectorStore,
 };
+// Single canonical impl lives in librefang-types; re-exported here so
+// existing `librefang_memory::semantic::cosine_similarity` callers keep
+// working without three independently-edited copies drifting (see PR #4125).
+pub use librefang_types::memory::cosine_similarity;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -911,30 +915,6 @@ fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
-}
-
-/// Compute cosine similarity between two vectors.
-///
-/// Returns `None` for non-comparable vectors (dim mismatch, empty, zero
-/// magnitude). Callers must handle `None` explicitly — see #3536.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0f32;
-    let mut norm_a = 0.0f32;
-    let mut norm_b = 0.0f32;
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        norm_a += a[i] * a[i];
-        norm_b += b[i] * b[i];
-    }
-    let denom = norm_a.sqrt() * norm_b.sqrt();
-    if denom < f32::EPSILON {
-        None
-    } else {
-        Some(dot / denom)
-    }
 }
 
 /// Serialize embedding to bytes for SQLite BLOB storage.
