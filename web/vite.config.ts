@@ -12,10 +12,19 @@ export default defineConfig({
     rollupOptions: {
       input: './index.html',
       output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom'],
-          'vendor-motion': ['framer-motion'],
-          'vendor-query': ['@tanstack/react-query'],
+        // vite 8 uses rolldown which requires the function form of
+        // manualChunks; the object form is rejected at build time.
+        manualChunks(id: string) {
+          if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+            return 'vendor-react'
+          }
+          if (id.includes('node_modules/framer-motion/')) {
+            return 'vendor-motion'
+          }
+          if (id.includes('node_modules/@tanstack/react-query/')) {
+            return 'vendor-query'
+          }
+          return undefined
         },
       },
     },

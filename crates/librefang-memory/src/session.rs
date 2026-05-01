@@ -1107,59 +1107,7 @@ impl SessionStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT messages, compaction_cursor, compacted_summary, updated_at \
-                 FROM canonical_sessions WHERE agent_id = ?1",
-            )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-        let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
-            let messages_blob: Vec<u8> = row.get(0)?;
-            let cursor: i64 = row.get(1)?;
-            let summary: Option<String> = row.get(2)?;
-            let updated_at: String = row.get(3)?;
-            Ok((messages_blob, cursor, summary, updated_at))
-        });
-
-        match result {
-            Ok((messages_blob, cursor, summary, updated_at)) => {
-                // Try new format (tagged entries); fall back to legacy Vec<Message> for pre-fix rows.
-                let messages: Vec<CanonicalEntry> =
-                    match rmp_serde::from_slice::<Vec<CanonicalEntry>>(&messages_blob) {
-                        Ok(entries) => entries,
-                        Err(_) => {
-                            let legacy: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-                            legacy
-                                .into_iter()
-                                .map(|message| CanonicalEntry {
-                                    message,
-                                    session_id: None,
-                                })
-                                .collect()
-                        }
-                    };
-                Ok(CanonicalSession {
-                    agent_id,
-                    messages,
-                    compaction_cursor: cursor as usize,
-                    compacted_summary: summary,
-                    updated_at,
-                })
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let now = Utc::now().to_rfc3339();
-                Ok(CanonicalSession {
-                    agent_id,
-                    messages: Vec::new(),
-                    compaction_cursor: 0,
-                    compacted_summary: None,
-                    updated_at: now,
-                })
-            }
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
-        }
+        load_canonical_in_tx(&conn, agent_id)
     }
 
     /// Append new messages to the canonical session and compact if over threshold.
@@ -1174,7 +1122,20 @@ impl SessionStore {
         compaction_threshold: Option<usize>,
         session_id: Option<SessionId>,
     ) -> LibreFangResult<CanonicalSession> {
-        let mut canonical = self.load_canonical(agent_id)?;
+        // Hold the connection lock across the entire read-modify-write so concurrent
+        // sessions of the same agent cannot lose each other's appended messages
+        // (canonical_sessions is keyed by agent_id and stored as a single blob).
+        // BEGIN IMMEDIATE escalates to a write lock at the SQLite layer too, so
+        // any future cross-process caller is also serialized.
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut canonical = load_canonical_in_tx(&tx, agent_id)?;
         canonical
             .messages
             .extend(new_messages.iter().cloned().map(|message| CanonicalEntry {
@@ -1232,7 +1193,9 @@ impl SessionStore {
         }
 
         canonical.updated_at = Utc::now().to_rfc3339();
-        self.save_canonical(&canonical)?;
+        save_canonical_in_tx(&tx, &canonical)?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(canonical)
     }
 
@@ -1270,23 +1233,85 @@ impl SessionStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let messages_blob = rmp_serde::to_vec(&canonical.messages)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-        conn.execute(
-            "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(agent_id) DO UPDATE SET messages = ?2, compaction_cursor = ?3, compacted_summary = ?4, updated_at = ?5",
-            rusqlite::params![
-                canonical.agent_id.0.to_string(),
-                messages_blob,
-                canonical.compaction_cursor as i64,
-                canonical.compacted_summary,
-                canonical.updated_at,
-            ],
+        save_canonical_in_tx(&conn, canonical)
+    }
+}
+
+/// Load a canonical session using an already-acquired connection (e.g. inside a transaction).
+fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult<CanonicalSession> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT messages, compaction_cursor, compacted_summary, updated_at \
+             FROM canonical_sessions WHERE agent_id = ?1",
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        Ok(())
+
+    let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
+        let messages_blob: Vec<u8> = row.get(0)?;
+        let cursor: i64 = row.get(1)?;
+        let summary: Option<String> = row.get(2)?;
+        let updated_at: String = row.get(3)?;
+        Ok((messages_blob, cursor, summary, updated_at))
+    });
+
+    match result {
+        Ok((messages_blob, cursor, summary, updated_at)) => {
+            // Try new format (tagged entries); fall back to legacy Vec<Message> for pre-fix rows.
+            let messages: Vec<CanonicalEntry> =
+                match rmp_serde::from_slice::<Vec<CanonicalEntry>>(&messages_blob) {
+                    Ok(entries) => entries,
+                    Err(_) => {
+                        let legacy: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                        legacy
+                            .into_iter()
+                            .map(|message| CanonicalEntry {
+                                message,
+                                session_id: None,
+                            })
+                            .collect()
+                    }
+                };
+            Ok(CanonicalSession {
+                agent_id,
+                messages,
+                compaction_cursor: cursor as usize,
+                compacted_summary: summary,
+                updated_at,
+            })
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            let now = Utc::now().to_rfc3339();
+            Ok(CanonicalSession {
+                agent_id,
+                messages: Vec::new(),
+                compaction_cursor: 0,
+                compacted_summary: None,
+                updated_at: now,
+            })
+        }
+        Err(e) => Err(LibreFangError::Memory(e.to_string())),
     }
+}
+
+/// Persist a canonical session using an already-acquired connection.
+fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> LibreFangResult<()> {
+    let messages_blob = rmp_serde::to_vec(&canonical.messages)
+        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+    conn.execute(
+        "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(agent_id) DO UPDATE SET messages = ?2, compaction_cursor = ?3, compacted_summary = ?4, updated_at = ?5",
+        rusqlite::params![
+            canonical.agent_id.0.to_string(),
+            messages_blob,
+            canonical.compaction_cursor as i64,
+            canonical.compacted_summary,
+            canonical.updated_at,
+        ],
+    )
+    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    Ok(())
 }
 
 /// A single JSONL line in the session mirror file.
@@ -1683,6 +1708,66 @@ mod tests {
         let (_, recent) = store.canonical_context(agent_id, None, None).unwrap();
         let text: String = recent.iter().map(|m| m.content.text_content()).collect();
         assert!(text.contains("legacy"));
+    }
+
+    #[test]
+    fn test_canonical_append_concurrent_no_message_loss() {
+        // Regression for #3559: two sessions of the same agent appending
+        // concurrently must not silently overwrite each other.
+        let store = setup();
+        let agent_id = AgentId::new();
+        let sid_a = SessionId::new();
+        let sid_b = SessionId::new();
+
+        const PER_THREAD: usize = 50;
+        let store_a = store.clone();
+        let store_b = store.clone();
+        let h_a = std::thread::spawn(move || {
+            for i in 0..PER_THREAD {
+                store_a
+                    .append_canonical(
+                        agent_id,
+                        &[Message::user(format!("A-{i}"))],
+                        Some(10_000), // disable compaction so all messages are observable
+                        Some(sid_a),
+                    )
+                    .expect("append A");
+            }
+        });
+        let h_b = std::thread::spawn(move || {
+            for i in 0..PER_THREAD {
+                store_b
+                    .append_canonical(
+                        agent_id,
+                        &[Message::user(format!("B-{i}"))],
+                        Some(10_000),
+                        Some(sid_b),
+                    )
+                    .expect("append B");
+            }
+        });
+        h_a.join().unwrap();
+        h_b.join().unwrap();
+
+        let canonical = store.load_canonical(agent_id).unwrap();
+        assert_eq!(
+            canonical.messages.len(),
+            PER_THREAD * 2,
+            "expected all {} messages from both sessions to be persisted",
+            PER_THREAD * 2,
+        );
+        let count_a = canonical
+            .messages
+            .iter()
+            .filter(|e| e.session_id == Some(sid_a))
+            .count();
+        let count_b = canonical
+            .messages
+            .iter()
+            .filter(|e| e.session_id == Some(sid_b))
+            .count();
+        assert_eq!(count_a, PER_THREAD, "session A messages dropped");
+        assert_eq!(count_b, PER_THREAD, "session B messages dropped");
     }
 
     #[test]

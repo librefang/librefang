@@ -20,7 +20,7 @@
     "@headlessui/react": "2.2.10",
     "@mdx-js/loader": "3.1.1",
     "@mdx-js/react": "3.1.1",
-    "@next/mdx": "15.5.14",
+    "@next/mdx": "16.2.4",
     "@sindresorhus/slugify": "^2.2.1",
     "@tailwindcss/typography": "^0.5.16",
     "clsx": "^2.1.1",
@@ -28,12 +28,12 @@
     "flexsearch": "^0.8.205",
     "focus-visible": "^5.2.1",
     "hast-util-from-html": "^2.0.3",
-    "lucide-react": "^0.577.0",
+    "lucide-react": "^1.14.0",
     "marked": "16.2.1",
     "mdast-util-to-string": "^4.0.0",
     "mdx-annotations": "^0.1.4",
     "motion": "12.38.0",
-    "next": "15.5.14",
+    "next": "15.5.15",
     "next-themes": "^0.4.6",
     "prism-react-renderer": "^2.4.1",
     "react": "19.2.5",
@@ -51,7 +51,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.4",
     "@types/mdx": "^2.0.13",
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.6.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@types/react-highlight-words": "^0.20.0",
@@ -66,5 +66,13 @@
   "engines": {
     "node": ">=18.0.0",
     "pnpm": ">=9.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "picomatch@<2.3.2": ">=2.3.2",
+      "picomatch@>=4.0.0 <4.0.4": ">=4.0.4",
+      "brace-expansion@>=2.0.0 <2.0.3": ">=2.0.3",
+      "postcss@<8.5.10": ">=8.5.10"
+    }
   }
 }

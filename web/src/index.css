@@ -1,6 +1,27 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* tailwindcss v4 doesn't expose `darkMode: 'class'` from JS config;
+ * declare the equivalent variant in CSS. Matches the previous behaviour
+ * of `<html class="dark">` toggling all `dark:` utilities. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Project palette + fonts that were in tailwind.config.js previously.
+ * v4 reads design tokens from CSS custom properties under `@theme`. */
+@theme {
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-surface: var(--bg-surface);
+  --color-surface-100: var(--bg-surface-100);
+  --color-surface-200: var(--bg-surface-200);
+  --color-surface-300: var(--bg-surface-300);
+
+  --font-sans: 'Inter', 'Noto Sans SC', 'Noto Sans TC', 'Noto Sans JP',
+    'Noto Sans KR', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
 
 @layer base {
   :root {

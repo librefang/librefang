@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowLeft, ExternalLink, Download, Tag, Loader2, Github, Filter } from 'lucide-react'
+import { ArrowLeft, ExternalLink, Download, Tag, Loader2, Filter } from 'lucide-react'
+import { Github } from '../components/BrandIcons'
 import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '../store'
 import { cn } from '../lib/utils'
