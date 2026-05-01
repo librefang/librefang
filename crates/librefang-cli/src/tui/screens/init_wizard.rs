@@ -535,6 +535,7 @@ impl State {
                         frontier = Some(&m.id);
                     }
                 }
+                _ => {}
             }
         }
 
@@ -565,6 +566,7 @@ fn tier_label(tier: ModelTier) -> &'static str {
         ModelTier::Fast => "fast",
         ModelTier::Local => "local",
         ModelTier::Custom => "custom",
+        _ => "unknown",
     }
 }
 
