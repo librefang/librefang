@@ -1,6 +1,6 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon, Download, Star } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Loader2, AlertCircle, ExternalLink, Sparkles, Copy, Check, Terminal, FileText, RotateCcw, Link as LinkIcon, Download, Star, TrendingUp } from 'lucide-react'
 import { useState } from 'react'
 import { useRegistry, getLocalizedDesc, getLocalizedName, getCategoryItems } from '../useRegistry'
 import type { RegistryCategory, Detail } from '../useRegistry'
@@ -301,28 +301,31 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
               ))}
             </div>
           )}
-          {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0) && (
-            <div className="flex flex-wrap items-center gap-4 mb-3 text-xs font-mono text-gray-500">
+          {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0 || mktPkg.latest_version) && (
+            <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-black/3 dark:bg-white/3 border border-black/8 dark:border-white/8 rounded">
+              {mktPkg.latest_version && (
+                <span className="flex items-center gap-1.5 text-xs font-mono font-semibold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded">
+                  v{mktPkg.latest_version}
+                </span>
+              )}
               {mktPkg.total_downloads > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <Download className="w-3.5 h-3.5" />
-                  {mktPkg.total_downloads.toLocaleString()} {t.registry?.downloads || 'downloads'}
+                <span className="flex items-center gap-1.5 text-xs font-mono text-gray-600 dark:text-gray-300">
+                  <Download className="w-3.5 h-3.5 text-cyan-500/70" />
+                  <strong>{mktPkg.total_downloads >= 1000 ? `${(mktPkg.total_downloads / 1000).toFixed(1)}k` : mktPkg.total_downloads}</strong>
+                  <span className="text-gray-400">{t.registry?.downloads || 'downloads'}</span>
                 </span>
               )}
               {mktPkg.weekly_downloads > 0 && (
-                <span className="flex items-center gap-1.5 text-gray-400">
-                  ↑ {mktPkg.weekly_downloads.toLocaleString()} {t.registry?.thisWeek || 'this week'}
+                <span className="flex items-center gap-1.5 text-xs font-mono text-green-600 dark:text-green-400">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <strong>{mktPkg.weekly_downloads >= 1000 ? `${(mktPkg.weekly_downloads / 1000).toFixed(1)}k` : mktPkg.weekly_downloads}</strong>
+                  <span className="text-gray-400">{t.registry?.thisWeek || 'this week'}</span>
                 </span>
               )}
               {mktPkg.stars > 0 && (
-                <span className="flex items-center gap-1.5">
-                  <Star className="w-3.5 h-3.5" />
-                  {mktPkg.stars.toLocaleString()}
-                </span>
-              )}
-              {mktPkg.latest_version && (
-                <span className="text-cyan-600 dark:text-cyan-500">
-                  v{mktPkg.latest_version}
+                <span className="flex items-center gap-1.5 text-xs font-mono text-amber-500">
+                  <Star className="w-3.5 h-3.5" fill="currentColor" />
+                  <strong>{mktPkg.stars}</strong>
                 </span>
               )}
             </div>
