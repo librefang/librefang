@@ -502,20 +502,35 @@ export function AgentsPage() {
   }, [sessionsQuery.data, detailAgent?.id]);
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
   const sessionsByAgent = useMemo(() => {
-    const map = new Map<string, { sessions24h: number; cost24h: number }>();
+    const map = new Map<
+      string,
+      { sessions24h: number; cost24h: number; durations: number[]; activeNow: number }
+    >();
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     for (const s of sessionsQuery.data ?? []) {
       const id = s.agent_id;
       if (!id) continue;
       const ts = s.created_at ? Date.parse(s.created_at) : 0;
       if (ts < cutoff) continue;
-      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0 };
+      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
       entry.sessions24h += 1;
       entry.cost24h += typeof s.cost_usd === "number" ? s.cost_usd : 0;
+      if (typeof s.duration_ms === "number" && s.duration_ms > 0) {
+        entry.durations.push(s.duration_ms);
+      }
+      if (s.active) entry.activeNow += 1;
       map.set(id, entry);
     }
     return map;
   }, [sessionsQuery.data]);
+
+  /** P95 of an unsorted sample using nearest-rank. Returns 0 when empty. */
+  const p95Of = (xs: number[]): number => {
+    if (xs.length === 0) return 0;
+    const sorted = [...xs].sort((a, b) => a - b);
+    const rank = Math.ceil(0.95 * sorted.length) - 1;
+    return sorted[Math.max(0, Math.min(sorted.length - 1, rank))] ?? 0;
+  };
 
   const modelsQuery = useModels(
     { provider: modelDraft.provider },
@@ -677,7 +692,7 @@ export function AgentsPage() {
 
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
     const stateLower = (agent.state || "").toLowerCase();
     return (
       <button
@@ -726,9 +741,8 @@ export function AgentsPage() {
     const detailState = ((agent as AgentView).state || "").toLowerCase();
     const isSuspended = detailState === "suspended";
     const isCrashed = detailState === "crashed";
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
+    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
     const detailCaps = (agent as AgentView).capabilities;
-    const skillsCount = Array.isArray(detailCaps?.skills) ? detailCaps.skills.length : 0;
     const toolsCount = Array.isArray(detailCaps?.tools) ? detailCaps.tools.length : 0;
     const tabs: Array<{ id: typeof agentTab; label: string; Icon: typeof Bot }> = [
       { id: "conversation", label: t("agents.tab.conversation", { defaultValue: "Conversation" }), Icon: MessageCircle },
@@ -831,21 +845,65 @@ export function AgentsPage() {
             </div>
           </div>
 
-          {/* KPI tiles */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
-            {[
-              { l: t("agents.kpi.sessions",  { defaultValue: "Sessions · 24h" }), v: String(stats.sessions24h),               m: stats.sessions24h > 0 ? "active" : "—" },
-              { l: t("agents.kpi.cost",      { defaultValue: "Cost · 24h" }),     v: `$${stats.cost24h.toFixed(2)}`,           m: stats.cost24h > 0 ? "billed" : "—" },
-              { l: t("agents.kpi.skills",    { defaultValue: "Skills" }),         v: String(skillsCount || "—"),               m: skillsCount > 0 ? `${skillsCount} installed` : "none" },
-              { l: t("agents.kpi.tools",     { defaultValue: "Tools" }),          v: String(toolsCount || "—"),                m: toolsCount > 0 ? `${toolsCount} configured` : "none" },
-            ].map((s) => (
-              <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
-                <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
-                <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
-                <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+          {/* KPI tiles — Sessions · Cost · P95 · Tools (matches design canvas).
+              Subtext is data-derived ("N live", "$X/run", sample size, skill list)
+              so empty agents show "—" instead of stale state words. */}
+          {(() => {
+            const p95Ms = p95Of(stats.durations);
+            const avgCost = stats.sessions24h > 0 ? stats.cost24h / stats.sessions24h : 0;
+            const skillNames: string[] = Array.isArray((agent as AgentView).skills)
+              ? ((agent as AgentView).skills as string[])
+              : Array.isArray((agent as AgentView).capabilities?.skills)
+                ? (((agent as AgentView).capabilities!.skills) as string[])
+                : [];
+            const toolsMeta = skillNames.length > 0
+              ? skillNames.slice(0, 3).join(" · ")
+              : toolsCount > 0
+                ? `${toolsCount} configured`
+                : "—";
+            return (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-4">
+                {[
+                  {
+                    l: t("agents.kpi.sessions", { defaultValue: "Sessions · 24h" }),
+                    v: String(stats.sessions24h),
+                    m: stats.activeNow > 0
+                      ? `${stats.activeNow} live`
+                      : stats.sessions24h > 0
+                        ? t("agents.kpi.sessions_idle", { defaultValue: "idle" })
+                        : "—",
+                  },
+                  {
+                    l: t("agents.kpi.cost", { defaultValue: "Cost · 24h" }),
+                    v: `$${stats.cost24h.toFixed(2)}`,
+                    m: avgCost > 0 ? `$${avgCost.toFixed(2)}/run` : "—",
+                  },
+                  {
+                    l: t("agents.kpi.p95", { defaultValue: "P95 latency" }),
+                    v: p95Ms > 0
+                      ? p95Ms >= 1000
+                        ? `${(p95Ms / 1000).toFixed(2)}s`
+                        : `${Math.round(p95Ms)}ms`
+                      : "—",
+                    m: stats.durations.length > 0
+                      ? t("agents.kpi.samples", { count: stats.durations.length, defaultValue: "{{count}} samples" })
+                      : "—",
+                  },
+                  {
+                    l: t("agents.kpi.tools", { defaultValue: "Tools" }),
+                    v: String(toolsCount || "—"),
+                    m: toolsMeta,
+                  },
+                ].map((s) => (
+                  <div key={s.l} className="px-3 py-2 rounded-md bg-main/60 border border-border-subtle">
+                    <div className="text-[10px] uppercase font-semibold text-text-dim tracking-[0.08em]">{s.l}</div>
+                    <div className="font-mono font-semibold text-[17px] mt-1 truncate tabular-nums text-text-main">{s.v}</div>
+                    <div className="text-[10.5px] text-text-dim/80 mt-0.5 truncate">{s.m}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {/* Tabs */}
           <div className="flex gap-1 mt-4 -mb-3 border-b border-border-subtle overflow-x-auto">
