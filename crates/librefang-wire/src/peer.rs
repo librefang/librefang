@@ -251,6 +251,27 @@ fn hmac_verify(secret: &str, data: &[u8], signature: &str) -> bool {
     subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), signature.as_bytes()).into()
 }
 
+/// SECURITY (#4269): Build the byte string the Ed25519 identity
+/// signature covers. When an ephemeral X25519 pubkey is included in
+/// the handshake, it is appended to `auth_data` so the static-identity
+/// signature also binds the ephemeral — closing an active MITM that
+/// would otherwise swap in its own ephemeral. With no ephemeral
+/// (legacy PR-2..5 peers) the scope reduces to `auth_data`, keeping
+/// signature compatibility with already-pinned peers from those
+/// releases.
+fn identity_signing_scope(auth_data: &[u8], ephemeral_pubkey: Option<&str>) -> Vec<u8> {
+    match ephemeral_pubkey {
+        Some(eph) => {
+            let mut buf = Vec::with_capacity(auth_data.len() + 1 + eph.len());
+            buf.extend_from_slice(auth_data);
+            buf.push(b'|');
+            buf.extend_from_slice(eph.as_bytes());
+            buf
+        }
+        None => auth_data.to_vec(),
+    }
+}
+
 /// Errors from the wire protocol layer.
 #[derive(Debug, Error)]
 pub enum WireError {
@@ -551,13 +572,22 @@ impl PeerNode {
         out
     }
 
-    /// SECURITY (#3873): If this node has an Ed25519 identity, return
-    /// `(Some(public_key_b64), Some(signature_b64))` over `auth_data`. With
-    /// no identity configured returns `(None, None)` and the recipient gets
-    /// only HMAC authentication.
-    fn sign_identity(&self, auth_data: &[u8]) -> (Option<String>, Option<String>) {
+    /// SECURITY (#3873, #4269): If this node has an Ed25519 identity,
+    /// return `(Some(public_key_b64), Some(signature_b64))`. The signed
+    /// scope is `auth_data | "|" | ephemeral_pubkey` when an ephemeral
+    /// X25519 pubkey is being sent (#4269), or just `auth_data` when not
+    /// — binding the per-handshake KEX pubkey to the static identity so
+    /// an active MITM cannot substitute a pubkey it controls.
+    fn sign_identity(
+        &self,
+        auth_data: &[u8],
+        ephemeral_pubkey: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
         match &self.keypair {
-            Some(kp) => (Some(kp.public_key().to_string()), Some(kp.sign(auth_data))),
+            Some(kp) => {
+                let scope = identity_signing_scope(auth_data, ephemeral_pubkey);
+                (Some(kp.public_key().to_string()), Some(kp.sign(&scope)))
+            }
             None => (None, None),
         }
     }
@@ -580,10 +610,12 @@ impl PeerNode {
         public_key: &Option<String>,
         signature: &Option<String>,
         auth_data: &[u8],
+        ephemeral_pubkey: Option<&str>,
     ) -> Result<(), WireError> {
         match (public_key, signature) {
             (Some(pk), Some(sig)) => {
-                verify_signature(pk, auth_data, sig).map_err(|e| {
+                let scope = identity_signing_scope(auth_data, ephemeral_pubkey);
+                verify_signature(pk, &scope, sig).map_err(|e| {
                     WireError::HandshakeFailed(format!(
                         "Ed25519 identity signature invalid for node {peer_node_id}: {e}"
                     ))
@@ -707,7 +739,13 @@ impl PeerNode {
             our_nonce, self.config.node_id, recipient_node_id
         );
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
-        let (our_pubkey, our_identity_sig) = self.sign_identity(auth_data.as_bytes());
+        // SECURITY (#4269): Generate per-handshake X25519 ephemeral so the
+        // resulting session_key derives from ECDH instead of shared_secret.
+        let our_kex = crate::kex::EphemeralKex::generate()
+            .map_err(|e| WireError::HandshakeFailed(format!("X25519 keygen failed: {e}")))?;
+        let our_eph = our_kex.public_b64().to_string();
+        let (our_pubkey, our_identity_sig) =
+            self.sign_identity(auth_data.as_bytes(), Some(&our_eph));
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -720,6 +758,7 @@ impl PeerNode {
                 auth_hmac,
                 public_key: our_pubkey,
                 identity_signature: our_identity_sig,
+                ephemeral_pubkey: Some(our_eph.clone()),
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -736,6 +775,7 @@ impl PeerNode {
                 auth_hmac: ack_hmac,
                 public_key: ack_pubkey,
                 identity_signature: ack_identity_sig,
+                ephemeral_pubkey: ack_eph,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     return Err(WireError::VersionMismatch {
@@ -761,12 +801,14 @@ impl PeerNode {
                 }
 
                 // SECURITY (#3873): Verify Ed25519 identity signature (if
-                // present) over the same auth_data and TOFU-pin the pubkey.
+                // present) over auth_data + ephemeral_pubkey (#4269) and
+                // TOFU-pin the pubkey.
                 self.verify_and_pin_identity(
                     node_id,
                     ack_pubkey,
                     ack_identity_sig,
                     expected_ack_data.as_bytes(),
+                    ack_eph.as_deref(),
                 )?;
 
                 // SECURITY (#3880): Record nonce AFTER successful HMAC
@@ -777,8 +819,21 @@ impl PeerNode {
                     return Err(WireError::HandshakeFailed(replay_err));
                 }
 
-                // SECURITY: Derive per-session key for authenticated messages
-                let key = derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce);
+                // SECURITY (#4269): Prefer ECDH-derived session_key when
+                // both sides provided an ephemeral pubkey. Falls back to
+                // the legacy shared_secret derivation for peers from
+                // PR-2..5 that don't yet send one.
+                let key = match ack_eph {
+                    Some(remote_eph) => {
+                        let transcript = crate::kex::handshake_transcript(&our_nonce, ack_nonce);
+                        our_kex
+                            .derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    None => derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce),
+                };
 
                 info!(
                     "OFP: handshake complete with {} ({}) — {} agents",
@@ -866,7 +921,12 @@ impl PeerNode {
         let our_nonce = uuid::Uuid::new_v4().to_string();
         let auth_data = format!("{}|{}|{}", our_nonce, self.config.node_id, node_id);
         let auth_hmac = hmac_sign(&self.config.shared_secret, auth_data.as_bytes());
-        let (our_pubkey, our_identity_sig) = self.sign_identity(auth_data.as_bytes());
+        // SECURITY (#4269): per-handshake X25519 ephemeral.
+        let our_kex = crate::kex::EphemeralKex::generate()
+            .map_err(|e| WireError::HandshakeFailed(format!("X25519 keygen failed: {e}")))?;
+        let our_eph = our_kex.public_b64().to_string();
+        let (our_pubkey, our_identity_sig) =
+            self.sign_identity(auth_data.as_bytes(), Some(&our_eph));
 
         let handshake = WireMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -879,6 +939,7 @@ impl PeerNode {
                 auth_hmac,
                 public_key: our_pubkey,
                 identity_signature: our_identity_sig,
+                ephemeral_pubkey: Some(our_eph.clone()),
             }),
         };
         write_message(&mut writer, &handshake).await?;
@@ -893,6 +954,7 @@ impl PeerNode {
                 protocol_version,
                 public_key: ack_pubkey,
                 identity_signature: ack_identity_sig,
+                ephemeral_pubkey: ack_eph,
                 ..
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
@@ -914,19 +976,32 @@ impl PeerNode {
                         "HMAC verification failed on HandshakeAck".into(),
                     ));
                 }
-                // SECURITY (#3873): Verify Ed25519 identity + TOFU pin.
+                // SECURITY (#3873): Verify Ed25519 identity + TOFU pin
+                // (#4269: scope also covers the server's ephemeral pubkey).
                 self.verify_and_pin_identity(
                     ack_node_id,
                     ack_pubkey,
                     ack_identity_sig,
                     expected_ack_data.as_bytes(),
+                    ack_eph.as_deref(),
                 )?;
                 // SECURITY (#3880): Record nonce AFTER HMAC verification.
                 if let Err(replay_err) = self.nonce_tracker.check_and_record(ack_nonce) {
                     return Err(WireError::HandshakeFailed(replay_err));
                 }
-                // SECURITY: Derive per-session key for authenticated post-handshake I/O
-                derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce)
+                // SECURITY (#4269): ECDH-derived session_key when both
+                // peers brought an ephemeral; legacy fallback otherwise.
+                match ack_eph {
+                    Some(remote_eph) => {
+                        let transcript = crate::kex::handshake_transcript(&our_nonce, ack_nonce);
+                        our_kex
+                            .derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    None => derive_session_key(&self.config.shared_secret, &our_nonce, ack_nonce),
+                }
             }
             WireMessageKind::Response(WireResponse::Error { code, message }) => {
                 return Err(WireError::HandshakeFailed(format!(
@@ -1015,6 +1090,7 @@ impl PeerNode {
                 auth_hmac,
                 public_key: peer_pubkey,
                 identity_signature: peer_identity_sig,
+                ephemeral_pubkey: peer_eph,
             }) => {
                 if *protocol_version != PROTOCOL_VERSION {
                     let err_resp = WireMessage {
@@ -1073,6 +1149,7 @@ impl PeerNode {
                     peer_pubkey,
                     peer_identity_sig,
                     expected_data.as_bytes(),
+                    peer_eph.as_deref(),
                 ) {
                     let err_resp = WireMessage {
                         id: msg.id.clone(),
@@ -1105,7 +1182,21 @@ impl PeerNode {
                 let ack_nonce = uuid::Uuid::new_v4().to_string();
                 let ack_auth_data = format!("{}|{}|{}", ack_nonce, node.config.node_id, node_id);
                 let ack_hmac = hmac_sign(&node.config.shared_secret, ack_auth_data.as_bytes());
-                let (our_pubkey, our_identity_sig) = node.sign_identity(ack_auth_data.as_bytes());
+
+                // SECURITY (#4269): Server-side ephemeral X25519. Generated
+                // only when the client also brought one — otherwise we keep
+                // legacy session_key derivation for compatibility with
+                // PR-2..5 peers that have not yet adopted KEX.
+                let our_kex = if peer_eph.is_some() {
+                    Some(crate::kex::EphemeralKex::generate().map_err(|e| {
+                        WireError::HandshakeFailed(format!("X25519 keygen failed: {e}"))
+                    })?)
+                } else {
+                    None
+                };
+                let our_eph = our_kex.as_ref().map(|k| k.public_b64().to_string());
+                let (our_pubkey, our_identity_sig) =
+                    node.sign_identity(ack_auth_data.as_bytes(), our_eph.as_deref());
 
                 let ack = WireMessage {
                     id: msg.id.clone(),
@@ -1118,16 +1209,23 @@ impl PeerNode {
                         auth_hmac: ack_hmac,
                         public_key: our_pubkey,
                         identity_signature: our_identity_sig,
+                        ephemeral_pubkey: our_eph,
                     }),
                 };
                 write_message(&mut writer, &ack).await?;
 
-                // SECURITY: Derive per-session key (server side: their nonce first, our nonce second)
-                let session_key = derive_session_key(
-                    &node.config.shared_secret,
-                    nonce,      // client's nonce
-                    &ack_nonce, // our nonce
-                );
+                // SECURITY (#4269): Prefer ECDH-derived session_key when the
+                // KEX was completed on both sides; legacy fallback otherwise.
+                let session_key = match (our_kex, peer_eph.as_deref()) {
+                    (Some(kex), Some(remote_eph)) => {
+                        let transcript = crate::kex::handshake_transcript(nonce, &ack_nonce);
+                        kex.derive_session_key(remote_eph, &transcript)
+                            .map_err(|e| {
+                                WireError::HandshakeFailed(format!("X25519 ECDH failed: {e}"))
+                            })?
+                    }
+                    _ => derive_session_key(&node.config.shared_secret, nonce, &ack_nonce),
+                };
 
                 info!(
                     "OFP: handshake with {} ({}) from {} — {} agents",
@@ -2408,6 +2506,60 @@ mod tests {
             Err(other) => panic!("expected HandshakeFailed, got: {other}"),
             Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
         }
+    }
+
+    /// PR-6 / #4269: a successful handshake between two identity-bearing
+    /// peers carries `ephemeral_pubkey` on both legs and the resulting
+    /// post-handshake message exchange round-trips correctly. The
+    /// existing per-message HMAC test (`test_handshake_and_message_loop`)
+    /// already exercises the message loop, but did so under the legacy
+    /// session-key derivation. This test re-runs the same end-to-end
+    /// flow under the KEX path to catch any regression where the
+    /// derivation diverges between the two sides — which would surface
+    /// as the message-loop test passing but the agent_message HMAC
+    /// rejecting.
+    #[tokio::test]
+    async fn issue_4269_kex_session_key_round_trips_a_message() {
+        let kp1 = Ed25519KeyPair::generate().unwrap();
+        let kp2 = Ed25519KeyPair::generate().unwrap();
+
+        let r1 = PeerRegistry::new();
+        let h1 = Arc::new(TestHandle::new());
+        let (n1, _t1) = PeerNode::start_with_identity(
+            test_config("kex-A", "A"),
+            r1.clone(),
+            h1.clone(),
+            Some(kp1),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let r2 = PeerRegistry::new();
+        let h2 = Arc::new(TestHandle::new());
+        let (n2, _t2) = PeerNode::start_with_identity(
+            test_config("kex-B", "B"),
+            r2.clone(),
+            h2.clone(),
+            Some(kp2),
+            None,
+        )
+        .await
+        .unwrap();
+
+        n2.connect_to_peer_with_id(n1.local_addr(), h2.clone(), "kex-A")
+            .await
+            .expect("KEX-bearing handshake must complete");
+
+        // Exercise the post-handshake message channel — this signs each
+        // frame with the session_key both sides derived. If KEX outputs
+        // diverged silently, the receiver's HMAC verify would reject and
+        // send_to_peer would error here.
+        let resp = n2
+            .send_to_peer("kex-A", "echo", "ping over KEX session", None, h2)
+            .await
+            .expect("authenticated message round-trip must succeed under KEX");
+        assert!(resp.contains("ping over KEX session"));
     }
 
     /// PR-5: `list_pinned_peers` is the input the admin endpoint at
