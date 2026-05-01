@@ -43,6 +43,8 @@ import {
   Copy, ClipboardPaste, LayoutGrid,
   Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag, BookCopy, Calendar,
   FlaskConical, AlertCircle, CheckCircle2, SkipForward, ChevronUp,
+  Webhook, MessageSquare, Repeat, Split, Layers, Clock, Send, Cpu,
+  type LucideIcon,
 } from "lucide-react";
 import { truncateId } from "../lib/string";
 import {
@@ -196,18 +198,38 @@ const NODE_TYPES = [
 // Node types that require an agent binding
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
 
+// Lucide icon for each node-type, used as the small glyph next to the
+// UPPERCASE kind label inside CustomNode. Mirrors the design bundle's
+// per-kind icon (Zap/Cpu/Wrench/ShieldCheck/Send) but expanded to our
+// 12-type taxonomy.
+const NODE_KIND_ICON: Record<string, LucideIcon> = {
+  start: Play,
+  end: CheckCircle2,
+  schedule: Calendar,
+  webhook: Webhook,
+  channel: MessageSquare,
+  condition: HelpCircle,
+  loop: Repeat,
+  parallel: Split,
+  collect: Layers,
+  wait: Clock,
+  respond: Send,
+  agent: Cpu,
+};
+
 // Custom node component — design language: dense card with a left
 // colored stripe (per node-type), an UPPERCASE kind label row, a mono
 // title, and a status pulse dot. Handles sit on the left/right edges
 // (horizontal flow). Existing layouts positioned for the previous
 // vertical flow will edge-route diagonally — accepted by design.
-function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type: string; t: (key: string) => string }) {
+function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNodeData; type: string; selected?: boolean; t: (key: string) => string }) {
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
   const isEnd = data.nodeType === "end";
   const runState = data._runState as string | undefined;
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
   const missingAgent = needsAgent && !data.agentId;
+  const KindIcon = NODE_KIND_ICON[data.nodeType ?? ""] ?? HelpCircle;
 
   // Status dot: pulsing color while running, success when done, warning
   // for missing agent, idle dim otherwise. Mirrors the design's top-right
@@ -218,20 +240,30 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type
     : "#94a3b8";
   const isPulse = runState === "running";
 
-  // Outer ring tightens visually around the running/done node while
-  // staying out of the way otherwise.
-  const ringStyle = runState === "running"
-    ? { boxShadow: `0 0 0 1.5px ${config.color}55, 0 0 24px -8px ${config.color}` }
-    : runState === "done"
-      ? { boxShadow: `0 0 0 1.5px #10b98155` }
-      : missingAgent
-        ? { boxShadow: `0 0 0 1px #f59e0b55` }
-        : { boxShadow: "0 4px 12px -4px rgba(0,0,0,0.5)" };
+  // Outer ring/glow.
+  // - selected: design's two-stop shadow (color tint + outer bloom)
+  // - running / done: state-colored ring
+  // - missingAgent: warning ring
+  // - idle: subtle drop shadow
+  // Selected wins over the run-state ring so the user always sees focus.
+  const ringStyle = selected
+    ? { boxShadow: `0 0 0 2px ${config.color}33, 0 0 24px -8px ${config.color}` }
+    : runState === "running"
+      ? { boxShadow: `0 0 0 1.5px ${config.color}55, 0 0 24px -8px ${config.color}` }
+      : runState === "done"
+        ? { boxShadow: `0 0 0 1.5px #10b98155` }
+        : missingAgent
+          ? { boxShadow: `0 0 0 1px #f59e0b55` }
+          : { boxShadow: "0 4px 12px -4px rgba(0,0,0,0.5)" };
 
   return (
     <div
-      className="rounded-lg bg-surface min-w-[170px] max-w-[220px] overflow-hidden relative transition-all duration-150 border border-border-subtle hover:border-text-dim/40"
+      className="rounded-lg bg-surface/95 backdrop-blur-[8px] min-w-[170px] max-w-[220px] overflow-hidden relative transition-all duration-150 border hover:border-text-dim/40"
       style={{
+        // border-color shifts to the kind-color when selected, otherwise
+        // sits on the subtle theme token. Done as inline so the selected
+        // path doesn't fight a Tailwind class with higher specificity.
+        borderColor: selected ? config.color : "var(--color-border-subtle)",
         borderLeft: `2px solid ${config.color}`,
         ...ringStyle,
       }}
@@ -243,8 +275,9 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: CanvasNodeData; type
           style={{ borderColor: config.color }} />
       )}
 
-      {/* Header row: kind label + status dot */}
+      {/* Header row: kind icon + label + status dot */}
       <div className="flex items-center gap-1.5 px-3 pt-2">
+        <KindIcon className="w-2.5 h-2.5 shrink-0" style={{ color: config.color }} />
         <span
           className="text-[9px] font-bold uppercase tracking-[0.08em] font-mono"
           style={{ color: config.color }}
@@ -1227,7 +1260,7 @@ function CanvasPageInner() {
   // unmounting/remounting all nodes on every render, which breaks click handlers.
   // We use refs for all callbacks and the translation function so the deps are empty.
   const nodeTypes = useMemo(() => ({
-    custom: (props: NodeProps) => <CustomNode {...props as unknown as { data: CanvasNodeData; type: string }} t={tRef.current} />,
+    custom: (props: NodeProps) => <CustomNode {...props as unknown as { data: CanvasNodeData; type: string; selected?: boolean }} t={tRef.current} />,
     groupNode: (props: NodeProps) => <GroupNodeComponent {...props as unknown as { data: CanvasNodeData; id: string }} data={{
       ...props.data,
       _onToggle: (id: string) => toggleGroupRef.current(id),
@@ -1493,19 +1526,23 @@ function CanvasPageInner() {
   const edgeColor = theme === "dark" ? "#6b7280" : "#94a3b8";
   const edgeColorActive = theme === "dark" ? "#818cf8" : "#6366f1";
 
+  // Edges follow the design language: thin bezier curves at 0.6 opacity
+  // with an arrow marker. Active (just-connected) edges use the brand
+  // accent so the user sees the connection they made; quiescent edges
+  // sit in a muted theme-tone.
   const defaultEdgeOptions = useMemo(() => ({
-    type: "smoothstep" as const,
+    type: "default" as const, // xyflow's "default" edge type is bezier
     animated: false,
-    style: { stroke: edgeColor, strokeWidth: 2 },
-    markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor, width: 16, height: 16 },
+    style: { stroke: edgeColor, strokeWidth: 1.5, opacity: 0.6 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor, width: 14, height: 14 },
   }), [edgeColor]);
 
   const onConnect = useCallback((params: Connection) => {
     setEdges((eds) => addEdge({
       ...params,
-      type: "smoothstep",
-      style: { stroke: edgeColorActive, strokeWidth: 2 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: edgeColorActive, width: 16, height: 16 },
+      type: "default",
+      style: { stroke: edgeColorActive, strokeWidth: 1.5, opacity: 0.8 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: edgeColorActive, width: 14, height: 14 },
     }, eds));
   }, [setEdges, edgeColorActive]);
 
@@ -2200,7 +2237,7 @@ function CanvasPageInner() {
             zoomOnScroll
             className={`bg-transparent! ${spacePressed ? "cursor-grab!" : ""}`}
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
-            connectionLineType={ConnectionLineType.SmoothStep}
+            connectionLineType={ConnectionLineType.Bezier}
             isValidConnection={isValidConnection}
           >
             <Background variant={BackgroundVariant.Dots} color={theme === "dark" ? "#444" : "#cbd5e1"} gap={24} size={1.5} />
