@@ -2105,4 +2105,100 @@ mod tests {
         assert_eq!(row["total_tokens"].as_u64(), Some(0));
         assert!(row["duration_ms"].is_null());
     }
+
+    /// agent_stats_24h must:
+    ///   - count only sessions whose created_at falls inside the 24h window,
+    ///   - sum only usage_events whose timestamp falls inside it,
+    ///   - return P95 latency via nearest-rank over events with latency > 0,
+    ///   - count active_now from sessions touched in the last 5 minutes,
+    ///   - scope every aggregate to the given agent_id.
+    #[test]
+    fn agent_stats_24h_aggregates_within_window() {
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        run_migrations(&conn.lock().unwrap()).unwrap();
+        let store = SessionStore::new(Arc::clone(&conn));
+
+        let agent_id = AgentId::new();
+        let other_agent = AgentId::new();
+
+        // Three sessions for the target agent: two recent (within 24h),
+        // one well outside the window. Plus one for an unrelated agent
+        // to verify scoping.
+        let now = chrono::Utc::now();
+        let recent_a = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let recent_b = (now - chrono::Duration::minutes(2)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(48)).to_rfc3339();
+
+        let insert_session = |id: &str, agent: &AgentId, created: &str, updated: &str| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at)
+                 VALUES (?1, ?2, x'90', 0, ?3, ?4)",
+                rusqlite::params![id, agent.0.to_string(), created, updated],
+            )
+            .unwrap();
+        };
+        let s_active = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_active, &agent_id, &recent_a, &recent_b); // updated_at within 5min
+        let s_idle = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_idle, &agent_id, &recent_a, &recent_a); // updated_at >5min ago
+        let s_stale = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_stale, &agent_id, &stale, &stale);
+        let s_other = uuid::Uuid::new_v4().to_string();
+        insert_session(&s_other, &other_agent, &recent_a, &recent_b);
+
+        // Usage events: three within the window for the target agent
+        // (latencies 100/200/300 → P95 nearest-rank = ceil(0.95*3)=3 → 300),
+        // one outside the window (must be ignored), one for the other agent.
+        let insert_event = |agent: &AgentId, ts: &str, cost: f64, latency: i64| {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO usage_events (id, agent_id, timestamp, model, input_tokens, output_tokens, cost_usd, tool_calls, latency_ms)
+                 VALUES (?1, ?2, ?3, 'm', 10, 20, ?4, 0, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    agent.0.to_string(),
+                    ts,
+                    cost,
+                    latency,
+                ],
+            )
+            .unwrap();
+        };
+        insert_event(&agent_id, &recent_a, 0.10, 100);
+        insert_event(&agent_id, &recent_b, 0.05, 200);
+        insert_event(&agent_id, &recent_b, 0.15, 300);
+        insert_event(&agent_id, &stale, 9.99, 999); // outside window
+        insert_event(&other_agent, &recent_a, 7.77, 777);
+
+        let stats = store.agent_stats_24h(&agent_id.0.to_string()).unwrap();
+        assert_eq!(stats.sessions_24h, 2, "only 2 sessions are within 24h");
+        assert!(
+            (stats.cost_24h - 0.30).abs() < 1e-9,
+            "cost_24h = 0.10 + 0.05 + 0.15"
+        );
+        assert_eq!(
+            stats.p95_latency_ms, 300,
+            "nearest-rank P95 of [100,200,300]"
+        );
+        assert_eq!(stats.samples, 3);
+        assert_eq!(stats.active_now, 1, "only s_active was touched within 5min");
+
+        // Other-agent scoping: querying with that agent's id must return
+        // only its own row, not leak the target agent's larger numbers.
+        let other_stats = store.agent_stats_24h(&other_agent.0.to_string()).unwrap();
+        assert_eq!(other_stats.sessions_24h, 1);
+        assert!((other_stats.cost_24h - 7.77).abs() < 1e-9);
+        assert_eq!(other_stats.samples, 1);
+
+        // Empty-history agent must produce all-zero stats, not error.
+        let empty_stats = store
+            .agent_stats_24h(&AgentId::new().0.to_string())
+            .unwrap();
+        assert_eq!(empty_stats.sessions_24h, 0);
+        assert_eq!(empty_stats.cost_24h, 0.0);
+        assert_eq!(empty_stats.p95_latency_ms, 0);
+        assert_eq!(empty_stats.samples, 0);
+        assert_eq!(empty_stats.active_now, 0);
+    }
 }

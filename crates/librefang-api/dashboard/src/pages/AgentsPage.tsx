@@ -506,24 +506,20 @@ export function AgentsPage() {
     return best?.session_id;
   }, [sessionsQuery.data, detailAgent?.id]);
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
+  // Row-level aggregate only — detail-panel KPI reads from the per-agent
+  // /stats endpoint (useAgentStats) which doesn't suffer from the global
+  // /api/sessions pagination cap.
   const sessionsByAgent = useMemo(() => {
-    const map = new Map<
-      string,
-      { sessions24h: number; cost24h: number; durations: number[]; activeNow: number }
-    >();
+    const map = new Map<string, { sessions24h: number; cost24h: number }>();
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     for (const s of sessionsQuery.data ?? []) {
       const id = s.agent_id;
       if (!id) continue;
       const ts = s.created_at ? Date.parse(s.created_at) : 0;
       if (ts < cutoff) continue;
-      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
+      const entry = map.get(id) ?? { sessions24h: 0, cost24h: 0 };
       entry.sessions24h += 1;
       entry.cost24h += typeof s.cost_usd === "number" ? s.cost_usd : 0;
-      if (typeof s.duration_ms === "number" && s.duration_ms > 0) {
-        entry.durations.push(s.duration_ms);
-      }
-      if (s.active) entry.activeNow += 1;
       map.set(id, entry);
     }
     return map;
@@ -702,7 +698,7 @@ export function AgentsPage() {
 
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
-    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
+    const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0 };
     const stateLower = (agent.state || "").toLowerCase();
     return (
       <button

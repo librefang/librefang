@@ -2393,7 +2393,11 @@ export async function createAgentSession(
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions");
+  // Bump past the server's default page size (50) so list-row aggregates
+  // (sessions/cost in the agent row) don't silently clip when an agent's
+  // sessions aren't in the latest 50 globally. The detail-panel KPI uses
+  // GET /api/agents/{id}/stats which is unaffected by this.
+  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions?limit=500");
   return data.sessions ?? [];
 }
 

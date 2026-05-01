@@ -992,11 +992,9 @@ pub async fn list_agents(
 )]
 pub async fn get_agent_stats(
     State(state): State<Arc<AppState>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // Reject requests for unknown agents so the dashboard can distinguish
-    // "agent gone" from "agent has no activity yet" (both would otherwise
-    // produce the all-zero stats payload).
     let agent_uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => librefang_types::agent::AgentId(u),
         Err(_) => {
@@ -1007,12 +1005,32 @@ pub async fn get_agent_stats(
                 .into_response();
         }
     };
-    if state.kernel.agent_registry().get(agent_uuid).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "agent not found" })),
-        )
-            .into_response();
+    let entry = match state.kernel.agent_registry().get(agent_uuid) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Owner-scoping: non-admin callers can only read stats for agents
+    // they authored. Mirrors the filter applied in `list_agents` so the
+    // detail-panel rollup can't leak per-agent cost / latency to other
+    // users on the same instance.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin
+            && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "agent not found" })),
+            )
+                .into_response();
+        }
     }
 
     let substrate = state.kernel.memory_substrate();
