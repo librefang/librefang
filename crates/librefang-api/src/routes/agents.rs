@@ -774,6 +774,18 @@ pub(crate) fn enrich_agent_json(
     let ready =
         matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
 
+    use librefang_types::agent::ScheduleMode;
+    let schedule = match &e.manifest.schedule {
+        ScheduleMode::Reactive => "manual".to_string(),
+        ScheduleMode::Periodic { cron } => cron.clone(),
+        ScheduleMode::Proactive { .. } => "proactive".to_string(),
+        ScheduleMode::Continuous {
+            check_interval_secs,
+        } => {
+            format!("continuous · {check_interval_secs}s")
+        }
+    };
+
     serde_json::json!({
         "id": e.id.to_string(),
         "name": e.name,
@@ -789,6 +801,7 @@ pub(crate) fn enrich_agent_json(
         "supports_thinking": supports_thinking,
         "ready": ready,
         "profile": e.manifest.profile,
+        "schedule": schedule,
         "identity": {
             "emoji": e.identity.emoji,
             "avatar_url": e.identity.avatar_url,

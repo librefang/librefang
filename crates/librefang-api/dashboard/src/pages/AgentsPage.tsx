@@ -736,7 +736,9 @@ export function AgentsPage() {
         <div className="font-mono text-[10.5px] text-text-dim flex items-center gap-2 pl-[22px] mt-1">
           <span className="truncate min-w-0">{agent.model_name || agent.model_provider || "—"}</span>
           <span className="text-text-dim/60">·</span>
-          <span className="truncate min-w-0">{agent.profile || t("common.local", { defaultValue: "local" })}</span>
+          <span className="truncate min-w-0">
+            {agent.schedule || t("agents.schedule_manual", { defaultValue: "manual" })}
+          </span>
           <span className="ml-auto shrink-0 tabular-nums">
             {stats.sessions24h} · ${stats.cost24h.toFixed(2)}
           </span>

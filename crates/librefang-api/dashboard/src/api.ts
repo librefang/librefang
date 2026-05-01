@@ -269,6 +269,10 @@ export interface AgentItem {
   supports_thinking?: boolean;
   ready?: boolean;
   profile?: string;
+  /** Human-readable schedule summary: "manual" for reactive agents,
+   *  the cron expression for periodic agents, "proactive", or
+   *  "continuous · Ns" for continuous agents. */
+  schedule?: string;
   identity?: AgentIdentity;
   is_hand?: boolean;
   web_search_augmentation?: "off" | "auto" | "always";
