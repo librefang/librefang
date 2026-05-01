@@ -827,6 +827,471 @@ function ServerDetailBody({
   );
 }
 
+// ── Catalog Card (compact) ──────────────────────────────────────────
+
+function CatalogCard({
+  tpl,
+  alreadyAdded,
+  onViewDetail,
+  onInstall,
+  t,
+}: {
+  tpl: McpCatalogEntry;
+  alreadyAdded: boolean;
+  onViewDetail: () => void;
+  onInstall: () => void;
+  t: TFunction;
+}) {
+  const reqEnvCount = (tpl.required_env ?? []).length;
+  return (
+    <Card
+      hover={!alreadyAdded}
+      padding="none"
+      className={`overflow-hidden ${alreadyAdded ? "opacity-70" : ""}`}
+    >
+      <div
+        className="p-3.5 cursor-pointer"
+        role="button"
+        tabIndex={0}
+        onClick={onViewDetail}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onViewDetail();
+          }
+        }}
+      >
+        <div className="flex items-start gap-2.5">
+          <div
+            className={`grid place-items-center w-[30px] h-[30px] rounded-lg shrink-0 ${
+              alreadyAdded
+                ? "bg-success/10 border border-success/30 text-success"
+                : "bg-accent/10 border border-accent/30 text-accent"
+            }`}
+          >
+            {tpl.icon ? (
+              <CatalogIcon icon={tpl.icon} className="w-3.5 h-3.5" />
+            ) : (
+              <Plug className="w-3.5 h-3.5" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[13px] font-medium truncate">{tpl.name}</span>
+              {alreadyAdded && (
+                <Badge variant="success" dot>
+                  {t("mcp.catalog_installed")}
+                </Badge>
+              )}
+            </div>
+            {tpl.category && (
+              <div className="font-mono text-[10px] uppercase tracking-widest text-text-dim mt-0.5 truncate">
+                {tpl.category}
+              </div>
+            )}
+            <p className="text-[11.5px] text-text-dim leading-snug line-clamp-2 mt-1.5">
+              {tpl.description}
+            </p>
+            <div className="flex items-center gap-2.5 mt-2 text-[11px]">
+              {reqEnvCount > 0 && (
+                <span className="font-mono text-accent inline-flex items-center gap-1">
+                  <Key className="w-2.5 h-2.5" />
+                  {t("mcp.requires_env_count", {
+                    count: reqEnvCount,
+                    defaultValue: "{{count}} key",
+                  })}
+                </span>
+              )}
+              {(tpl.tags ?? []).slice(0, 2).map((tag) => (
+                <span
+                  key={tag}
+                  className="font-mono text-text-dim text-[10.5px]"
+                >
+                  #{tag}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+      <button
+        onClick={onInstall}
+        disabled={alreadyAdded}
+        className={`w-full flex items-center justify-center gap-1.5 py-2.5 border-t border-border-subtle text-[12px] font-semibold transition-colors ${
+          alreadyAdded
+            ? "text-text-dim/40 cursor-not-allowed"
+            : "text-brand hover:bg-brand/5"
+        }`}
+      >
+        {alreadyAdded ? (
+          <>
+            <Check className="h-3.5 w-3.5" />
+            {t("mcp.catalog_installed")}
+          </>
+        ) : (
+          <>
+            <Download className="h-3.5 w-3.5" />
+            {t("mcp.catalog_install")}
+          </>
+        )}
+      </button>
+    </Card>
+  );
+}
+
+// ── Catalog Install Wizard ──────────────────────────────────────────
+//
+// Replaces the old single-step "env setup" drawer with a 4-step flow
+// modeled on the design bundle's MCPInstall mock (Permissions →
+// Configure → Installing → Done). The Installing step is gated on the
+// real addMcpServer mutation rather than mock theatre — when the
+// promise resolves we advance to Done; on error we drop back to
+// Configure with the mutation's error toast.
+
+type WizardStep = "permissions" | "configure" | "installing" | "done";
+
+function CatalogInstallWizard({
+  template,
+  onClose,
+  onSuccess,
+  t,
+}: {
+  template: McpCatalogEntry;
+  onClose: () => void;
+  onSuccess: () => void;
+  t: TFunction;
+}) {
+  const addToast = useUIStore((s) => s.addToast);
+  const addMutation = useAddMcpServer();
+  const [step, setStep] = useState<WizardStep>("permissions");
+  const [envInputs, setEnvInputs] = useState<Record<string, string>>(() => {
+    const seed: Record<string, string> = {};
+    for (const e of template.required_env ?? []) seed[e.name] = "";
+    return seed;
+  });
+  const [accepted, setAccepted] = useState(false);
+  const requiredEnv = template.required_env ?? [];
+  const hasRequiredEnv = requiredEnv.length > 0;
+
+  function runInstall() {
+    setStep("installing");
+    const cleanCreds: Record<string, string> = {};
+    for (const [k, v] of Object.entries(envInputs)) {
+      if (typeof v === "string" && v.trim().length > 0) cleanCreds[k] = v;
+    }
+    addMutation.mutate(
+      hasRequiredEnv
+        ? { template_id: template.id, credentials: cleanCreds }
+        : { template_id: template.id },
+      {
+        onSuccess: () => {
+          setStep("done");
+          addToast(t("mcp.add_success"), "success");
+        },
+        onError: (e: unknown) => {
+          addToast(errorMessage(e, t("mcp.add_failed")), "error");
+          // Step back to whichever pane the user was last editing.
+          setStep(hasRequiredEnv ? "configure" : "permissions");
+        },
+      },
+    );
+  }
+
+  // Stepper at the top.
+  const steps: { id: WizardStep; label: string }[] = [
+    { id: "permissions", label: t("mcp.wizard.step_permissions", { defaultValue: "Overview" }) },
+    { id: "configure", label: t("mcp.wizard.step_configure", { defaultValue: "Configure" }) },
+    { id: "installing", label: t("mcp.wizard.step_installing", { defaultValue: "Installing" }) },
+    { id: "done", label: t("mcp.wizard.step_done", { defaultValue: "Done" }) },
+  ];
+  const currentIdx = steps.findIndex((s) => s.id === step);
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-3 p-4 border-b border-border-subtle">
+        <div className="grid place-items-center w-10 h-10 rounded-lg bg-accent/10 border border-accent/30 text-accent shrink-0">
+          {template.icon ? (
+            <CatalogIcon icon={template.icon} className="w-5 h-5" />
+          ) : (
+            <Plug className="w-5 h-5" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[10px] uppercase tracking-widest text-text-dim">
+            {t("mcp.wizard.eyebrow", { defaultValue: "install · mcp server" })}
+          </div>
+          <h2 className="text-[16px] font-semibold mt-0.5 truncate">{template.name}</h2>
+        </div>
+      </div>
+
+      {/* Stepper */}
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle bg-main/30">
+        {steps.map((s, i) => {
+          const done = i < currentIdx;
+          const active = i === currentIdx;
+          return (
+            <div key={s.id} className="flex items-center gap-2 min-w-0">
+              <div
+                className={`grid place-items-center w-[18px] h-[18px] rounded-full text-[9px] font-bold font-mono border ${
+                  done
+                    ? "bg-success border-success text-main"
+                    : active
+                      ? "bg-brand border-brand text-main"
+                      : "border-border-subtle text-text-dim"
+                }`}
+                style={active ? { boxShadow: "0 0 8px var(--color-brand)" } : undefined}
+              >
+                {done ? <Check className="w-2.5 h-2.5" /> : i + 1}
+              </div>
+              <span
+                className={`font-mono text-[11px] truncate ${
+                  active ? "" : done ? "text-text-dim" : "text-text-dim/60"
+                }`}
+              >
+                {s.label}
+              </span>
+              {i < steps.length - 1 && (
+                <div className="w-6 h-px bg-border-subtle shrink-0" />
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-4">
+        {step === "permissions" && (
+          <div className="flex flex-col gap-3.5">
+            <p className="text-[13px] leading-relaxed text-text-dim">
+              {template.description}
+            </p>
+            {(template.tags ?? []).length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {template.tags!.map((tag) => (
+                  <span
+                    key={tag}
+                    className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-accent/10 text-accent"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+            {template.setup_instructions && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1.5">
+                  {t("mcp.setup_instructions", { defaultValue: "Setup" })}
+                </div>
+                <pre className="text-[11.5px] leading-relaxed whitespace-pre-wrap font-sans p-3 rounded-lg bg-main/40 border border-border-subtle text-text-dim">
+                  {template.setup_instructions}
+                </pre>
+              </div>
+            )}
+            {hasRequiredEnv && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-text-dim mb-1.5">
+                  {t("mcp.wizard.requires", { defaultValue: "Requires" })}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {requiredEnv.map((e) => (
+                    <div
+                      key={e.name}
+                      className="flex items-center gap-2 p-2 rounded-md bg-main/40 border border-border-subtle text-[11.5px]"
+                    >
+                      <Key className="w-3 h-3 text-text-dim shrink-0" />
+                      <code className="font-mono text-[11px] font-bold">{e.name}</code>
+                      {e.label && (
+                        <span className="text-text-dim truncate flex-1">{e.label}</span>
+                      )}
+                      {e.get_url && (
+                        <a
+                          href={e.get_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-brand hover:underline shrink-0"
+                          aria-label={t("mcp.wizard.get_credential", { defaultValue: "Get credential" })}
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="rounded-md border border-brand/25 bg-brand/5 p-3 text-[11.5px] text-text-dim leading-relaxed">
+              {t("mcp.wizard.review_notice", {
+                defaultValue:
+                  "After install the server's tools start gated by the approval policy — destructive calls require human sign-off until you scope them down.",
+              })}
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer text-[12.5px] text-text-dim">
+              <input
+                type="checkbox"
+                checked={accepted}
+                onChange={(e) => setAccepted(e.target.checked)}
+                className="accent-[var(--color-brand)]"
+              />
+              {t("mcp.wizard.confirm_review", {
+                defaultValue: "I've reviewed what this server can do.",
+              })}
+            </label>
+          </div>
+        )}
+
+        {step === "configure" && (
+          <div className="flex flex-col gap-4">
+            <div className="text-[12.5px] text-text-dim">
+              {t("mcp.env_setup_desc")}
+            </div>
+            {requiredEnv.map((e) => (
+              <div key={e.name} className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5">
+                  <label
+                    htmlFor={`wiz-env-${e.name}`}
+                    className="text-[10px] font-bold uppercase tracking-widest text-text-dim"
+                  >
+                    {e.label || e.name}
+                  </label>
+                  {e.get_url && (
+                    <a
+                      href={e.get_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-brand hover:underline"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                {e.help && <span className="text-[10px] text-text-dim/70">{e.help}</span>}
+                <input
+                  id={`wiz-env-${e.name}`}
+                  type={e.is_secret ? "password" : "text"}
+                  value={envInputs[e.name] ?? ""}
+                  onChange={(ev) =>
+                    setEnvInputs((prev) => ({ ...prev, [e.name]: ev.target.value }))
+                  }
+                  placeholder={e.label || e.name}
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 transition-colors"
+                />
+              </div>
+            ))}
+            <div className="rounded-md border border-success/25 bg-success/5 p-3 text-[11.5px] text-text-dim leading-relaxed flex items-start gap-2">
+              <ShieldCheck className="w-3.5 h-3.5 text-success shrink-0 mt-0.5" />
+              <span>
+                {t("mcp.wizard.creds_note", {
+                  defaultValue:
+                    "Credentials are encrypted in the local vault and only released to this server's process at connect-time.",
+                })}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {step === "installing" && (
+          <div className="grid place-items-center min-h-48 text-center">
+            <div className="flex flex-col items-center gap-3">
+              <div className="relative">
+                <div className="w-12 h-12 rounded-full border-2 border-brand/20" />
+                <div className="absolute inset-0 w-12 h-12 rounded-full border-2 border-brand border-t-transparent animate-spin" />
+              </div>
+              <div className="font-mono text-[12.5px]">
+                {t("mcp.wizard.installing", {
+                  name: template.name,
+                  defaultValue: "Installing {{name}}…",
+                })}
+              </div>
+              <div className="text-[11px] text-text-dim">
+                {t("mcp.wizard.installing_sub", {
+                  defaultValue: "Persisting config, registering with the runtime.",
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === "done" && (
+          <div className="flex flex-col items-center text-center gap-3 pt-4">
+            <div
+              className="grid place-items-center w-14 h-14 rounded-full bg-success/15 border-2 border-success/40"
+              style={{ boxShadow: "0 0 24px color-mix(in oklab, var(--color-success) 25%, transparent)" }}
+            >
+              <Check className="w-6 h-6 text-success" />
+            </div>
+            <h3 className="text-[17px] font-semibold">
+              {t("mcp.wizard.done_title", { defaultValue: "Installed" })}
+            </h3>
+            <p className="text-[12.5px] text-text-dim max-w-sm">
+              {t("mcp.wizard.done_body", {
+                name: template.name,
+                defaultValue: "{{name}} is connected and exposing its tools to your agents.",
+              })}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Footer */}
+      <div className="flex items-center gap-2 p-3 border-t border-border-subtle">
+        {step === "permissions" && (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              className="ml-auto"
+              disabled={!accepted}
+              onClick={() => (hasRequiredEnv ? setStep("configure") : runInstall())}
+            >
+              {hasRequiredEnv
+                ? t("common.continue", { defaultValue: "Continue" })
+                : t("mcp.catalog_install")}
+            </Button>
+          </>
+        )}
+        {step === "configure" && (
+          <>
+            <Button variant="ghost" onClick={() => setStep("permissions")}>
+              {t("common.back", { defaultValue: "Back" })}
+            </Button>
+            <Button
+              className="ml-auto"
+              leftIcon={<Download className="h-3.5 w-3.5" />}
+              isLoading={addMutation.isPending}
+              onClick={runInstall}
+            >
+              {t("mcp.catalog_install")}
+            </Button>
+          </>
+        )}
+        {step === "installing" && (
+          <Button variant="ghost" disabled className="ml-auto">
+            {t("common.cancel")}
+          </Button>
+        )}
+        {step === "done" && (
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              {t("common.close", { defaultValue: "Close" })}
+            </Button>
+            <Button
+              className="ml-auto"
+              onClick={() => {
+                onSuccess();
+                onClose();
+              }}
+            >
+              {t("mcp.wizard.view_servers", { defaultValue: "View servers" })}
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ───────────────────────────────────────────────────────
 
 export function McpServersPage() {
@@ -845,7 +1310,6 @@ export function McpServersPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [catalogSearch, setCatalogSearch] = useState("");
   const [installingTemplate, setInstallingTemplate] = useState<McpCatalogEntry | null>(null);
-  const [envInputs, setEnvInputs] = useState<Record<string, string>>({});
 
   useCreateShortcut(() => setShowAddModal(true));
 
@@ -931,8 +1395,6 @@ export function McpServersPage() {
       addMutation.mutate(payload, {
         onSuccess: () => {
           setShowAddModal(false);
-          setInstallingTemplate(null);
-          setEnvInputs({});
           setForm(defaultForm);
           addToast(t("mcp.add_success"), "success");
         },
@@ -954,54 +1416,9 @@ export function McpServersPage() {
   const updateField = <K extends keyof ServerFormState>(key: K, value: ServerFormState[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
 
-  // Catalog install: backend expects `{ template_id, credentials }` — the
-  // dashboard no longer materializes a full server spec from the template.
-  function installFromTemplate(tpl: McpCatalogEntry) {
-    const hasEnv = (tpl.required_env ?? []).length > 0;
-    if (hasEnv) {
-      const defaults: Record<string, string> = {};
-      for (const e of tpl.required_env ?? []) defaults[e.name] = "";
-      setEnvInputs(defaults);
-      setInstallingTemplate(tpl);
-    } else {
-      addMutation.mutate({ template_id: tpl.id }, {
-        onSuccess: () => {
-          setShowAddModal(false);
-          setInstallingTemplate(null);
-          setEnvInputs({});
-          setForm(defaultForm);
-          addToast(t("mcp.add_success"), "success");
-        },
-        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
-      });
-    }
-  }
-
-  function confirmTemplateInstall() {
-    if (!installingTemplate) return;
-    // Strip blank credential fields before submit. The server's installer
-    // persists whatever is sent, so a skipped optional field would land
-    // in the vault as an empty string and the downstream env lookup would
-    // then skip its dotenv fallback (since the vault "has" a value,
-    // albeit empty). Dropping the key lets the resolver chain work.
-    const cleanCreds: Record<string, string> = {};
-    for (const [k, v] of Object.entries(envInputs)) {
-      if (typeof v === "string" && v.trim().length > 0) cleanCreds[k] = v;
-    }
-    addMutation.mutate(
-      { template_id: installingTemplate.id, credentials: cleanCreds },
-      {
-        onSuccess: () => {
-          setShowAddModal(false);
-          setInstallingTemplate(null);
-          setEnvInputs({});
-          setForm(defaultForm);
-          addToast(t("mcp.add_success"), "success");
-        },
-        onError: (e: unknown) => addToast(errorMessage(e, t("mcp.add_failed")), "error"),
-      },
-    );
-  }
+  // Catalog install drives the 4-step CatalogInstallWizard component;
+  // bookkeeping (mutation, env inputs, success/error toasts) lives there.
+  // The page only owns which template is currently being installed.
 
   const catalogEntries = catalogQuery.data?.entries ?? [];
   // Catalog entries are already flagged `installed` by the backend, but the
@@ -1241,101 +1658,18 @@ export function McpServersPage() {
             />
           )}
           {filteredTemplates.length > 0 && (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
               {filteredTemplates.map((tpl) => {
                 const alreadyAdded = tpl.installed || installedTemplateIds.has(tpl.id);
                 return (
-                  <Card key={tpl.id} hover={!alreadyAdded} padding="none" className={`flex flex-col overflow-hidden group ${alreadyAdded ? "opacity-75" : ""}`}>
-                    <div className={`h-1.5 bg-linear-to-r ${
-                      alreadyAdded
-                        ? "from-success via-success/60 to-success/30"
-                        : "from-brand via-brand/60 to-brand/30"
-                    }`} />
-                    <div
-                      className="p-5 flex-1 flex flex-col cursor-pointer"
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setDetailsCatalog(tpl)}
-                      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetailsCatalog(tpl); } }}
-                    >
-                      {/* Header */}
-                      <div className="flex items-start justify-between gap-3 mb-3">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center shadow-sm ${
-                            alreadyAdded
-                              ? "bg-linear-to-br from-success/10 to-success/5 border border-success/20"
-                              : "bg-linear-to-br from-brand/10 to-brand/5 border border-brand/20"
-                          }`}>
-                            {tpl.icon
-                              ? <CatalogIcon icon={tpl.icon} className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
-                              : <Plug className={`w-5 h-5 ${alreadyAdded ? "text-success" : "text-brand"}`} />
-                            }
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <h3 className={`text-sm font-black truncate transition-colors ${
-                              alreadyAdded ? "" : "group-hover:text-brand"
-                            }`}>{tpl.name}</h3>
-                            {tpl.category && (
-                              <span className="block truncate text-[10px] font-black uppercase tracking-widest text-text-dim/60">{tpl.category}</span>
-                            )}
-                          </div>
-                        </div>
-                        {alreadyAdded && (
-                          <Badge variant="success" dot>
-                            <Check className="h-3 w-3 mr-0.5" />
-                            {t("mcp.catalog_installed")}
-                          </Badge>
-                        )}
-                      </div>
-
-                      {/* Description */}
-                      <p className="text-xs text-text-dim leading-relaxed line-clamp-2 mb-3 flex-1">{tpl.description}</p>
-
-                      {/* Tags */}
-                      {(tpl.tags ?? []).length > 0 && (
-                        <div className="flex flex-wrap gap-1 mb-3">
-                          {tpl.tags!.slice(0, 4).map(tag => (
-                            <span key={tag} className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-brand/8 text-brand/70">{tag}</span>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Required env vars */}
-                      {(tpl.required_env ?? []).length > 0 && (
-                        <div className="space-y-1 mb-2">
-                          {(tpl.required_env ?? []).map(e => (
-                            <div key={e.name} className="flex items-center gap-1.5 text-[10px]">
-                              <Key className="w-3 h-3 text-text-dim/50 shrink-0" />
-                              <span className="font-mono font-bold text-text-dim">{e.name}</span>
-                              {e.get_url && (
-                                <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline ml-auto">
-                                  <ExternalLink className="h-3 w-3" />
-                                </a>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Action */}
-                    <div className="border-t border-border-subtle">
-                      <button
-                        onClick={() => installFromTemplate(tpl)}
-                        disabled={alreadyAdded}
-                        className={`w-full flex items-center justify-center gap-1.5 py-3 text-xs font-bold transition-colors rounded-b-xl sm:rounded-b-2xl ${
-                          alreadyAdded
-                            ? "text-text-dim/30 cursor-not-allowed"
-                            : "text-brand hover:bg-brand/5"
-                        }`}
-                      >
-                        {alreadyAdded
-                          ? <><Check className="h-3.5 w-3.5" /> {t("mcp.catalog_installed")}</>
-                          : <><Download className="h-3.5 w-3.5" /> {t("mcp.catalog_install")}</>
-                        }
-                      </button>
-                    </div>
-                  </Card>
+                  <CatalogCard
+                    key={tpl.id}
+                    tpl={tpl}
+                    alreadyAdded={alreadyAdded}
+                    onViewDetail={() => setDetailsCatalog(tpl)}
+                    onInstall={() => setInstallingTemplate(tpl)}
+                    t={t}
+                  />
                 );
               })}
             </div>
@@ -1478,56 +1812,21 @@ export function McpServersPage() {
         </div>
       </DrawerPanel>
 
-      {/* Catalog env setup modal */}
+      {/* Catalog install wizard — Permissions / Configure / Installing / Done */}
       <DrawerPanel
         isOpen={!!installingTemplate}
-        onClose={() => { setInstallingTemplate(null); setEnvInputs({}); }}
-        title={t("mcp.env_setup_title", { name: installingTemplate?.name ?? "" })}
+        onClose={() => setInstallingTemplate(null)}
+        title={installingTemplate?.name ?? ""}
         size="md"
       >
-        <div className="p-5 space-y-4">
-          <p className="text-xs text-text-dim">{t("mcp.env_setup_desc")}</p>
-          {(installingTemplate?.required_env ?? []).map(e => (
-            <div key={e.name} className="flex flex-col gap-1.5">
-              <div className="flex items-center gap-1.5">
-                <label htmlFor={`catalog-env-${e.name}`} className="text-[10px] font-black uppercase tracking-widest text-text-dim">
-                  {e.label || e.name}
-                </label>
-                {e.get_url && (
-                  <a href={e.get_url} target="_blank" rel="noopener noreferrer" className="text-brand hover:underline">
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
-                )}
-              </div>
-              {e.help && <span className="text-[9px] text-text-dim/50">{e.help}</span>}
-              <input
-                id={`catalog-env-${e.name}`}
-                type={e.is_secret ? "password" : "text"}
-                value={envInputs[e.name] ?? ""}
-                onChange={(ev) => setEnvInputs(prev => ({ ...prev, [e.name]: ev.target.value }))}
-                placeholder={e.label || e.name}
-                className="w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5 text-sm font-mono text-text-main placeholder:text-text-dim/40 focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10 hover:border-brand/20 transition-colors duration-200 shadow-sm"
-              />
-            </div>
-          ))}
-          <div className="flex gap-3 pt-2">
-            <Button
-              variant="secondary"
-              className="flex-1"
-              onClick={() => { setInstallingTemplate(null); setEnvInputs({}); }}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              className="flex-1"
-              isLoading={addMutation.isPending}
-              leftIcon={<Download className="h-3.5 w-3.5" />}
-              onClick={confirmTemplateInstall}
-            >
-              {t("mcp.catalog_install")}
-            </Button>
-          </div>
-        </div>
+        {installingTemplate && (
+          <CatalogInstallWizard
+            template={installingTemplate}
+            onClose={() => setInstallingTemplate(null)}
+            onSuccess={() => setTab("servers")}
+            t={t}
+          />
+        )}
       </DrawerPanel>
 
       {/* Delete confirmation */}
@@ -1662,7 +1961,7 @@ export function McpServersPage() {
                   onClick={() => {
                     const tpl = detailsCatalog;
                     setDetailsCatalog(null);
-                    installFromTemplate(tpl);
+                    setInstallingTemplate(tpl);
                   }}
                 >
                   {alreadyAdded ? t("mcp.catalog_installed") : t("mcp.catalog_install")}
