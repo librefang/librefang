@@ -13,6 +13,7 @@ import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { useFavorites } from '../lib/useFavorites'
 import { useMarketplace, type MarketplacePkg } from '../lib/useMarketplace'
+import { fmtNum } from '../lib/format'
 // Fixed top header needs content to start below its 64px band.
 
 interface RegistryPageProps {
@@ -48,7 +49,9 @@ function isPopular(item: Detail) {
   return item.tags?.includes('popular') ?? false
 }
 
-type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads'
+type SortKey = 'popular' | 'nameAsc' | 'nameDesc' | 'trending' | 'downloads' | 'weekly'
+
+const SORT_KEYS: SortKey[] = ['popular', 'nameAsc', 'nameDesc', 'trending', 'downloads', 'weekly']
 
 function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, number>, marketplace: Map<string, MarketplacePkg>): Detail[] {
   const arr = [...items]
@@ -66,6 +69,8 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
       })
     case 'downloads':
       return arr.sort((a, b) => (marketplace.get(b.id)?.total_downloads ?? 0) - (marketplace.get(a.id)?.total_downloads ?? 0))
+    case 'weekly':
+      return arr.sort((a, b) => (marketplace.get(b.id)?.weekly_downloads ?? 0) - (marketplace.get(a.id)?.weekly_downloads ?? 0))
     case 'popular':
     default:
       return arr.sort((a, b) => {
@@ -75,12 +80,6 @@ function sortItems(items: Detail[], key: SortKey, trendingIds: Map<string, numbe
         return a.name.localeCompare(b.name)
       })
   }
-}
-
-function fmtNum(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
 }
 
 const TRENDING_API = 'https://stats.librefang.ai/api/registry/trending'
@@ -110,7 +109,7 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
   const [sortBy, setSortBy] = useState<SortKey>(() => {
     if (typeof window === 'undefined') return 'popular'
     const raw = new URLSearchParams(window.location.search).get('sort')
-    return (['popular', 'nameAsc', 'nameDesc', 'trending', 'downloads'] as SortKey[]).includes(raw as SortKey)
+    return SORT_KEYS.includes(raw as SortKey)
       ? (raw as SortKey)
       : 'popular'
   })
@@ -147,6 +146,13 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
     for (const row of trendingQuery.data?.top ?? []) m.set(row.id, row.clicks)
     return m
   }, [trendingQuery.data])
+
+  // Enable the "Trending this week" sort only when at least one package has a
+  // non-zero weekly count — otherwise the option would just re-order by id.
+  const hasWeeklyData = useMemo(() => {
+    for (const pkg of marketplace.values()) if (pkg.weekly_downloads > 0) return true
+    return false
+  }, [marketplace])
 
   const filtered = useMemo(() => {
     const sorted = sortItems(items, sortBy, trendingIds, marketplace)
@@ -234,6 +240,9 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
               </option>
               <option value="downloads" disabled={marketplace.size === 0}>
                 {t.registry?.sort?.downloads || 'Most downloaded'}
+              </option>
+              <option value="weekly" disabled={!hasWeeklyData}>
+                {t.registry?.sort?.weekly || 'Trending this week'}
               </option>
             </select>
           </label>
@@ -432,28 +441,24 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                     <ArrowRight className="w-3.5 h-3.5 text-gray-300 dark:text-gray-600 group-hover:text-cyan-500 transition-colors shrink-0 mt-1" />
                   </div>
 
-                  {/* Meta row: category · version · popular badge */}
-                  <div className="flex items-center gap-2 mb-2.5 flex-wrap">
+                  {/* Meta row: category, version, popular — flex gap handles
+                      spacing so chips wrap cleanly on narrow viewports without
+                      orphaned separator dots. */}
+                  <div className="flex items-center gap-x-3 gap-y-1 mb-2.5 flex-wrap">
                     {item.category && (
                       <span className="text-[10px] font-mono text-gray-400 dark:text-gray-500 uppercase tracking-wider">
                         {item.category}
                       </span>
                     )}
                     {mktPkg?.latest_version && (
-                      <>
-                        {item.category && <span className="text-gray-300 dark:text-gray-700 text-[10px]">·</span>}
-                        <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-500">
-                          v{mktPkg.latest_version}
-                        </span>
-                      </>
+                      <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-500 tabular-nums">
+                        v{mktPkg.latest_version}
+                      </span>
                     )}
                     {popular && (
-                      <>
-                        <span className="text-gray-300 dark:text-gray-700 text-[10px]">·</span>
-                        <span className="flex items-center gap-0.5 text-[10px] font-mono text-amber-500">
-                          <Sparkles className="w-2.5 h-2.5" /> popular
-                        </span>
-                      </>
+                      <span className="flex items-center gap-0.5 text-[10px] font-mono text-amber-500">
+                        <Sparkles className="w-2.5 h-2.5" /> popular
+                      </span>
                     )}
                   </div>
 
@@ -474,29 +479,46 @@ export default function RegistryPage({ category, onOpenSearch }: RegistryPagePro
                     </div>
                   )}
 
-                  {/* Stats row */}
-                  {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0) && (
+                  {/* Stats row. While marketplace data is still loading
+                      (`marketplace.size === 0`) we render an invisible
+                      placeholder of the same height so the card doesn't
+                      reflow when stats stream in. */}
+                  {marketplace.size === 0 ? (
+                    <div className="h-[28px]" aria-hidden="true" />
+                  ) : mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0 || mktPkg.weekly_downloads > 0) ? (
                     <div className="flex items-center gap-3 pt-2.5 border-t border-black/8 dark:border-white/8">
                       {mktPkg.total_downloads > 0 && (
-                        <span className="flex items-center gap-1 text-[11px] font-mono text-gray-500 dark:text-gray-400">
-                          <Download className="w-3 h-3 text-cyan-500/70" />
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-gray-500 dark:text-gray-400 tabular-nums"
+                          aria-label={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                          title={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                        >
+                          <Download className="w-3 h-3 text-cyan-500/70" aria-hidden="true" />
                           {fmtNum(mktPkg.total_downloads)}
                         </span>
                       )}
                       {mktPkg.weekly_downloads > 0 && (
-                        <span className="flex items-center gap-1 text-[11px] font-mono text-green-600 dark:text-green-500">
-                          <TrendingUp className="w-3 h-3" />
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-green-600 dark:text-green-500 tabular-nums"
+                          aria-label={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                          title={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                        >
+                          <TrendingUp className="w-3 h-3" aria-hidden="true" />
                           {fmtNum(mktPkg.weekly_downloads)}
                         </span>
                       )}
                       {mktPkg.stars > 0 && (
-                        <span className="flex items-center gap-1 text-[11px] font-mono text-amber-500/80">
-                          <Star className="w-3 h-3" />
+                        <span
+                          className="flex items-center gap-1 text-[11px] font-mono text-amber-500/80 tabular-nums"
+                          aria-label={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                          title={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                        >
+                          <Star className="w-3 h-3" aria-hidden="true" />
                           {fmtNum(mktPkg.stars)}
                         </span>
                       )}
                     </div>
-                  )}
+                  ) : null}
                 </a>
               )
             })}
