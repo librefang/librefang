@@ -2683,7 +2683,11 @@ pub async fn attach_session_stream(
     );
 
     Sse::new(sse_stream)
-        .keep_alive(axum::response::sse::KeepAlive::default())
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response()
 }
 

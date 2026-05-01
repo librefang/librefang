@@ -2476,6 +2476,14 @@
     "connected": "connected",
     "no_peers": "No peers connected",
     "no_peers_desc": "No OFP peers are currently connected to this node.",
+    "identity_fingerprint": "Identity fingerprint",
+    "identity_fingerprint_hint": "Compare with the remote operator out-of-band before pinning.",
+    "identity_missing": "No Ed25519 identity loaded. OFP is running in HMAC-only legacy mode; per-peer impersonation defense (#3873) is dormant.",
+    "pinned_peers_count_one": "{{count}} TOFU-pinned peer",
+    "pinned_peers_count_other": "{{count}} TOFU-pinned peers",
+    "trusted_peers": "Trusted peers",
+    "trusted_peers_pinned": "{{count}} pinned",
+    "trusted_peer_fingerprint_hint": "SHA-256 fingerprint of the pinned Ed25519 public key. Compare OOB.",
     "help": "Network shows this instance's status in the Open Federation Protocol (OFP) — peer LibreFang nodes you've discovered or been discovered by, your own node identity, and the OFP version in use. OFP is the layer below A2A: it's how nodes find each other; A2A is what they say once connected.\n\nHow to use this page:\n\n1. Identity. The node-id and protocol version identify this LibreFang instance to the federation.\n\n2. Peers. Shows every connected peer with online / offline status. Empty list means you're not federating with anyone yet.\n\n3. Status. Online means OFP is reachable and your node is announcing itself.\n\nWhen to use it (vs. A2A):\n\n  · Network — node-level federation: who's out there, who's connected.\n  · A2A — agent-level talk: what agents on those nodes can do for each other.\n\nTypical scenarios:\n\n  · Confirming two LibreFang instances actually see each other before debugging A2A.\n  · Reading off your node-id to share with a peer for direct connection.\n\nThings to know:\n\n  · Federation is opt-in and config-gated. If \"no peers\" looks empty by default, that's expected unless you've configured peers.\n  · Network status is a live read — refresh polls, no caching."
   },
   "a2a": {

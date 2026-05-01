@@ -8,6 +8,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/peers", axum::routing::get(list_peers))
         .route("/peers/{id}", axum::routing::get(get_peer))
         .route("/network/status", axum::routing::get(network_status))
+        .route(
+            "/network/trusted-peers",
+            axum::routing::get(network_trusted_peers),
+        )
         .route("/comms/topology", axum::routing::get(comms_topology))
         .route("/comms/events", axum::routing::get(comms_events))
         .route(
@@ -167,7 +171,7 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     let enabled = cfg.network_enabled && !cfg.network.shared_secret.is_empty();
     drop(cfg);
 
-    let (node_id, listen_address, connected_peers, total_peers) =
+    let (node_id, listen_address, connected_peers, total_peers, identity_fingerprint, pinned_peers) =
         if let Some(peer_node) = state.kernel.peer_node_ref() {
             let registry = peer_node.registry();
             (
@@ -175,18 +179,58 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
                 peer_node.local_addr().to_string(),
                 registry.connected_count(),
                 registry.total_count(),
+                peer_node.identity_fingerprint(),
+                peer_node.pinned_peer_count(),
             )
         } else {
-            (String::new(), String::new(), 0, 0)
+            (String::new(), String::new(), 0, 0, None, 0)
         };
 
+    // SECURITY (#3873): Surface this node's Ed25519 identity fingerprint
+    // and the count of TOFU-pinned peers so operators can verify their
+    // own identity is loaded (not silently HMAC-only) and watch the pin
+    // map populate as peers are encountered. The fingerprint is the
+    // out-of-band-comparable value — share it on a side channel so a
+    // remote operator can check the value their kernel pinned.
     Json(serde_json::json!({
         "enabled": enabled,
         "node_id": node_id,
         "listen_address": listen_address,
         "connected_peers": connected_peers,
         "total_peers": total_peers,
+        "identity_fingerprint": identity_fingerprint,
+        "pinned_peers": pinned_peers,
     }))
+}
+
+/// SECURITY (#3873): GET /api/network/trusted-peers — list every TOFU-pinned
+/// peer this node will accept under each `node_id`. Operators read this to
+/// verify what their daemon trusts and out-of-band-compare fingerprints
+/// with remote operators before federating.
+#[utoipa::path(
+    get,
+    path = "/api/network/trusted-peers",
+    tag = "network",
+    responses(
+        (status = 200, description = "List TOFU-pinned peers", body = serde_json::Value)
+    )
+)]
+pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let entries: Vec<serde_json::Value> = match state.kernel.peer_node_ref() {
+        Some(peer_node) => peer_node
+            .list_pinned_peers()
+            .into_iter()
+            .map(|(node_id, public_key, fingerprint)| {
+                serde_json::json!({
+                    "node_id": node_id,
+                    "public_key": public_key,
+                    "fingerprint": fingerprint,
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    Json(serde_json::json!({ "peers": entries }))
 }
 
 #[utoipa::path(
