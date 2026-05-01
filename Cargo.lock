@@ -4134,6 +4134,7 @@ dependencies = [
  "librefang-runtime",
  "librefang-skills",
  "librefang-telemetry",
+ "librefang-testing",
  "librefang-types",
  "librefang-wire",
  "metrics",
@@ -4381,6 +4382,7 @@ dependencies = [
  "librefang-memory",
  "librefang-runtime",
  "librefang-skills",
+ "librefang-testing",
  "librefang-types",
  "librefang-wire",
  "rand 0.10.1",
@@ -4681,6 +4683,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "tower",
  "uuid",
 ]
