@@ -823,6 +823,12 @@ pub(crate) fn enrich_agent_json(
         "children": e.children.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
         "session_id": e.session_id.0.to_string(),
         "tags": e.tags,
+        "onboarding_completed": e.onboarding_completed,
+        "onboarding_completed_at": e.onboarding_completed_at.as_ref().map(|t| t.to_rfc3339()),
+        "force_session_wipe": e.force_session_wipe,
+        "resume_pending": e.resume_pending,
+        "reset_reason": e.reset_reason,
+        "has_processed_message": e.has_processed_message,
     })
 }
 
@@ -2638,7 +2644,11 @@ pub async fn attach_session_stream(
     );
 
     Sse::new(sse_stream)
-        .keep_alive(axum::response::sse::KeepAlive::default())
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response()
 }
 

@@ -508,6 +508,49 @@ impl PeerNode {
         &self.registry
     }
 
+    /// SECURITY (#3873): Stable hex SHA-256 fingerprint of this node's
+    /// Ed25519 public key. `None` when this node was started without an
+    /// identity (HMAC-only legacy mode). The fingerprint is the value an
+    /// operator compares out-of-band with a remote peer to verify the
+    /// pubkey before TOFU pins it.
+    pub fn identity_fingerprint(&self) -> Option<String> {
+        self.keypair.as_ref().map(|kp| kp.fingerprint())
+    }
+
+    /// SECURITY (#3873): Number of remote nodes this PeerNode currently
+    /// has Ed25519 pubkeys pinned for. Includes pins hydrated from the
+    /// persistent trust store at startup plus any added during this
+    /// daemon's lifetime. Surfaced via `/api/network/status` so operators
+    /// can see at a glance whether TOFU pinning is actually populating.
+    pub fn pinned_peer_count(&self) -> usize {
+        self.pinned_pubkeys.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// SECURITY (#3873): Snapshot of every TOFU-pinned `(node_id,
+    /// public_key, fingerprint)` triple, sorted by `node_id` for stable
+    /// rendering. Used by `GET /api/network/trusted-peers` so an operator
+    /// can verify exactly which identities this node will accept under
+    /// each `node_id`. Fingerprint is the value to compare out-of-band
+    /// with the remote operator before treating the pin as trustworthy.
+    pub fn list_pinned_peers(&self) -> Vec<(String, String, String)> {
+        let pins = match self.pinned_pubkeys.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<_> = pins
+            .iter()
+            .map(|(id, pk)| {
+                (
+                    id.clone(),
+                    pk.clone(),
+                    crate::keys::fingerprint_of_pubkey(pk),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// SECURITY (#3873): If this node has an Ed25519 identity, return
     /// `(Some(public_key_b64), Some(signature_b64))` over `auth_data`. With
     /// no identity configured returns `(None, None)` and the recipient gets
@@ -2365,5 +2408,62 @@ mod tests {
             Err(other) => panic!("expected HandshakeFailed, got: {other}"),
             Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
         }
+    }
+
+    /// PR-5: `list_pinned_peers` is the input the admin endpoint at
+    /// `GET /api/network/trusted-peers` rebuilds for operators. It MUST
+    /// emit `(node_id, public_key, fingerprint)` triples sorted by
+    /// `node_id` so the dashboard doesn't reshuffle on every refresh,
+    /// and the fingerprint MUST match what `fingerprint_of_pubkey`
+    /// computes for the corresponding public key (else operators
+    /// OOB-comparing fingerprints would be misled).
+    #[tokio::test]
+    async fn issue_3873_list_pinned_peers_is_sorted_and_consistent() {
+        // Hand-craft a trust file with three peers in non-sorted order
+        // so the hydration step alone doesn't accidentally produce a
+        // sorted output.
+        let tmp = tempfile::tempdir().unwrap();
+        let kp_a = Ed25519KeyPair::generate().unwrap();
+        let kp_b = Ed25519KeyPair::generate().unwrap();
+        let kp_c = Ed25519KeyPair::generate().unwrap();
+        {
+            let mut store = crate::trusted_peers::TrustedPeers::new(tmp.path().to_path_buf());
+            store
+                .trust_peer("zeta".into(), kp_c.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("alpha".into(), kp_a.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("mike".into(), kp_b.public_key().to_string(), None, None)
+                .unwrap();
+        }
+
+        let (node, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        let listed = node.list_pinned_peers();
+        let ids: Vec<&str> = listed.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["alpha", "mike", "zeta"],
+            "must be sorted by node_id"
+        );
+        for (id, pk, fp) in &listed {
+            assert_eq!(
+                fp,
+                &crate::keys::fingerprint_of_pubkey(pk),
+                "fingerprint for {id} must equal fingerprint_of_pubkey(public_key)"
+            );
+        }
+        assert_eq!(listed.len(), 3);
+        assert_eq!(node.pinned_peer_count(), 3);
     }
 }
