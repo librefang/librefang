@@ -6,7 +6,7 @@
 //! These functions are called from the `host_call` dispatch in `sandbox.rs`.
 //! They receive `&GuestState` (not `&mut`) and return JSON values.
 
-use crate::sandbox::GuestState;
+use crate::sandbox::{GuestState, MAX_GUEST_RESULT_BYTES};
 use librefang_types::capability::{capability_matches, Capability};
 use serde_json::json;
 use std::net::ToSocketAddrs;
@@ -789,27 +789,73 @@ fn host_kv_get(state: &GuestState, params: &serde_json::Value) -> serde_json::Va
     // a flat key space, so agent A can read or overwrite agent B's keys.
     let namespaced_key = format!("{}:{key}", state.agent_id);
     match kernel.memory_recall(&namespaced_key, None) {
-        Ok(Some(val)) => json!({"ok": val}),
+        Ok(Some(val)) => {
+            // SECURITY (#3866): cap the value returned to the guest so a
+            // value stored before this cap existed cannot be used to push
+            // an unbounded buffer back through host_call.
+            let serialized_len = serde_json::to_vec(&val).map(|v| v.len()).unwrap_or(0);
+            if serialized_len > MAX_GUEST_RESULT_BYTES {
+                return json!({"error": format!(
+                    "Stored value too large to return: {serialized_len} bytes (max {MAX_GUEST_RESULT_BYTES})"
+                )});
+            }
+            json!({"ok": val})
+        }
         Ok(None) => json!({"ok": null}),
         Err(e) => json!({"error": e}),
     }
 }
+
+/// Maximum key length accepted by `host_kv_set` (Bug #3866).
+///
+/// Keys are namespaced and stored verbatim in SQLite; an unbounded key
+/// lets a guest pump megabytes of bytes into the index per call.
+const MAX_KV_KEY_BYTES: usize = 1024;
+
+/// Maximum serialized value size accepted by `host_kv_set` (Bug #3866).
+///
+/// Aliased from `MAX_GUEST_RESULT_BYTES` so all 1 MiB payload caps stay in
+/// sync with a single definition.
+const MAX_KV_VALUE_BYTES: usize = MAX_GUEST_RESULT_BYTES;
 
 fn host_kv_set(state: &GuestState, params: &serde_json::Value) -> serde_json::Value {
     let key = match params.get("key").and_then(|k| k.as_str()) {
         Some(k) => k,
         None => return json!({"error": "Missing 'key' parameter"}),
     };
-    let value = match params.get("value") {
-        Some(v) => v.clone(),
-        None => return json!({"error": "Missing 'value' parameter"}),
-    };
+    // SECURITY (#3866): cap key length before storing.
+    if key.len() > MAX_KV_KEY_BYTES {
+        return json!({"error": format!(
+            "Key too large: {} bytes (max {MAX_KV_KEY_BYTES})",
+            key.len()
+        )});
+    }
+    // Capability check before deserialising/cloning the value so a guest
+    // without MemoryWrite cannot force the host to serialize a 1 MiB blob.
     if let Err(e) = check_capability(
         &state.capabilities,
         &Capability::MemoryWrite(key.to_string()),
     ) {
         return e;
     }
+    let value_ref = match params.get("value") {
+        Some(v) => v,
+        None => return json!({"error": "Missing 'value' parameter"}),
+    };
+    // SECURITY (#3866): cap serialized value size to bound SQLite growth.
+    // Serialize via the borrow first so we don't clone a potentially large
+    // value before knowing it passes the cap. Fail-closed: a serialization
+    // error rejects the call rather than silently skipping the size guard.
+    let serialized_len = match serde_json::to_vec(value_ref) {
+        Ok(v) => v.len(),
+        Err(e) => return json!({"error": format!("Failed to serialize value: {e}")}),
+    };
+    if serialized_len > MAX_KV_VALUE_BYTES {
+        return json!({"error": format!(
+            "Value too large: {serialized_len} bytes (max {MAX_KV_VALUE_BYTES})"
+        )});
+    }
+    let value = value_ref.clone();
     let kernel = match &state.kernel {
         Some(k) => k,
         None => return json!({"error": "No kernel handle available"}),
@@ -1327,6 +1373,54 @@ mod tests {
         );
     }
 
+    /// Regression test for Bug #3866: host_kv_set must reject value
+    /// payloads larger than `MAX_KV_VALUE_BYTES` (1 MiB) before persisting.
+    #[tokio::test]
+    async fn test_kv_set_rejects_oversized_value() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        // Build a value whose JSON serialization exceeds the 1 MiB cap.
+        let huge = "x".repeat(MAX_KV_VALUE_BYTES + 16);
+        let result = host_kv_set(&state, &json!({"key": "k", "value": huge}));
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("too large"),
+            "Expected 'too large' rejection, got: {err}"
+        );
+        // Crucially, the kernel must NOT have stored anything.
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(
+            stored.len(),
+            0,
+            "Oversized value must not reach memory_store"
+        );
+    }
+
+    /// Regression test for Bug #3866: host_kv_set must reject keys longer
+    /// than `MAX_KV_KEY_BYTES` (1024 bytes) before persisting.
+    #[tokio::test]
+    async fn test_kv_set_rejects_oversized_key() {
+        let kernel = RecordingKernel::new();
+        let state = state_with_kernel(
+            "agent-bob",
+            vec![Capability::MemoryWrite("*".to_string())],
+            std::sync::Arc::clone(&kernel),
+        );
+        let long_key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        let result = host_kv_set(&state, &json!({"key": long_key, "value": 1}));
+        let err = result["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("Key too large"),
+            "Expected 'Key too large' rejection, got: {err}"
+        );
+        let stored = kernel.stored.lock().unwrap();
+        assert_eq!(stored.len(), 0, "Oversized key must not reach memory_store");
+    }
+
     /// Two agents using the same guest key must produce different namespaced
     /// keys — that is the whole point of the namespace isolation.
     #[tokio::test]
@@ -1530,6 +1624,59 @@ mod tests {
         assert!(
             err.contains("traversal") || err.contains("forbidden"),
             "traversal path must be rejected; got: {err}"
+        );
+    }
+
+    /// Regression for #3457: a guest with a narrow workspace FileRead grant
+    /// must not be able to escape via a symlink that lives inside the
+    /// workspace but points outside it. The capability check must see the
+    /// canonicalized target, not the raw symlink path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fs_read_symlink_escape_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        // External target the symlink will point at.
+        let outside = tmp.path().join("outside.secret");
+        std::fs::write(&outside, b"secret").unwrap();
+        // Plant the symlink inside the (fake) workspace.
+        let escape = workspace.join("escape");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        // Grant only the workspace prefix.
+        let grant = format!("{}/*", workspace.to_string_lossy());
+        let state = test_state(vec![Capability::FileRead(grant)]);
+        let result = host_fs_read(&state, &json!({"path": escape.to_str().unwrap()}));
+        let err = result["error"]
+            .as_str()
+            .expect("symlink-escape read must fail");
+        assert!(
+            err.contains("denied") || err.contains("Capability"),
+            "symlink-escape must be capability-denied, got: {err}"
+        );
+    }
+
+    /// Regression for #3457 (fs_list variant): same escape via symlink-dir
+    /// must be capability-denied for directory listings.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_fs_list_symlink_escape_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let outside_dir = tmp.path().join("outside_dir");
+        std::fs::create_dir(&outside_dir).unwrap();
+        let escape = workspace.join("escape_dir");
+        std::os::unix::fs::symlink(&outside_dir, &escape).unwrap();
+        let grant = format!("{}/*", workspace.to_string_lossy());
+        let state = test_state(vec![Capability::FileRead(grant)]);
+        let result = host_fs_list(&state, &json!({"path": escape.to_str().unwrap()}));
+        let err = result["error"]
+            .as_str()
+            .expect("symlink-escape list must fail");
+        assert!(
+            err.contains("denied") || err.contains("Capability"),
+            "symlink-escape must be capability-denied, got: {err}"
         );
     }
 }

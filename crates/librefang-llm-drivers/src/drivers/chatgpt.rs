@@ -370,7 +370,7 @@ impl ChatGptDriver {
         let mut instructions: Option<String> = request.system.clone();
         let mut input_items = Vec::new();
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_str = match msg.role {
                 Role::System => {
                     // Merge system messages into instructions
@@ -433,10 +433,12 @@ impl ChatGptDriver {
         // tool_accum: (call_id, name, arguments, arguments_done_emitted) indexed by output_index
         let mut tool_accum: Vec<(String, String, String, bool)> = Vec::new();
         let mut completed_response: Option<serde_json::Value> = None;
+        // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
+        let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
 
         while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk.map_err(|e| LlmError::Http(format!("SSE stream error: {e}")))?;
-            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+            line_buf.push_str(&utf8.decode(&bytes));
 
             while let Some(newline_pos) = line_buf.find('\n') {
                 let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
@@ -653,15 +655,22 @@ impl ChatGptDriver {
                                     ..Default::default()
                                 };
                             }
-                            // Extract stop reason from status
-                            match resp_obj
+                            // Extract stop reason from status. Responses API
+                            // surfaces refusals via incomplete_details.reason
+                            // — treat as ContentFiltered (#3450).
+                            let status = resp_obj
                                 .get("status")
                                 .and_then(|s| s.as_str())
-                                .unwrap_or("completed")
-                            {
-                                "incomplete" => stop_reason = StopReason::MaxTokens,
-                                _ => stop_reason = StopReason::EndTurn,
-                            }
+                                .unwrap_or("completed");
+                            let incomplete_reason = resp_obj
+                                .get("incomplete_details")
+                                .and_then(|d| d.get("reason"))
+                                .and_then(|r| r.as_str());
+                            stop_reason = match (status, incomplete_reason) {
+                                (_, Some("content_filter")) => StopReason::ContentFiltered,
+                                ("incomplete", _) => StopReason::MaxTokens,
+                                _ => StopReason::EndTurn,
+                            };
                             completed_response = Some(resp_obj.clone());
                         }
                     }
@@ -685,6 +694,11 @@ impl ChatGptDriver {
                 }
             }
         }
+
+        // Drain any partial codepoint left in the decoder. No-op in
+        // a well-formed stream; on a truncated connection the residue
+        // surfaces as U+FFFD instead of vanishing (#3448).
+        line_buf.push_str(&utf8.finish());
 
         // Build content blocks
         let mut content_blocks = Vec::new();
@@ -1104,12 +1118,12 @@ mod tests {
     fn test_build_responses_request_basic() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hello".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.7,
@@ -1134,7 +1148,7 @@ mod tests {
     fn test_build_responses_request_system_merged() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![
+            messages: std::sync::Arc::new(vec![
                 Message {
                     role: Role::System,
                     content: MessageContent::Text("System prompt.".to_string()),
@@ -1147,7 +1161,7 @@ mod tests {
                     pinned: false,
                     timestamp: None,
                 },
-            ],
+            ]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,
@@ -1171,12 +1185,12 @@ mod tests {
     fn test_build_responses_request_appends_json_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,
@@ -1199,12 +1213,12 @@ mod tests {
     fn test_build_responses_request_appends_json_schema_response_format() {
         let req = CompletionRequest {
             model: "gpt-4o".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hi".to_string()),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: Vec::new(),
             max_tokens: 0,
             temperature: 1.0,

@@ -364,9 +364,26 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Default returns None (event subscription not available).
     async fn subscribe_events(
         &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<librefang_types::event::Event>>>
+    {
         None
     }
+
+    /// Record that the consumer side dropped `n` events due to broadcast
+    /// lag. Called by listeners that receive from [`subscribe_events`] when
+    /// they observe `RecvError::Lagged(n)`. The production impl forwards
+    /// to `EventBus::record_consumer_lag` so lag drops show up in the
+    /// kernel's `dropped_count` metric and trigger a rate-limited
+    /// `error!` log (issue #3630).
+    ///
+    /// No default impl on purpose: a default no-op would let any future
+    /// production handle silently inherit the no-op and swallow lag
+    /// drops, re-defeating #3630 with no compiler signal. Test mocks
+    /// that have no event bus to forward to should write an explicit
+    /// `fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {}`
+    /// to acknowledge the requirement; that one line is cheaper than
+    /// chasing another silent-drop regression.
+    fn record_consumer_lag(&self, n: u64, context: &'static str);
 
     // ── Budget, Network, A2A ──
 
@@ -1271,7 +1288,7 @@ impl BridgeManager {
                     result = rx.recv() => {
                         match result {
                             Ok(event) => {
-                                if let librefang_types::event::EventPayload::ApprovalRequested(ref approval) = event.payload {
+                                if let librefang_types::event::EventPayload::ApprovalRequested(approval) = &event.payload {
                                     let msg = format!(
                                         "Approval required for agent {}\n\
                                          Tool: {}\n\
@@ -1308,7 +1325,13 @@ impl BridgeManager {
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Approval event listener lagged by {n} events");
+                                // Route through the kernel's lag counter so
+                                // approval-event misses contribute to
+                                // EventBus::dropped_count and surface as a
+                                // rate-limited error! log (#3630). Default
+                                // impl is a no-op for test mocks without an
+                                // event bus.
+                                handle.record_consumer_lag(n, "channel_approval_listener");
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 info!("Event bus closed — stopping approval listener");
@@ -3850,16 +3873,26 @@ fn sanitize_extension(ext: &str) -> String {
     }
 }
 
-/// Validate that a URL uses an allowed scheme (http or https).
+/// Validate that a URL is safe for the daemon to fetch on behalf of an
+/// inbound channel message (#3442).
+///
+/// Delegates to [`crate::http_client::validate_url_for_fetch`], which
+/// enforces:
+/// * `http`/`https` scheme only — rejects `file://`, `ftp://`,
+///   `javascript:`, `data:`, etc.
+/// * No IPv4/IPv6 literal in any private, loopback, link-local,
+///   unique-local, multicast, reserved, or cloud-metadata range —
+///   including the IPv4-mapped (`::ffff:x.x.x.x`) and NAT64
+///   (`64:ff9b::x.x.x.x`) wire-equivalent forms.
+/// * No internal hostname (`localhost`, `*.local`,
+///   `metadata.google.internal`, `169.254.169.254`).
+///
+/// Without this guard, a forged inbound message containing
+/// `attachment.url = "http://169.254.169.254/latest/meta-data/..."`
+/// or `"http://127.0.0.1:4545/api/agents"` would have its body fetched
+/// and base64'd into the agent's LLM context.
 fn validate_url_scheme(url: &str) -> Result<(), String> {
-    if url.starts_with("https://") || url.starts_with("http://") {
-        Ok(())
-    } else {
-        Err(format!(
-            "Rejected URL with unsupported scheme: {}",
-            url.split(':').next().unwrap_or("unknown")
-        ))
-    }
+    crate::http_client::validate_url_for_fetch(url)
 }
 
 /// Download a file from a URL to disk with streaming and size cap.
@@ -4084,25 +4117,16 @@ async fn download_image_to_blocks(
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    // Validate URL scheme — only allow http/https to prevent SSRF via file:// etc.
-    match url::Url::parse(url) {
-        Ok(parsed) => match parsed.scheme() {
-            "http" | "https" => {}
-            scheme => {
-                warn!("Rejecting image download with disallowed scheme: {scheme}");
-                return vec![ContentBlock::Text {
-                    text: format!("[Image download rejected: unsupported URL scheme '{scheme}']"),
-                    provider_metadata: None,
-                }];
-            }
-        },
-        Err(e) => {
-            warn!("Rejecting image download with invalid URL: {e}");
-            return vec![ContentBlock::Text {
-                text: "[Image download rejected: invalid URL]".to_string(),
-                provider_metadata: None,
-            }];
-        }
+    // SSRF guard (#3442): reject not just non-http/https schemes but also
+    // any URL that points at a loopback, private, link-local, or cloud
+    // metadata target.  A forged inbound message could otherwise smuggle
+    // `http://169.254.169.254/...` into the LLM context as an "image".
+    if let Err(reason) = crate::http_client::validate_url_for_fetch(url) {
+        warn!("Rejecting image download: {reason}");
+        return vec![ContentBlock::Text {
+            text: format!("[Image download rejected: {reason}]"),
+            provider_metadata: None,
+        }];
     }
 
     let client = crate::http_client::new_client();
@@ -4927,6 +4951,9 @@ mod tests {
         }
         async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
             Err("spawn not implemented in mock".to_string())
+        }
+        fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+            // Test mock: no event bus to forward to.
         }
     }
 
@@ -6259,6 +6286,42 @@ mod tests {
             let (drained_msg, _) = result.unwrap();
             assert_content_eq(&drained_msg.content, "1\n2");
         }
+
+        // Regression test for #3742: simulates the race where the manual
+        // max-buffer flush path AND the max_timer task BOTH enqueue the same
+        // key on flush_tx. The receiver loop calls drain() once per dequeued
+        // key, so the second call must be a noop — i.e. drain() relies on
+        // `buffers.remove(key)` as the atomic single-take guard. If anything
+        // ever regresses to e.g. `buffers.get(key)` + side effects, this test
+        // catches the resulting double-send.
+        #[tokio::test]
+        async fn test_debouncer_double_drain_is_idempotent() {
+            let (debouncer, _rx) = MessageDebouncer::new(1000, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            debouncer.push(
+                "discord:userX",
+                PendingMessage {
+                    message: make_test_message("only"),
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            // First drain takes the buffer atomically.
+            let first = debouncer.drain("discord:userX", &mut buffers);
+            assert!(first.is_some());
+            // Second drain on the same key must observe an empty entry and noop.
+            let second = debouncer.drain("discord:userX", &mut buffers);
+            assert!(
+                second.is_none(),
+                "double-flush race must not duplicate-send (#3742)"
+            );
+            assert!(
+                !buffers.contains_key("discord:userX"),
+                "drain must remove the buffer entry"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -6680,6 +6743,9 @@ mod tests {
                 *self.captured_bot_name.lock().unwrap() = Some(bot_name.map(|s| s.to_string()));
                 true
             }
+            fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+                // Test mock: no event bus to forward to.
+            }
         }
 
         #[tokio::test]
@@ -6698,6 +6764,9 @@ mod tests {
                 }
                 async fn spawn_agent_by_name(&self, _: &str) -> Result<AgentId, String> {
                     Err("not used in test".into())
+                }
+                fn record_consumer_lag(&self, _n: u64, _ctx: &'static str) {
+                    // Test mock: no event bus to forward to.
                 }
             }
 
@@ -6789,6 +6858,28 @@ mod tests {
             assert!(validate_url_scheme("javascript:alert(1)").is_err());
             assert!(validate_url_scheme("data:text/plain,hello").is_err());
             assert!(validate_url_scheme("/local/path").is_err());
+        }
+
+        /// #3442: an inbound channel message may not smuggle a loopback,
+        /// private, link-local, or cloud-metadata URL through the
+        /// attachment-download path.  Pre-fix this checked scheme only.
+        #[test]
+        fn test_validate_url_scheme_blocks_ssrf_targets() {
+            for url in [
+                "http://127.0.0.1/admin",
+                "http://localhost/admin",
+                "http://169.254.169.254/latest/meta-data/",
+                "http://10.0.0.1/internal",
+                "http://192.168.1.1/router",
+                "http://[::1]/admin",
+                "http://[::ffff:169.254.169.254]/imds",
+                "http://metadata.google.internal/v1/instance",
+            ] {
+                assert!(
+                    validate_url_scheme(url).is_err(),
+                    "expected SSRF reject for {url}"
+                );
+            }
         }
 
         #[tokio::test]

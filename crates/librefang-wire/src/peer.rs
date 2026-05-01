@@ -982,6 +982,16 @@ async fn connection_loop(
                     peer_node_id, msg.id
                 );
             }
+            // Forward-compat (#3544): a peer running a newer protocol version
+            // may emit message types we don't understand. Drop the message
+            // silently — the TCP link must stay alive so older peers stay
+            // reachable. No response is produced for an unknown envelope.
+            WireMessageKind::Unknown => {
+                debug!(
+                    "OFP: ignoring unknown message type from {} (id={:?})",
+                    peer_node_id, msg.id
+                );
+            }
         }
     }
 }
@@ -1090,6 +1100,12 @@ fn handle_notification(peer_node_id: &str, notif: &WireNotification, registry: &
         WireNotification::ShuttingDown => {
             info!("OFP: peer {} is shutting down", peer_node_id);
             registry.mark_disconnected(peer_node_id);
+        }
+        WireNotification::Unknown => {
+            debug!(
+                "OFP: ignoring unknown notification from peer {}",
+                peer_node_id
+            );
         }
     }
 }

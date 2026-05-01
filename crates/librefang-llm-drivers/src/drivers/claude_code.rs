@@ -186,7 +186,7 @@ impl ClaudeCodeDriver {
             parts.push(format!("[System]\n{sys}"));
         }
 
-        for msg in &request.messages {
+        for msg in request.messages.iter() {
             let role_label = match msg.role {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
@@ -986,12 +986,16 @@ impl LlmDriver for ClaudeCodeDriver {
                                             // Don't stream error results to the user —
                                             // they will be caught after the loop and
                                             // converted to LlmError for rotation.
-                                            if !event.is_error && !should_suppress(result) {
-                                                let _ = tx
+                                            if !event.is_error
+                                                && !should_suppress(result)
+                                                && tx
                                                     .send(StreamEvent::TextDelta {
                                                         text: result.clone(),
                                                     })
-                                                    .await;
+                                                    .await
+                                                    .is_err()
+                                            {
+                                                break None;
                                             }
                                         }
                                     }
@@ -1006,12 +1010,15 @@ impl LlmDriver for ClaudeCodeDriver {
                                 _ => {
                                     if let Some(ref content) = event.content {
                                         full_text.push_str(content);
-                                        if !should_suppress(content) {
-                                            let _ = tx
+                                        if !should_suppress(content)
+                                            && tx
                                                 .send(StreamEvent::TextDelta {
                                                     text: content.clone(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                        {
+                                            break None;
                                         }
                                     }
                                 }
@@ -1020,8 +1027,13 @@ impl LlmDriver for ClaudeCodeDriver {
                         Err(e) => {
                             warn!(line = %line, error = %e, "Non-JSON line from Claude CLI");
                             full_text.push_str(&line);
-                            if !should_suppress(&line) {
-                                let _ = tx.send(StreamEvent::TextDelta { text: line }).await;
+                            if !should_suppress(&line)
+                                && tx
+                                    .send(StreamEvent::TextDelta { text: line })
+                                    .await
+                                    .is_err()
+                            {
+                                break None;
                             }
                         }
                     }
@@ -1215,12 +1227,12 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hello"),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1251,7 +1263,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1265,7 +1277,7 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1313,7 +1325,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Text {
@@ -1327,7 +1339,7 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,
@@ -1391,7 +1403,7 @@ mod tests {
 
         let request = CompletionRequest {
             model: "claude-code/sonnet".to_string(),
-            messages: vec![Message {
+            messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Image {
@@ -1405,7 +1417,7 @@ mod tests {
                 ]),
                 pinned: false,
                 timestamp: None,
-            }],
+            }]),
             tools: vec![],
             max_tokens: 1024,
             temperature: 0.7,

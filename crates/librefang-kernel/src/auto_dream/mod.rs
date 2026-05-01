@@ -798,7 +798,7 @@ pub fn maybe_fire_on_turn_end(kernel: Arc<LibreFangKernel>, agent_id: AgentId) {
         return;
     }
 
-    tokio::spawn(async move {
+    crate::supervised_spawn::spawn_supervised("auto_dream_dispatch", async move {
         // Re-check all three gates inside the task. The operator could have
         // flipped the global switch, toggled this agent off, or started a
         // shutdown in the microseconds between the synchronous pre-filter
@@ -909,7 +909,7 @@ impl librefang_runtime::hooks::HookHandler for AutoDreamTurnEndHook {
 }
 
 pub fn spawn_scheduler(kernel: Arc<LibreFangKernel>) {
-    tokio::spawn(async move {
+    crate::supervised_spawn::spawn_supervised("auto_dream_scheduler", async move {
         {
             let cfg = kernel.config_snapshot();
             if cfg.auto_dream.enabled {
@@ -1164,7 +1164,7 @@ pub async fn trigger_manual(kernel: Arc<LibreFangKernel>, agent_id: AgentId) -> 
             let slot = Arc::new(Mutex::new(Some(abort_tx)));
             ABORT_HANDLES.insert(agent_id, slot);
             let k = Arc::clone(&kernel);
-            tokio::spawn(async move {
+            crate::supervised_spawn::spawn_supervised("auto_dream_run", async move {
                 run_dream(k, agent_id, prior_mtime, Some(abort_rx)).await;
             });
             // task_id becomes available once run_dream installs the

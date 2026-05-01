@@ -86,11 +86,14 @@ fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String
         .map_err(|e| format!("Failed to write upload file: {e}"))?;
 
     // Register metadata so serve_upload returns the correct content type.
+    // Daemon-generated media has no human owner — leave `uploaded_by` empty
+    // so any authenticated caller can fetch it (#3361).
     super::agents::UPLOAD_REGISTRY.insert(
         file_id.clone(),
         super::agents::UploadMeta {
             filename: filename.to_string(),
             content_type: content_type.to_string(),
+            uploaded_by: None,
         },
     );
 

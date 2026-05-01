@@ -12,6 +12,7 @@ pub mod drivers;
 pub mod rate_limit_tracker;
 pub mod shared_rate_guard;
 pub mod think_filter;
+pub mod utf8_stream;
 
 pub use credential_pool::{
     new_arc_pool, ArcCredentialPool, CredentialPool, PoolStrategy, PooledCredential,
