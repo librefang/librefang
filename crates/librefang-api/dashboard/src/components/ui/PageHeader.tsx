@@ -102,7 +102,7 @@ const HELP_MARKDOWN_COMPONENTS: Components = {
 interface PageHeaderProps {
   icon: ReactNode;
   title: string;
-  subtitle?: string;
+  subtitle?: ReactNode;
   /** Optional small label rendered next to the title (e.g. "Beta", count, or a <Badge/> element). */
   badge?: ReactNode;
   actions?: ReactNode;
