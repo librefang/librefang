@@ -2408,10 +2408,15 @@ export async function createAgentSession(
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  // Bump past the server's default page size (50) so list-row aggregates
+  // Bumped past the server's default page size (50) so list-row aggregates
   // (sessions/cost in the agent row) don't silently clip when an agent's
-  // sessions aren't in the latest 50 globally. The detail-panel KPI uses
-  // GET /api/agents/{id}/stats which is unaffected by this.
+  // sessions aren't in the latest 50 globally. Modern backends embed
+  // `sessions_24h` / `cost_24h` directly on each AgentItem (see
+  // `enrich_agent_json`), so this scan is now only the *fallback* path
+  // for older daemons; the detail-panel KPI tile reads from
+  // `GET /api/agents/{id}/stats` and never touches this list.
+  // TODO: drop the fallback (and this whole call from AgentsPage) once
+  // the minimum supported daemon version is past the embed change.
   const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions?limit=500");
   return data.sessions ?? [];
 }
