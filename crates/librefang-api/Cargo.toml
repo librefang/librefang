@@ -19,6 +19,7 @@ librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-telemetry = { path = "../librefang-telemetry" }
+librefang-http = { path = "../librefang-http" }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 portable-pty = { workspace = true }
