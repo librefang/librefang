@@ -85,6 +85,18 @@ jobs:
             echo "No release-tag marker found, skipping"
             exit 0
           fi
+
+          # Guard against PR-body markers that drifted from the actual
+          # workspace version. Without this gate, a stale `<!-- release-tag: vX -->`
+          # marker would tag the merge with vX while the binary inside reports
+          # the workspace version, producing artifacts whose `librefang --version`
+          # disagrees with the GitHub Release name. See #3545.
+          WS_VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::PR-body release-tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+
           echo "Creating tag $TAG on main"
           git tag "$TAG"
           git push origin "$TAG"
@@ -146,6 +158,22 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+
+      # Block any tag whose stripped form does not match
+      # `[workspace.package].version` in Cargo.toml. A mismatch means the
+      # CHANGELOG `awk` extractor below silently falls through to the generic
+      # "See CHANGELOG..." note, the Homebrew formula version (derived from
+      # `${TAG#v}` further down the workflow) drifts from `librefang --version`,
+      # and downstream consumers ship inconsistent metadata. See #3545.
+      - name: Verify tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          WS_VERSION=$(grep -E '^version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::pushed tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+          echo "Tag $TAG matches workspace version $WS_VERSION"
 
       - name: Extract changelog for this version
         id: changelog
