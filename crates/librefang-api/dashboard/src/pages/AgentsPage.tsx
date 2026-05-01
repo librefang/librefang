@@ -28,6 +28,7 @@ import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useCreateShortcut } from "../lib/useCreateShortcut";
 import { MultiSelectCmdk } from "../components/ui/MultiSelectCmdk";
 import { Card } from "../components/ui/Card";
+import { MarkdownContent } from "../components/ui/MarkdownContent";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -1064,16 +1065,23 @@ export function AgentsPage() {
             const isUser = m.role === "user";
             const txt = messageText(m).trim();
             if (!txt) return null;
+            // Truncate first, then render. The full conversation lives
+            // behind the "Open chat" button — this is a preview only.
+            const preview = txt.length > 280 ? `${txt.slice(0, 280)}…` : txt;
             return (
               <div key={i} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] whitespace-pre-wrap break-words border ${
+                  className={`max-w-[78%] rounded-lg px-3 py-2 text-[12.5px] break-words border ${
                     isUser
                       ? "bg-brand/10 border-brand/30 text-text-main"
                       : "bg-main/60 border-border-subtle text-text-main"
                   }`}
                 >
-                  {txt.length > 280 ? `${txt.slice(0, 280)}…` : txt}
+                  {isUser ? (
+                    <span className="whitespace-pre-wrap">{preview}</span>
+                  ) : (
+                    <MarkdownContent>{preview}</MarkdownContent>
+                  )}
                 </div>
               </div>
             );
@@ -1096,16 +1104,48 @@ export function AgentsPage() {
   // ---------- Memory tab — per-agent KV row layout per design canvas
   const renderMemoryTab = (agent: AgentDetail) => {
     const kv = agentKvMemoryQuery.data ?? [];
-    const rows = kv.slice(0, 8);
-    const formatValue = (v: unknown): string => {
-      if (typeof v === "string") return v;
-      if (v == null) return "—";
-      try {
-        return JSON.stringify(v);
-      } catch {
-        return String(v);
+
+    // The kv_store backs both real KV (`user.preferences.tone` →
+    // `"concise"`) and the proactive-memory cache (key = `memory:<uuid>`,
+    // value = the full MemoryItem JSON). Render those two cases
+    // differently so the proactive entries don't dump 600-char JSON
+    // blobs into the row.
+    type View = { key: string; value: string; ageIso?: string };
+    const projected: View[] = kv.map((r) => {
+      const value = r.value as unknown;
+      if (
+        typeof r.key === "string" &&
+        r.key.startsWith("memory:") &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        const obj = value as Record<string, unknown>;
+        const content = typeof obj.content === "string" ? obj.content : "";
+        const category = typeof obj.category === "string" ? obj.category : "memory";
+        const createdAt = typeof obj.created_at === "string" ? obj.created_at : undefined;
+        return { key: category, value: content || "—", ageIso: createdAt };
       }
-    };
+      // Plain KV: show value as a string. Avoid JSON.stringify wrapping
+      // strings with extra quotes.
+      const valueStr = typeof value === "string"
+        ? value
+        : value == null
+          ? "—"
+          : (() => {
+              try {
+                return JSON.stringify(value);
+              } catch {
+                return String(value);
+              }
+            })();
+      return {
+        key: r.key,
+        value: valueStr,
+        ageIso: r.created_at,
+      };
+    });
+    const rows = projected.slice(0, 8);
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -1137,11 +1177,11 @@ export function AgentsPage() {
                 <div className="flex items-center justify-between gap-2 sm:contents">
                   <span className="font-mono text-[12px] text-brand sm:min-w-[180px] truncate sm:shrink-0 min-w-0">{r.key}</span>
                   <span className="font-mono text-[10.5px] text-text-dim/70 sm:order-3 sm:shrink-0 tabular-nums shrink-0">
-                    {r.created_at ? formatRelativeTime(r.created_at) : "—"}
+                    {r.ageIso ? formatRelativeTime(r.ageIso) : "—"}
                   </span>
                 </div>
-                <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2">
-                  {formatValue(r.value)}
+                <span className="font-mono text-[12px] text-text-dim sm:flex-1 min-w-0 truncate sm:order-2" title={r.value}>
+                  {r.value}
                 </span>
               </div>
             ))}
