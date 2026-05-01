@@ -160,10 +160,29 @@ Click the green **"Code"** button on GitHub → **"Codespaces"** → **"Create c
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang
+just setup        # one-time per clone — activates git hooks + fetches deps
 cargo build
 ```
 
+`just setup` (which calls `cargo xtask setup`) does three things on a fresh clone:
+- Sets `git config core.hooksPath scripts/hooks` so the in-repo pre-commit (`cargo fmt --check` + conditional OpenAPI / SDK regen) and commit-msg hooks become active.
+- Runs `cargo fetch` to warm up the dependency cache.
+- Runs `pnpm install` in the dashboard / web / docs sub-projects.
+
+You only need to run it once per clone — `git pull` keeps the hooks current automatically because they live in `scripts/hooks/` rather than being copied into `.git/hooks/`.
+
 The first build takes a few minutes because it compiles SQLite (bundled) and Wasmtime. Subsequent builds are incremental.
+
+#### Worktrees for parallel work
+
+For any non-trivial feature, work in a `git worktree` rather than the main clone. This avoids contending with other sessions on the shared `target/` directory and prevents accidental edits on the wrong branch:
+
+```bash
+git worktree add /tmp/librefang-<feature> -b <branch-name> origin/main
+cd /tmp/librefang-<feature>
+```
+
+New worktrees inherit the main clone's `core.hooksPath` setting, so the git hooks are active there too without re-running `just setup`.
 
 ### Environment Variables
 
