@@ -436,14 +436,20 @@ impl CredentialVault {
             return Ok(cached.clone());
         }
 
-        // Try OS keyring first
-        if let Ok(key_b64) = load_keyring_key() {
+        // Env var wins over the keyring — matches `init()`'s precedence
+        // (line ~279) so an explicit `LIBREFANG_VAULT_KEY` survives across
+        // re-opens of the same vault. Without this, `init()` would honor
+        // the env key but a subsequent `unlock()` on a fresh instance
+        // would silently switch to whatever the (process-shared) keyring
+        // file currently holds — which races between parallel tests
+        // (#TOTP flake) and surprises CI/headless deployments that set
+        // the env var as the source of truth.
+        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
+            let key_b64 = Zeroizing::new(key_b64);
             return decode_master_key(&key_b64);
         }
 
-        // Fallback to env var
-        if let Ok(key_b64) = std::env::var(VAULT_KEY_ENV) {
-            let key_b64 = Zeroizing::new(key_b64);
+        if let Ok(key_b64) = load_keyring_key() {
             return decode_master_key(&key_b64);
         }
 
