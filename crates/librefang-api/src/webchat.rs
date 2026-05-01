@@ -347,7 +347,8 @@ pub async fn sync_dashboard(home_dir: &std::path::Path) {
         "https://github.com/librefang/librefang/releases/latest/download/dashboard-dist.tar.gz";
     tracing::info!("Syncing dashboard assets from release...");
 
-    let client = reqwest::Client::builder()
+    // Use librefang-http so dashboard sync respects [proxy] config (#3577).
+    let client = librefang_http::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default();
