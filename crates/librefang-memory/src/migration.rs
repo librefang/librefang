@@ -78,20 +78,29 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // tooling. Log loudly but don't fail boot — pre-fix DBs in the wild
     // already drift, and refusing to start would be worse than warning.
     let final_version = get_schema_version(conn);
-    let row_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT version) FROM migrations",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(-1);
-    if row_count >= 0 && (row_count as u32) != final_version {
-        tracing::error!(
-            user_version = final_version,
-            audit_rows = row_count,
-            "Migration audit drift: user_version != count(migrations); \
-             some migration applied DDL without recording its audit row"
-        );
+    match conn.query_row(
+        "SELECT COUNT(DISTINCT version) FROM migrations",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(row_count) if (row_count as u32) != final_version => {
+            tracing::error!(
+                user_version = final_version,
+                audit_rows = row_count,
+                "Migration audit drift: user_version != count(migrations); \
+                 some migration applied DDL without recording its audit row"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // The `migrations` table is created by v1; a query failure
+            // here means something is structurally wrong. Surface it
+            // instead of silently treating it as "no drift".
+            tracing::error!(
+                error = %e,
+                "Migration audit query failed; cannot verify user_version vs migrations"
+            );
+        }
     }
 
     Ok(())

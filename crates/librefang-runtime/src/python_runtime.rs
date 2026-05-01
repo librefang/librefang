@@ -147,6 +147,13 @@ pub fn validate_module_string(module: &str) -> Result<(), String> {
     if payload.is_empty() {
         return Err(format!("module path is empty: {module}"));
     }
+    // Reject NUL / control bytes — they have no legitimate use in a
+    // relative script path and can confuse downstream interpreters.
+    if payload.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!(
+            "module path must not contain NUL or control characters: {module}"
+        ));
+    }
     if payload.starts_with('/') || payload.starts_with('\\') {
         return Err(format!(
             "module path must be relative to the LibreFang home dir, not absolute: {module}"
@@ -159,7 +166,12 @@ pub fn validate_module_string(module: &str) -> Result<(), String> {
             "module path must be relative, not a Windows drive path: {module}"
         ));
     }
-    let p = std::path::Path::new(payload);
+    // Normalize backslashes to forward slashes BEFORE component parsing.
+    // On Linux, `Path::components()` treats `..\..\etc` as a single
+    // filename and would let backslash-encoded traversal through; on
+    // Windows the same string is real traversal. Treat both consistently.
+    let normalized = payload.replace('\\', "/");
+    let p = std::path::Path::new(&normalized);
     for component in p.components() {
         if matches!(component, std::path::Component::ParentDir) {
             return Err(format!(
@@ -542,6 +554,14 @@ mod tests {
         assert!(validate_module_string("wasm:/abs/skill.wasm").is_err());
         assert!(validate_module_string("python:C:\\Windows\\evil.py").is_err());
         assert!(validate_module_string("python:").is_err());
+        // Backslash-encoded traversal must be rejected even on Linux,
+        // where `Path::components()` would otherwise treat it as one
+        // filename component.
+        assert!(validate_module_string("python:..\\..\\etc\\shadow.py").is_err());
+        assert!(validate_module_string("python:scripts\\..\\..\\etc\\x.py").is_err());
+        // NUL / control characters have no legitimate use here.
+        assert!(validate_module_string("python:agent\0.py").is_err());
+        assert!(validate_module_string("python:agent\n.py").is_err());
     }
 
     #[tokio::test]

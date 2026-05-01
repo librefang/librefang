@@ -713,7 +713,21 @@ impl WasmSandbox {
         // the per-invocation `fuel_limit` actually caps host-side cost.
         let cost = host_call_fuel_cost(&method);
         if cost > 0 {
-            let remaining = caller.get_fuel().unwrap_or(0);
+            // Fail closed if fuel metering is disabled on this store —
+            // the reservation is the only thing standing between the
+            // guest and unbounded LLM/HTTP fanout.
+            let remaining = match caller.get_fuel() {
+                Ok(n) => n,
+                Err(e) => {
+                    let response = serde_json::json!({
+                        "error": format!(
+                            "host fuel meter unavailable for {method}: {e}; \
+                             denial-of-wallet guard requires fuel to be enabled"
+                        )
+                    });
+                    return Self::write_guest_json(caller, &response);
+                }
+            };
             if remaining < cost {
                 let response = serde_json::json!({
                     "error": format!(
@@ -723,7 +737,12 @@ impl WasmSandbox {
                 });
                 return Self::write_guest_json(caller, &response);
             }
-            let _ = caller.set_fuel(remaining - cost);
+            if let Err(e) = caller.set_fuel(remaining - cost) {
+                let response = serde_json::json!({
+                    "error": format!("failed to reserve host fuel for {method}: {e}")
+                });
+                return Self::write_guest_json(caller, &response);
+            }
         }
 
         let response = host_functions::dispatch(caller.data(), &method, &params);
@@ -888,6 +907,14 @@ mod tests {
         assert_eq!(host_call_fuel_cost("fs_list"), 0);
         // Unknown method also free; capability check catches it.
         assert_eq!(host_call_fuel_cost("unknown_method"), 0);
+
+        // Relative ordering: spawn (registers + may run a child agent)
+        // is the priciest, then send (single LLM-bearing fanout), then
+        // outbound network / shell.
+        assert!(host_call_fuel_cost("agent_spawn") > host_call_fuel_cost("agent_send"));
+        assert!(host_call_fuel_cost("agent_send") > host_call_fuel_cost("net_fetch"));
+        assert!(host_call_fuel_cost("net_fetch") >= host_call_fuel_cost("shell_exec"));
+        assert!(host_call_fuel_cost("shell_exec") > host_call_fuel_cost("kv_get"));
     }
 
     #[test]
