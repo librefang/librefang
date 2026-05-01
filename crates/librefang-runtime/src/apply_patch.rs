@@ -285,18 +285,59 @@ fn resolve_patch_path(
 /// All file paths are confined to `workspace_root` (or one of `additional_roots`)
 /// via sandbox resolution. `additional_roots` should already be canonical and
 /// represent named workspaces declared in the agent's manifest.
+///
+/// Backwards-compatible wrapper around [`apply_patch_ext`] with an empty
+/// `readonly_roots` list. New call sites should prefer `apply_patch_ext` so
+/// they participate in the read-only enforcement.
 pub async fn apply_patch(
     ops: &[PatchOp],
     workspace_root: &Path,
     additional_roots: &[&Path],
 ) -> PatchResult {
+    apply_patch_ext(ops, workspace_root, additional_roots, &[]).await
+}
+
+/// Apply parsed patch operations with explicit read-only-prefix enforcement.
+///
+/// Same as [`apply_patch`] but every resolved target path is checked against
+/// `readonly_roots` (canonical absolute paths of named workspaces declared
+/// `mode = "r"`). Any patch op whose resolved path falls underneath a read-only
+/// root is rejected with an error and the op is skipped — defense-in-depth on
+/// top of the dispatch-level check in `tool_runner` (#3662). Symlinks cannot
+/// circumvent this because the candidate is canonicalized first.
+pub async fn apply_patch_ext(
+    ops: &[PatchOp],
+    workspace_root: &Path,
+    additional_roots: &[&Path],
+    readonly_roots: &[&Path],
+) -> PatchResult {
     let mut result = PatchResult::default();
+
+    // Reject if `resolved` is inside any read-only root. Returns the formatted
+    // error string when the path is denied, otherwise `None`.
+    let denied_readonly = |resolved: &Path, original: &str| -> Option<String> {
+        if readonly_roots.is_empty() {
+            return None;
+        }
+        if readonly_roots.iter().any(|root| resolved.starts_with(root)) {
+            Some(format!(
+                "{}: Write denied: target resolves into a read-only named workspace",
+                original
+            ))
+        } else {
+            None
+        }
+    };
 
     for op in ops {
         match op {
             PatchOp::AddFile { path, content } => {
                 match resolve_patch_path(path, workspace_root, additional_roots) {
                     Ok(resolved) => {
+                        if let Some(err) = denied_readonly(&resolved, path) {
+                            result.errors.push(err);
+                            continue;
+                        }
                         if let Some(parent) = resolved.parent() {
                             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                                 result.errors.push(format!("mkdir {}: {}", path, e));
@@ -324,6 +365,10 @@ pub async fn apply_patch(
                         continue;
                     }
                 };
+                if let Some(err) = denied_readonly(&resolved, path) {
+                    result.errors.push(err);
+                    continue;
+                }
 
                 // Read existing content
                 let original = match tokio::fs::read_to_string(&resolved).await {
@@ -341,6 +386,10 @@ pub async fn apply_patch(
                         let target = if let Some(new_path) = move_to {
                             match resolve_patch_path(new_path, workspace_root, additional_roots) {
                                 Ok(t) => {
+                                    if let Some(err) = denied_readonly(&t, new_path) {
+                                        result.errors.push(err);
+                                        continue;
+                                    }
                                     result.files_moved += 1;
                                     t
                                 }
@@ -378,12 +427,18 @@ pub async fn apply_patch(
 
             PatchOp::DeleteFile { path } => {
                 match resolve_patch_path(path, workspace_root, additional_roots) {
-                    Ok(resolved) => match tokio::fs::remove_file(&resolved).await {
-                        Ok(()) => result.files_deleted += 1,
-                        Err(e) => {
-                            result.errors.push(format!("delete {}: {}", path, e));
+                    Ok(resolved) => {
+                        if let Some(err) = denied_readonly(&resolved, path) {
+                            result.errors.push(err);
+                            continue;
                         }
-                    },
+                        match tokio::fs::remove_file(&resolved).await {
+                            Ok(()) => result.files_deleted += 1,
+                            Err(e) => {
+                                result.errors.push(format!("delete {}: {}", path, e));
+                            }
+                        }
+                    }
                     Err(e) => result.errors.push(format!("{}: {}", path, e)),
                 }
             }
@@ -790,5 +845,151 @@ mod tests {
         assert!(!dir.join("doomed.txt").exists());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    // ─── #3662 defense-in-depth: apply_patch_ext readonly enforcement ───────
+
+    /// Even if a read-only workspace is mistakenly included in
+    /// `additional_roots`, the `readonly_roots` parameter must still block
+    /// writes underneath it. This is the failure mode the dispatch-level
+    /// check alone cannot catch — a future refactor of
+    /// `named_ws_prefixes_writable` could regress and silently widen the
+    /// writable set; the call-site enforcement keeps the invariant.
+    #[tokio::test]
+    async fn test_apply_patch_ext_blocks_add_into_readonly_root_even_if_writable() {
+        let primary = tempfile::tempdir().unwrap();
+        let readonly = tempfile::tempdir().unwrap();
+        let ro_canon = readonly.path().canonicalize().unwrap();
+        let target = ro_canon.join("blocked.txt");
+
+        let ops = vec![PatchOp::AddFile {
+            path: target.to_string_lossy().into_owned(),
+            content: "should-not-write".to_string(),
+        }];
+
+        // Simulate a misconfiguration: the readonly root is *also* in
+        // `additional_roots` so the sandbox would otherwise allow it. The
+        // explicit `readonly_roots` list must still reject the write.
+        let result = apply_patch_ext(
+            &ops,
+            primary.path(),
+            &[ro_canon.as_path()],
+            &[ro_canon.as_path()],
+        )
+        .await;
+
+        assert!(!result.is_ok(), "expected denial");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("read-only named workspace")),
+            "errors did not mention readonly: {:?}",
+            result.errors
+        );
+        assert!(!target.exists(), "file must not have been written");
+        assert_eq!(result.files_added, 0);
+    }
+
+    /// `UpdateFile` with a `move_to` destination inside a read-only workspace
+    /// must be rejected even when the source file lives in the primary
+    /// workspace.
+    #[tokio::test]
+    async fn test_apply_patch_ext_blocks_move_into_readonly_root() {
+        let primary = tempfile::tempdir().unwrap();
+        let readonly = tempfile::tempdir().unwrap();
+        let ro_canon = readonly.path().canonicalize().unwrap();
+
+        // Prepare a file in the primary workspace.
+        tokio::fs::write(primary.path().join("src.txt"), "line1\nline2\n")
+            .await
+            .unwrap();
+
+        let move_target = ro_canon.join("moved.txt");
+
+        let ops = vec![PatchOp::UpdateFile {
+            path: "src.txt".to_string(),
+            move_to: Some(move_target.to_string_lossy().into_owned()),
+            hunks: vec![Hunk {
+                context_before: vec![],
+                old_lines: vec!["line1".to_string()],
+                new_lines: vec!["LINE1".to_string()],
+                context_after: vec!["line2".to_string()],
+            }],
+        }];
+
+        let result = apply_patch_ext(
+            &ops,
+            primary.path(),
+            &[ro_canon.as_path()],
+            &[ro_canon.as_path()],
+        )
+        .await;
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("read-only named workspace")),
+            "expected readonly denial, got: {:?}",
+            result.errors
+        );
+        assert!(
+            !move_target.exists(),
+            "moved file must not exist in readonly root"
+        );
+        // Source file must remain untouched (no in-place write happened either,
+        // because the move target was rejected before the write).
+        let src_after = tokio::fs::read_to_string(primary.path().join("src.txt"))
+            .await
+            .unwrap();
+        assert_eq!(src_after, "line1\nline2\n");
+    }
+
+    /// `DeleteFile` inside a read-only workspace must be rejected.
+    #[tokio::test]
+    async fn test_apply_patch_ext_blocks_delete_in_readonly_root() {
+        let primary = tempfile::tempdir().unwrap();
+        let readonly = tempfile::tempdir().unwrap();
+        let ro_canon = readonly.path().canonicalize().unwrap();
+        let victim = ro_canon.join("victim.txt");
+        tokio::fs::write(&victim, "do-not-delete").await.unwrap();
+
+        let ops = vec![PatchOp::DeleteFile {
+            path: victim.to_string_lossy().into_owned(),
+        }];
+
+        let result = apply_patch_ext(
+            &ops,
+            primary.path(),
+            &[ro_canon.as_path()],
+            &[ro_canon.as_path()],
+        )
+        .await;
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("read-only named workspace")),
+            "expected readonly denial, got: {:?}",
+            result.errors
+        );
+        assert!(victim.exists(), "victim must not have been deleted");
+        assert_eq!(result.files_deleted, 0);
+    }
+
+    /// Empty `readonly_roots` is the back-compat path used by `apply_patch`;
+    /// behaviour must match the old wrapper.
+    #[tokio::test]
+    async fn test_apply_patch_ext_empty_readonly_matches_apply_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = vec![PatchOp::AddFile {
+            path: "ok.txt".to_string(),
+            content: "fine".to_string(),
+        }];
+        let result = apply_patch_ext(&ops, dir.path(), &[], &[]).await;
+        assert!(result.is_ok(), "errors: {:?}", result.errors);
+        assert_eq!(result.files_added, 1);
     }
 }
