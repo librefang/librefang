@@ -2409,4 +2409,61 @@ mod tests {
             Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
         }
     }
+
+    /// PR-5: `list_pinned_peers` is the input the admin endpoint at
+    /// `GET /api/network/trusted-peers` rebuilds for operators. It MUST
+    /// emit `(node_id, public_key, fingerprint)` triples sorted by
+    /// `node_id` so the dashboard doesn't reshuffle on every refresh,
+    /// and the fingerprint MUST match what `fingerprint_of_pubkey`
+    /// computes for the corresponding public key (else operators
+    /// OOB-comparing fingerprints would be misled).
+    #[tokio::test]
+    async fn issue_3873_list_pinned_peers_is_sorted_and_consistent() {
+        // Hand-craft a trust file with three peers in non-sorted order
+        // so the hydration step alone doesn't accidentally produce a
+        // sorted output.
+        let tmp = tempfile::tempdir().unwrap();
+        let kp_a = Ed25519KeyPair::generate().unwrap();
+        let kp_b = Ed25519KeyPair::generate().unwrap();
+        let kp_c = Ed25519KeyPair::generate().unwrap();
+        {
+            let mut store = crate::trusted_peers::TrustedPeers::new(tmp.path().to_path_buf());
+            store
+                .trust_peer("zeta".into(), kp_c.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("alpha".into(), kp_a.public_key().to_string(), None, None)
+                .unwrap();
+            store
+                .trust_peer("mike".into(), kp_b.public_key().to_string(), None, None)
+                .unwrap();
+        }
+
+        let (node, _t) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+
+        let listed = node.list_pinned_peers();
+        let ids: Vec<&str> = listed.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["alpha", "mike", "zeta"],
+            "must be sorted by node_id"
+        );
+        for (id, pk, fp) in &listed {
+            assert_eq!(
+                fp,
+                &crate::keys::fingerprint_of_pubkey(pk),
+                "fingerprint for {id} must equal fingerprint_of_pubkey(public_key)"
+            );
+        }
+        assert_eq!(listed.len(), 3);
+        assert_eq!(node.pinned_peer_count(), 3);
+    }
 }

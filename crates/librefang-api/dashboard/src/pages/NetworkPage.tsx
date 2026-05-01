@@ -122,7 +122,7 @@ export function NetworkPage() {
           <Card padding="md">
             <div className="flex items-center justify-between">
               <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
-                Identity fingerprint
+                {t("network.identity_fingerprint")}
               </span>
               <div
                 className={`w-8 h-8 rounded-lg flex items-center justify-center ${
@@ -139,19 +139,19 @@ export function NetworkPage() {
             {status?.identity_fingerprint ? (
               <p
                 className="text-xs font-mono mt-2 break-all"
-                title="Compare with the remote operator out-of-band before pinning."
+                title={t("network.identity_fingerprint_hint")}
               >
                 {status.identity_fingerprint}
               </p>
             ) : (
               <p className="text-xs text-warning mt-2">
-                No Ed25519 identity loaded. OFP is running in HMAC-only legacy
-                mode; per-peer impersonation defense (#3873) is dormant.
+                {t("network.identity_missing")}
               </p>
             )}
             <p className="text-[10px] text-text-dim mt-2">
-              {status?.pinned_peers ?? 0} TOFU-pinned peer
-              {(status?.pinned_peers ?? 0) === 1 ? "" : "s"}
+              {t("network.pinned_peers_count", {
+                count: status?.pinned_peers ?? 0,
+              })}
             </p>
           </Card>
 
@@ -162,9 +162,13 @@ export function NetworkPage() {
             <div>
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-black tracking-tight">
-                  Trusted peers
+                  {t("network.trusted_peers")}
                 </h2>
-                <Badge variant="brand">{trustedPeers.length} pinned</Badge>
+                <Badge variant="brand">
+                  {t("network.trusted_peers_pinned", {
+                    count: trustedPeers.length,
+                  })}
+                </Badge>
               </div>
               <StaggerList className="grid gap-2 sm:gap-3 md:grid-cols-2">
                 {trustedPeers.map((tp) => (
@@ -182,7 +186,7 @@ export function NetworkPage() {
                         </p>
                         <p
                           className="text-[10px] text-text-dim font-mono mt-1 break-all"
-                          title="SHA-256 fingerprint of the pinned Ed25519 public key. Compare OOB."
+                          title={t("network.trusted_peer_fingerprint_hint")}
                         >
                           {tp.fingerprint}
                         </p>
