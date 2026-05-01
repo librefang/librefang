@@ -946,6 +946,25 @@ impl SessionStore {
         query: &str,
         agent_id: Option<&AgentId>,
     ) -> LibreFangResult<Vec<SessionSearchResult>> {
+        // Backwards-compatible default: keep historical 50-row cap for
+        // callers that don't care about pagination (tests, internal kernel
+        // use). New paginated callers should use `search_sessions_paginated`.
+        self.search_sessions_paginated(query, agent_id, Some(50), 0)
+    }
+
+    /// Full-text search across session content using FTS5, with pagination.
+    ///
+    /// Pagination is pushed into SQLite via `LIMIT ?/OFFSET ?`, so unbounded
+    /// result sets never materialize in memory (#3691). Pass `limit = None`
+    /// to skip the LIMIT clause; callers MUST clamp to a sane upper bound
+    /// before doing so.
+    pub fn search_sessions_paginated(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<SessionSearchResult>> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -967,6 +986,11 @@ impl SessionStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
+        // SQLite treats LIMIT < 0 as "no limit" — encode `None` that way so
+        // the query plan stays a single prepared statement either way.
+        let limit_param: i64 = limit.map(|n| n as i64).unwrap_or(-1);
+        let offset_param: i64 = offset as i64;
+
         let results = if let Some(aid) = agent_id {
             let mut stmt = conn
                 .prepare(
@@ -974,19 +998,22 @@ impl SessionStore {
                      FROM sessions_fts
                      WHERE content MATCH ?1 AND agent_id = ?2
                      ORDER BY rank
-                     LIMIT 50",
+                     LIMIT ?3 OFFSET ?4",
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
-                .query_map(rusqlite::params![sanitized, aid.0.to_string()], |row| {
-                    Ok(SessionSearchResult {
-                        session_id: row.get(0)?,
-                        agent_id: row.get(1)?,
-                        snippet: row.get(2)?,
-                        rank: row.get(3)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![sanitized, aid.0.to_string(), limit_param, offset_param],
+                    |row| {
+                        Ok(SessionSearchResult {
+                            session_id: row.get(0)?,
+                            agent_id: row.get(1)?,
+                            snippet: row.get(2)?,
+                            rank: row.get(3)?,
+                        })
+                    },
+                )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()
@@ -997,19 +1024,22 @@ impl SessionStore {
                      FROM sessions_fts
                      WHERE content MATCH ?1
                      ORDER BY rank
-                     LIMIT 50",
+                     LIMIT ?2 OFFSET ?3",
                 )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             let rows = stmt
-                .query_map(rusqlite::params![sanitized], |row| {
-                    Ok(SessionSearchResult {
-                        session_id: row.get(0)?,
-                        agent_id: row.get(1)?,
-                        snippet: row.get(2)?,
-                        rank: row.get(3)?,
-                    })
-                })
+                .query_map(
+                    rusqlite::params![sanitized, limit_param, offset_param],
+                    |row| {
+                        Ok(SessionSearchResult {
+                            session_id: row.get(0)?,
+                            agent_id: row.get(1)?,
+                            snippet: row.get(2)?,
+                            rank: row.get(3)?,
+                        })
+                    },
+                )
                 .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
             rows.filter_map(|r| r.ok()).collect()

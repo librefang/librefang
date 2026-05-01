@@ -1243,8 +1243,8 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
-    const DEFAULT_LIMIT: usize = 50;
-    const MAX_LIMIT: usize = 500;
+    pub(crate) const DEFAULT_LIMIT: usize = 50;
+    pub(crate) const MAX_LIMIT: usize = 500;
 
     fn effective_limit(&self) -> usize {
         self.limit
@@ -1526,6 +1526,8 @@ pub async fn session_cleanup(
     params(
         ("q" = String, Query, description = "FTS5 search query"),
         ("agent_id" = Option<String>, Query, description = "Optional agent ID filter"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
         (status = 200, description = "Search results", body = serde_json::Value),
@@ -1550,14 +1552,32 @@ pub async fn search_sessions(
             .map(librefang_types::agent::AgentId)
     });
 
-    match state
-        .kernel
-        .memory_substrate()
-        .search_sessions(&query, agent_id.as_ref())
-    {
+    // Pagination is parsed manually here (rather than via PaginationParams)
+    // because the handler already decodes the query map for `q` and
+    // `agent_id`. Keep the cap policy aligned with the shared type.
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(PaginationParams::DEFAULT_LIMIT)
+        .min(PaginationParams::MAX_LIMIT);
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    match state.kernel.memory_substrate().search_sessions_paginated(
+        &query,
+        agent_id.as_ref(),
+        Some(limit),
+        offset,
+    ) {
         Ok(results) => (
             StatusCode::OK,
-            Json(serde_json::json!({"results": results})),
+            Json(serde_json::json!({
+                "results": results,
+                "limit": limit,
+                "offset": offset,
+            })),
         ),
         Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
