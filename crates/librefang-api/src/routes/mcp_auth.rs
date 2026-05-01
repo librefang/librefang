@@ -16,6 +16,7 @@ use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
+use url::Url;
 
 /// SHA-256 prefix of the caller's user_id (UUID).  Embedded into the vault
 /// key + flow_id so a callback initiated by user A cannot be redeemed
@@ -394,6 +395,21 @@ pub async fn auth_start(
     if let Err(e) = store("token_endpoint", &metadata.token_endpoint) {
         tracing::warn!(error = %e, "Failed to store token_endpoint in vault");
     }
+    // #3713: persist the original authorization-server host so the callback
+    // can re-verify that the stored `token_endpoint` still resolves to the
+    // same host the user authorized against. Without this pin, a malicious
+    // (or mid-flow tampered) discovery response could redirect the
+    // authorization-code exchange to an attacker-controlled endpoint and
+    // exfiltrate the auth code. We pin against `server_url`'s host because
+    // that is the URL the operator placed in `config.toml` — the only value
+    // in the flow that the attacker cannot influence.
+    if let Some(issuer_host) = url_host_lower(&server_url) {
+        if let Err(e) = store("issuer_host", &issuer_host) {
+            tracing::warn!(error = %e, "Failed to store issuer_host in vault");
+        }
+    } else {
+        tracing::warn!(server_url = %server_url, "server_url has no host — cannot pin issuer for callback");
+    }
     if let Err(e) = store("redirect_uri", &redirect_uri) {
         tracing::warn!(error = %e, "Failed to store redirect_uri in vault");
     }
@@ -601,6 +617,47 @@ pub async fn auth_callback(
         return auth_failed(format!(
             "SSRF: token_endpoint rejected for code exchange: {reason}"
         ));
+    }
+
+    // #3713: pin the token-exchange target to the authorization server's
+    // original host. The discovery metadata's `token_endpoint` is attacker-
+    // influenced data; it must not be trusted to point anywhere outside the
+    // host the user originally authorized against. If the stored issuer host
+    // is missing (e.g. an in-flight flow predating this guard) or does not
+    // match `token_endpoint.host()`, refuse the exchange — never POST the
+    // code to an unverified host.
+    let issuer_host = match load("issuer_host") {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            tracing::error!(
+                server = %name,
+                token_endpoint = %token_endpoint,
+                "issuer_host missing from vault — refusing token exchange (#3713)"
+            );
+            return auth_failed(
+                "Authorization server host pin missing from vault — refusing to                  exchange the auth code. Please retry the sign-in from the dashboard.",
+            );
+        }
+    };
+    if !token_endpoint_host_matches(&token_endpoint, &issuer_host) {
+        let token_host = url_host_lower(&token_endpoint).unwrap_or_default();
+        tracing::error!(
+            server = %name,
+            token_endpoint = %token_endpoint,
+            issuer_host = %issuer_host,
+            token_host = %token_host,
+            "token_endpoint host does not match authorization server host —              refusing token exchange (possible metadata-tamper attack, #3713)"
+        );
+        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
+        auth_states.insert(
+            name.clone(),
+            McpAuthState::Error {
+                message: "token_endpoint host mismatch — refused to exchange auth code".to_string(),
+            },
+        );
+        return auth_failed(
+            "Token endpoint host does not match the authorization server host.              Refusing to exchange the auth code.",
+        );
     }
 
     let client_id = load("client_id");
@@ -815,6 +872,26 @@ pub async fn auth_revoke(
             "state": "not_required",
         })),
     )
+}
+
+/// Lowercased host component of a URL string, or None if the URL is
+/// unparseable or has no host. Used to pin the OAuth flow's token endpoint
+/// to the original authorization server's host (#3713).
+fn url_host_lower(raw: &str) -> Option<String> {
+    Url::parse(raw)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
+
+/// True iff `token_endpoint` parses to a URL whose host equals
+/// `expected_host` (case-insensitive). A token endpoint with no host, an
+/// unparseable URL, or a different host all return false — the caller MUST
+/// refuse the code exchange in that case (#3713).
+fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> bool {
+    match url_host_lower(token_endpoint) {
+        Some(h) => h == expected_host.to_ascii_lowercase(),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -1045,5 +1122,62 @@ mod tests {
         let h = hdrs(&[("origin", "null")]);
         let url = derive_callback_url(&h, "srv", &[], LISTEN);
         assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
+    }
+
+    #[test]
+    fn token_endpoint_matching_issuer_host_is_accepted() {
+        assert!(token_endpoint_host_matches(
+            "https://auth.example.com/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_with_different_host_is_rejected() {
+        // The vulnerability scenario: discovery advertises a token endpoint
+        // pointed at an attacker host. The callback must refuse.
+        assert!(!token_endpoint_host_matches(
+            "https://attacker.example/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_subdomain_is_rejected() {
+        // Defense-in-depth: a sibling/child of the issuer host is still a
+        // different origin and must not be trusted.
+        assert!(!token_endpoint_host_matches(
+            "https://evil.auth.example.com.attacker.example/oauth/token",
+            "auth.example.com"
+        ));
+        assert!(!token_endpoint_host_matches(
+            "https://api.auth.example.com/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn token_endpoint_host_match_is_case_insensitive() {
+        assert!(token_endpoint_host_matches(
+            "https://AUTH.Example.COM/oauth/token",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn unparseable_token_endpoint_is_rejected() {
+        assert!(!token_endpoint_host_matches(
+            "not a url",
+            "auth.example.com"
+        ));
+    }
+
+    #[test]
+    fn url_host_lower_extracts_lowercased_host() {
+        assert_eq!(
+            url_host_lower("https://Auth.Example.COM/path"),
+            Some("auth.example.com".to_string())
+        );
+        assert_eq!(url_host_lower("not a url"), None);
     }
 }
