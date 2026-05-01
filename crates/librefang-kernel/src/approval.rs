@@ -2769,7 +2769,8 @@ mod tests {
         mgr.record_totp_code_used_for(
             "987654",
             Some("approval:11111111-1111-1111-1111-111111111111"),
-        );
+        )
+        .expect("record TOTP code");
         // Same code claimed for a different approval — must still be flagged
         // as used. Without this an attacker rewriting the path could replay
         // a captured TOTP request to authorize a higher-impact approval.

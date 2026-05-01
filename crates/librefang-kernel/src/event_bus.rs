@@ -262,10 +262,10 @@ impl Default for EventBus {
 /// burst into a permanent miss; callers that ignore `Lagged` lose triggers
 /// silently (issue #3630).
 pub async fn recv_event_skipping_lag(
-    rx: &mut broadcast::Receiver<Event>,
+    rx: &mut broadcast::Receiver<Arc<Event>>,
     bus: &EventBus,
     context: &'static str,
-) -> Option<Event> {
+) -> Option<Arc<Event>> {
     loop {
         match rx.recv().await {
             Ok(event) => return Some(event),
