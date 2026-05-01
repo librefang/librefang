@@ -1261,8 +1261,8 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
-    pub(crate) const DEFAULT_LIMIT: usize = 50;
-    pub(crate) const MAX_LIMIT: usize = 500;
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 500;
 
     fn effective_limit(&self) -> usize {
         self.limit
@@ -1555,6 +1555,7 @@ pub async fn session_cleanup(
 pub async fn search_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
@@ -1570,18 +1571,13 @@ pub async fn search_sessions(
             .map(librefang_types::agent::AgentId)
     });
 
-    // Pagination is parsed manually here (rather than via PaginationParams)
-    // because the handler already decodes the query map for `q` and
-    // `agent_id`. Keep the cap policy aligned with the shared type.
-    let limit = params
-        .get("limit")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(PaginationParams::DEFAULT_LIMIT)
-        .min(PaginationParams::MAX_LIMIT);
-    let offset = params
-        .get("offset")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
+    // Reuse the shared cap policy (default 50 / max 500) instead of
+    // re-implementing it from the raw query map. Multiple `Query<T>`
+    // extractors are fine — both read the same URI query string and
+    // serde_urlencoded ignores fields the target type doesn't declare,
+    // so `q`/`agent_id` don't interfere with PaginationParams.
+    let limit = pagination.effective_limit();
+    let offset = pagination.effective_offset();
 
     match state.kernel.memory_substrate().search_sessions_paginated(
         &query,
@@ -1589,14 +1585,24 @@ pub async fn search_sessions(
         Some(limit),
         offset,
     ) {
-        Ok(results) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "results": results,
-                "limit": limit,
-                "offset": offset,
-            })),
-        ),
+        Ok(results) => {
+            // `next_offset` is `None` when this page wasn't full — the
+            // client knows it has reached the end without re-querying.
+            let next_offset = if results.len() < limit {
+                None
+            } else {
+                Some(offset + results.len())
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "results": results,
+                    "limit": limit,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                })),
+            )
+        }
         Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
 }
