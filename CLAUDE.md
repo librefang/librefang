@@ -16,10 +16,12 @@ LibreFang is an open-source Agent Operating System written in Rust (24 crates in
 - **Extensibility**: `librefang-skills`, `librefang-hands`, `librefang-extensions`, `librefang-channels`
 
 ## Build & Verify Workflow
-After every feature implementation, run ALL THREE checks:
+**Do NOT run `cargo build` or `cargo test` locally.** Use `cargo check` for
+compile verification. Full build / test runs in CI — local invocations are
+slow, use lots of disk, and contend with other sessions on the same target dir.
+After every change, only run:
 ```bash
-cargo build --workspace --lib          # Must compile (use --lib if exe is locked)
-cargo test --workspace                 # All tests must pass (currently 2100+)
+cargo check --workspace --lib                          # Compile-check only
 cargo clippy --workspace --all-targets -- -D warnings  # Zero warnings
 ```
 

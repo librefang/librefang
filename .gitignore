@@ -73,7 +73,11 @@ result
 # IDE & tools
 .idea/
 .vscode/
-.claude/
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/hooks/*
+!.claude/hooks/forbid-main-worktree.sh
 .codex
 .omc/
 .qwen/
