@@ -1095,6 +1095,42 @@ pub async fn get_agent_stats(
     }
 }
 
+/// Wire-shape for one row in [`list_agent_events`]. Mirrors
+/// [`librefang_memory::usage::AgentEventRow`] but defined here as a
+/// utoipa::ToSchema view so we can register it with the OpenAPI doc
+/// without forcing utoipa into the memory crate.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentEventRowView {
+    pub timestamp: String,
+    pub model: String,
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+    pub tool_calls: u64,
+    pub latency_ms: u64,
+}
+
+impl From<librefang_memory::usage::AgentEventRow> for AgentEventRowView {
+    fn from(r: librefang_memory::usage::AgentEventRow) -> Self {
+        Self {
+            timestamp: r.timestamp,
+            model: r.model,
+            provider: r.provider,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cost_usd: r.cost_usd,
+            tool_calls: r.tool_calls,
+            latency_ms: r.latency_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct AgentEventsResponse {
+    pub events: Vec<AgentEventRowView>,
+}
+
 /// GET /api/agents/{id}/events — Recent turn-level events for one agent.
 ///
 /// Backs the dashboard's agent-detail Logs tab. Returns rows sourced
@@ -1110,7 +1146,7 @@ pub async fn get_agent_stats(
         ("limit" = Option<u32>, Query, description = "Max rows (default 30, max 200)"),
     ),
     responses(
-        (status = 200, description = "Recent agent events", body = serde_json::Value),
+        (status = 200, description = "Recent agent events", body = AgentEventsResponse),
         (status = 404, description = "Agent not found")
     )
 )]
@@ -1166,7 +1202,12 @@ pub async fn list_agent_events(
         .usage()
         .list_agent_events_recent(agent_uuid, limit)
     {
-        Ok(events) => Json(serde_json::json!({ "events": events })).into_response(),
+        Ok(events) => {
+            let view = AgentEventsResponse {
+                events: events.into_iter().map(AgentEventRowView::from).collect(),
+            };
+            Json(view).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e.to_string() })),
