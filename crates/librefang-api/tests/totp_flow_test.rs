@@ -304,17 +304,8 @@ async fn confirm_rejects_replayed_code() {
     .await;
     assert_eq!(s1, StatusCode::OK);
 
-    // Setup another enrollment so we have a fresh secret in the vault for
-    // confirm to look at — without this, the second call would short-circuit
-    // on the "already confirmed" path. We need a path that actually hits the
-    // replay check with the same code as before.
-    //
-    // Simpler approach: directly re-issue confirm without going through
-    // setup. The handler reads the same secret + checks is_totp_code_used
-    // first, so the replayed code gets blocked. After the first OK, the
-    // confirmed flag is "true", but `totp_confirm` does not check that flag —
-    // it just verifies the code. So a second call with the same code should
-    // hit the replay bucket and 400.
+    // Re-issue the same code: the replay bucket (`is_totp_code_used`)
+    // must reject it, even though the first call already succeeded.
     let (s2, b2) = json_post(
         &h,
         "/api/approvals/totp/confirm",
@@ -370,16 +361,9 @@ async fn revoke_with_valid_code_clears_enrollment() {
     .await;
     assert_eq!(sc, StatusCode::OK);
 
-    // Wait one TOTP step boundary so we don't try to reuse the confirm code
-    // (which is now in the replay bucket). 31s is too long for a unit test —
-    // instead, use a recovery code.
-    // Look up the recovery codes from the setup response by re-invoking
-    // setup-confirm fresh; simpler: store the ones from the very first
-    // setup. We'll redo this test using a recovery code path to avoid the
-    // 30-second TOTP-window dependency.
-    //
-    // (Re-running setup-confirm here would consume another code; just use
-    // the recovery list saved in the vault.)
+    // Use a recovery code (not the just-consumed TOTP code, which is now in
+    // the replay bucket — and waiting out the 30s step boundary would slow
+    // the test).
     let recovery_json = h
         .state
         .kernel
