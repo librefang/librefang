@@ -373,6 +373,11 @@ pub struct PeerNode {
     /// Once capped, NEW pins are refused; existing pins (and their
     /// mismatch-detection guarantee) remain intact.
     pinned_pubkeys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// SECURITY (#3873): Persistent backing for `pinned_pubkeys`. When
+    /// `Some`, every new pin is also written to disk via
+    /// `TrustedPeers::trust_peer`. The in-memory map is hydrated from this
+    /// store at startup so pins survive restarts.
+    trust_store: Option<Arc<std::sync::Mutex<crate::trusted_peers::TrustedPeers>>>,
 }
 
 /// SECURITY (#3873): Hard cap on TOFU pin entries — see field doc.
@@ -391,7 +396,7 @@ impl PeerNode {
         registry: PeerRegistry,
         handle: Arc<dyn PeerHandle>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
-        Self::start_with_identity(config, registry, handle, None).await
+        Self::start_with_identity(config, registry, handle, None, None).await
     }
 
     /// Like [`start`] but binds an Ed25519 keypair to this node. Every
@@ -404,6 +409,7 @@ impl PeerNode {
         registry: PeerRegistry,
         handle: Arc<dyn PeerHandle>,
         keypair: Option<Ed25519KeyPair>,
+        trust_store_dir: Option<std::path::PathBuf>,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), WireError> {
         // SECURITY: Require shared_secret for OFP
         if config.shared_secret.is_empty() {
@@ -415,15 +421,51 @@ impl PeerNode {
         let listener = TcpListener::bind(config.listen_addr).await?;
         let local_addr = listener.local_addr()?;
 
+        // SECURITY (#3873): Hydrate the in-memory pin map from the
+        // persistent trust store if a directory was provided. Pins survive
+        // daemon restarts so the mismatch-detection branch protects across
+        // boots, not just within a single lifetime.
+        let mut pin_seed = std::collections::HashMap::<String, String>::new();
+        let trust_store = if let Some(dir) = trust_store_dir {
+            let mut store = crate::trusted_peers::TrustedPeers::new(dir);
+            if let Err(e) = store.load() {
+                // Corrupt or unreadable trust file — refuse to start rather
+                // than silently dropping pins, which would weaken the
+                // mismatch-detection guarantee without operator awareness.
+                return Err(WireError::HandshakeFailed(format!(
+                    "OFP: failed to load trusted peers store: {e}"
+                )));
+            }
+            // SECURITY (#3873): Cap hydration at MAX_PIN_ENTRIES so a
+            // tampered or runaway trust file cannot blow past the
+            // runtime cap by pre-loading into memory.
+            for peer in store.list() {
+                if pin_seed.len() >= MAX_PIN_ENTRIES {
+                    warn!(
+                        "OFP: trust store has more than {} entries; truncating hydration",
+                        MAX_PIN_ENTRIES
+                    );
+                    break;
+                }
+                if let Some(pk) = peer.public_key.clone() {
+                    pin_seed.insert(peer.node_id.clone(), pk);
+                }
+            }
+            Some(Arc::new(std::sync::Mutex::new(store)))
+        } else {
+            None
+        };
+
         info!(
-            "OFP: listening on {} (node_id={}, identity={})",
+            "OFP: listening on {} (node_id={}, identity={}, persisted_pins={})",
             local_addr,
             config.node_id,
             if keypair.is_some() {
                 "ed25519"
             } else {
                 "hmac-only"
-            }
+            },
+            pin_seed.len(),
         );
 
         let rate_limiter = Arc::new(PeerRateLimiter::new(
@@ -439,7 +481,8 @@ impl PeerNode {
             session_key: std::sync::Mutex::new(None),
             rate_limiter,
             keypair: keypair.map(Arc::new),
-            pinned_pubkeys: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pinned_pubkeys: Arc::new(std::sync::Mutex::new(pin_seed)),
+            trust_store,
         });
 
         let node_clone = Arc::clone(&node);
@@ -518,6 +561,33 @@ impl PeerNode {
                             )));
                         }
                         pins.insert(peer_node_id.to_string(), pk.clone());
+                        // Drop the in-memory lock before touching the disk
+                        // store to keep the persistence write off the hot
+                        // handshake path's critical section.
+                        drop(pins);
+                        if let Some(store) = &self.trust_store {
+                            let mut store = store.lock().map_err(|_| {
+                                WireError::HandshakeFailed("trust store poisoned".into())
+                            })?;
+                            if let Err(e) = store.trust_peer(
+                                peer_node_id.to_string(),
+                                pk.clone(),
+                                None,
+                                None,
+                            ) {
+                                // Persist failure: log but do not roll back
+                                // the in-memory pin. Within this daemon the
+                                // mismatch-check still works; only the
+                                // cross-restart guarantee is at risk, and
+                                // reverting the pin would let an attacker
+                                // who can break disk writes also break the
+                                // in-memory defense.
+                                warn!(
+                                    "OFP: failed to persist trust pin for {}: {} — in-memory pin retained",
+                                    peer_node_id, e
+                                );
+                            }
+                        }
                         info!(
                             "OFP: pinned Ed25519 public key for {} (fingerprint {})",
                             peer_node_id,
@@ -1984,6 +2054,7 @@ mod tests {
             r1.clone(),
             h1.clone(),
             Some(kp1),
+            None,
         )
         .await
         .unwrap();
@@ -1995,6 +2066,7 @@ mod tests {
             r2.clone(),
             h2.clone(),
             Some(kp2),
+            None,
         )
         .await
         .unwrap();
@@ -2026,6 +2098,7 @@ mod tests {
             r_server.clone(),
             h_server.clone(),
             None, // server has no identity itself; that's fine
+            None,
         )
         .await
         .unwrap();
@@ -2036,6 +2109,7 @@ mod tests {
             PeerRegistry::new(),
             Arc::new(TestHandle::new()),
             Some(kp_legit),
+            None,
         )
         .await
         .unwrap();
@@ -2056,6 +2130,7 @@ mod tests {
             PeerRegistry::new(),
             Arc::new(TestHandle::new()),
             Some(kp_attacker),
+            None,
         )
         .await
         .unwrap();
@@ -2085,6 +2160,7 @@ mod tests {
             r_server.clone(),
             Arc::new(TestHandle::new()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2095,6 +2171,7 @@ mod tests {
             PeerRegistry::new(),
             Arc::new(TestHandle::new()),
             Some(kp),
+            None,
         )
         .await
         .unwrap();
@@ -2113,6 +2190,7 @@ mod tests {
             test_config("node-X", "downgrade"),
             PeerRegistry::new(),
             Arc::new(TestHandle::new()),
+            None,
             None,
         )
         .await
@@ -2140,6 +2218,7 @@ mod tests {
             r_server.clone(),
             Arc::new(TestHandle::new()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2147,6 +2226,7 @@ mod tests {
             test_config("legacy", "L"),
             PeerRegistry::new(),
             Arc::new(TestHandle::new()),
+            None,
             None,
         )
         .await
@@ -2160,5 +2240,130 @@ mod tests {
             .await
             .expect("legacy peers (no identity) must still interoperate");
         assert!(server.pinned_pubkeys_snapshot().is_empty());
+    }
+
+    /// PR-4: pins must survive restart. After a successful identity-bearing
+    /// handshake the trust store on disk records the peer's pubkey, and a
+    /// fresh `PeerNode` instance pointed at the same `data_dir` rejects an
+    /// attacker presenting the same `node_id` with a different keypair —
+    /// the very attack #3873 closes off, now durable across daemon boots.
+    #[tokio::test]
+    async fn issue_3873_pin_survives_restart_via_trust_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().to_path_buf();
+        let kp_legit = Ed25519KeyPair::generate().unwrap();
+        let legit_pub = kp_legit.public_key().to_string();
+
+        // ---- Boot 1: legit client connects, server persists pin to disk.
+        let r1 = PeerRegistry::new();
+        let (server1, _t1) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r1.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(store_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        let (legit, _t2) = PeerNode::start_with_identity(
+            test_config("client-A", "legit"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_legit),
+            None,
+        )
+        .await
+        .unwrap();
+        legit
+            .connect_to_peer_with_id(
+                server1.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await
+            .expect("first handshake must persist pin");
+
+        // Sanity: trust file exists on disk now.
+        let trust_file = store_dir.join("trusted_peers.json");
+        assert!(trust_file.exists(), "trust store must be written");
+        let raw = std::fs::read_to_string(&trust_file).unwrap();
+        assert!(
+            raw.contains("client-A") && raw.contains(&legit_pub),
+            "trust file must contain the pinned peer + pubkey"
+        );
+
+        drop(server1);
+
+        // ---- Boot 2: fresh server pointed at the same store_dir.
+        let r2 = PeerRegistry::new();
+        let (server2, _t3) = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            r2.clone(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(store_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Pin map must be hydrated from disk.
+        let pins = server2.pinned_pubkeys_snapshot();
+        assert_eq!(pins.get("client-A"), Some(&legit_pub));
+
+        // Attacker reuses node_id "client-A" with a different keypair —
+        // the cross-restart pin must reject it.
+        let kp_attacker = Ed25519KeyPair::generate().unwrap();
+        let (attacker, _t4) = PeerNode::start_with_identity(
+            test_config("client-A", "spoof"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            Some(kp_attacker),
+            None,
+        )
+        .await
+        .unwrap();
+        let res = attacker
+            .connect_to_peer_with_id(
+                server2.local_addr(),
+                Arc::new(TestHandle::new()) as Arc<dyn PeerHandle>,
+                "server",
+            )
+            .await;
+        assert!(
+            res.is_err(),
+            "post-restart impersonation MUST be rejected by the persisted pin"
+        );
+    }
+
+    /// PR-4 follow-up: a corrupt `trusted_peers.json` MUST cause
+    /// `start_with_identity` to fail rather than silently dropping the
+    /// pin set, which would weaken the mismatch-detection guarantee
+    /// without operator awareness.
+    #[tokio::test]
+    async fn issue_3873_corrupt_trust_file_fails_loud() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write garbage where the trust file would live.
+        std::fs::write(tmp.path().join("trusted_peers.json"), "{ not valid json").unwrap();
+
+        let res = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await;
+
+        match res {
+            Err(WireError::HandshakeFailed(msg)) => {
+                assert!(
+                    msg.contains("trusted peers store"),
+                    "error must identify the trust store as the failing component, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected HandshakeFailed, got: {other}"),
+            Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
+        }
     }
 }

@@ -28,6 +28,7 @@ pub mod keys;
 pub mod message;
 pub mod peer;
 pub mod registry;
+pub mod trusted_peers;
 
 pub use message::{WireMessage, WireRequest, WireResponse};
 pub use peer::{PeerConfig, PeerNode};

@@ -20,6 +20,7 @@ export {
   // agents
   listAgents,
   getAgentDetail,
+  getAgentStats,
   listAgentSessions,
   listAgentTemplates,
   listPromptVersions,
