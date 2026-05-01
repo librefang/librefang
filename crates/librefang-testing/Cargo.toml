@@ -18,5 +18,6 @@ tower = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }
 uuid = { workspace = true }
 http-body-util = "0.1"
