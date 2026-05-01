@@ -32,7 +32,6 @@ pub struct Message {
 /// The role of a message sender in an LLM conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[non_exhaustive]
 pub enum Role {
     /// System prompt.
     System,
@@ -45,7 +44,6 @@ pub enum Role {
 /// Content of a message — can be simple text or structured blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-#[non_exhaustive]
 pub enum MessageContent {
     /// Simple text content.
     Text(String),
@@ -56,7 +54,6 @@ pub enum MessageContent {
 /// A content block within a message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
-#[non_exhaustive]
 pub enum ContentBlock {
     /// A text block.
     #[serde(rename = "text")]
@@ -320,7 +317,6 @@ impl Message {
 /// Why the LLM stopped generating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum StopReason {
     /// The model finished its turn.
     EndTurn,
