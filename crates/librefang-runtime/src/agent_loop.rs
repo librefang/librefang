@@ -209,6 +209,7 @@ fn repair_session_before_save(session: &mut Session, agent_id: &str, reason: &st
         );
     }
     session.set_messages(repaired);
+    session.last_repaired_generation = Some(session.messages_generation);
 }
 
 /// Maximum consecutive iterations where every executed tool failed before
