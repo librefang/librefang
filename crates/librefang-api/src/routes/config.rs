@@ -2407,7 +2407,7 @@ async fn dashboard_snapshot_inner(state: &Arc<AppState>) -> serde_json::Value {
         agent_entries_visible.sort_by_key(|b| std::cmp::Reverse(b.last_active));
         agent_entries_visible
             .iter()
-            .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog))
+            .map(|e| super::agents::enrich_agent_json(e, &dm, &catalog, None))
             .collect()
     };
 
