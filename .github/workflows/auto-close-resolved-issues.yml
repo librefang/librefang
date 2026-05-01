@@ -62,6 +62,11 @@ jobs:
               process.env.LIVE_VAR.toLowerCase() === 'true';
             const MAX_ACTIONS = 25;
             const CANDIDATE_LABEL = 'auto-close-candidate';
+            // Marker tag in bot comments — used as the source of truth for
+            // "have we already flagged this issue?". A label is added on top
+            // for human discoverability, but the marker is what prevents
+            // re-spam if a maintainer removes the label without closing.
+            const MARKER = '<!-- auto-close-reconciler:flagged -->';
             const since = new Date(Date.now() - lookback * 86400_000).toISOString();
 
             core.info(`Mode: ${live ? 'LIVE (will close)' : 'DRY-RUN (comment + label only)'}`);
@@ -147,13 +152,19 @@ jobs:
               if (issue.pull_request) { skipped.push(`#${num} (is PR)`); continue; }
               if (issue.state !== 'open') { skipped.push(`#${num} (already closed)`); continue; }
 
-              // Skip if already flagged in a previous dry-run cycle
-              const hasCandidateLabel =
-                Array.isArray(issue.labels) &&
-                issue.labels.some((l) => (typeof l === 'string' ? l : l.name) === CANDIDATE_LABEL);
-              if (!live && hasCandidateLabel) {
-                skipped.push(`#${num} (already flagged)`);
-                continue;
+              // Skip if already flagged in a previous dry-run cycle.
+              // Source of truth is the MARKER in a bot comment, NOT the label
+              // — labels can be removed by humans without intent to dismiss
+              // re-flagging, and we must not spam if that happens.
+              if (!live) {
+                const comments = await github.paginate(
+                  github.rest.issues.listComments,
+                  { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+                );
+                if (comments.some((c) => typeof c.body === 'string' && c.body.includes(MARKER))) {
+                  skipped.push(`#${num} (already flagged)`);
+                  continue;
+                }
               }
 
               // Check timeline for reopened events — never auto-close something humans deliberately reopened
@@ -190,10 +201,12 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: num,
                   body:
+                    `${MARKER}\n` +
                     `🤖 Looks resolved by commit \`${info.sha}\` on \`main\` (\`${info.subject}\`).\n\n` +
-                    `This is a dry-run flag from the auto-close reconciliation workflow. ` +
-                    `If correct, close manually. If not, remove the \`${CANDIDATE_LABEL}\` label ` +
-                    `and the bot will skip this issue in future runs.`,
+                    `Dry-run flag from the auto-close reconciliation workflow. ` +
+                    `Close manually if correct. The bot keys off the hidden marker in this ` +
+                    `comment to avoid re-flagging — delete this comment if you want the bot ` +
+                    `to consider this issue again.`,
                 });
                 await github.rest.issues.addLabels({
                   owner: context.repo.owner,
