@@ -7235,7 +7235,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: String::new(), // use driver default
             messages: std::sync::Arc::new(vec![Message::user(message.to_string())]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 20,
             temperature: 0.0,
             system: Some(classify_prompt),
@@ -8036,7 +8036,7 @@ system_prompt = "You are a helpful assistant."
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     message,
                 )]),
-                tools: tools.clone(),
+                tools: std::sync::Arc::new(tools.clone()),
                 max_tokens: manifest.model.max_tokens,
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
@@ -11873,7 +11873,7 @@ system_prompt = "You are a helpful assistant."
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     prompt,
                 )]),
-                tools: vec![],
+                tools: std::sync::Arc::new(vec![]),
                 max_tokens: 32,
                 temperature: 0.2,
                 system: Some(
@@ -11958,7 +11958,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: model.to_string(),
             messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 10,
             temperature: 0.0,
             system: None,
@@ -15517,7 +15517,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: model_for_review,
             messages: std::sync::Arc::new(vec![Message::user(user_msg)]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 2000,
             temperature: 0.0,
             system: Some(review_prompt.to_string()),

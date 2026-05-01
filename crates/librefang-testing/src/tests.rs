@@ -104,7 +104,7 @@ async fn test_mock_llm_driver_recording() {
     let request = CompletionRequest {
         model: "test-model".into(),
         messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: Some("test system prompt".into()),
@@ -277,7 +277,7 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
     let request = CompletionRequest {
         model: "test-model".into(),
         messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: None,
@@ -319,7 +319,7 @@ async fn test_failing_llm_driver() {
     let request = CompletionRequest {
         model: "test-model".into(),
         messages: std::sync::Arc::new(vec![]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 100,
         temperature: 0.0,
         system: None,

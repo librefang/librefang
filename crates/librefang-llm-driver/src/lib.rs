@@ -222,7 +222,15 @@ pub struct CompletionRequest {
     /// of which auto-deref through `Arc<Vec<_>>`.
     pub messages: std::sync::Arc<Vec<Message>>,
     /// Available tools the model can use.
-    pub tools: Vec<ToolDefinition>,
+    ///
+    /// Wrapped in `Arc` so cloning the request (retry, fallback, etc.) only
+    /// bumps a refcount instead of deep-copying the full tool definition list
+    /// — and so the agent loop can share a single resolved tool snapshot
+    /// across iterations without re-cloning every `ToolDefinition` per turn
+    /// (#3586). All driver code reads through `&request.tools` /
+    /// `request.tools.iter()`, both of which auto-deref through
+    /// `Arc<Vec<_>>`.
+    pub tools: std::sync::Arc<Vec<ToolDefinition>>,
     /// Maximum tokens to generate.
     pub max_tokens: u32,
     /// Sampling temperature.
@@ -735,7 +743,7 @@ mod tests {
         let request = CompletionRequest {
             model: "test".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: None,
@@ -797,7 +805,7 @@ mod tests {
         let request = CompletionRequest {
             model: "test".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1,
             temperature: 0.0,
             system: None,

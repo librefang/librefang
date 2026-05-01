@@ -1473,7 +1473,7 @@ mod tests {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![ToolDefinition {
+            tools: std::sync::Arc::new(vec![ToolDefinition {
                 name: "web_search".to_string(),
                 description: "Search the web".to_string(),
                 input_schema: serde_json::json!({
@@ -1482,7 +1482,7 @@ mod tests {
                         "query": {"type": "string"}
                     }
                 }),
-            }],
+            }]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1506,7 +1506,7 @@ mod tests {
         let request = CompletionRequest {
             model: "gemini-2.0-flash".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,

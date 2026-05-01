@@ -672,7 +672,7 @@ async fn summarize_messages(
             pinned: false,
             timestamp: None,
         }]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: config.max_summary_tokens,
         temperature: 0.3,
         system: Some(
@@ -798,7 +798,7 @@ async fn summarize_in_chunks(
             pinned: false,
             timestamp: None,
         }]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: config.max_summary_tokens,
         temperature: 0.3,
         system: Some(
