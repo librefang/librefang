@@ -311,22 +311,16 @@ pub async fn auth_start(
     let redirect_uri = derive_callback_url(&headers, &name, &cfg.trusted_hosts, &cfg.api_listen);
 
     // Check vault for cached client_id, or do Dynamic Client Registration
-    let mut client_id = metadata
-        .client_id
-        .clone()
-        .or_else(|| {
-            // #3750: vault_get now returns Result; treat any storage error
-            // as "no cached client_id" and fall through to Dynamic Client
-            // Registration. The structured error is logged but does not
-            // abort discovery — DCR is the documented recovery path.
-            match provider.vault_get(&KernelOAuthProvider::vault_key(&server_url, "client_id")) {
-                Ok(opt) => opt,
-                Err(e) => {
-                    tracing::warn!(error = %e, "vault_get(client_id) failed; continuing without cached client_id");
-                    None
-                }
-            }
-        });
+    let mut client_id = metadata.client_id.clone().or_else(|| {
+        // Use the lenient `vault_get_or_warn` here: on a fresh install
+        // there is no `vault.enc` yet, and the strict `vault_get`
+        // would `Err(KeyNotFound)` → emit a "vault_get failed" warning
+        // on every first MCP add. DCR is the documented recovery path
+        // for "no cached client_id" anyway, so collapse missing-vault /
+        // missing-key into None silently. Real vault unlock failures
+        // are still logged at warn! by `vault_get_or_warn`.
+        provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(&server_url, "client_id"))
+    });
 
     if client_id.is_none() {
         if let Some(ref reg_endpoint) = metadata.registration_endpoint {

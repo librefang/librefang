@@ -469,6 +469,93 @@ mod tests {
         );
     }
 
+    /// #3750: pin the `ExtensionError → McpOAuthError` mapping so a
+    /// rephrasing of the upstream vault error message (which the
+    /// `Vault("Vault not initialized…")` arm currently substring-matches
+    /// on) can't silently demote `KeyNotFound` to `Crypto`. If the
+    /// upstream message ever changes, the third assertion below fires
+    /// and points at this exact coupling.
+    #[test]
+    fn map_extension_err_covers_each_variant() {
+        // VaultLocked → VaultLocked
+        let mapped = map_extension_err(ExtensionError::VaultLocked);
+        assert!(
+            matches!(mapped, McpOAuthError::VaultLocked),
+            "VaultLocked must round-trip, got {mapped:?}"
+        );
+
+        // Vault("Vault not initialized…") → KeyNotFound. The literal
+        // prefix is the contract with `librefang-extensions::vault::unlock`;
+        // any change there must update both sides.
+        let mapped = map_extension_err(ExtensionError::Vault(
+            "Vault not initialized. Run `librefang vault init`.".to_string(),
+        ));
+        assert!(
+            matches!(mapped, McpOAuthError::KeyNotFound(_)),
+            "'Vault not initialized…' must map to KeyNotFound, got {mapped:?}; \
+             if the upstream vault error message changed, update map_extension_err to match."
+        );
+
+        // Vault(other) → Crypto
+        let mapped = map_extension_err(ExtensionError::Vault("AEAD decryption failed".to_string()));
+        assert!(
+            matches!(mapped, McpOAuthError::Crypto(_)),
+            "non-init Vault errors must map to Crypto, got {mapped:?}"
+        );
+
+        // Io → Io
+        let io = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let mapped = map_extension_err(ExtensionError::Io(io));
+        assert!(
+            matches!(mapped, McpOAuthError::Io(_)),
+            "Io must round-trip, got {mapped:?}"
+        );
+    }
+
+    /// `load_token` MUST distinguish "no vault file at all" (a fresh
+    /// install — `Ok(None)`) from "vault present but unlock failed"
+    /// (`Err`). Pre-fix both surfaced as `None` and the dashboard could
+    /// not tell the user to set `LIBREFANG_VAULT_KEY` (#3750).
+    #[tokio::test]
+    async fn load_token_returns_ok_none_when_vault_file_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let provider = KernelOAuthProvider::new(tmp.path().to_path_buf());
+
+        let result = provider.load_token("https://example.com/mcp").await;
+        assert!(
+            matches!(result, Ok(None)),
+            "fresh install (no vault.enc) must yield Ok(None), got {result:?}"
+        );
+    }
+
+    /// Counterpart to the test above: a corrupt vault must surface as
+    /// `Err`, not silently as `Ok(None)`. Otherwise the dashboard would
+    /// helpfully kick off a re-auth flow that can never succeed because
+    /// the vault is unreadable.
+    #[tokio::test]
+    async fn load_token_propagates_vault_failure_as_err() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        std::fs::write(home.join("vault.enc"), b"not-a-real-vault").expect("seed bad vault");
+        unsafe {
+            std::env::set_var(
+                "LIBREFANG_VAULT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+        }
+
+        let provider = KernelOAuthProvider::new(home);
+        let result = provider.load_token("https://example.com/mcp").await;
+        unsafe {
+            std::env::remove_var("LIBREFANG_VAULT_KEY");
+        }
+
+        assert!(
+            result.is_err(),
+            "corrupt vault must surface as Err, not Ok(None) — got {result:?}"
+        );
+    }
+
     #[test]
     fn clear_tokens_covers_all_stored_fields() {
         // Verifies that ALL_VAULT_FIELDS (used by clear_tokens) covers every field
