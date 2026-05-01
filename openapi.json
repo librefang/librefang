@@ -1949,6 +1949,40 @@
         }
       }
     },
+    "/api/agents/{id}/stats": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.",
+        "description": "Returns sessions/cost/P95-latency/active-now in a single round trip so\nthe dashboard's per-agent KPI tiles don't have to scan the global\n`/api/sessions` page (which is paginated and was clipping data for\nagents that hadn't appeared in the latest N sessions).",
+        "operationId": "get_agent_stats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "24-hour stats rollup",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/stop": {
       "post": {
         "tags": [
