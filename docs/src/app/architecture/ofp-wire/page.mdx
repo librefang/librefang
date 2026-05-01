@@ -53,7 +53,7 @@ OFP authenticates every connection in two layers:
 | Oversized `AgentMessage` draining the receiver's LLM budget | Yes | `MAX_PEER_MESSAGE_BYTES = 64 KiB` ([#3876](https://github.com/librefang/librefang/issues/3876)) |
 | Timing side-channel on HMAC verification | Yes | `subtle::ConstantTimeEq` |
 | **Reading frame contents on the wire** | **No** | Use a deployment-layer overlay |
-| **Forging in-flight messages of an existing connection given `shared_secret` + nonce sniff** | **Partial — open follow-up** | Per-message HMAC currently derives `session_key` from `shared_secret` + handshake nonces; a passive observer who has both can recompute it. Closing this requires an Ed25519/X25519 ephemeral key exchange and is filed for a separate protocol PR. |
+| **Forging in-flight messages of an existing connection given `shared_secret` + nonce sniff** | **Partial — tracked in [#4269](https://github.com/librefang/librefang/issues/4269)** | Per-message HMAC currently derives `session_key` from `shared_secret` + handshake nonces; a passive observer who has both can recompute it. Closing this requires an Ed25519/X25519 ephemeral key exchange and is filed for a separate protocol PR. |
 
 In other words: an attacker on the path can sniff your federation traffic,
 but cannot impersonate a peer, mutate a message, or get oversized payloads

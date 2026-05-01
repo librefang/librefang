@@ -365,6 +365,8 @@ use crate::types;
         types::ExtensionInstallRequest,
         types::ExtensionUninstallRequest,
         routes::auto_dream::SetEnabledRequest,
+        routes::agents::AgentStats24hView,
+        routes::agents::AgentStatsPrevView,
         routes::users::UserView,
         routes::users::UserUpsert,
         routes::users::BulkImportRequest,
