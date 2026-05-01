@@ -110,9 +110,9 @@ Eigene Hands erstellen: `HAND.toml` + System-Prompt + `SKILL.md` definieren. [An
 
 ```
 librefang-kernel            Orchestrierung, Workflows, Metering, RBAC, Scheduler, Budget
-librefang-runtime           Agenten-Loop, 3 LLM-Treiber, 53 Tools, WASM-Sandbox, MCP, A2A
+librefang-runtime           Agenten-Loop, Tool-Ausführung, WASM-Sandbox, MCP, A2A
 librefang-api               140+ REST/WS/SSE-Endpunkte, OpenAI-kompatible API, Dashboard
-librefang-channels          40 Messaging-Adapter, Rate Limiting, DM/Gruppen-Policies
+librefang-channels          45 Messaging-Adapter, Rate Limiting, DM/Gruppen-Policies
 librefang-memory            SQLite-Persistenz, Vektor-Embeddings, Sessions, Komprimierung
 librefang-types             Kerntypen, Taint-Tracking, Ed25519-Signierung, Modellkatalog
 librefang-skills            60 gebündelte Skills, SKILL.md-Parser, FangHub-Marktplatz

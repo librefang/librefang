@@ -164,6 +164,7 @@ impl StandaloneChat {
                 let preview: String = text.chars().take(80).collect();
                 self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
             }
+            _ => {}
         }
     }
 

@@ -11,6 +11,19 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# Guard against duplicate `## [Unreleased]` headings in CHANGELOG.md.
+# Release tooling (`.github/workflows/release.yml` awk extractor and
+# `xtask/src/changelog.rs`) silently picks the first match and drops any
+# subsequent block, so a duplicate quietly loses entries. See #3395.
+if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
+    UNRELEASED_COUNT=$(grep -c '^## \[Unreleased\]' CHANGELOG.md || true)
+    if [ "$UNRELEASED_COUNT" -gt 1 ]; then
+        echo "Error: CHANGELOG.md has $UNRELEASED_COUNT '## [Unreleased]' sections; expected exactly 1."
+        echo "Release tooling will silently drop entries from all but the first. Merge them into one block."
+        exit 1
+    fi
+fi
+
 # Regenerate openapi.json only when staged route changes can actually move
 # the spec. OpenAPI output is driven by utoipa attributes, derives, and
 # handler signatures — pure function-body edits never change openapi.json,
