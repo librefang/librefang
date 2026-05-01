@@ -1,0 +1,117 @@
+name: Auto-close Resolved Issues
+
+# Scan recent merged commits + PR bodies on main for "Closes #N" / "Fixes #N" /
+# "Resolves #N" keywords, and close any referenced issue that is still OPEN.
+#
+# Why this exists: GitHub's auto-close-on-merge only fires when the keyword is
+# in the PR body of a merged-via-PR change AND the PR targets the repo's
+# default branch. It silently misses commits merged via other paths, references
+# in the squash-commit message but not the PR body, and references that were
+# valid but the closing webhook dropped. We've accumulated stale-open issues
+# from this (#3602, #3770, #3774, #3778, #3779 — all already fixed). This
+# workflow is the safety net.
+
+on:
+  schedule:
+    - cron: '15 7 * * *'  # Daily at 07:15 UTC
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'How many days of commit history to scan'
+        required: false
+        default: '14'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '14' }}
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const lookback = parseInt(process.env.LOOKBACK_DAYS, 10);
+            const since = new Date(Date.now() - lookback * 86400_000).toISOString();
+
+            // 1. Collect issue refs from commit messages on main
+            const log = execSync(
+              `git log origin/main --since="${since}" --pretty=format:"%H%n%B%n---COMMIT-END---"`,
+              { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+            );
+
+            const refRegex = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi;
+            const refs = new Map(); // issueNumber -> { sha, subject }
+
+            for (const block of log.split('---COMMIT-END---')) {
+              const trimmed = block.trim();
+              if (!trimmed) continue;
+              const lines = trimmed.split('\n');
+              const sha = lines[0];
+              const subject = lines[1] || '';
+              const body = trimmed;
+              for (const m of body.matchAll(refRegex)) {
+                const n = parseInt(m[1], 10);
+                if (!refs.has(n)) refs.set(n, { sha: sha.slice(0, 7), subject });
+              }
+            }
+
+            core.info(`Found ${refs.size} unique issue refs in last ${lookback} days of main commits`);
+
+            if (refs.size === 0) return;
+
+            // 2. For each ref, check if issue is still OPEN; close if so
+            let closed = 0;
+            for (const [num, info] of refs) {
+              let issue;
+              try {
+                const r = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                });
+                issue = r.data;
+              } catch (e) {
+                if (e.status === 404) continue;
+                throw e;
+              }
+
+              // Skip PRs (issues API returns PRs too)
+              if (issue.pull_request) continue;
+              if (issue.state !== 'open') continue;
+
+              const body =
+                `Auto-closing: commit \`${info.sha}\` on \`main\` references this issue ` +
+                `with a closing keyword (\`${info.subject}\`), but GitHub's auto-close ` +
+                `did not fire. Reopen if this is in error.`;
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: num,
+                body,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: num,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+              core.info(`Closed #${num} (resolved by ${info.sha})`);
+              closed++;
+            }
+
+            core.info(`Reconciled ${closed} stale-open issues`);
+            core.summary
+              .addHeading('Auto-close summary')
+              .addRaw(`Scanned last ${lookback} days, found ${refs.size} refs, closed ${closed} stale issues.`)
+              .write();
