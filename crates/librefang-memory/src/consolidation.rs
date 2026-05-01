@@ -258,7 +258,7 @@ fn merge_metadata_json(keeper: &str, loser: &str) -> String {
 
 /// Decode embedding bytes (LE f32) into a `Vec<f32>`.
 fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return None;
     }
     Some(
@@ -289,7 +289,12 @@ fn encode_embedding(v: &[f32]) -> Vec<u8> {
 ///
 /// - both present, same dim → weighted average bytes
 /// - both present, dim mismatch → keeper (the one with higher accum weight)
-/// - one present → that one
+/// - keeper has bytes, loser does not → keeper verbatim
+/// - keeper has none, loser has bytes → **loser is adopted** (asymmetric:
+///   the keeper inherits the loser's vector rather than staying empty,
+///   because some embedding is strictly more useful for downstream
+///   ranking than none, and the loser is about to be soft-deleted so
+///   its vector would otherwise be lost)
 /// - neither → `None`
 ///
 /// Negative or zero weights are clamped to a small positive epsilon so
@@ -863,5 +868,34 @@ mod tests {
             access, 3,
             "access_count must sum 1+1+1 across keeper + 2 losers"
         );
+    }
+
+    /// `merge_embeddings_weighted` is asymmetric on the (None, Some) edge:
+    /// when the keeper has no embedding but the loser does, the loser's
+    /// bytes are adopted by the keeper rather than left as `None`. Pre-fix
+    /// the loser's embedding was unconditionally lost on soft-delete; this
+    /// path is what rescues it. Asserted at the helper level so a future
+    /// refactor that flips the asymmetry (e.g., "keeper always wins, even
+    /// when empty") fails loudly here instead of silently regressing #3537.
+    #[test]
+    fn test_merge_embeddings_keeper_none_adopts_loser() {
+        let loser_bytes = encode_embedding(&[0.25_f32, 0.5, 0.75, 1.0]);
+        let merged = merge_embeddings_weighted(None, 0.0, Some(&loser_bytes), 0.5)
+            .expect("loser-only path must produce Some");
+        let decoded = decode_embedding(&merged).expect("merged bytes decode");
+        assert_eq!(
+            decoded,
+            vec![0.25_f32, 0.5, 0.75, 1.0],
+            "keeper-without-embedding must adopt the loser's vector verbatim"
+        );
+
+        // Sanity: the symmetric (Some, None) path still wins for the keeper.
+        let keeper_bytes = encode_embedding(&[1.0_f32, 0.0]);
+        let merged = merge_embeddings_weighted(Some(&keeper_bytes), 0.9, None, 0.0)
+            .expect("keeper-only path must produce Some");
+        assert_eq!(decode_embedding(&merged).unwrap(), vec![1.0_f32, 0.0]);
+
+        // And (None, None) stays None.
+        assert!(merge_embeddings_weighted(None, 0.0, None, 0.0).is_none());
     }
 }

@@ -1054,6 +1054,7 @@ impl VectorStore for SqliteVectorStore {
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let mut results = Vec::new();
+        let mut skipped_non_comparable: u64 = 0;
         for row_result in rows {
             let (id, content, meta_str, emb_bytes) =
                 row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -1062,10 +1063,14 @@ impl VectorStore for SqliteVectorStore {
             // zero vector). Including them with score=0.0 would let them
             // outrank genuinely orthogonal hits and pollute the result set.
             let Some(score) = cosine_similarity(query_embedding, &emb) else {
+                // Per-row stays at debug to avoid flooding logs during a
+                // re-embedding migration; the loop emits one aggregated
+                // warn at the end if any were skipped.
                 tracing::debug!(
                     memory_id = %id,
                     "skipping vector candidate: dim mismatch or zero magnitude"
                 );
+                skipped_non_comparable += 1;
                 continue;
             };
             let metadata: HashMap<String, serde_json::Value> =
@@ -1076,6 +1081,13 @@ impl VectorStore for SqliteVectorStore {
                 score,
                 metadata,
             });
+        }
+        if skipped_non_comparable > 0 {
+            tracing::warn!(
+                count = skipped_non_comparable,
+                "vector search skipped non-comparable candidates (dim mismatch or zero magnitude); \
+                 likely a re-embedding migration is in progress"
+            );
         }
 
         // Sort by score descending, truncate to limit
