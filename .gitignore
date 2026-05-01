@@ -80,6 +80,9 @@ result
 !.claude/hooks/forbid-main-worktree.sh
 !.claude/hooks/session-start-worktree-check.sh
 !.claude/hooks/guard-bash-safety.sh
+!.claude/hooks/lib/
+.claude/hooks/lib/*
+!.claude/hooks/lib/check-bash-rules.py
 .codex
 .omc/
 .qwen/
