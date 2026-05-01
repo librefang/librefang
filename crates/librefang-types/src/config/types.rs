@@ -1494,10 +1494,16 @@ pub struct VaultConfig {
     /// a new signature and triggers a fresh "allow" prompt on daemon
     /// restart. Linux and Windows default to `true`.
     ///
-    /// The env var `LIBREFANG_VAULT_NO_KEYRING=1` overrides this setting and
-    /// forces the file-based fallback (`~/.librefang/.keyring`,
-    /// AES-256-GCM-wrapped, 0600) regardless of the config or platform
-    /// default.
+    /// The env var `LIBREFANG_VAULT_NO_KEYRING=1` overrides this setting
+    /// and forces the file-based fallback regardless of the config or
+    /// platform default. The fallback path is resolved via
+    /// `dirs::data_local_dir()`:
+    /// - macOS: `~/Library/Application Support/librefang/.keyring`
+    /// - Linux: `~/.local/share/librefang/.keyring`
+    /// - Windows: `%LOCALAPPDATA%\librefang\.keyring`
+    ///
+    /// The file is AES-256-GCM-wrapped with an Argon2id-derived
+    /// machine-fingerprint key and stored mode 0600.
     pub use_os_keyring: Option<bool>,
 }
 
