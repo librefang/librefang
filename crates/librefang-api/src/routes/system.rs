@@ -1544,6 +1544,8 @@ pub async fn session_cleanup(
     params(
         ("q" = String, Query, description = "FTS5 search query"),
         ("agent_id" = Option<String>, Query, description = "Optional agent ID filter"),
+        ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
+        ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
         (status = 200, description = "Search results", body = serde_json::Value),
@@ -1553,6 +1555,7 @@ pub async fn session_cleanup(
 pub async fn search_sessions(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Query(pagination): Query<PaginationParams>,
 ) -> impl IntoResponse {
     let query = match params.get("q") {
         Some(q) if !q.is_empty() => q.clone(),
@@ -1568,15 +1571,38 @@ pub async fn search_sessions(
             .map(librefang_types::agent::AgentId)
     });
 
-    match state
-        .kernel
-        .memory_substrate()
-        .search_sessions(&query, agent_id.as_ref())
-    {
-        Ok(results) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"results": results})),
-        ),
+    // Reuse the shared cap policy (default 50 / max 500) instead of
+    // re-implementing it from the raw query map. Multiple `Query<T>`
+    // extractors are fine — both read the same URI query string and
+    // serde_urlencoded ignores fields the target type doesn't declare,
+    // so `q`/`agent_id` don't interfere with PaginationParams.
+    let limit = pagination.effective_limit();
+    let offset = pagination.effective_offset();
+
+    match state.kernel.memory_substrate().search_sessions_paginated(
+        &query,
+        agent_id.as_ref(),
+        Some(limit),
+        offset,
+    ) {
+        Ok(results) => {
+            // `next_offset` is `None` when this page wasn't full — the
+            // client knows it has reached the end without re-querying.
+            let next_offset = if results.len() < limit {
+                None
+            } else {
+                Some(offset + results.len())
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "results": results,
+                    "limit": limit,
+                    "offset": offset,
+                    "next_offset": next_offset,
+                })),
+            )
+        }
         Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),
     }
 }
