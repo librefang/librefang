@@ -47,19 +47,19 @@ const categoryIconMap: Record<string, React.ComponentType<{ className?: string }
 
 // Per-category accent — keeps templates visually grouped at a glance.
 // Uses Tailwind palette so it inherits dark/light theme via opacity.
-const categoryAccent: Record<string, { text: string; bg: string; ring: string; bar: string }> = {
-  devtools:     { text: "text-violet-500",  bg: "bg-violet-500/10",  ring: "ring-violet-500/30",  bar: "from-violet-500/15" },
-  productivity: { text: "text-sky-500",     bg: "bg-sky-500/10",     ring: "ring-sky-500/30",     bar: "from-sky-500/15" },
-  sre:          { text: "text-rose-500",    bg: "bg-rose-500/10",    ring: "ring-rose-500/30",    bar: "from-rose-500/15" },
-  sales:        { text: "text-emerald-500", bg: "bg-emerald-500/10", ring: "ring-emerald-500/30", bar: "from-emerald-500/15" },
-  research:     { text: "text-amber-500",   bg: "bg-amber-500/10",   ring: "ring-amber-500/30",   bar: "from-amber-500/15" },
-  admin:        { text: "text-slate-500",   bg: "bg-slate-500/10",   ring: "ring-slate-500/30",   bar: "from-slate-500/15" },
-  creation:     { text: "text-sky-500",     bg: "bg-sky-500/10",     ring: "ring-sky-500/30",     bar: "from-sky-500/15" },
-  language:     { text: "text-violet-500",  bg: "bg-violet-500/10",  ring: "ring-violet-500/30",  bar: "from-violet-500/15" },
-  thinking:     { text: "text-emerald-500", bg: "bg-emerald-500/10", ring: "ring-emerald-500/30", bar: "from-emerald-500/15" },
-  business:     { text: "text-amber-500",   bg: "bg-amber-500/10",   ring: "ring-amber-500/30",   bar: "from-amber-500/15" },
+const categoryAccent: Record<string, { text: string; bg: string; border: string; bar: string }> = {
+  devtools:     { text: "text-violet-500",  bg: "bg-violet-500/10",  border: "border-violet-500/40",  bar: "from-violet-500/15" },
+  productivity: { text: "text-sky-500",     bg: "bg-sky-500/10",     border: "border-sky-500/40",     bar: "from-sky-500/15" },
+  sre:          { text: "text-rose-500",    bg: "bg-rose-500/10",    border: "border-rose-500/40",    bar: "from-rose-500/15" },
+  sales:        { text: "text-emerald-500", bg: "bg-emerald-500/10", border: "border-emerald-500/40", bar: "from-emerald-500/15" },
+  research:     { text: "text-amber-500",   bg: "bg-amber-500/10",   border: "border-amber-500/40",   bar: "from-amber-500/15" },
+  admin:        { text: "text-slate-500",   bg: "bg-slate-500/10",   border: "border-slate-500/40",   bar: "from-slate-500/15" },
+  creation:     { text: "text-sky-500",     bg: "bg-sky-500/10",     border: "border-sky-500/40",     bar: "from-sky-500/15" },
+  language:     { text: "text-violet-500",  bg: "bg-violet-500/10",  border: "border-violet-500/40",  bar: "from-violet-500/15" },
+  thinking:     { text: "text-emerald-500", bg: "bg-emerald-500/10", border: "border-emerald-500/40", bar: "from-emerald-500/15" },
+  business:     { text: "text-amber-500",   bg: "bg-amber-500/10",   border: "border-amber-500/40",   bar: "from-amber-500/15" },
 };
-const fallbackAccent = { text: "text-text-dim", bg: "bg-main", ring: "ring-border-subtle", bar: "from-brand/10" };
+const fallbackAccent = { text: "text-text-dim", bg: "bg-main", border: "border-border-subtle", bar: "from-brand/10" };
 const accentFor = (cat?: string) => (cat && categoryAccent[cat]) || fallbackAccent;
 
 type CanvasTemplate = {
@@ -266,7 +266,7 @@ export function WorkflowsPage() {
   };
   useCreateShortcut(handleNewWorkflow);
 
-  const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
+  const buildCanvasTemplateFor = (tmpl: WorkflowTemplate): CanvasTemplate => {
     const steps = getTemplateSteps(tmpl);
     const nameToIdx = new Map(steps.map((s, i) => [s.name, i]));
     const nodes = steps.map((s, idx) => ({
@@ -287,12 +287,22 @@ export function WorkflowsPage() {
         edges.push({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` })
       );
     }
+    return { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" };
+  };
 
+  // Preview opens the template in canvas without persisting anything —
+  // the user can iterate on layout / prompts before deciding to save.
+  const handlePreviewTemplate = (tmpl: WorkflowTemplate) => {
+    navigateToCanvas(undefined, buildCanvasTemplateFor(tmpl));
+  };
+
+  const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
+    const canvasTpl = buildCanvasTemplateFor(tmpl);
     const hasRequiredParams = (tmpl.parameters ?? []).some(p => p.required);
     if (hasRequiredParams) {
       // Template has required params — open canvas pre-populated with nodes so
       // the user can see the workflow structure and fill in parameter values.
-      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
+      navigateToCanvas(undefined, canvasTpl);
       return;
     }
     try {
@@ -302,10 +312,10 @@ export function WorkflowsPage() {
         openWorkflow(workflowId);
       } else {
         // Instantiation succeeded but no ID returned — fall back to pre-populated canvas
-        navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
+        navigateToCanvas(undefined, canvasTpl);
       }
     } catch {
-      navigateToCanvas(undefined, { nodes, edges, name: tmpl.name, description: tmpl.description ?? "" });
+      navigateToCanvas(undefined, canvasTpl);
     }
   };
 
@@ -430,7 +440,7 @@ export function WorkflowsPage() {
                       onClick={() => setTplCategory(id)}
                       className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border capitalize transition-colors ${
                         active
-                          ? `${a.text} ${a.bg} border-current/40`
+                          ? `${a.text} ${a.bg} ${a.border}`
                           : "text-text-dim border-border-subtle hover:text-text bg-surface"
                       }`}
                     >
@@ -518,7 +528,7 @@ export function WorkflowsPage() {
                       </Button>
                       <Button
                         variant="secondary"
-                        onClick={() => handleUseTemplate(tmpl)}
+                        onClick={() => handlePreviewTemplate(tmpl)}
                         title={t("workflows.preview_template", { defaultValue: "Preview in canvas" })}
                       >
                         <Eye className="w-3.5 h-3.5" />
