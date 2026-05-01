@@ -788,6 +788,119 @@ jobs:
           echo "::error::Upload failed after 5 attempts"
           exit 1
 
+  # ═════════════════════════════════════════════════════════════════════════
+  # Aggregate per-asset *.sha256 sibling files into one SHA256SUMS manifest
+  # and sign it with cosign keyless (Sigstore + GitHub OIDC). See #3546.
+  #
+  # Why an aggregator instead of signing each `*.sha256` in place:
+  #   - One signature per release (vs ~20) is cheaper for verifiers.
+  #   - `install.sh` only has to fetch+verify two files (SHA256SUMS,
+  #     SHA256SUMS.sig) and the cert bundle, regardless of platform count.
+  #   - Matches the layout most upstream Rust tooling (rustup, sigstore-rs)
+  #     already understands.
+  #
+  # Keyless signing uses the workflow's OIDC identity, so no long-lived
+  # secret is required. Verifiers re-derive trust from:
+  #     --certificate-identity-regexp "https://github\.com/librefang/librefang/.*"
+  #     --certificate-oidc-issuer     "https://token.actions.githubusercontent.com"
+  #
+  # SLSA build-provenance attestation (`actions/attest-build-provenance`) is
+  # tracked as a follow-up — it requires touching every per-target packaging
+  # step to stamp `subject-path:`, which is out of scope for this PR.
+  # ═════════════════════════════════════════════════════════════════════════
+
+  sign_release_artifacts:
+    name: Sign Release Artifacts
+    if: >
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
+    needs:
+      - create_release
+      - cli_mac
+      - cli_linux
+      - cli_android
+      - cli_linux_mini
+      - cli_musl
+      - cli_windows
+      - cli_mac_mini
+      - cli_windows_mini
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # upload signed manifest as release asset
+      id-token: write   # fetch OIDC token for cosign keyless signing
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: "v2.6.3"
+
+      - name: Build SHA256SUMS manifest from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p sums
+          cd sums
+
+          # Pull every per-asset sibling .sha256 the cli_* jobs uploaded.
+          # Skip the manifest itself if it exists from a prior re-run.
+          gh release view "$TAG" --json assets \
+            --jq '.assets[].name | select(endswith(".sha256")) | select(. != "SHA256SUMS")' \
+            > asset-list.txt
+
+          if [ ! -s asset-list.txt ]; then
+            echo "::error::no *.sha256 sibling files attached to release $TAG"
+            exit 1
+          fi
+
+          while IFS= read -r name; do
+            echo "Fetching $name"
+            gh release download "$TAG" --pattern "$name" --clobber
+          done < asset-list.txt
+
+          # Each sibling file already contains "<hash>  <filename>" — just
+          # concatenate (sorted for determinism).
+          : > ../SHA256SUMS
+          for f in $(ls *.sha256 | sort); do
+            cat "$f" >> ../SHA256SUMS
+          done
+
+          cd ..
+          echo "::group::SHA256SUMS"
+          cat SHA256SUMS
+          echo "::endgroup::"
+
+      - name: Sign SHA256SUMS with cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Verify signature locally before upload
+        run: |
+          cosign verify-blob \
+            --certificate SHA256SUMS.pem \
+            --signature SHA256SUMS.sig \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            SHA256SUMS
+
+      - name: Upload signed manifest to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            SHA256SUMS.pem \
+            --clobber
+
   cli_npm:
     name: CLI / npm
     if: >
