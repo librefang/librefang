@@ -5607,6 +5607,85 @@ async fn injection_teardown_only_removes_target_session() {
     kernel.shutdown();
 }
 
+/// Regression test for #3575: when the bounded mpsc(8) injection channel is
+/// full, `inject_message_for_session` must surface a `KernelError::Backpressure`
+/// instead of silently returning `Ok(false)`. The API layer relies on this
+/// distinction to map the situation to HTTP 503 instead of HTTP 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_message_returns_backpressure_when_channel_full() {
+    use crate::error::KernelError;
+
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_full");
+    let session = SessionId::new();
+
+    // Set up the channel but do NOT drain the receiver — this lets us fill
+    // the bounded mpsc(8) buffer deterministically.
+    let _rx = kernel.setup_injection_channel(agent_id, session);
+
+    // The channel capacity is 8 (see `setup_injection_channel`). Fill it.
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session), &format!("msg {i}"))
+            .await
+            .unwrap_or_else(|e| panic!("inject {i} should succeed before saturation: {e}"));
+    }
+
+    // The 9th inject targets the only live session, whose channel is full.
+    // Pre-fix this returned Ok(false) (silently dropped). Post-fix it must
+    // return KernelError::Backpressure.
+    let result = kernel
+        .inject_message_for_session(agent_id, Some(session), "overflow")
+        .await;
+    match result {
+        Err(KernelError::Backpressure(_)) => { /* expected */ }
+        other => panic!("expected Backpressure when injection channel is full, got {other:?}"),
+    }
+
+    kernel.teardown_injection_channel(agent_id, session);
+    kernel.shutdown();
+}
+
+/// Mixed-target case for #3575: when broadcasting across multiple live
+/// sessions and at least one accepts, the call must still report success
+/// (`Ok(true)`) — backpressure only fires when *every* live target was full.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_broadcast_succeeds_when_one_target_accepts() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_mixed");
+
+    let session_full = SessionId::new();
+    let session_open = SessionId::new();
+
+    let _rx_full = kernel.setup_injection_channel(agent_id, session_full);
+    let rx_open = kernel.setup_injection_channel(agent_id, session_open);
+
+    // Saturate session_full's buffer (capacity 8).
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session_full), &format!("fill {i}"))
+            .await
+            .expect("targeted fill should succeed");
+    }
+
+    // Broadcast (None): session_full will reject as Full, session_open accepts.
+    let injected = kernel
+        .inject_message_for_session(agent_id, None, "broadcast-mixed")
+        .await
+        .expect("broadcast must succeed when at least one session accepts");
+    assert!(
+        injected,
+        "delivered flag should be true when one target accepts"
+    );
+
+    // session_open actually received it.
+    assert!(rx_open.lock().await.try_recv().is_ok());
+
+    kernel.teardown_injection_channel(agent_id, session_full);
+    kernel.teardown_injection_channel(agent_id, session_open);
+    kernel.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Session label generation — pure-function helpers
 // ---------------------------------------------------------------------------
