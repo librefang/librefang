@@ -49,6 +49,7 @@ use crate::types;
         // ── Agents ──
         routes::list_agents,
         routes::get_agent_stats,
+        routes::list_agent_events,
         routes::spawn_agent,
         routes::get_agent,
         routes::kill_agent,
