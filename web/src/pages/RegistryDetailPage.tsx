@@ -14,6 +14,7 @@ import Breadcrumbs from '../components/Breadcrumbs'
 import RegistryIcon from '../components/RegistryIcon'
 import { fetchRegistryRaw, pathCandidatesFor, fetchFirstAvailable } from '../lib/registry-raw'
 import { useMarketplace } from '../lib/useMarketplace'
+import { fmtNum } from '../lib/format'
 
 interface RegistryDetailPageProps {
   category: RegistryCategory
@@ -302,30 +303,54 @@ export default function RegistryDetailPage({ category, id, onOpenSearch }: Regis
             </div>
           )}
           {mktPkg && (mktPkg.total_downloads > 0 || mktPkg.stars > 0 || mktPkg.latest_version) && (
-            <div className="flex flex-wrap items-center gap-3 mb-4 p-3 bg-black/3 dark:bg-white/3 border border-black/8 dark:border-white/8 rounded">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mb-4 pt-3 border-t border-black/8 dark:border-white/8">
               {mktPkg.latest_version && (
-                <span className="flex items-center gap-1.5 text-xs font-mono font-semibold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded">
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono font-semibold text-cyan-600 dark:text-cyan-400 bg-cyan-500/10 px-2 py-1 rounded tabular-nums"
+                  aria-label={`Latest version v${mktPkg.latest_version}`}
+                >
                   v{mktPkg.latest_version}
                 </span>
               )}
               {mktPkg.total_downloads > 0 && (
-                <span className="flex items-center gap-1.5 text-xs font-mono text-gray-600 dark:text-gray-300">
-                  <Download className="w-3.5 h-3.5 text-cyan-500/70" />
-                  <strong>{mktPkg.total_downloads >= 1000 ? `${(mktPkg.total_downloads / 1000).toFixed(1)}k` : mktPkg.total_downloads}</strong>
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono text-gray-600 dark:text-gray-300 tabular-nums"
+                  aria-label={`${mktPkg.total_downloads.toLocaleString()} ${t.registry?.downloads || 'downloads'}`}
+                  title={mktPkg.total_downloads.toLocaleString()}
+                >
+                  <Download className="w-3.5 h-3.5 text-cyan-500/70" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.total_downloads)}</strong>
                   <span className="text-gray-400">{t.registry?.downloads || 'downloads'}</span>
                 </span>
               )}
-              {mktPkg.weekly_downloads > 0 && (
-                <span className="flex items-center gap-1.5 text-xs font-mono text-green-600 dark:text-green-400">
-                  <TrendingUp className="w-3.5 h-3.5" />
-                  <strong>{mktPkg.weekly_downloads >= 1000 ? `${(mktPkg.weekly_downloads / 1000).toFixed(1)}k` : mktPkg.weekly_downloads}</strong>
+              {/* Render weekly even when zero (when total_downloads > 0) so
+                  visitors can see the metric exists rather than wondering
+                  whether the data simply failed to load. */}
+              {mktPkg.total_downloads > 0 && (
+                <span
+                  className={cn(
+                    'flex items-center gap-1.5 text-xs font-mono tabular-nums',
+                    mktPkg.weekly_downloads > 0
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-gray-400 dark:text-gray-600'
+                  )}
+                  aria-label={`${mktPkg.weekly_downloads.toLocaleString()} ${t.registry?.thisWeek || 'this week'}`}
+                  title={mktPkg.weekly_downloads.toLocaleString()}
+                >
+                  <TrendingUp className="w-3.5 h-3.5" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.weekly_downloads)}</strong>
                   <span className="text-gray-400">{t.registry?.thisWeek || 'this week'}</span>
                 </span>
               )}
               {mktPkg.stars > 0 && (
-                <span className="flex items-center gap-1.5 text-xs font-mono text-amber-500">
-                  <Star className="w-3.5 h-3.5" fill="currentColor" />
-                  <strong>{mktPkg.stars}</strong>
+                <span
+                  className="flex items-center gap-1.5 text-xs font-mono text-amber-500 tabular-nums"
+                  aria-label={`${mktPkg.stars.toLocaleString()} ${t.registry?.stars || 'stars'}`}
+                  title={mktPkg.stars.toLocaleString()}
+                >
+                  <Star className="w-3.5 h-3.5" fill="currentColor" aria-hidden="true" />
+                  <strong>{fmtNum(mktPkg.stars)}</strong>
+                  <span className="text-gray-400">{t.registry?.stars || 'stars'}</span>
                 </span>
               )}
             </div>
