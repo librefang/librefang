@@ -48,53 +48,6 @@ fn auth_failed(detail: impl std::fmt::Display) -> Response {
     ))
 }
 
-/// #3713: Confirm that a `token_endpoint` URL discovered from an MCP server's
-/// OAuth metadata was published by the same host as the original `server_url`
-/// the user pointed the daemon at.
-///
-/// Without this check a malicious MCP server can advertise an attacker-owned
-/// `token_endpoint` in its `.well-known/oauth-authorization-server` document.
-/// The callback handler would then ship the user's authorization code to the
-/// attacker, who exchanges it for a real OAuth token at whatever upstream the
-/// MCP server proxies. The redirect-URI / `trusted_hosts` check in
-/// `auth_start` does not cover this — it only protects the redirect leg.
-///
-/// Match policy is **exact host, case-insensitive**: scheme and port may
-/// differ (`https://server.com` discovering `https://server.com:8443/token` is
-/// fine, as is `http://server.com/mcp` → `https://server.com/oauth/token`),
-/// but the host literal must match. Distinct subdomains under the same eTLD+1
-/// are NOT trusted by default — operators who legitimately split the
-/// authorization service onto a separate host can pre-register that host via
-/// the `[[mcp_servers.oauth]]` overrides in `config.toml` (those bypass
-/// discovery entirely, so this guard never runs against them).
-///
-/// Returns `Ok(())` when the hosts match, otherwise `Err(reason)` with a
-/// short operator-facing description.
-pub(crate) fn token_endpoint_host_matches_server(
-    server_url: &str,
-    token_endpoint: &str,
-) -> Result<(), String> {
-    let server =
-        url::Url::parse(server_url).map_err(|e| format!("server_url is not a valid URL: {e}"))?;
-    let token = url::Url::parse(token_endpoint)
-        .map_err(|e| format!("token_endpoint is not a valid URL: {e}"))?;
-    let server_host = server
-        .host_str()
-        .ok_or_else(|| "server_url has no host".to_string())?
-        .to_ascii_lowercase();
-    let token_host = token
-        .host_str()
-        .ok_or_else(|| "token_endpoint has no host".to_string())?
-        .to_ascii_lowercase();
-    if server_host == token_host {
-        Ok(())
-    } else {
-        Err(format!(
-            "token_endpoint host '{token_host}' does not match server host '{server_host}'"
-        ))
-    }
-}
-
 /// GET /api/mcp/servers/{name}/auth/status
 ///
 /// Returns the current OAuth authentication state for an MCP server.
@@ -650,34 +603,6 @@ pub async fn auth_callback(
         ));
     }
 
-    // #3713: Re-validate that the stored `token_endpoint` host matches the
-    // host of the MCP server we discovered metadata from. Without this, a
-    // malicious server can advertise an attacker-controlled `token_endpoint`
-    // in its discovery doc and steal the authorization code. The SSRF guard
-    // above only blocks loopback/internal targets, not arbitrary public
-    // attacker hosts.
-    if let Err(reason) = token_endpoint_host_matches_server(&server_url, &token_endpoint) {
-        tracing::error!(
-            server = %name,
-            server_url = %server_url,
-            token_endpoint = %token_endpoint,
-            reason = %reason,
-            "Refusing OAuth code exchange: token_endpoint host does not match MCP server host"
-        );
-        let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
-        auth_states.insert(
-            name.clone(),
-            McpAuthState::Error {
-                message: format!("token_endpoint host mismatch: {reason}"),
-            },
-        );
-        return auth_failed(
-            "Authorization rejected: the OAuth token endpoint advertised by this MCP \
-             server does not match the server's own host. This may indicate a malicious \
-             MCP server attempting to steal your authorization code.",
-        );
-    }
-
     let client_id = load("client_id");
     let redirect_uri = match load("redirect_uri") {
         Some(r) if !r.is_empty() => r,
@@ -1120,77 +1045,5 @@ mod tests {
         let h = hdrs(&[("origin", "null")]);
         let url = derive_callback_url(&h, "srv", &[], LISTEN);
         assert!(url.starts_with("http://127.0.0.1:4545/"), "got {url}");
-    }
-
-    // ── #3713: token_endpoint host pinning ────────────────────────
-
-    #[test]
-    fn token_endpoint_host_match_accepts_identical_host() {
-        assert!(token_endpoint_host_matches_server(
-            "https://server.example.com/mcp",
-            "https://server.example.com/oauth/token",
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn token_endpoint_host_match_accepts_differing_scheme_and_port() {
-        // Scheme upgrade (http MCP → https token) and explicit port on token
-        // endpoint are both legitimate — only host is pinned.
-        assert!(token_endpoint_host_matches_server(
-            "http://server.example.com/mcp",
-            "https://server.example.com:8443/oauth/token",
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn token_endpoint_host_match_is_case_insensitive() {
-        assert!(token_endpoint_host_matches_server(
-            "https://Server.Example.COM/mcp",
-            "https://server.example.com/oauth/token",
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn token_endpoint_host_match_rejects_attacker_host() {
-        let err = token_endpoint_host_matches_server(
-            "https://server.example.com/mcp",
-            "https://attacker.evil/oauth/token",
-        )
-        .unwrap_err();
-        assert!(err.contains("attacker.evil"), "got: {err}");
-        assert!(err.contains("server.example.com"), "got: {err}");
-    }
-
-    #[test]
-    fn token_endpoint_host_match_rejects_subdomain_swap() {
-        // Distinct subdomains under the same eTLD+1 do NOT auto-trust:
-        // operators must use the explicit oauth override in config.toml
-        // when their authorization service lives on a separate hostname.
-        assert!(token_endpoint_host_matches_server(
-            "https://server.example.com/mcp",
-            "https://auth.example.com/oauth/token",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn token_endpoint_host_match_rejects_suffix_smuggling() {
-        // Naive `ends_with` checks would let "evil-server.example.com"
-        // match against "server.example.com". Exact-host comparison
-        // closes that.
-        assert!(token_endpoint_host_matches_server(
-            "https://server.example.com/mcp",
-            "https://evil-server.example.com/oauth/token",
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn token_endpoint_host_match_rejects_invalid_url() {
-        assert!(token_endpoint_host_matches_server("not a url", "https://x/").is_err());
-        assert!(token_endpoint_host_matches_server("https://x/", "not a url").is_err());
     }
 }
