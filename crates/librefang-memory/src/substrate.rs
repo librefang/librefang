@@ -457,6 +457,22 @@ impl MemorySubstrate {
         self.sessions.search_sessions(query, agent_id)
     }
 
+    /// Full-text search with SQL-side pagination (#3691).
+    ///
+    /// Prefer this over `search_sessions` for any caller exposed to the
+    /// network: untrusted clients must not be able to ask the substrate
+    /// for an unbounded result set.
+    pub fn search_sessions_paginated(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> LibreFangResult<Vec<crate::session::SessionSearchResult>> {
+        self.sessions
+            .search_sessions_paginated(query, agent_id, limit, offset)
+    }
+
     /// Load canonical session context for cross-channel memory.
     ///
     /// Returns the compacted summary (if any) and recent messages from the
