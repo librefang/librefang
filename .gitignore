@@ -79,6 +79,7 @@ result
 .claude/hooks/*
 !.claude/hooks/forbid-main-worktree.sh
 !.claude/hooks/session-start-worktree-check.sh
+!.claude/hooks/guard-bash-safety.sh
 .codex
 .omc/
 .qwen/

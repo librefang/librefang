@@ -17,6 +17,22 @@ and continue all work from that path. The `forbid-main-worktree` hook
 commands targeted at the main tree if you forget — but the hook is a safety
 net, not your plan.
 
+### Other AI safety hooks (`.claude/hooks/`)
+
+`guard-bash-safety.sh` (PreToolUse on Bash) blocks:
+- Force-push to `main` / `master` (incl. `+main` refspec) — get explicit user OK first
+- `--no-verify` / `--no-gpg-sign` on commit/push/rebase/merge/am/cherry-pick/pull
+- Staging known-sensitive files (`.env*`, `*.pem`, `*.p12`, `id_rsa`, `id_ed25519`,
+  `credentials*`, `secrets*`, `vault_*.key`); also broad `git add -A` / `git add .`
+  (CLAUDE.md global rule: stage specific paths)
+- Commit messages containing Claude attribution (`Co-Authored-By: Claude`,
+  `🤖 Generated with [Claude Code]`, etc.)
+- `rm -rf` against dangerous targets (`/`, `~`, `$HOME`, `target`, `.git`,
+  `/Users`, `/usr`, `/etc`, `/var`, `/opt`, …)
+
+`session-start-worktree-check.sh` (SessionStart) emits a banner telling
+the model whether the session started in the main tree or a linked worktree.
+
 ## Project Overview
 LibreFang is an open-source Agent Operating System written in Rust (24 crates in `crates/`, plus `xtask/`).
 - Config: `~/.librefang/config.toml`

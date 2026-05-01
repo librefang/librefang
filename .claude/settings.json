@@ -65,6 +65,15 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/forbid-main-worktree.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-bash-safety.sh"
+          }
+        ]
       }
     ]
   }
