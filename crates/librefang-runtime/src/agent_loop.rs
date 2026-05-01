@@ -6592,6 +6592,74 @@ mod tests {
     }
 
     #[test]
+    fn test_resolved_tools_cache_reuses_arc_when_input_is_stable() {
+        // The whole point of #3586 is that an idle iteration (no new tools
+        // loaded via `tool_load`) MUST hand back the same `Arc` rather than
+        // rebuild the resolved tool list. Pin that with `Arc::ptr_eq` so a
+        // future regression that reverts the cache to a no-op fails here
+        // instead of silently in a profiler.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &[], true);
+        let a = cache.get(&pool, &[]);
+        let b = cache.get(&pool, &[]);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "stable input must reuse the cached Arc"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_rebuilds_when_session_loaded_grows() {
+        // Lazy mode + a new tool_load redemption mid-turn: the cache must
+        // rebuild so the LLM sees the just-loaded tool on the next turn.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, true);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("late_arrival"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "growing session_loaded_tools must rebuild the cache"
+        );
+        assert!(
+            after.iter().any(|t| t.name == "late_arrival"),
+            "rebuilt cache must include the newly loaded tool"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_no_rebuild_when_lazy_mode_off() {
+        // In non-lazy mode `resolve_request_tools` ignores `session_loaded`,
+        // so the cache should never rebuild — even if the (unused) loaded
+        // vec grows. Guards against an over-eager invalidation that would
+        // re-clone the full eager list every iteration.
+        let pool: Vec<ToolDefinition> = (0..3).map(|i| fake_tool(&format!("t{i}"))).collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, false);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("ignored"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "non-lazy mode must never rebuild on session_loaded growth"
+        );
+    }
+
+    #[test]
     fn test_is_no_reply() {
         // Canonical token
         assert!(is_no_reply("NO_REPLY"));
