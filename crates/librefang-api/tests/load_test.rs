@@ -7,10 +7,8 @@
 
 use axum::Router;
 use librefang_api::middleware;
-use librefang_api::routes::{self, AppState};
-use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
-use std::sync::Arc;
+use librefang_api::routes;
+use librefang_testing::TestAppState;
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -21,7 +19,7 @@ use tower_http::trace::TraceLayer;
 
 struct TestServer {
     base_url: String,
-    state: Arc<AppState>,
+    state: std::sync::Arc<librefang_api::routes::AppState>,
     _tmp: tempfile::TempDir,
 }
 
@@ -32,54 +30,9 @@ impl Drop for TestServer {
 }
 
 async fn start_test_server() -> TestServer {
-    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
-
-    let config = KernelConfig {
-        home_dir: tmp.path().to_path_buf(),
-        data_dir: tmp.path().join("data"),
-        default_model: DefaultModelConfig {
-            provider: "ollama".to_string(),
-            model: "test-model".to_string(),
-            api_key_env: "OLLAMA_API_KEY".to_string(),
-            base_url: None,
-            message_timeout_secs: 300,
-            extra_params: std::collections::HashMap::new(),
-            cli_profile_dirs: Vec::new(),
-        },
-        ..KernelConfig::default()
-    };
-
-    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
-
-    let state = Arc::new(AppState {
-        kernel,
-        started_at: Instant::now(),
-        peer_registry: None,
-        bridge_manager: tokio::sync::Mutex::new(None),
-        channels_config: tokio::sync::RwLock::new(Default::default()),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-        clawhub_cache: dashmap::DashMap::new(),
-        skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
-        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
-            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
-        )),
-        active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        prometheus_handle: None,
-        media_drivers: librefang_runtime::media::MediaDriverCache::new(),
-        webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
-        api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
-        user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        provider_test_cache: dashmap::DashMap::new(),
-        config_write_lock: tokio::sync::Mutex::new(()),
-        pending_a2a_agents: dashmap::DashMap::new(),
-        auth_login_limiter: std::sync::Arc::new(
-            librefang_api::rate_limiter::AuthLoginLimiter::new(),
-        ),
-        gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
-    });
+    let test = TestAppState::new();
+    test.state.kernel.set_self_handle();
+    let state = test.state.clone();
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
@@ -140,10 +93,12 @@ async fn start_test_server() -> TestServer {
         axum::serve(listener, app).await.unwrap();
     });
 
+    let (_state, _tmp, _) = test.into_parts();
+
     TestServer {
         base_url: format!("http://{}", addr),
         state,
-        _tmp: tmp,
+        _tmp,
     }
 }
 
