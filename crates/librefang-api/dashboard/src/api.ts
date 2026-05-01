@@ -1980,8 +1980,11 @@ export async function runSchedule(scheduleId: string): Promise<ApiActionResponse
   return post<ApiActionResponse>(`/api/schedules/${encodeURIComponent(scheduleId)}/run`, {});
 }
 
-export async function listTriggers(): Promise<TriggerItem[]> {
-  const data = await get<{ triggers?: TriggerItem[] }>("/api/triggers");
+export async function listTriggers(agentId?: string): Promise<TriggerItem[]> {
+  const url = agentId
+    ? `/api/triggers?agent_id=${encodeURIComponent(agentId)}`
+    : "/api/triggers";
+  const data = await get<{ triggers?: TriggerItem[] }>(url);
   return data.triggers ?? [];
 }
 
