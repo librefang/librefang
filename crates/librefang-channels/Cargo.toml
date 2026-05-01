@@ -6,102 +6,64 @@ license.workspace = true
 description = "Channel Bridge Layer — pluggable messaging integrations for LibreFang"
 
 [features]
-default = [
-    # Commonly used channels — lightweight, no heavy/unmaintained deps
-    "channel-telegram",
-    "channel-discord",
-    "channel-slack",
-    "channel-webhook",
-    "channel-signal",
-    "channel-whatsapp",
-    "channel-teams",
-    "channel-feishu",
+# Channel crate defaults are intentionally empty: every workspace
+# consumer (`librefang-api`, `librefang-cli`, `librefang-desktop`) sets
+# `default-features = false` and forwards an explicit subset, so the old
+# 25+ channel default just confused readers and risked drifting from
+# `all-channels`. Pick a feature explicitly when depending on this
+# crate. See #3655.
+default = []
+
+# Every channel adapter the crate ships. Kept in lock-step with the
+# individual `channel-*` features below — adding a new adapter requires
+# a matching entry here. CI / release / packaging pipelines opt in to
+# this; everyday `cargo build` paths don't.
+all-channels = [
+    "channel-bluesky",
     "channel-dingtalk",
-    "channel-wecom",
-    "channel-twitch",
-    "channel-rocketchat",
-    "channel-zulip",
-    "channel-revolt",
-    "channel-pumble",
-    "channel-threema",
-    "channel-twist",
-    "channel-webex",
-    "channel-ntfy",
+    "channel-discord",
+    "channel-discourse",
+    "channel-email",
+    "channel-feishu",
+    "channel-flock",
+    "channel-gitter",
+    "channel-google-chat",
+    "channel-gotify",
+    "channel-guilded",
+    "channel-irc",
+    "channel-keybase",
+    "channel-line",
+    "channel-linkedin",
+    "channel-mastodon",
+    "channel-matrix",
+    "channel-mattermost",
+    "channel-messenger",
+    "channel-mqtt",
+    "channel-mumble",
     "channel-nextcloud",
     "channel-nostr",
+    "channel-ntfy",
+    "channel-pumble",
     "channel-qq",
-    "channel-wechat",
-    "channel-voice",
-    "channel-reddit",
-    "channel-xmpp",
-    # Heavy/unmaintained deps — opt-in only:
-    # "channel-email"        — imap 2.x + nom 5 + base64 0.13 (unmaintained; see #3861)
-    # "channel-google-chat"  — rsa crate, RUSTSEC-2023-0071 Marvin timing attack (see #3666)
-    # "channel-matrix"       — heavy dep tree
-    # "channel-mattermost"   — rarely used
-    # "channel-irc"          — rarely used
-    # "channel-bluesky"      — rarely used
-    # "channel-line"         — rarely used
-    # "channel-mastodon"     — rarely used
-    # "channel-messenger"    — rarely used
-    # "channel-flock"        — rarely used
-    # "channel-guilded"      — rarely used
-    # "channel-keybase"      — rarely used
-    # "channel-discourse"    — rarely used
-    # "channel-gitter"       — rarely used
-    # "channel-gotify"       — rarely used
-    # "channel-linkedin"     — rarely used
-    # "channel-mumble"       — rarely used
-    # "channel-viber"        — rarely used
-    # "channel-mqtt"         — rarely used
-]
-
-all-channels = [
-    "channel-telegram",
-    "channel-discord",
-    "channel-slack",
-    "channel-matrix",
-    "channel-email",
-    "channel-webhook",
-    "channel-whatsapp",
-    "channel-signal",
-    "channel-teams",
-    "channel-mattermost",
-    "channel-irc",
-    "channel-google-chat",
-    "channel-twitch",
-    "channel-rocketchat",
-    "channel-zulip",
-    "channel-xmpp",
-    "channel-bluesky",
-    "channel-feishu",
-    "channel-line",
-    "channel-mastodon",
-    "channel-messenger",
     "channel-reddit",
     "channel-revolt",
+    "channel-rocketchat",
+    "channel-signal",
+    "channel-slack",
+    "channel-teams",
+    "channel-telegram",
+    "channel-threema",
+    "channel-twist",
+    "channel-twitch",
     "channel-viber",
     "channel-voice",
-    "channel-flock",
-    "channel-guilded",
-    "channel-keybase",
-    "channel-nextcloud",
-    "channel-nostr",
-    "channel-pumble",
-    "channel-threema",
-    "channel-twist",
     "channel-webex",
-    "channel-dingtalk",
-    "channel-discourse",
-    "channel-gitter",
-    "channel-gotify",
-    "channel-linkedin",
-    "channel-mumble",
-    "channel-ntfy",
-    "channel-qq",
+    "channel-webhook",
     "channel-wechat",
     "channel-wecom",
-    "channel-mqtt",
+    "channel-whatsapp",
+    "channel-xmpp",
+    "channel-zulip",
 ]
 
 # Individual channel features
