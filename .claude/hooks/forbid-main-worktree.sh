@@ -148,10 +148,15 @@ text = sys.stdin.read()
 repo = sys.argv[1] if len(sys.argv) > 1 else ""
 real_repo = os.path.realpath(repo) if repo else ""
 hit = False
-# Match >  or  >> followed by an unquoted or quoted path token.
-for m in re.finditer(r">>?\s*(?:\"([^\"]+)\"|\x27([^\x27]+)\x27|(\S+))", text):
+# Match >  or  >>  (NOT preceded by a digit or & — those are file-descriptor
+# operators like 2>&1, &>file, 2>file). We only care about plain stdout
+# redirects, since those are what an AI would use to write into the repo.
+for m in re.finditer(r"(?<![\d&])>>?\s*(?:\"([^\"]+)\"|\x27([^\x27]+)\x27|(\S+))", text):
     p = m.group(1) or m.group(2) or m.group(3)
     if not p:
+        continue
+    # Skip fd duplications (>&1, >&2) and known void targets.
+    if p.startswith("&") or p in ("/dev/null", "/dev/stderr", "/dev/stdout"):
         continue
     if p.startswith("/"):
         ap = os.path.realpath(p)

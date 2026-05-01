@@ -45,13 +45,13 @@ else
   msg="✅ Session starting in a librefang LINKED WORKTREE ($repo_root). Edits permitted; cargo build/run/install still forbidden, cargo test only with -p <crate>."
 fi
 
-# Warn if .githooks/ is checked into the tree but not yet activated.
-# (commit-msg + pre-commit live there; user runs scripts/install-githooks.sh once.)
+# Warn if scripts/hooks/ is checked in but not yet activated as core.hooksPath.
+# (cargo xtask setup activates it; same effect: `git config core.hooksPath scripts/hooks`)
 hooks_path="$(git -C "$main_root" config --get core.hooksPath 2>/dev/null || true)"
-if [ -d "$main_root/.githooks" ] && [ "$hooks_path" != ".githooks" ]; then
+if [ -d "$main_root/scripts/hooks" ] && [ "$hooks_path" != "scripts/hooks" ]; then
   msg="$msg
 
-🔧 git core.hooksPath is not pointing at .githooks/ yet — the version-controlled commit-msg / pre-commit hooks are inactive in this clone. Run once: \`bash scripts/install-githooks.sh\` (from the main worktree)."
+🔧 git core.hooksPath is not pointing at scripts/hooks/ yet — the version-controlled pre-commit / commit-msg hooks are inactive in this clone. Run once: \`just setup\` (or \`cargo xtask setup\`) from the main worktree."
 fi
 
 python3 - "$msg" <<'PY'
