@@ -51,6 +51,7 @@ impl std::str::FromStr for GoalId {
 /// The current status of a goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum GoalStatus {
     /// Not yet started.
     Pending,
