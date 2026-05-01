@@ -4,35 +4,93 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "tuesday"
     open-pull-requests-limit: 3
     labels:
       - "ci"
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # Dashboard (React/pnpm)
   - package-ecosystem: "npm"
     directory: "/crates/librefang-api/dashboard"
     schedule:
       interval: "weekly"
+      day: "wednesday"
+    versioning-strategy: increase
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      dashboard-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Web frontend
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      web-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Documentation site
+  - package-ecosystem: "npm"
+    directory: "/docs"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      docs-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # CLI npm wrapper package
   - package-ecosystem: "npm"
     directory: "/packages/cli-npm"
     schedule:
       interval: "weekly"
+      day: "thursday"
+    versioning-strategy: increase
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      cli-npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       # @librefang/cli-* versions in package.json are "0.0.0" placeholders
       # replaced by CI at publish time, not real dependencies.
@@ -43,15 +101,28 @@ updates:
     directory: "/sdk/javascript"
     schedule:
       interval: "weekly"
+      day: "friday"
+    versioning-strategy: increase-if-necessary
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      js-sdk-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   # Python SDK
   - package-ecosystem: "pip"
     directory: "/sdk/python"
     schedule:
       interval: "weekly"
+      day: "friday"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
+    groups:
+      python-sdk-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
