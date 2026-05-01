@@ -436,7 +436,17 @@ impl PeerNode {
                     "OFP: failed to load trusted peers store: {e}"
                 )));
             }
+            // SECURITY (#3873): Cap hydration at MAX_PIN_ENTRIES so a
+            // tampered or runaway trust file cannot blow past the
+            // runtime cap by pre-loading into memory.
             for peer in store.list() {
+                if pin_seed.len() >= MAX_PIN_ENTRIES {
+                    warn!(
+                        "OFP: trust store has more than {} entries; truncating hydration",
+                        MAX_PIN_ENTRIES
+                    );
+                    break;
+                }
                 if let Some(pk) = peer.public_key.clone() {
                     pin_seed.insert(peer.node_id.clone(), pk);
                 }
@@ -2324,5 +2334,36 @@ mod tests {
             res.is_err(),
             "post-restart impersonation MUST be rejected by the persisted pin"
         );
+    }
+
+    /// PR-4 follow-up: a corrupt `trusted_peers.json` MUST cause
+    /// `start_with_identity` to fail rather than silently dropping the
+    /// pin set, which would weaken the mismatch-detection guarantee
+    /// without operator awareness.
+    #[tokio::test]
+    async fn issue_3873_corrupt_trust_file_fails_loud() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write garbage where the trust file would live.
+        std::fs::write(tmp.path().join("trusted_peers.json"), "{ not valid json").unwrap();
+
+        let res = PeerNode::start_with_identity(
+            test_config("server", "S"),
+            PeerRegistry::new(),
+            Arc::new(TestHandle::new()),
+            None,
+            Some(tmp.path().to_path_buf()),
+        )
+        .await;
+
+        match res {
+            Err(WireError::HandshakeFailed(msg)) => {
+                assert!(
+                    msg.contains("trusted peers store"),
+                    "error must identify the trust store as the failing component, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected HandshakeFailed, got: {other}"),
+            Ok(_) => panic!("corrupt trust file MUST not produce a running PeerNode"),
+        }
     }
 }
