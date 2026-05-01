@@ -1205,12 +1205,13 @@ export function AgentsPage() {
       : Array.isArray(view.capabilities?.skills)
         ? view.capabilities!.skills!
         : [];
-    // skills_mode: "all" means the manifest doesn't enumerate a skill
-    // allowlist — the agent uses every skill in the registry. The
-    // previous "0 installed" empty state was misleading: most agents
-    // ship with no allowlist precisely because they accept everything.
-    const skillsMode = (view as { skills_mode?: string }).skills_mode;
+    // skills_mode: 'none' (skills_disabled), 'all' (no allowlist — uses
+    // every skill in the registry, the default), or 'allowlist' (manifest
+    // pinned a list). Each needs a different empty-state copy; the
+    // previous code collapsed them all to "0 installed".
+    const skillsMode = (agent as AgentDetail).skills_mode;
     const usesAllSkills = skillsMode === "all" && skills.length === 0;
+    const skillsDisabled = skillsMode === "none";
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
@@ -1230,7 +1231,21 @@ export function AgentsPage() {
             {t("agents.detail.install_skill", { defaultValue: "Install" })}
           </Button>
         </div>
-        {usesAllSkills ? (
+        {skillsDisabled ? (
+          <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">
+            <X className="w-4 h-4 text-text-dim shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <div className="font-mono text-[12.5px] font-medium text-text-main">
+                {t("agents.detail.skills_disabled_title", { defaultValue: "Skills disabled" })}
+              </div>
+              <div className="font-mono text-[10.5px] text-text-dim/80 mt-0.5">
+                {t("agents.detail.skills_disabled_desc", {
+                  defaultValue: "manifest pinned skills_disabled = true — the agent runs without skill dispatch",
+                })}
+              </div>
+            </div>
+          </div>
+        ) : usesAllSkills ? (
           <div
             onClick={() => navigate({ to: "/skills" })}
             className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3 cursor-pointer hover:border-brand/40 transition-colors"
@@ -1371,7 +1386,7 @@ export function AgentsPage() {
           // schedule mode (also returned by GET /api/agents on list, but
           // we re-derive from the detail response defensively).
           (() => {
-            const mode = (agent as { schedule?: string }).schedule;
+            const mode = (agent as AgentDetail).schedule;
             const isReactive = !mode || mode === "manual";
             return (
               <div className="rounded-md border border-border-subtle bg-main/40 p-4 flex items-start gap-3">

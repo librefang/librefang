@@ -1109,6 +1109,16 @@ export interface AgentDetail {
   system_prompt?: string;
   capabilities?: { tools?: boolean; network?: boolean };
   skills?: string[];
+  /** Skill assignment mode derived by the backend:
+   *  - 'all' — manifest doesn't pin an allowlist (the default).
+   *  - 'allowlist' — manifest pinned the list in `skills`.
+   *  - 'none' — skills_disabled = true. */
+  skills_mode?: "all" | "allowlist" | "none";
+  /** Human-readable schedule summary derived from manifest.schedule:
+   *  'manual' for reactive, the cron expression, 'proactive', or
+   *  'continuous · Ns'. Matches what `enrich_agent_json` puts on the
+   *  list endpoint. */
+  schedule?: string;
   tags?: string[];
   mode?: string;
   thinking?: { budget_tokens?: number; stream_thinking?: boolean };
