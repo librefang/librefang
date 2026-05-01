@@ -164,6 +164,9 @@ impl StandaloneChat {
                 let preview: String = text.chars().take(80).collect();
                 self.chat.status_msg = Some(format!("[owner_notice] {preview}"));
             }
+            // `StreamEvent` is `#[non_exhaustive]`; future variants are ignored
+            // here until we deliberately wire UI behavior for them.
+            _ => {}
         }
     }
 

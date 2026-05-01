@@ -535,6 +535,9 @@ impl State {
                         frontier = Some(&m.id);
                     }
                 }
+                // `ModelTier` is `#[non_exhaustive]`; unknown future tiers are
+                // skipped here rather than misclassified into a known bucket.
+                _ => {}
             }
         }
 
@@ -565,6 +568,9 @@ fn tier_label(tier: ModelTier) -> &'static str {
         ModelTier::Fast => "fast",
         ModelTier::Local => "local",
         ModelTier::Custom => "custom",
+        // `ModelTier` is `#[non_exhaustive]`; render unknown future tiers
+        // generically rather than panicking.
+        _ => "unknown",
     }
 }
 
