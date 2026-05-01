@@ -71,6 +71,62 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
 
+    // Audit-trail consistency (#3538): user_version must match the count
+    // of distinct rows in `migrations`. Drift means an earlier migration
+    // applied DDL without recording its audit row — operator tooling
+    // that lists `SELECT version FROM migrations` then misses those
+    // versions silently. Backfill the missing rows in place so a
+    // pre-fix DB self-heals on next boot instead of spamming `error!`
+    // every restart, and log a single warn line summarising the rescue.
+    // Idempotent: a clean DB inserts nothing because every version
+    // already has its row.
+    let final_version = get_schema_version(conn);
+    let mut backfilled: u32 = 0;
+    let mut backfill_failed = false;
+    for v in 1..=final_version {
+        let exists: i64 = match conn.query_row(
+            "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+            [v],
+            |row| row.get(0),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    version = v,
+                    error = %e,
+                    "Migration audit query failed; cannot verify drift for this version"
+                );
+                backfill_failed = true;
+                break;
+            }
+        };
+        if exists == 0 {
+            if let Err(e) = conn.execute(
+                "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+                 VALUES (?1, datetime('now'), 'audit-row backfill (#3538)')",
+                [v],
+            ) {
+                tracing::error!(
+                    version = v,
+                    error = %e,
+                    "Migration audit backfill failed for this version"
+                );
+                backfill_failed = true;
+                break;
+            }
+            backfilled += 1;
+        }
+    }
+    if backfilled > 0 && !backfill_failed {
+        tracing::warn!(
+            user_version = final_version,
+            backfilled,
+            "Migration audit drift detected and self-healed: inserted \
+             missing audit rows for migrations that previously applied DDL \
+             without recording their audit row (#3538)"
+        );
+    }
+
     Ok(())
 }
 
@@ -501,7 +557,15 @@ fn migrate_v13(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_experiment_variants_experiment ON experiment_variants(experiment_id);
         CREATE INDEX IF NOT EXISTS idx_experiment_metrics_variant ON experiment_metrics(variant_id);
         ",
-    )
+    )?;
+    // Audit row (#3538): every applied migration must produce a row in
+    // `migrations` so `user_version` and the audit trail stay aligned.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (13, datetime('now'), 'Add prompt versioning, experiments, variants, metrics tables')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Version 14: Add latency_ms column to usage_events for model performance tracking.
@@ -603,6 +667,12 @@ fn migrate_v17(conn: &Connection) -> Result<(), rusqlite::Error> {
         "ALTER TABLE approval_audit ADD COLUMN second_factor_used INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // Audit row (#3538): keep migrations table in sync with user_version.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (17, datetime('now'), 'Persistent approval audit log')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -613,7 +683,14 @@ fn migrate_v18(conn: &Connection) -> Result<(), rusqlite::Error> {
             failures   INTEGER NOT NULL DEFAULT 0,
             locked_at  INTEGER             -- Unix timestamp (seconds) when lockout started, NULL if below threshold
         );",
-    )
+    )?;
+    // Audit row (#3538): keep migrations table in sync with user_version.
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (18, datetime('now'), 'Add totp_lockout table for second-factor brute-force protection')",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Version 19: Add `provider` column to usage_events so the metering engine
@@ -974,6 +1051,93 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_migrations(&conn).unwrap();
         run_migrations(&conn).unwrap(); // Should not error
+    }
+
+    #[test]
+    fn test_every_migration_records_audit_row() {
+        // Regression for #3538: each migration must insert into the
+        // `migrations` table so that user_version and the audit trail
+        // never drift. The startup check at the end of run_migrations
+        // logs an error on drift; this test catches it before merge.
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let user_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT version) FROM migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            user_version as i64, row_count,
+            "user_version ({user_version}) != distinct migration audit rows ({row_count})"
+        );
+
+        // Every version 1..=user_version must appear in the audit table.
+        for v in 1..=user_version {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [v],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(
+                exists >= 1,
+                "migration v{v} is applied (user_version={user_version}) but has no audit row"
+            );
+        }
+    }
+
+    /// Regression for #3538 follow-up: a DB whose migrations table is
+    /// already drifted (some audit rows missing) must self-heal on the
+    /// next `run_migrations` call instead of warning forever. Simulates
+    /// a pre-fix prod DB by deleting v13/v17/v18 audit rows after
+    /// migrate, then re-runs and asserts the rows are back. Idempotent
+    /// behaviour: a second run inserts nothing.
+    #[test]
+    fn test_run_migrations_backfills_drifted_audit_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Simulate the historical drift: v13 / v17 / v18 audit rows
+        // missing while user_version is at the current latest.
+        for v in [13u32, 17u32, 18u32] {
+            conn.execute("DELETE FROM migrations WHERE version = ?1", [v])
+                .unwrap();
+        }
+
+        // Re-run: migrate_vN bodies do not re-execute (user_version is
+        // already at the head), so the only path that can heal the
+        // missing rows is the backfill at the end of run_migrations.
+        run_migrations(&conn).unwrap();
+
+        for v in [13u32, 17u32, 18u32] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM migrations WHERE version = ?1",
+                    [v],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "audit row for v{v} should have been backfilled, but found {count}"
+            );
+        }
+
+        // Idempotent: a second backfill pass adds nothing.
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, after, "second backfill must be a no-op");
     }
 
     #[test]

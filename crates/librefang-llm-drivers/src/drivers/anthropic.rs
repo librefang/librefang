@@ -352,6 +352,11 @@ fn build_anthropic_request(request: &CompletionRequest) -> ApiRequest {
 
 #[async_trait]
 impl LlmDriver for AnthropicDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "anthropic", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let api_request = build_anthropic_request(&request);
 
@@ -480,6 +485,11 @@ impl LlmDriver for AnthropicDriver {
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "anthropic", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,

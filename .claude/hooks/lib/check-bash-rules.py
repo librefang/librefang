@@ -611,14 +611,24 @@ def rule_gh_pr_merge(toks, ctx):
         if strip_parens(toks[i + 2]) != "merge":
             continue
         # Found gh pr merge
-        if any(x == "--admin" for x in toks[i + 3 :] if not is_quoted_content(x)):
+        rest = [x for x in toks[i + 3 :] if not is_quoted_content(x)]
+        if any(x == "--admin" for x in rest):
             return (
                 "`gh pr merge --admin` bypasses branch protection — equivalent "
                 "to force-pushing to main. Get explicit user confirmation."
             )
+        # `--auto` schedules the merge to run only after every required
+        # CI check has passed. The user is already in the loop (they
+        # said "merge"), and CI is still the gate, so this is a safe AI
+        # action — never an immediate ship-without-checks. Allow it.
+        # Plain `gh pr merge <pr>` (no --auto) would merge right now,
+        # before CI runs; keep blocking that.
+        if any(x == "--auto" or x.startswith("--auto=") for x in rest):
+            return None
         return (
-            "`gh pr merge` is a publish-level action; ask the user to merge "
-            "themselves rather than doing it from the AI session."
+            "Refusing immediate `gh pr merge`. An immediate merge ships "
+            "before CI runs; pass --auto so GitHub waits for required "
+            "checks (recommended: `gh pr merge <pr> --auto --squash`)."
         )
     return None
 

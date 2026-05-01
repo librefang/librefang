@@ -541,6 +541,11 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
 
 #[async_trait]
 impl LlmDriver for ClaudeCodeDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "claude_code", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // Issue #2314: LibreFang tools are bridged to the spawned Claude CLI
         // via its native `--mcp-config` MCP-client support. When `tools` is
@@ -790,6 +795,11 @@ impl LlmDriver for ClaudeCodeDriver {
         })
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "claude_code", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: CompletionRequest,

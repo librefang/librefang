@@ -222,6 +222,11 @@ impl CopilotDriver {
 
 #[async_trait::async_trait]
 impl crate::llm_driver::LlmDriver for CopilotDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "copilot", model = %request.model)
+    )]
     async fn complete(
         &self,
         request: crate::llm_driver::CompletionRequest,
@@ -231,6 +236,11 @@ impl crate::llm_driver::LlmDriver for CopilotDriver {
         driver.complete(request).await
     }
 
+    #[tracing::instrument(
+        name = "llm.stream",
+        skip_all,
+        fields(provider = "copilot", model = %request.model)
+    )]
     async fn stream(
         &self,
         request: crate::llm_driver::CompletionRequest,

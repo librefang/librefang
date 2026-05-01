@@ -704,6 +704,11 @@ fn classify_response_status(status: u16) -> StatusAction {
 
 #[async_trait]
 impl LlmDriver for BedrockDriver {
+    #[tracing::instrument(
+        name = "llm.complete",
+        skip_all,
+        fields(provider = "bedrock", model = %request.model)
+    )]
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (messages, system) = convert_messages(&request.messages, &request.system);
 
