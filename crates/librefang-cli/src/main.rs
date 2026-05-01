@@ -3350,9 +3350,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let pipe_write = fds[1];
     let pipe_read = fds[0];
 
-    // Save copy of original stdout/stderr (to restore on drop)
+    // Save a copy of original stdout (to restore both fd 1 and fd 2 on
+    // drop). We don't keep a separate stderr copy: by the time the tee
+    // thread reads from the pipe, stdout and stderr have already been
+    // merged at the fd level, so we cannot route output back to the
+    // correct original fd. Writing to both copies would simply duplicate
+    // every line in any consumer that captures both fds (e.g. the Docker
+    // log driver), which is the bug this code path used to cause.
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
-    let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
     // Redirect stdout and stderr to the pipe. From here on any write to the
     // standard streams goes through the pipe and must be drained by the
@@ -3374,10 +3379,10 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 unsafe { libc::close(pipe_read) };
                 break;
             }
-            // Write to terminal (original stdout/stderr)
+            // Write to the saved stdout fd once. See comment at the dup site
+            // for why we don't also write to a stderr copy.
             unsafe {
                 libc::write(stdout_copy, buf.as_ptr() as *const libc::c_void, n as usize);
-                libc::write(stderr_copy, buf.as_ptr() as *const libc::c_void, n as usize);
             }
             // Write to log file
             if let Ok(mut f) = log_file.lock() {
@@ -3385,7 +3390,7 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 let _ = f.flush();
             }
         }
-        // guard Drop closes stdout_copy/stderr_copy; pipe_read is closed above on break
+        // guard Drop closes stdout_copy; pipe_read is closed above on break
     });
 
     ForegroundTeeGuard {
