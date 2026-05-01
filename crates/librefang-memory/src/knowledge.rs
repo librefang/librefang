@@ -81,23 +81,32 @@ impl KnowledgeStore {
     }
 
     /// Delete all entities and relations belonging to a specific agent.
+    ///
+    /// Wrapped in a single transaction so a relations-then-entities
+    /// failure can't leave orphan entities (relations referencing entities
+    /// silently broke ranking on the next graph query). See #3501.
     pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let rel_count = conn
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rel_count = tx
             .execute(
                 "DELETE FROM relations WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
-        let ent_count = conn
+        let ent_count = tx
             .execute(
                 "DELETE FROM entities WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(rel_count + ent_count)
     }
 
