@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# git commit-msg hook: reject commit messages containing Claude / Anthropic
+# attribution. CLAUDE.md (global + project) forbids these in this repo.
+#
+# This is the second layer behind .claude/hooks/guard-bash-safety.sh — that
+# hook can only see -m / --message values on the command line. Heredoc-based
+# messages (`git commit -F-`) and editor-driven messages bypass it. This
+# git-side hook catches them all.
+#
+# To enable: from repo root, run once
+#     git config core.hooksPath .githooks
+# (or run scripts/install-githooks.sh)
+
+set -eu
+
+msg_file="$1"
+if grep -qiE '(Co-Authored-By:.*(Claude|Anthropic|noreply@anthropic\.com)|Generated with .{0,40}Claude|🤖.*Claude[[:space:]]+Code)' "$msg_file"; then
+  cat >&2 <<'EOF'
+[commit-msg] Refusing commit — message contains Claude / Anthropic
+attribution (Co-Authored-By / "Generated with Claude" / 🤖 Claude Code).
+CLAUDE.md (global + project) forbids these. Edit the message and retry.
+EOF
+  exit 1
+fi
