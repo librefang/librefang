@@ -6,7 +6,7 @@
 <h3 align="center">Sistema Operativo de Agentes Libre — Libre como en Libertad</h3>
 
 <p align="center">
-  Agent OS de código abierto construido en Rust. 14 crates. 2,100+ tests. Cero advertencias de clippy.
+  Agent OS de código abierto construido en Rust. 24 crates. 2,100+ tests. Cero advertencias de clippy.
 </p>
 
 <p align="center">
@@ -111,9 +111,9 @@ Crea el tuyo: define un `HAND.toml` + prompt de sistema + `SKILL.md`. [Guía](ht
 
 ```bash
 librefang-kernel            Orquestación, workflows, medición, RBAC, planificador, presupuesto
-librefang-runtime           Bucle de agente, 3 drivers LLM, 53 herramientas, sandbox WASM, MCP, A2A
+librefang-runtime           Bucle de agente, ejecución de herramientas, sandbox WASM, MCP, A2A
 librefang-api               140+ endpoints REST/WS/SSE, API compatible con OpenAI, dashboard
-librefang-channels          40 adaptadores de mensajería, limitación de tasa, políticas DM/grupo
+librefang-channels          45 adaptadores de mensajería, limitación de tasa, políticas DM/grupo
 librefang-memory            Persistencia SQLite, embeddings vectoriales, sesiones, compactación
 librefang-types             Tipos core, seguimiento de taint, firma Ed25519, catálogo de modelos
 librefang-skills            60 skills incluidos, parser SKILL.md, marketplace FangHub
