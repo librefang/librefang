@@ -361,12 +361,10 @@ pub fn record_429_from_headers(
     headers: &reqwest::header::HeaderMap,
     reason: &str,
 ) -> Duration {
-    let retry_after = headers
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::ZERO);
+    // 0 fallback preserves the existing precedence semantics
+    // (RPH > RPM > Retry-After > 5min default) — a missing or
+    // unparseable header means "no Retry-After signal", not "5 s".
+    let retry_after = crate::retry_after::parse_retry_after(headers, 0);
     let snap = crate::rate_limit_tracker::RateLimitSnapshot::from_headers(headers);
     record_from_snapshot(
         provider,

@@ -529,6 +529,7 @@ pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
@@ -538,6 +539,23 @@ pub async fn get_agent_kv(
                 .into_json_tuple();
         }
     };
+    // Owner-scoping: non-admins can only read the KV store of agents
+    // they authored. Without this, anyone authenticated could pull
+    // user.preferences / oncall.contact / api.tokens out of any agent.
+    if let Some(ref user) = api_user {
+        use librefang_kernel::auth::UserRole;
+        if user.0.role < UserRole::Admin {
+            let entry = state.kernel.agent_registry().get(agent_id);
+            let owned = entry
+                .as_ref()
+                .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+                .unwrap_or(false);
+            if !owned {
+                return ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
+                    .into_json_tuple();
+            }
+        }
+    }
     match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
