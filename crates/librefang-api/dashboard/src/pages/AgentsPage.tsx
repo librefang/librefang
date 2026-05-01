@@ -690,6 +690,18 @@ export function AgentsPage() {
     setDetailLoading(false);
   };
 
+  // Auto-select the first agent on desktop so the detail panel isn't blank
+  // on first paint. Skipped on mobile because the detail view is a full-
+  // screen overlay there — auto-opening it would block access to the list.
+  useEffect(() => {
+    if (detailAgent) return;
+    if (filteredAgents.length === 0) return;
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1024px)").matches) return;
+    void selectAgent(filteredAgents[0]);
+    // selectAgent is recreated each render; depending on filteredAgents+detailAgent is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredAgents, detailAgent]);
+
   const renderAgentRow = (agent: AgentItem) => {
     const isSelected = detailAgent?.id === agent.id;
     const stats = sessionsByAgent.get(agent.id) ?? { sessions24h: 0, cost24h: 0, durations: [], activeNow: 0 };
