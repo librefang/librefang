@@ -635,7 +635,7 @@ pub async fn auth_callback(
                 "issuer_host missing from vault — refusing token exchange (#3713)"
             );
             return auth_failed(
-                "Authorization server host pin missing from vault — refusing to                  exchange the auth code. Please retry the sign-in from the dashboard.",
+                "Authorization server host pin missing from vault — refusing to exchange the auth code. Please retry the sign-in from the dashboard.",
             );
         }
     };
@@ -646,7 +646,7 @@ pub async fn auth_callback(
             token_endpoint = %token_endpoint,
             issuer_host = %issuer_host,
             token_host = %token_host,
-            "token_endpoint host does not match authorization server host —              refusing token exchange (possible metadata-tamper attack, #3713)"
+            "token_endpoint host does not match authorization server host — refusing token exchange (possible metadata-tamper attack, #3713)"
         );
         let mut auth_states = state.kernel.mcp_auth_states_ref().lock().await;
         auth_states.insert(
@@ -656,7 +656,7 @@ pub async fn auth_callback(
             },
         );
         return auth_failed(
-            "Token endpoint host does not match the authorization server host.              Refusing to exchange the auth code.",
+            "Token endpoint host does not match the authorization server host. Refusing to exchange the auth code.",
         );
     }
 
