@@ -162,6 +162,13 @@ impl TestAppState {
     ///
     /// Useful for tests that exercise config-reload endpoints which read
     /// from disk.
+    ///
+    /// Note: this snapshots the kernel's internal `KernelConfig` only.
+    /// Values set via [`with_api_key`](Self::with_api_key) /
+    /// [`with_user_api_keys`](Self::with_user_api_keys) live on the
+    /// `AppState` runtime locks and are NOT written to disk — bake them
+    /// into the kernel config via `MockKernelBuilder::with_config` if
+    /// the test reloads from this file.
     pub fn with_config_path(mut self, path: PathBuf) -> Self {
         let config_str =
             toml::to_string_pretty(&*self.state.kernel.config_ref()).expect("serialize config");
@@ -174,28 +181,6 @@ impl TestAppState {
     /// to hold onto directly.
     pub fn into_parts(self) -> (Arc<AppState>, TempDir, Option<PathBuf>) {
         (self.state, self._tmp, self._config_path)
-    }
-
-    /// Starts a minimal HTTP server on an ephemeral port.
-    ///
-    /// Returns the base URL (e.g. `"http://127.0.0.1:54321"`).
-    /// The server only mounts `/api/health` — tests that need more routes
-    /// should build their own `Router` via [`router()`](Self::router).
-    pub async fn start_tcp(&self) -> String {
-        use axum::routing::get;
-
-        let app = Router::new()
-            .route("/api/health", get(librefang_api::routes::health))
-            .with_state(self.state.clone());
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local addr");
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve");
-        });
-        format!("http://127.0.0.1:{}", addr.port())
     }
 
     /// Internal: builds AppState from a kernel.
