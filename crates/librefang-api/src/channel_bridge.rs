@@ -4167,13 +4167,12 @@ mod tests {
     /// to a public timeline) and to record `success=false`.
     #[tokio::test]
     async fn test_stream_bridge_status_error() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal("rate limit hit".to_string()).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal("rate limit hit".to_string()),
             )
         });
 
@@ -4211,13 +4210,12 @@ mod tests {
     /// like successful empty replies.
     #[tokio::test]
     async fn test_stream_bridge_group_error_suppresses_text_but_reports_err() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal("some internal failure".to_string()).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal("some internal failure".to_string()),
             )
         });
 
@@ -4256,7 +4254,6 @@ mod tests {
     /// text so they understand the reply may be incomplete.
     #[tokio::test]
     async fn test_stream_bridge_timeout_partial_output_reports_ok_status() {
-        use librefang_kernel::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
@@ -4267,8 +4264,8 @@ mod tests {
                 "agent loop timed out: {}",
                 librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
             );
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, KernelError>(
-                LibreFangError::Internal(err).into(),
+            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+                LibreFangError::Internal(err),
             )
         });
 

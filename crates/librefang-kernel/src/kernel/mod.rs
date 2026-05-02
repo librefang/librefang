@@ -1116,6 +1116,51 @@ impl LibreFangKernel {
         crate::auto_dream::set_agent_enabled(self, agent_id, enabled)
     }
 
+    /// Build a redacted trajectory bundle for an agent's session.
+    ///
+    /// Encapsulates `librefang_kernel::trajectory` (exporter + policy + agent
+    /// context) so API callers do not need to import that module directly.
+    /// Sessions are persisted lazily on first message; if the session row is
+    /// missing but the requested ID matches the agent's currently-registered
+    /// session, an empty bundle is returned instead of a not-found error.
+    /// See issue #3744.
+    pub fn export_session_trajectory(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> KernelResult<crate::trajectory::TrajectoryBundle> {
+        use crate::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
+
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Build redaction policy. Use the agent's workspace as the
+        // path-collapse root when present.
+        let mut policy = RedactionPolicy::default();
+        if let Some(ws) = entry.manifest.workspace.clone() {
+            policy = policy.with_workspace_root(ws);
+        }
+
+        let exporter = TrajectoryExporter::new(self.memory.clone(), policy);
+        let agent_ctx = AgentContext {
+            name: entry.name.clone(),
+            model: entry.manifest.model.model.clone(),
+            provider: entry.manifest.model.provider.clone(),
+            system_prompt: entry.manifest.model.system_prompt.clone(),
+        };
+
+        match self.memory.get_session(session_id) {
+            Ok(None) if session_id == entry.session_id => {
+                Ok(exporter.empty_bundle(agent_id, session_id, agent_ctx))
+            }
+            Ok(_) => exporter
+                .export_session(agent_id, session_id, agent_ctx)
+                .map_err(KernelError::LibreFang),
+            Err(e) => Err(KernelError::LibreFang(e)),
+        }
+    }
+
     /// Build the roots list for a specific MCP server config.
     ///
     /// Starts with the default roots (workspaces directory) and, for stdio
