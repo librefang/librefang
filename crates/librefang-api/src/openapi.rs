@@ -347,6 +347,8 @@ use crate::types;
         openai_compat::list_models,
     ),
     components(schemas(
+        types::JsonObject,
+        types::JsonArray,
         types::SpawnRequest,
         types::SpawnResponse,
         types::AttachmentRef,

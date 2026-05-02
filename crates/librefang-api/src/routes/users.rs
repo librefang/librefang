@@ -1224,7 +1224,7 @@ fn decode_field<T: serde::de::DeserializeOwned>(
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
     responses(
-        (status = 200, description = "Per-user policy slice", body = serde_json::Value),
+        (status = 200, description = "Per-user policy slice", body = crate::types::JsonObject),
         (status = 404, description = "Not found"),
     )
 )]
@@ -1270,9 +1270,9 @@ pub async fn get_user_policy(
     path = "/api/users/{name}/policy",
     tag = "users",
     params(("name" = String, Path, description = "User name (case-sensitive)")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Updated user policy slice", body = serde_json::Value),
+        (status = 200, description = "Updated user policy slice", body = crate::types::JsonObject),
         (status = 400, description = "Validation error"),
         (status = 404, description = "Not found"),
     )

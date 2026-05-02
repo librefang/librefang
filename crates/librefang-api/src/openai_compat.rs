@@ -251,7 +251,7 @@ fn convert_messages(oai_messages: &[OaiMessage]) -> Vec<Message> {
 // ── Handlers ────────────────────────────────────────────────────────────────
 
 /// POST /v1/chat/completions
-#[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = serde_json::Value, responses((status = 200, description = "OpenAI-compatible chat completion", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/v1/chat/completions", tag = "openai", request_body = crate::types::JsonObject, responses((status = 200, description = "OpenAI-compatible chat completion", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
@@ -547,7 +547,7 @@ async fn stream_response(
 }
 
 /// GET /v1/models — List available agents as OpenAI model objects.
-#[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/v1/models", tag = "openai", operation_id = "list_openai_models", responses((status = 200, description = "OpenAI-compatible model list", body = crate::types::JsonObject)))]
 pub async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.agent_registry().list();
     let created = std::time::SystemTime::now()

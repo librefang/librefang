@@ -105,7 +105,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
     tag = "system",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Effective permissions snapshot", body = serde_json::Value),
+        (status = 200, description = "Effective permissions snapshot", body = crate::types::JsonObject),
         (status = 404, description = "Unknown user"),
     )
 )]

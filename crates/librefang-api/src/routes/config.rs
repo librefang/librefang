@@ -196,7 +196,7 @@ fn redacted_web(web: &librefang_types::config::WebConfig) -> serde_json::Value {
     path = "/api/status",
     tag = "system",
     responses(
-        (status = 200, description = "Daemon status", body = serde_json::Value)
+        (status = 200, description = "Daemon status", body = crate::types::JsonObject)
     )
 )]
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -267,7 +267,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     path = "/api/init",
     tag = "system",
     responses(
-        (status = 200, description = "Quick init result", body = serde_json::Value)
+        (status = 200, description = "Quick init result", body = crate::types::JsonObject)
     )
 )]
 pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -356,7 +356,7 @@ api_key_env = "{api_key_env}"
     path = "/api/shutdown",
     tag = "system",
     responses(
-        (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
+        (status = 200, description = "Graceful daemon shutdown", body = crate::types::JsonObject)
     )
 )]
 pub async fn shutdown(
@@ -391,7 +391,7 @@ pub async fn shutdown(
     path = "/api/version",
     tag = "system",
     responses(
-        (status = 200, description = "Version information", body = serde_json::Value)
+        (status = 200, description = "Version information", body = crate::types::JsonObject)
     )
 )]
 pub async fn version() -> impl IntoResponse {
@@ -425,7 +425,7 @@ pub async fn version() -> impl IntoResponse {
     path = "/api/health",
     tag = "system",
     responses(
-        (status = 200, description = "Health check", body = serde_json::Value)
+        (status = 200, description = "Health check", body = crate::types::JsonObject)
     )
 )]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -460,7 +460,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     path = "/api/health/detail",
     tag = "system",
     responses(
-        (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
+        (status = 200, description = "Detailed health diagnostics", body = crate::types::JsonObject)
     )
 )]
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -526,7 +526,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/metrics",
     tag = "system",
     responses(
-        (status = 200, description = "Prometheus text-format metrics", body = serde_json::Value)
+        (status = 200, description = "Prometheus text-format metrics", body = crate::types::JsonObject)
     )
 )]
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -659,7 +659,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     path = "/api/config",
     tag = "system",
     responses(
-        (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
+        (status = 200, description = "Get kernel configuration (secrets redacted)", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1265,7 +1265,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     path = "/api/security",
     tag = "system",
     responses(
-        (status = 200, description = "Security feature status", body = serde_json::Value)
+        (status = 200, description = "Security feature status", body = crate::types::JsonObject)
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1345,7 +1345,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
     path = "/api/migrate/detect",
     tag = "system",
     responses(
-        (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
+        (status = 200, description = "Detect migratable framework installation", body = crate::types::JsonObject)
     )
 )]
 pub async fn migrate_detect() -> impl IntoResponse {
@@ -1396,7 +1396,7 @@ pub async fn migrate_detect() -> impl IntoResponse {
     path = "/api/migrate/scan",
     tag = "system",
     responses(
-        (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
+        (status = 200, description = "Scan directory for migratable workspace", body = crate::types::JsonObject)
     )
 )]
 pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
@@ -1414,7 +1414,7 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
     path = "/api/migrate",
     tag = "system",
     responses(
-        (status = 200, description = "Run migration from another agent framework", body = serde_json::Value)
+        (status = 200, description = "Run migration from another agent framework", body = crate::types::JsonObject)
     )
 )]
 pub async fn run_migrate(
@@ -1515,7 +1515,7 @@ pub async fn run_migrate(
     path = "/api/config/reload",
     tag = "system",
     responses(
-        (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
+        (status = 200, description = "Reload configuration from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_reload(
@@ -1659,7 +1659,7 @@ pub async fn export_config(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/config/schema",
     tag = "system",
     responses(
-        (status = 200, description = "Get config structure schema", body = serde_json::Value)
+        (status = 200, description = "Get config structure schema", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1868,7 +1868,7 @@ pub fn ui_options_overlay(
     path = "/api/config/set",
     tag = "system",
     responses(
-        (status = 200, description = "Set a single config value and persist", body = serde_json::Value)
+        (status = 200, description = "Set a single config value and persist", body = crate::types::JsonObject)
     )
 )]
 pub async fn config_set(

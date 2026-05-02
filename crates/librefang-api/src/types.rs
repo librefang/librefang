@@ -6,6 +6,37 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Generic JSON wrappers — used as `body = JsonObject` / `body = JsonArray`
+// in `#[utoipa::path]` attributes for handlers that return free-form JSON
+// (heterogeneous shapes that are not worth a dedicated struct, or shapes
+// that are still in flux). They emit `{ "type": "object" }` / `{ "type":
+// "array" }` instead of the empty `{}` blob that `serde_json::Value`
+// produces, so downstream SDK generators see a real schema.
+// ---------------------------------------------------------------------------
+
+/// OpenAPI placeholder for an arbitrary JSON object response/request.
+///
+/// Use `body = JsonObject` (qualified as `crate::types::JsonObject` from
+/// route modules) when the underlying handler returns
+/// `axum::Json<serde_json::Value>` and the shape is dynamic. The schema
+/// renders as `{ "type": "object", "additionalProperties": true }`,
+/// which is honest about the contract (any JSON object) without leaving
+/// SDK generators with `{}` to ignore.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(value_type = Object, description = "Arbitrary JSON object")]
+#[allow(dead_code)]
+pub struct JsonObject(pub serde_json::Value);
+
+/// OpenAPI placeholder for an arbitrary JSON array response/request.
+///
+/// Counterpart to [`JsonObject`] for handlers that return a top-level
+/// JSON array of heterogeneous items.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+#[schema(value_type = Vec<Object>, description = "Arbitrary JSON array")]
+#[allow(dead_code)]
+pub struct JsonArray(pub Vec<serde_json::Value>);
+
+// ---------------------------------------------------------------------------
 // Unified API error response
 // ---------------------------------------------------------------------------
 

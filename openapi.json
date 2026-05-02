@@ -21,7 +21,9 @@
             "description": "Get the A2A agent card",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -40,7 +42,9 @@
             "description": "List all A2A agent cards",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -57,7 +61,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -67,7 +73,9 @@
             "description": "Submit a task to an agent via A2A",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -97,7 +105,9 @@
             "description": "Get A2A task status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -127,7 +137,9 @@
             "description": "Cancel a tracked A2A task",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -147,7 +159,9 @@
             "description": "List discovered external A2A agents",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -177,7 +191,9 @@
             "description": "Get a specific external A2A agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -194,7 +210,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -204,7 +222,9 @@
             "description": "Discover an external A2A agent by URL",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -221,7 +241,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -231,7 +253,9 @@
             "description": "Send a task to an external A2A agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -270,7 +294,9 @@
             "description": "Get external A2A task status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -405,7 +431,9 @@
             "description": "Create multiple agents at once",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -433,7 +461,9 @@
             "description": "Delete multiple agents at once",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -463,7 +493,9 @@
             "description": "Start multiple agents (set to Full mode)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -493,7 +525,9 @@
             "description": "Stop multiple agents' current runs",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -523,7 +557,9 @@
             "description": "Agent details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -588,7 +624,9 @@
             "description": "Partially update an agent (name, description, model, system prompt)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -629,7 +667,9 @@
             "description": "Clone an agent with its workspace files",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -670,7 +710,9 @@
             "description": "Hot-update agent name, description, system prompt, identity, and model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -700,7 +742,9 @@
             "description": "List recent delivery receipts for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -777,7 +821,9 @@
             "description": "List workspace identity files for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -816,7 +862,9 @@
             "description": "Read a workspace identity file",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -864,7 +912,9 @@
             "description": "Write a workspace identity file",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -901,7 +951,9 @@
             "description": "File deleted successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -909,7 +961,9 @@
             "description": "File not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -943,7 +997,9 @@
             "description": "Invalid agent id or target agent is not managed by a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -951,7 +1007,9 @@
             "description": "Agent not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -959,7 +1017,9 @@
             "description": "Hand role not found for the agent (hand registry inconsistency)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -967,7 +1027,9 @@
             "description": "Internal kernel error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1006,7 +1068,9 @@
             "description": "Runtime override applied to the live manifest and persisted to hand_state.json",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1014,7 +1078,9 @@
             "description": "Invalid agent id or target agent is not managed by a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1022,7 +1088,9 @@
             "description": "Agent not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1030,7 +1098,9 @@
             "description": "Hand role not found for the agent (hand registry inconsistency)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1038,7 +1108,9 @@
             "description": "Internal kernel error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1068,7 +1140,9 @@
             "description": "Clear all conversation history for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1109,7 +1183,9 @@
             "description": "Update an agent's visual identity",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1139,7 +1215,9 @@
             "description": "Get an agent's MCP server assignment info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1176,7 +1254,9 @@
             "description": "Update an agent's MCP server allowlist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1206,7 +1286,9 @@
             "description": "Exported memory",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1235,7 +1317,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1245,7 +1329,9 @@
             "description": "Memory imported",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1366,7 +1452,9 @@
             "description": "Change an agent's operational mode",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1404,7 +1492,9 @@
             "description": "Change an agent's LLM model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1435,7 +1525,9 @@
             "description": "List of in-flight sessions for the agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonArray"
+                }
               }
             }
           }
@@ -1474,7 +1566,9 @@
             "description": "Get agent conversation session history",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1504,7 +1598,9 @@
             "description": "Trigger LLM session compaction",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1534,7 +1630,9 @@
             "description": "Hard-reboot an agent's session without saving summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1564,7 +1662,9 @@
             "description": "Reset an agent's current session",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1593,7 +1693,9 @@
             "description": "List all sessions for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1630,7 +1732,9 @@
             "description": "Create a new session for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1669,7 +1773,9 @@
             "description": "Session found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1708,7 +1814,9 @@
             "description": "Session imported successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1747,7 +1855,9 @@
             "description": "Exported session data",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1787,7 +1897,9 @@
             "description": "Cancel a single (agent, session) loop",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1867,7 +1979,9 @@
             "description": "Switch to an existing session",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1916,7 +2030,9 @@
             "description": "Redacted trajectory bundle",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1952,7 +2068,9 @@
             "description": "Get an agent's skill assignment info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1989,7 +2107,9 @@
             "description": "Update an agent's skill allowlist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2055,7 +2175,9 @@
             "description": "Cancel an agent's current LLM run",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2085,7 +2207,9 @@
             "description": "Get an agent's tool allowlist and blocklist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2124,7 +2248,9 @@
             "description": "Update an agent's tool allowlist and blocklist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2155,7 +2281,9 @@
             "description": "Get decision traces from the agent's most recent message",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2196,7 +2324,9 @@
             "description": "Update an agent's manifest",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2237,7 +2367,9 @@
             "description": "Upload a file attachment for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2279,7 +2411,9 @@
             "description": "Paginated list of pending and recent approvals",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2293,7 +2427,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2303,7 +2439,9 @@
             "description": "Approval created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2333,7 +2471,9 @@
             "description": "Single approval request",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2363,7 +2503,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2373,7 +2515,9 @@
             "description": "Request approved",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2403,7 +2547,9 @@
             "description": "Request rejected",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2585,7 +2731,9 @@
             "description": "Filtered audit log entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2626,7 +2774,9 @@
             "description": "Audit verification result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2645,7 +2795,9 @@
             "description": "OAuth callback — completes login flow",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2672,7 +2824,9 @@
             "description": "OAuth callback (POST) — completes login flow",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2690,7 +2844,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2700,7 +2856,9 @@
             "description": "Token introspection result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2758,7 +2916,9 @@
             "description": "List configured OAuth/OIDC providers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2778,7 +2938,9 @@
             "description": "Get authenticated user info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2810,7 +2972,9 @@
             "description": "Abort outcome",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2852,7 +3016,9 @@
             "description": "Opt-in toggled",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2887,7 +3053,9 @@
             "description": "Trigger outcome",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2908,7 +3076,9 @@
             "description": "Auto-dream status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2928,7 +3098,9 @@
             "description": "Backup created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3012,7 +3184,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3022,7 +3196,9 @@
             "description": "Binding added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3068,7 +3244,9 @@
             "description": "Global budget status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3093,7 +3271,9 @@
             "description": "Updated global budget status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3146,7 +3326,9 @@
             "description": "Per-agent budget and quota status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3182,7 +3364,9 @@
             "description": "Updated agent budget",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3215,7 +3399,9 @@
             "description": "Per-user cost ranking",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3246,7 +3432,9 @@
             "description": "Single user budget detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3265,7 +3453,9 @@
             "description": "Catalog sync status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3285,7 +3475,9 @@
             "description": "Catalog updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3326,7 +3518,9 @@
             "description": "Channels reloaded successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3334,7 +3528,9 @@
             "description": "Reload failed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3353,7 +3549,9 @@
             "description": "WeChat QR login initiated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3383,7 +3581,9 @@
             "description": "WeChat QR scan status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3403,7 +3603,9 @@
             "description": "WhatsApp QR session started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3434,7 +3636,9 @@
             "description": "WhatsApp QR scan status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3462,7 +3666,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3472,7 +3678,9 @@
             "description": "Channel configured successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3480,7 +3688,9 @@
             "description": "Bad request",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3488,7 +3698,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3516,7 +3728,9 @@
             "description": "Channel removed successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3524,7 +3738,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3532,7 +3748,9 @@
             "description": "Internal server error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3570,7 +3788,9 @@
             "description": "Channel test result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3578,7 +3798,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3609,7 +3831,9 @@
             "description": "Browse ClawHub skills by sort order",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3627,7 +3851,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3637,7 +3863,9 @@
             "description": "Install a skill from ClawHub",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3668,7 +3896,9 @@
             "description": "Search ClawHub skills",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3698,7 +3928,9 @@
             "description": "Get detailed info about a ClawHub skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3728,7 +3960,9 @@
             "description": "Fetch source code of a ClawHub skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3780,7 +4014,9 @@
             "description": "Command details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3812,7 +4048,9 @@
             "description": "Recent inter-agent communication events",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonArray"
+                }
               }
             }
           }
@@ -3832,7 +4070,9 @@
             "description": "SSE stream of inter-agent events",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3849,7 +4089,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3859,7 +4101,9 @@
             "description": "Send a message between agents",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3876,7 +4120,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3886,7 +4132,9 @@
             "description": "Post a task to the agent task queue",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3905,7 +4153,9 @@
             "description": "Build agent topology graph",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3924,7 +4174,9 @@
             "description": "Get kernel configuration (secrets redacted)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3944,7 +4196,9 @@
             "description": "Reload configuration from disk",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3963,7 +4217,9 @@
             "description": "Get config structure schema",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3991,7 +4247,9 @@
             "description": "Set a single config value and persist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4028,7 +4286,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4038,7 +4298,9 @@
             "description": "Cron job created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4066,7 +4328,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4076,7 +4340,9 @@
             "description": "Cron job updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4127,7 +4393,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4137,7 +4405,9 @@
             "description": "Cron job toggled",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4167,7 +4437,9 @@
             "description": "Cron job status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4186,7 +4458,9 @@
             "description": "List catalog entries with install/health status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4203,7 +4477,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4213,7 +4489,9 @@
             "description": "Install a catalog entry",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4230,7 +4508,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4240,7 +4520,9 @@
             "description": "Uninstall a catalog-backed MCP server",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4270,7 +4552,9 @@
             "description": "Catalog entry detail + install status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4289,7 +4573,9 @@
             "description": "List all hand definitions",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4308,7 +4594,9 @@
             "description": "List active hand instances",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4325,7 +4613,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4335,7 +4625,9 @@
             "description": "Install a hand from TOML content",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4365,7 +4657,9 @@
             "description": "Deactivate a hand (kills agent)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4395,7 +4689,9 @@
             "description": "Get live browser state for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4425,7 +4721,9 @@
             "description": "Pause a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4455,7 +4753,9 @@
             "description": "Resume a paused hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4485,7 +4785,9 @@
             "description": "Get dashboard stats for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4504,7 +4806,9 @@
             "description": "Reload hand definitions from disk",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4534,7 +4838,9 @@
             "description": "Get a single hand definition with requirements",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4562,7 +4868,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4572,7 +4880,9 @@
             "description": "Activate a hand (spawns agent)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4602,7 +4912,9 @@
             "description": "Re-check dependency status for a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4632,7 +4944,9 @@
             "description": "Auto-install missing dependencies for a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4662,7 +4976,9 @@
             "description": "Get settings schema and current values",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4688,7 +5004,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4698,7 +5016,9 @@
             "description": "Update settings for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4717,7 +5037,9 @@
             "description": "Health check",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4736,7 +5058,9 @@
             "description": "Detailed health diagnostics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4754,7 +5078,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4764,7 +5090,9 @@
             "description": "Agent hook triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4782,7 +5110,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4792,7 +5122,9 @@
             "description": "Wake hook triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4812,7 +5144,9 @@
             "description": "Quick init result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4857,7 +5191,9 @@
             "description": "Search the FangHub marketplace",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4876,7 +5212,9 @@
             "description": "MCP catalog entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4906,7 +5244,9 @@
             "description": "Catalog entry detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -4914,7 +5254,9 @@
             "description": "Catalog entry not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4933,7 +5275,9 @@
             "description": "Health snapshot for all configured MCP servers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4952,7 +5296,9 @@
             "description": "Reload catalog and reconnect MCP servers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4971,7 +5317,9 @@
             "description": "List configured MCP servers and their tools",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4987,7 +5335,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4997,7 +5347,9 @@
             "description": "Add a new MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5028,7 +5380,9 @@
             "description": "MCP server details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -5058,7 +5412,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5068,7 +5424,9 @@
             "description": "Update an existing MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5096,7 +5454,9 @@
             "description": "Remove an MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5126,7 +5486,9 @@
             "description": "Reconnect an MCP server",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -5134,7 +5496,9 @@
             "description": "MCP server not configured",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5154,7 +5518,9 @@
             "description": "List configured named taint rule sets",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonArray"
+                }
               }
             }
           }
@@ -5205,7 +5571,9 @@
             "description": "Paginated memory list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5220,7 +5588,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5230,7 +5600,9 @@
             "description": "Memories added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5289,7 +5661,9 @@
             "description": "Paginated agent memory list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5317,7 +5691,9 @@
             "description": "Memories reset",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5347,7 +5723,9 @@
             "description": "Consolidation result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5377,7 +5755,9 @@
             "description": "Duplicate memory groups",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5407,7 +5787,9 @@
             "description": "Exported memories",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5435,7 +5817,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5445,7 +5829,9 @@
             "description": "Import result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5475,7 +5861,9 @@
             "description": "Agent KV store",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5514,7 +5902,9 @@
             "description": "KV value",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5549,7 +5939,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5559,7 +5951,9 @@
             "description": "KV value set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5630,7 +6024,9 @@
             "description": "Memories cleared at level",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5679,7 +6075,9 @@
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5709,7 +6107,9 @@
             "description": "Agent memory statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5729,7 +6129,9 @@
             "description": "Cleanup result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5757,7 +6159,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5767,7 +6171,9 @@
             "description": "Memory updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5795,7 +6201,9 @@
             "description": "Memory deleted",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5825,7 +6233,9 @@
             "description": "Memory version history",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5865,7 +6275,9 @@
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5885,7 +6297,9 @@
             "description": "Memory statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5915,7 +6329,9 @@
             "description": "User memories",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5935,7 +6351,9 @@
             "description": "Prometheus text-format metrics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5964,7 +6382,9 @@
             "description": "Run migration from another agent framework",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5982,7 +6402,9 @@
             "description": "Detect migratable framework installation",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6011,7 +6433,9 @@
             "description": "Scan directory for migratable workspace",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6050,7 +6474,9 @@
             "description": "List model aliases",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6066,7 +6492,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6076,7 +6504,9 @@
             "description": "Alias created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6119,7 +6549,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6129,7 +6561,9 @@
             "description": "Custom model added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6183,7 +6617,9 @@
             "description": "Model details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6202,7 +6638,9 @@
             "description": "OFP network status summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6219,7 +6657,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6229,7 +6669,9 @@
             "description": "Pairing completed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6293,7 +6735,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6303,7 +6747,9 @@
             "description": "Notification sent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6322,7 +6768,9 @@
             "description": "Pairing request created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6341,7 +6789,9 @@
             "description": "List known OFP peers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6371,7 +6821,9 @@
             "description": "Peer details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6426,7 +6878,9 @@
             "description": "Profile details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6480,7 +6934,9 @@
             "description": "OAuth poll result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6500,7 +6956,9 @@
             "description": "OAuth flow started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6530,7 +6988,9 @@
             "description": "Provider details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6571,7 +7031,9 @@
             "description": "Default provider updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6604,7 +7066,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6614,7 +7078,9 @@
             "description": "API key set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6667,7 +7133,9 @@
             "description": "Provider test result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6695,7 +7163,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6705,7 +7175,9 @@
             "description": "Provider URL set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6724,7 +7196,9 @@
             "description": "Queue status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6742,7 +7216,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6752,7 +7228,9 @@
             "description": "Backup restored",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6789,7 +7267,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6799,7 +7279,9 @@
             "description": "Schedule created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6832,7 +7314,9 @@
             "description": "Schedule details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6858,7 +7342,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6868,7 +7354,9 @@
             "description": "Schedule updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6921,7 +7409,9 @@
             "description": "Schedule triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6940,7 +7430,9 @@
             "description": "Security feature status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6981,7 +7473,9 @@
             "description": "Paginated list of sessions",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7001,7 +7495,9 @@
             "description": "Cleanup result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7031,7 +7527,9 @@
             "description": "Session found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7085,7 +7583,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7095,7 +7595,9 @@
             "description": "Label set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7114,7 +7616,9 @@
             "description": "Graceful daemon shutdown",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7152,7 +7656,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7162,7 +7668,9 @@
             "description": "Create a new prompt-only skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7179,7 +7687,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7189,7 +7699,9 @@
             "description": "Install a skill from FangHub",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7206,7 +7718,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7216,7 +7730,9 @@
             "description": "Uninstall a skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7234,7 +7750,9 @@
             "description": "Daemon status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7286,7 +7804,9 @@
             "description": "Template details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7338,7 +7858,9 @@
             "description": "Tool details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7376,7 +7898,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7386,7 +7910,9 @@
             "description": "Tool execution result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7424,7 +7950,9 @@
             "description": "List triggers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7439,7 +7967,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7449,7 +7979,9 @@
             "description": "Trigger created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7482,7 +8014,9 @@
             "description": "Trigger detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7545,7 +8079,9 @@
             "description": "Updated trigger",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7578,7 +8114,9 @@
             "description": "Serve an uploaded file by ID",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7597,7 +8135,9 @@
             "description": "Per-agent usage statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7616,7 +8156,9 @@
             "description": "Usage grouped by model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7635,7 +8177,9 @@
             "description": "Daily usage breakdown",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7654,7 +8198,9 @@
             "description": "Overall usage summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7900,7 +8446,9 @@
             "description": "Version information",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7919,7 +8467,9 @@
             "description": "API version info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7956,7 +8506,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7966,7 +8518,9 @@
             "description": "Workflow created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7997,7 +8551,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8007,7 +8563,9 @@
             "description": "Workflow updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -8077,7 +8635,9 @@
             "description": "Workflow run started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8140,7 +8700,9 @@
             "description": "Template created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -8161,7 +8723,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8171,7 +8735,9 @@
             "description": "Handle MCP JSON-RPC requests over HTTP",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8188,7 +8754,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8198,7 +8766,9 @@
             "description": "OpenAI-compatible chat completion",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8217,7 +8787,9 @@
             "description": "OpenAI-compatible model list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8636,6 +9208,17 @@
             "description": "Extension/integration ID to remove."
           }
         }
+      },
+      "JsonArray": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "Arbitrary JSON array"
+      },
+      "JsonObject": {
+        "type": "object",
+        "description": "Arbitrary JSON object"
       },
       "MessageRequest": {
         "type": "object",

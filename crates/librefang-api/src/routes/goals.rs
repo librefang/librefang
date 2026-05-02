@@ -414,7 +414,7 @@ pub async fn delete_goal(
     path = "/api/goals/templates",
     tag = "goals",
     responses(
-        (status = 200, description = "Goal templates", body = serde_json::Value)
+        (status = 200, description = "Goal templates", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_goal_templates() -> impl IntoResponse {
