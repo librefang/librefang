@@ -3038,9 +3038,9 @@ pub async fn export_session_trajectory(
     Query(params): Query<HashMap<String, String>>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> axum::response::Response {
+    use crate::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
     use axum::http::header;
     use axum::response::IntoResponse;
-    use librefang_kernel::trajectory::{AgentContext, RedactionPolicy, TrajectoryExporter};
 
     let (
         err_invalid_id,
