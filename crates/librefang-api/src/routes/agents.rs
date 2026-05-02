@@ -176,10 +176,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(serve_upload),
         )
         .route(
-            "/agents/{id}/update",
-            axum::routing::put(update_agent),
-        )
-        .route(
             "/agents/{id}/push",
             axum::routing::post(push_message),
         )
@@ -4029,76 +4025,10 @@ pub async fn set_agent_mcp_servers(
 // ---------------------------------------------------------------------------
 // Agent update endpoint
 // ---------------------------------------------------------------------------
-
-/// PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).
-#[utoipa::path(
-    put,
-    path = "/api/agents/{id}/update",
-    tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = AgentUpdateRequest, description = "New agent manifest TOML"),
-    responses(
-        (status = 200, description = "Update an agent's manifest", body = crate::types::JsonObject)
-    )
-)]
-pub async fn update_agent(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<AgentUpdateRequest>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
-        }
-    };
-
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
-
-    // Parse the new manifest
-    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
-                ),
-            );
-        }
-    };
-
-    drop(t);
-
-    // `update_manifest` preserves workspace/name/tags, re-grants capabilities,
-    // refreshes scheduler quotas, persists to SQLite, and writes agent.toml.
-    // Per-agent concurrency caps and session_mode caches still require
-    // kill+respawn — flagged in the response note.
-    match state.kernel.update_manifest(agent_id, manifest) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "agent_id": id,
-                "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
-}
+//
+// The legacy `PUT /api/agents/{id}/update` endpoint was removed in #3748 —
+// callers should send `{"manifest_toml": "..."}` to `PATCH /api/agents/{id}`
+// instead, which now also handles full-manifest replacement.
 
 #[utoipa::path(
     patch,
@@ -4132,6 +4062,42 @@ pub async fn patch_agent(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
+    }
+
+    // Full-manifest replacement path (folded in from the now-removed
+    // PUT /agents/{id}/update endpoint, #3748). When the caller supplies
+    // `manifest_toml`, parse it and run the kernel's `update_manifest`
+    // routine that preserves workspace/name/tags, re-grants capabilities,
+    // refreshes scheduler quotas, persists to SQLite, and writes
+    // agent.toml. Per-agent concurrency caps and session_mode caches
+    // still require kill+respawn.
+    if let Some(manifest_toml) = body.get("manifest_toml").and_then(|v| v.as_str()) {
+        let manifest: AgentManifest = match toml::from_str(manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
+        };
+        drop(t);
+        return match state.kernel.update_manifest(agent_id, manifest) {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "agent_id": id,
+                    "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
+                })),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            ),
+        };
     }
 
     // Apply partial updates using dedicated registry methods

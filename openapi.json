@@ -2581,49 +2581,6 @@
         }
       }
     },
-    "/api/agents/{id}/update": {
-      "put": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).",
-        "operationId": "update_agent",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Agent ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "New agent manifest TOML",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentUpdateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Update an agent's manifest",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/agents/{id}/upload": {
       "post": {
         "tags": [
@@ -9360,18 +9317,6 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
-          }
-        }
-      },
-      "AgentUpdateRequest": {
-        "type": "object",
-        "description": "Request to update an agent's manifest.",
-        "required": [
-          "manifest_toml"
-        ],
-        "properties": {
-          "manifest_toml": {
-            "type": "string"
           }
         }
       },
