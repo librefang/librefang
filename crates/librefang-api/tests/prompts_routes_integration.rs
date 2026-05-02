@@ -214,7 +214,8 @@ async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    assert_eq!(body["success"], true);
+    // #4365: activate now returns the full PromptVersion entity, not an ack envelope.
+    assert_eq!(body["id"], VERSION_ID, "body={body:?}");
 }
 
 // ----- experiments -----
