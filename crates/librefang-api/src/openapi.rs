@@ -93,6 +93,13 @@ use crate::types;
         routes::upload_file,
         routes::serve_upload,
         routes::get_agent_deliveries,
+        routes::inject_message,
+        routes::push_message,
+        routes::reload_agent_manifest,
+        routes::suspend_agent,
+        routes::resume_agent,
+        routes::agent_metrics,
+        routes::agent_logs,
 
         // ── Bulk Operations ──
         routes::bulk_create_agents,
@@ -341,6 +348,13 @@ use crate::types;
         oauth::auth_callback_post,
         oauth::auth_userinfo,
         oauth::auth_introspect,
+        oauth::auth_refresh,
+
+        // ── Dashboard auth (credential login / logout / password change) ──
+        crate::server::dashboard_login,
+        crate::server::dashboard_auth_check,
+        crate::server::dashboard_logout,
+        crate::server::change_password,
 
         // ── OpenAI-Compatible API ──
         openai_compat::chat_completions,
@@ -367,6 +381,10 @@ use crate::types;
         types::BulkActionResult,
         types::ExtensionInstallRequest,
         types::ExtensionUninstallRequest,
+        types::InjectMessageRequest,
+        types::InjectMessageResponse,
+        types::PushMessageRequest,
+        crate::server::ChangePasswordRequest,
         routes::auto_dream::SetEnabledRequest,
         routes::agents::AgentStats24hView,
         routes::agents::AgentStatsPrevView,
