@@ -7768,7 +7768,7 @@ system_prompt = "You are a helpful assistant."
                     // guard (which is skipped when there are no injections)
                     // would leave the storage copy untouched and the reset
                     // would be invisible to subsequent calls.
-                    if let Err(e) = self.memory.save_session(&session) {
+                    if let Err(e) = self.memory.save_session_async(&session).await {
                         tracing::warn!(
                             agent_id = %agent_id,
                             error = %e,
@@ -8394,7 +8394,7 @@ system_prompt = "You are a helpful assistant."
                 // Persist the stripped session. agent_loop already called
                 // save_session internally; this second save overwrites that
                 // with the version that has the assistant turn removed.
-                if let Err(e) = self.memory.save_session(&session) {
+                if let Err(e) = self.memory.save_session_async(&session).await {
                     warn!("cron [SILENT]: failed to persist stripped session: {e}");
                 }
             }
@@ -9081,6 +9081,7 @@ system_prompt = "You are a helpful assistant."
             messages_generation: 0,
             last_repaired_generation: None,
         };
+        // Sync save_session: caller `import_session` is a sync fn, no `.await` allowed.
         self.memory
             .save_session(&new_session)
             .map_err(KernelError::LibreFang)?;
@@ -9194,6 +9195,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Persist if anything was injected.
+        // Sync save_session: caller `inject_reset_prompt` is a sync fn, no `.await` allowed.
         if !session.messages.is_empty() {
             if let Err(e) = self.memory.save_session(session) {
                 // Persist failed — roll back the Phase 4 BeforeUser injections
@@ -10198,7 +10200,8 @@ system_prompt = "You are a helpful assistant."
         let mut updated_session = session;
         updated_session.set_messages(repaired_messages);
         self.memory
-            .save_session(&updated_session)
+            .save_session_async(&updated_session)
+            .await
             .map_err(KernelError::LibreFang)?;
 
         // Build result message with audit summary
@@ -13541,7 +13544,10 @@ system_prompt = "You are a helpful assistant."
                                                         session.mark_messages_mutated();
                                                     }
                                                 }
-                                                let _ = kernel_job.memory.save_session(&session);
+                                                let _ = kernel_job
+                                                    .memory
+                                                    .save_session_async(&session)
+                                                    .await;
                                             }
                                         }
                                     }
@@ -19438,7 +19444,7 @@ impl LibreFangKernel {
 
         session = persisted_session;
         if reconcile_tool_result(&mut session, tool_use_id, result) {
-            if let Err(e) = self.memory.save_session(&session) {
+            if let Err(e) = self.memory.save_session_async(&session).await {
                 warn!(
                     agent_id = %agent_id,
                     error = %e,
