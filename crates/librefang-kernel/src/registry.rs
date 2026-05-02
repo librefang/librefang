@@ -27,21 +27,37 @@ impl AgentRegistry {
     }
 
     /// Register a new agent.
+    ///
+    /// Publication ordering is load-bearing for concurrent lookups (#3338):
+    /// the entry is inserted into `agents` **before** the name binding is
+    /// finalized in `name_index`. A concurrent `find_by_name(name)` either
+    /// sees no name binding at all, or — once `vacant.insert(id)` runs —
+    /// resolves to an `id` that is already addressable via `agents.get(id)`.
+    /// This closes the spawn-before-publish gap that surfaced as flaky load
+    /// tests in `crates/librefang-api/tests/load_test.rs`.
     pub fn register(&self, entry: AgentEntry) -> LibreFangResult<()> {
         let id = entry.id;
-        // Use atomic entry() API to avoid TOCTOU race between contains_key and insert.
+        // Use atomic entry() API to avoid TOCTOU race between contains_key
+        // and insert. The Vacant guard holds the DashMap shard lock for
+        // this name across the agents/tag publish below, so no concurrent
+        // register for the same name can race past the duplicate check.
         match self.name_index.entry(entry.name.clone()) {
             Entry::Occupied(_) => {
                 return Err(LibreFangError::AgentAlreadyExists(entry.name));
             }
             Entry::Vacant(vacant) => {
+                // Publish the agent entry and tag index entries BEFORE
+                // binding the name to the id. Any concurrent reader that
+                // resolves the name once `vacant.insert(id)` returns is
+                // guaranteed to find the entry under `id`.
+                let tags = entry.tags.clone();
+                self.agents.insert(id, entry);
+                for tag in &tags {
+                    self.tag_index.entry(tag.clone()).or_default().push(id);
+                }
                 vacant.insert(id);
             }
         }
-        for tag in &entry.tags {
-            self.tag_index.entry(tag.clone()).or_default().push(id);
-        }
-        self.agents.insert(id, entry);
         Ok(())
     }
 
@@ -102,13 +118,35 @@ impl AgentRegistry {
     }
 
     /// Remove an agent from the registry.
+    ///
+    /// Tear-down ordering mirrors `register` to keep concurrent
+    /// `find_by_name` lookups monotone (#3338): the name binding is dropped
+    /// **before** the entry is removed from `agents`, so a reader that still
+    /// resolves the name will find the entry, and a reader that observes
+    /// the name as gone will not be handed a stale id pointing at a
+    /// vanished entry.
     pub fn remove(&self, id: AgentId) -> LibreFangResult<AgentEntry> {
+        // Snapshot name + tags without removing yet so we can drop the
+        // name binding first.
+        let (name, tags) = {
+            let snap = self
+                .agents
+                .get(&id)
+                .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+            (snap.name.clone(), snap.tags.clone())
+        };
+        // Drop the name binding first — but only if it still resolves to
+        // this id, otherwise a concurrent rename could have re-bound the
+        // name to a different agent.
+        self.name_index
+            .remove_if(&name, |_, mapped_id| *mapped_id == id);
+        // Now retract the entry. If a racing remove already took it,
+        // surface AgentNotFound rather than silently succeeding.
         let (_, entry) = self
             .agents
             .remove(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
-        self.name_index.remove(&entry.name);
-        for tag in &entry.tags {
+        for tag in &tags {
             if let Some(mut ids) = self.tag_index.get_mut(tag) {
                 ids.retain(|&agent_id| agent_id != id);
             }
@@ -820,6 +858,92 @@ mod tests {
         let registry = AgentRegistry::new();
         let bogus = AgentId::new();
         assert!(!registry.is_auto_dream_enabled(bogus));
+    }
+
+    /// Regression for #3338 / #3817: under concurrent register+remove,
+    /// `find_by_name` must be atomic — it must never return `None` because
+    /// publication of the entry hasn't caught up with the name binding,
+    /// nor return a half-cloned/torn entry. The contract is: when a
+    /// register call returns `Ok`, every subsequent `find_by_name(name)`
+    /// either returns `Some(entry)` for that name or returns `None`
+    /// because the agent is genuinely gone.
+    ///
+    /// Before the fix, `register` inserted into `name_index` before
+    /// `agents`, and `remove` retracted `agents` before `name_index`. A
+    /// concurrent `find_by_name` could observe the name resolved to an id
+    /// while the corresponding entry was either not yet published or
+    /// already gone — the entire row would silently come back as `None`.
+    /// This is the spawn-before-publish gap referenced in the issue.
+    #[test]
+    fn find_by_name_is_atomic_under_concurrent_register_and_remove() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let registry = Arc::new(AgentRegistry::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        // Count cases where `find_by_name` returned `Some` but the entry's
+        // name disagreed with the lookup key (impossible if registry is
+        // self-consistent; would catch torn reads).
+        let torn = Arc::new(AtomicUsize::new(0));
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::new(AtomicUsize::new(0));
+
+        let writer = {
+            let registry = Arc::clone(&registry);
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let entry = test_entry("racy");
+                    let id = entry.id;
+                    if registry.register(entry).is_ok() {
+                        registry.remove(id).ok();
+                    }
+                }
+            })
+        };
+
+        let reader = {
+            let registry = Arc::clone(&registry);
+            let stop = Arc::clone(&stop);
+            let torn = Arc::clone(&torn);
+            let lookups = Arc::clone(&lookups);
+            let hits = Arc::clone(&hits);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    lookups.fetch_add(1, Ordering::Relaxed);
+                    if let Some(found) = registry.find_by_name("racy") {
+                        hits.fetch_add(1, Ordering::Relaxed);
+                        if found.name != "racy" {
+                            torn.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            })
+        };
+
+        thread::sleep(std::time::Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        reader.join().unwrap();
+
+        // Sanity: reader actually ran enough iterations and saw the agent
+        // some of the time, otherwise a clean pass is vacuous.
+        assert!(
+            lookups.load(Ordering::Relaxed) > 1_000,
+            "reader did not run enough iterations to be a meaningful probe"
+        );
+        assert!(
+            hits.load(Ordering::Relaxed) > 0,
+            "reader never observed the agent — the writer/reader interleaving \
+             produced a vacuous pass; widen the test if this fires on slow CI"
+        );
+        assert_eq!(
+            torn.load(Ordering::Relaxed),
+            0,
+            "find_by_name returned an entry whose name does not match the lookup key — \
+             register/remove ordering exposes a torn read across name_index and agents"
+        );
     }
 
     #[test]
