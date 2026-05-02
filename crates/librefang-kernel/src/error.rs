@@ -1,6 +1,7 @@
 //! Kernel-specific error types.
 
 use librefang_hands::HandError;
+use librefang_runtime::python_runtime::PythonError;
 use librefang_runtime::sandbox::SandboxError;
 use librefang_types::error::LibreFangError;
 use thiserror::Error;
@@ -37,6 +38,23 @@ pub enum KernelError {
     /// byte-for-byte to keep existing log/UI output identical.
     #[error("WASM execution failed: {0}")]
     WasmSandbox(#[from] SandboxError),
+
+    /// A structured Python-runtime error.
+    ///
+    /// Restored as part of issue #3711 (4-of-21 slice): previously every
+    /// `PythonError` raised by `python_runtime::run_python_agent` was
+    /// stringified into
+    /// `LibreFangError::Internal(format!("Python execution failed: {e}"))`
+    /// at the kernel boundary, losing the typed kind (`Timeout`,
+    /// `ScriptError`, `ScriptNotFound`, `PythonNotFound`, `SpawnFailed`,
+    /// …). Carrying the typed variant lets upstream callers branch on it
+    /// (e.g. surface 408 for `Timeout`, 422 for `ScriptError`,
+    /// 500 for `Io`/`SpawnFailed`) without string matching.
+    ///
+    /// The Display prefix `"Python execution failed: "` is preserved
+    /// byte-for-byte to keep existing log/UI output identical.
+    #[error("Python execution failed: {0}")]
+    Python(#[from] PythonError),
 
     /// The kernel failed to boot.
     #[error("Boot failed: {0}")]
@@ -154,6 +172,50 @@ mod tests {
         assert_eq!(
             format!("{kerr}"),
             "WASM execution failed: WASM compilation failed: bad opcode"
+        );
+    }
+
+    /// Regression for #3711 (4-of-21 slice): a `PythonError::Timeout`
+    /// surfaced through the kernel boundary (e.g. from
+    /// `python_runtime::run_python_agent`) must keep its typed kind, not
+    /// be flattened to `LibreFangError::Internal(String)`. Upstream
+    /// callers rely on this to distinguish a recoverable timeout (408 /
+    /// retry with a longer budget) from a script bug (`ScriptError` →
+    /// 422) or an environment problem (`PythonNotFound` → 503).
+    #[test]
+    fn python_error_kind_survives_kernel_boundary() {
+        let kerr: KernelError = PythonError::Timeout(120).into();
+        match kerr {
+            KernelError::Python(PythonError::Timeout(secs)) => assert_eq!(secs, 120),
+            other => panic!("expected KernelError::Python(Timeout), got {other:?}"),
+        }
+
+        let kerr: KernelError = PythonError::ScriptError("traceback".to_string()).into();
+        assert!(matches!(
+            kerr,
+            KernelError::Python(PythonError::ScriptError(_))
+        ));
+    }
+
+    /// Regression for #3711: human-readable `Display` output for the
+    /// Python collapse site must remain byte-identical to the previous
+    /// `LibreFangError::Internal(format!("Python execution failed: {e}"))`
+    /// rendering so logs / UI surfaces don't shift. The
+    /// `#[error("Python execution failed: {0}")]` attribute on
+    /// `KernelError::Python` reproduces the old prefix; `PythonError`'s
+    /// own `thiserror` Display supplies the variant-specific tail.
+    #[test]
+    fn python_error_display_is_unchanged() {
+        let kerr: KernelError = PythonError::Timeout(30).into();
+        assert_eq!(
+            format!("{kerr}"),
+            "Python execution failed: Timeout after 30s"
+        );
+
+        let kerr: KernelError = PythonError::ScriptNotFound("/tmp/x.py".to_string()).into();
+        assert_eq!(
+            format!("{kerr}"),
+            "Python execution failed: Script not found: /tmp/x.py"
         );
     }
 }

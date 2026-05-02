@@ -7158,11 +7158,14 @@ system_prompt = "You are a helpful assistant."
             &config,
         )
         .await
-        .map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Python execution failed: {e}"
-            )))
-        })?;
+        // #3711 (4-of-21): propagate the typed `PythonError` instead of
+        // collapsing it to `LibreFangError::Internal(String)`. Display
+        // output ("Python execution failed: …") is preserved byte-for-byte
+        // by the format on `KernelError::Python`, so existing log/UI
+        // strings remain identical while upstream callers gain the ability
+        // to match on typed variants (e.g., `Timeout` → 408, `ScriptError`
+        // → 422).
+        .map_err(KernelError::from)?;
 
         info!(agent = %entry.name, "Python agent execution complete");
 
