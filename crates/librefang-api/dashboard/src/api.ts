@@ -2870,8 +2870,10 @@ export async function updateGoal(
     parent_id?: string | null;
     agent_id?: string | null;
   }
-): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}`, payload);
+): Promise<GoalItem> {
+  // Issue #3832: handler now returns the mutated GoalItem instead of an ack
+  // envelope, so callers can `setQueryData` directly without a follow-up GET.
+  return put<GoalItem>(`/api/goals/${encodeURIComponent(goalId)}`, payload);
 }
 
 export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
