@@ -367,7 +367,7 @@ type ReqIdMap = Arc<RwLock<HashMap<String, String>>>;
 enum Mode {
     /// WebSocket long-connection.
     Websocket {
-        ws_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+        ws_tx: Arc<RwLock<Option<mpsc::Sender<String>>>>,
         /// Tracks the most recent req_id per user for passive replies.
         pending_req_ids: ReqIdMap,
     },
@@ -488,7 +488,7 @@ impl WeComAdapter {
         secret: Zeroizing<String>,
         account_id: Arc<Option<String>>,
         mut shutdown_rx: watch::Receiver<bool>,
-        ws_tx_shared: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+        ws_tx_shared: Arc<RwLock<Option<mpsc::Sender<String>>>>,
         pending_req_ids: ReqIdMap,
     ) -> Pin<Box<dyn Stream<Item = ChannelMessage> + Send>> {
         let (msg_tx, msg_rx) = mpsc::channel::<ChannelMessage>(256);
@@ -522,7 +522,11 @@ impl WeComAdapter {
 
                 let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
-                let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<String>();
+                // Bounded to apply backpressure when the WebSocket sink stalls
+                // (rate limit, slow network) instead of letting RSS grow
+                // unbounded (#3580). Cap is generous — frames are small and
+                // 1024 covers normal burst depth; producers .await on full.
+                let (frame_tx, mut frame_rx) = mpsc::channel::<String>(1024);
                 {
                     let mut guard = ws_tx_shared.write().await;
                     *guard = Some(frame_tx);
@@ -1410,7 +1414,7 @@ impl ChannelAdapter for WeComAdapter {
                         frame_len = frame.len(),
                         "WeCom bot queuing frame"
                     );
-                    frame_tx.send(frame).map_err(|e| {
+                    frame_tx.send(frame).await.map_err(|e| {
                         error!("WeCom bot frame_tx.send failed: {e}");
                         format!("WeCom bot send failed: {e}")
                     })?;
