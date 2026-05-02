@@ -1124,7 +1124,7 @@ pub async fn list_triggers(
         Some(u) if u.0.role < librefang_kernel::auth::UserRole::Admin => Some(u.0.name.clone()),
         _ => None,
     };
-    if let (Some(ref user_name), Some(aid)) = (restrict_to.as_ref(), agent_filter) {
+    if let (Some(user_name), Some(aid)) = (restrict_to.as_ref(), agent_filter) {
         let owns = state
             .kernel
             .agent_registry()
