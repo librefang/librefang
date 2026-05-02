@@ -209,6 +209,45 @@ struct ApiErrorResponse {
 #[derive(Debug, Deserialize)]
 struct ApiErrorDetail {
     message: String,
+    /// Anthropic error `type` discriminator: `"rate_limit_error"`,
+    /// `"authentication_error"`, `"permission_error"`, `"not_found_error"`,
+    /// `"invalid_request_error"`, `"overloaded_error"`, `"api_error"`,
+    /// `"billing_error"` (#3745). Used to populate `LlmError::Api.code`.
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+/// Map Anthropic's `error.type` string to a typed [`ProviderErrorCode`] so
+/// `failover_reason()` can classify without substring-matching the human
+/// `message` (#3745). Returns `None` for unknown types — callers fall back
+/// to status-code-only classification.
+fn anthropic_error_code(
+    kind: Option<&str>,
+    status: u16,
+) -> Option<crate::llm_driver::llm_errors::ProviderErrorCode> {
+    use crate::llm_driver::llm_errors::ProviderErrorCode;
+    match kind {
+        Some("rate_limit_error") => Some(ProviderErrorCode::RateLimit),
+        Some("overloaded_error") => Some(ProviderErrorCode::ServerUnavailable),
+        Some("authentication_error") | Some("permission_error") => {
+            Some(ProviderErrorCode::AuthError)
+        }
+        Some("billing_error") => Some(ProviderErrorCode::CreditExhausted),
+        Some("not_found_error") => Some(ProviderErrorCode::ModelNotFound),
+        Some("invalid_request_error") => {
+            // Anthropic returns this for context-window overflows; the
+            // status is 400 in that case. Without a richer signal we fall
+            // back on status to disambiguate; only flag context overflow
+            // explicitly when status == 413.
+            if status == 413 {
+                Some(ProviderErrorCode::ContextLengthExceeded)
+            } else {
+                Some(ProviderErrorCode::BadRequest)
+            }
+        }
+        Some("api_error") => Some(ProviderErrorCode::ServerError),
+        _ => None,
+    }
 }
 
 /// Accumulator for content blocks during streaming.
@@ -446,10 +485,16 @@ impl LlmDriver for AnthropicDriver {
                     tracing::warn!("failed to read Anthropic error body: {e}");
                     format!("<failed to read body: {e}>")
                 });
-                let message = serde_json::from_str::<ApiErrorResponse>(&body)
-                    .map(|e| e.error.message)
-                    .unwrap_or(body);
-                return Err(LlmError::Api { status, message });
+                let parsed = serde_json::from_str::<ApiErrorResponse>(&body).ok();
+                let code = parsed
+                    .as_ref()
+                    .and_then(|p| anthropic_error_code(p.error.kind.as_deref(), status));
+                let message = parsed.map(|p| p.error.message).unwrap_or(body);
+                return Err(LlmError::Api {
+                    status,
+                    message,
+                    code,
+                });
             }
 
             // Extract and log rate limit headers before consuming the response body.
@@ -482,6 +527,7 @@ impl LlmDriver for AnthropicDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 
@@ -586,10 +632,16 @@ impl LlmDriver for AnthropicDriver {
                     tracing::warn!("failed to read Anthropic error body: {e}");
                     format!("<failed to read body: {e}>")
                 });
-                let message = serde_json::from_str::<ApiErrorResponse>(&body)
-                    .map(|e| e.error.message)
-                    .unwrap_or(body);
-                return Err(LlmError::Api { status, message });
+                let parsed = serde_json::from_str::<ApiErrorResponse>(&body).ok();
+                let code = parsed
+                    .as_ref()
+                    .and_then(|p| anthropic_error_code(p.error.kind.as_deref(), status));
+                let message = parsed.map(|p| p.error.message).unwrap_or(body);
+                return Err(LlmError::Api {
+                    status,
+                    message,
+                    code,
+                });
             }
 
             // Extract and log rate limit headers before consuming the stream.
@@ -854,6 +906,7 @@ impl LlmDriver for AnthropicDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 

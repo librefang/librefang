@@ -190,6 +190,7 @@ impl CopilotDriver {
             .map_err(|e| crate::llm_driver::LlmError::Api {
                 status: 401,
                 message: format!("Copilot token exchange failed: {e}"),
+                code: None,
             })?;
 
         self.token_cache.set(token.clone());

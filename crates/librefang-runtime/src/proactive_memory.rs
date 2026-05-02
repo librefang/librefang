@@ -867,6 +867,7 @@ mod tests {
             Err(crate::llm_driver::LlmError::Api {
                 status: 500,
                 message: "mock failure".into(),
+                code: None,
             })
         }
         fn is_configured(&self) -> bool {

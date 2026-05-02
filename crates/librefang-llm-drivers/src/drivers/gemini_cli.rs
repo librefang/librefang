@@ -205,6 +205,7 @@ impl LlmDriver for GeminiCliDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 

@@ -691,6 +691,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -906,6 +907,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 

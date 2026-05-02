@@ -25,6 +25,14 @@ pub enum LlmError {
         status: u16,
         /// Error message from the API.
         message: String,
+        /// Typed provider error code parsed from the structured response body
+        /// (e.g. `error.code = "rate_limit_exceeded"`). When present,
+        /// [`LlmError::failover_reason`] classifies via this typed value
+        /// instead of substring-matching the human-readable `message`. Drivers
+        /// that have not been migrated to populate this field (or transport
+        /// paths that never see a structured body) leave this `None` and fall
+        /// back to status-code-only classification. See #3745.
+        code: Option<crate::llm_errors::ProviderErrorCode>,
     },
     /// Rate limited — should retry after delay.
     #[error("Rate limited, retry after {retry_after_ms}ms{}", message.as_deref().map(|m| format!(": {m}")).unwrap_or_default())]
@@ -70,7 +78,7 @@ impl LlmError {
     /// Classification is purely structural (variant + embedded status/message)
     /// and therefore allocation-free and infallible.
     pub fn failover_reason(&self) -> crate::llm_errors::FailoverReason {
-        use crate::llm_errors::FailoverReason;
+        use crate::llm_errors::{FailoverReason, ProviderErrorCode};
         match self {
             // Rate-limited: retry the same provider after a backoff.
             LlmError::RateLimited { retry_after_ms, .. } => {
@@ -81,99 +89,48 @@ impl LlmError {
                 })
             }
 
-            // HTTP-level API error: inspect status + message.
-            LlmError::Api { status, message } => {
-                let msg = message.to_lowercase();
-                match status {
-                    429 => FailoverReason::RateLimit(None),
-                    // 401 Unauthorized is always an auth failure.
-                    401 => FailoverReason::AuthError,
-                    // 402 Payment Required is always a billing/credit issue.
-                    402 => FailoverReason::CreditExhausted,
-                    // 403: some providers (e.g. Anthropic) return 403 for rate-limits;
-                    // others use it for billing blocks.  Check rate-limit keywords first.
-                    403 => {
-                        if msg.contains("rate limit")
-                            || msg.contains("rate_limit")
-                            || msg.contains("too many requests")
-                        {
-                            FailoverReason::RateLimit(None)
-                        } else if msg.contains("credit")
-                            || msg.contains("balance")
-                            || msg.contains("billing")
-                            || msg.contains("payment")
-                            || (msg.contains("quota")
-                                && (msg.contains("exceeded") || msg.contains("limit")))
-                        {
-                            FailoverReason::CreditExhausted
-                        } else if msg.contains("model")
-                            || msg.contains("permission")
-                            || msg.contains("not found")
-                            || msg.contains("does not exist")
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    413 => FailoverReason::ContextTooLong,
-                    503 => FailoverReason::ModelUnavailable,
-                    // 404 is only a model error when the message explicitly references
-                    // the model — generic endpoint/base-URL 404s also contain "not found"
-                    // but are not recoverable by switching models.
-                    404 => {
-                        if msg.contains("model not found")
-                            || msg.contains("model does not exist")
-                            || msg.contains("unknown model")
-                            || (msg.contains("model") && msg.contains("not found"))
-                            || (msg.contains("model") && msg.contains("does not exist"))
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    400 => {
-                        // Some providers return context errors as 400.
-                        if msg.contains("context")
-                            || msg.contains("token limit")
-                            || msg.contains("too long")
-                            || msg.contains("context_length")
-                        {
-                            FailoverReason::ContextTooLong
-                        } else {
-                            FailoverReason::HttpError
-                        }
-                    }
-                    _ => {
-                        // Message-level disambiguation for other/unknown status codes.
-                        if msg.contains("rate limit")
-                            || msg.contains("rate_limit")
-                            || msg.contains("too many requests")
-                        {
-                            FailoverReason::RateLimit(None)
-                        } else if msg.contains("credit")
-                            || msg.contains("balance")
-                            || msg.contains("billing")
-                            || msg.contains("insufficient")
-                        {
-                            FailoverReason::CreditExhausted
-                        } else if msg.contains("context")
-                            || msg.contains("token limit")
-                            || msg.contains("context_length")
-                        {
-                            FailoverReason::ContextTooLong
-                        } else if msg.contains("unavailable")
-                            || msg.contains("not found")
-                            || msg.contains("overloaded")
-                        {
-                            FailoverReason::ModelUnavailable
-                        } else {
-                            FailoverReason::HttpError
-                        }
+            // HTTP-level API error.
+            //
+            // When the driver populated `code`, classify by the typed enum —
+            // exhaustive, locale-independent, and immune to provider rewording
+            // (#3745). When `code` is `None`, fall back to status-code-only
+            // classification (no substring matching of the human-readable
+            // message). Drivers that need fine-grained behaviour from
+            // ambiguous statuses (403, 404, 400) must populate `code`.
+            LlmError::Api {
+                status,
+                code: Some(code),
+                ..
+            } => match code {
+                ProviderErrorCode::RateLimit => FailoverReason::RateLimit(None),
+                ProviderErrorCode::CreditExhausted => FailoverReason::CreditExhausted,
+                ProviderErrorCode::ContextLengthExceeded => FailoverReason::ContextTooLong,
+                ProviderErrorCode::ModelNotFound | ProviderErrorCode::ServerUnavailable => {
+                    FailoverReason::ModelUnavailable
+                }
+                ProviderErrorCode::AuthError => FailoverReason::AuthError,
+                ProviderErrorCode::ServerError | ProviderErrorCode::BadRequest => {
+                    // Honour known unambiguous status hints even when the
+                    // typed code is generic.
+                    match status {
+                        413 => FailoverReason::ContextTooLong,
+                        _ => FailoverReason::HttpError,
                     }
                 }
-            }
+            },
+            LlmError::Api {
+                status, code: None, ..
+            } => match status {
+                429 => FailoverReason::RateLimit(None),
+                401 => FailoverReason::AuthError,
+                402 => FailoverReason::CreditExhausted,
+                413 => FailoverReason::ContextTooLong,
+                503 => FailoverReason::ModelUnavailable,
+                // 400/403/404/500 without a typed `code` are ambiguous —
+                // skip to the next provider rather than guessing from the
+                // message text.
+                _ => FailoverReason::HttpError,
+            },
 
             // Inactivity / subprocess timeout maps to Timeout.
             LlmError::TimedOut { .. } => FailoverReason::Timeout,

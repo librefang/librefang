@@ -140,7 +140,7 @@ impl TokenRotationDriver {
         matches!(
             err,
             LlmError::RateLimited { .. } | LlmError::Overloaded { .. }
-        ) || matches!(err, LlmError::Api { status, message }
+        ) || matches!(err, LlmError::Api { status, message, .. }
             if *status == 429
                 || *status == 402
                 || *status == 401
@@ -282,6 +282,7 @@ impl LlmDriver for TokenRotationDriver {
                 "All {} API keys for provider '{}' are rate-limited or in cooldown",
                 slot_count, self.provider
             ),
+            code: None,
         }))
     }
 
@@ -344,6 +345,7 @@ impl LlmDriver for TokenRotationDriver {
                 "All {} API keys for provider '{}' are rate-limited or in cooldown (stream)",
                 slot_count, self.provider
             ),
+            code: None,
         }))
     }
 }
@@ -568,15 +570,18 @@ mod tests {
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 429,
-            message: "too many requests".to_string()
+            message: "too many requests".to_string(),
+            code: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 402,
-            message: "billing issue".to_string()
+            message: "billing issue".to_string(),
+            code: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 403,
-            message: "credit balance is too low".to_string()
+            message: "credit balance is too low".to_string(),
+            code: None,
         }));
         // Non-rotatable errors
         assert!(!TokenRotationDriver::should_rotate(
@@ -593,29 +598,35 @@ mod tests {
         )));
         assert!(!TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 403,
-            message: "invalid api key".to_string()
+            message: "invalid api key".to_string(),
+            code: None,
         }));
         // Auth errors that should rotate (expired token on one profile)
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 401,
-            message: "OAuth token has expired".to_string()
+            message: "OAuth token has expired".to_string(),
+            code: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 1,
-            message: "Claude Code CLI is not authenticated. Run: claude auth\nDetail: {\"result\":\"Failed to authenticate. API Error: 401 {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"authentication_error\\\"}}\"}".to_string()
+            message: "Claude Code CLI is not authenticated. Run: claude auth\nDetail: {\"result\":\"Failed to authenticate. API Error: 401 {\\\"type\\\":\\\"error\\\",\\\"error\\\":{\\\"type\\\":\\\"authentication_error\\\"}}\"}".to_string(),
+            code: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 1,
-            message: "not authenticated".to_string()
+            message: "not authenticated".to_string(),
+            code: None,
         }));
         assert!(TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 1,
-            message: "OAuth token has expired".to_string()
+            message: "OAuth token has expired".to_string(),
+            code: None,
         }));
         // Generic exit-code-1 errors should NOT rotate
         assert!(!TokenRotationDriver::should_rotate(&LlmError::Api {
             status: 1,
-            message: "some other CLI error".to_string()
+            message: "some other CLI error".to_string(),
+            code: None,
         }));
     }
 
@@ -640,7 +651,8 @@ mod tests {
         assert_eq!(
             TokenRotationDriver::cooldown_from_error(&LlmError::Api {
                 status: 429,
-                message: "rate limited".to_string()
+                message: "rate limited".to_string(),
+                code: None,
             }),
             DEFAULT_COOLDOWN_MS
         );

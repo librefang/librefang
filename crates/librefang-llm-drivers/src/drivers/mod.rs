@@ -762,6 +762,7 @@ fn create_driver_from_entry(
                     message: "Azure OpenAI requires an endpoint. Set [azure_openai] endpoint \
                                   in config.toml, or AZURE_OPENAI_ENDPOINT env var."
                         .to_string(),
+                    code: None,
                 })?;
             let deployment = azure
                 .deployment
@@ -839,6 +840,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
                          Add base_url to your [default_model] config or set it in [provider_urls].",
                         provider, env_var
                     ),
+                    code: None,
                 });
             }
         }
@@ -856,6 +858,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
+        code: None,
     })
 }
 

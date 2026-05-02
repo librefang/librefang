@@ -784,7 +784,11 @@ impl LlmDriver for BedrockDriver {
                     let message = serde_json::from_str::<BedrockErrorResponse>(&body_text)
                         .map(|e| e.message)
                         .unwrap_or(body_text);
-                    return Err(LlmError::Api { status, message });
+                    return Err(LlmError::Api {
+                        status,
+                        message,
+                        code: None,
+                    });
                 }
             }
 
@@ -806,6 +810,7 @@ impl LlmDriver for BedrockDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
     // stream() uses the default wrapper from LlmDriver trait — no override needed

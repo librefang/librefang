@@ -212,6 +212,7 @@ impl LlmDriver for FallbackChain {
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain: all providers exhausted".to_string(),
+            code: None,
         }))
     }
 
@@ -312,6 +313,7 @@ impl LlmDriver for FallbackChain {
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "FallbackChain(stream): all providers exhausted".to_string(),
+            code: None,
         }))
     }
 }
@@ -387,6 +389,7 @@ mod tests {
             Err(LlmError::Api {
                 status: 402,
                 message: "Insufficient credits in your account".to_string(),
+                code: None,
             })
         }
     }
@@ -399,6 +402,7 @@ mod tests {
             Err(LlmError::Api {
                 status: 503,
                 message: "Service unavailable".to_string(),
+                code: None,
             })
         }
     }
@@ -411,6 +415,7 @@ mod tests {
             Err(LlmError::Api {
                 status: 413,
                 message: "Context length exceeded".to_string(),
+                code: None,
             })
         }
     }
@@ -544,6 +549,7 @@ mod tests {
         let e = LlmError::Api {
             status: 429,
             message: "Too many requests".to_string(),
+            code: None,
         };
         assert_eq!(e.failover_reason(), FailoverReason::RateLimit(None));
     }
@@ -553,6 +559,7 @@ mod tests {
         let e = LlmError::Api {
             status: 402,
             message: "Insufficient credit balance".to_string(),
+            code: None,
         };
         assert_eq!(e.failover_reason(), FailoverReason::CreditExhausted);
     }
@@ -562,6 +569,7 @@ mod tests {
         let e = LlmError::Api {
             status: 413,
             message: "Payload too large".to_string(),
+            code: None,
         };
         assert_eq!(e.failover_reason(), FailoverReason::ContextTooLong);
     }
@@ -571,6 +579,7 @@ mod tests {
         let e = LlmError::Api {
             status: 503,
             message: "Service unavailable".to_string(),
+            code: None,
         };
         assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
     }
@@ -621,6 +630,7 @@ mod tests {
         let e = LlmError::Api {
             status: 401,
             message: "Unauthorized".to_string(),
+            code: None,
         };
         assert_eq!(e.failover_reason(), FailoverReason::AuthError);
     }
@@ -629,6 +639,74 @@ mod tests {
     fn failover_reason_http_transport_error() {
         let e = LlmError::Http("connection refused".to_string());
         assert_eq!(e.failover_reason(), FailoverReason::HttpError);
+    }
+
+    // #3745: classification must come from the typed `code` field, not from
+    // substring-matching the human-readable `message`. These tests use empty
+    // / non-English / deliberately misleading messages combined with a typed
+    // `ProviderErrorCode` and assert the correct `FailoverReason` is still
+    // produced — proving the substring matcher is gone from the typed path.
+    #[test]
+    fn failover_reason_typed_code_classifies_with_empty_message() {
+        use librefang_llm_driver::llm_errors::ProviderErrorCode;
+
+        let e = LlmError::Api {
+            // status 200 is nonsense for an error — pick something the
+            // legacy matcher would have classified as `HttpError` to prove
+            // the typed `code` is what drives the decision.
+            status: 200,
+            message: String::new(),
+            code: Some(ProviderErrorCode::RateLimit),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::RateLimit(None));
+    }
+
+    #[test]
+    fn failover_reason_typed_code_ignores_misleading_localized_message() {
+        use librefang_llm_driver::llm_errors::ProviderErrorCode;
+
+        // Provider rewrote the message in another language *and* the
+        // English fragments don't contain any of the legacy substring
+        // hooks ("rate limit", "credit", "context", "not found", …).
+        let e = LlmError::Api {
+            status: 403,
+            message: "余额不足，请前往控制台充值".to_string(),
+            code: Some(ProviderErrorCode::CreditExhausted),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::CreditExhausted);
+
+        // Even an actively misleading English message must not flip the
+        // verdict when the typed code says context overflow.
+        let e = LlmError::Api {
+            status: 400,
+            message: "rate limit exceeded".to_string(),
+            code: Some(ProviderErrorCode::ContextLengthExceeded),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::ContextTooLong);
+    }
+
+    #[test]
+    fn failover_reason_typed_code_auth_error() {
+        use librefang_llm_driver::llm_errors::ProviderErrorCode;
+
+        let e = LlmError::Api {
+            status: 403,
+            message: String::new(),
+            code: Some(ProviderErrorCode::AuthError),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::AuthError);
+    }
+
+    #[test]
+    fn failover_reason_typed_code_model_not_found() {
+        use librefang_llm_driver::llm_errors::ProviderErrorCode;
+
+        let e = LlmError::Api {
+            status: 404,
+            message: "endpoint not found".to_string(),
+            code: Some(ProviderErrorCode::ModelNotFound),
+        };
+        assert_eq!(e.failover_reason(), FailoverReason::ModelUnavailable);
     }
 
     #[tokio::test]

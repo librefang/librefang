@@ -522,6 +522,7 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
         return Some(LlmError::Api {
             status: 401,
             message: text.to_string(),
+            code: None,
         });
     }
     // Rate-limit / quota exhaustion
@@ -719,6 +720,7 @@ impl LlmDriver for ClaudeCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -748,6 +750,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 return Err(LlmError::Api {
                     status: 1,
                     message: text,
+                    code: None,
                 });
             }
 
@@ -1144,6 +1147,7 @@ impl LlmDriver for ClaudeCodeDriver {
                         stderr_text.trim()
                     }
                 ),
+                code: None,
             });
         }
 
