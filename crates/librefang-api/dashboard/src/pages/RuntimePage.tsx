@@ -151,7 +151,7 @@ export function RuntimePage() {
   const allHealthy = healthChecks.length > 0 && healthChecks.every((c: HealthCheck) => OK_STATUSES.has(c.status));
   const lanes = queue?.lanes ?? [];
   const queueConfig = queue?.config;
-  const auditEntries = auditQuery.data?.entries ?? [];
+  const auditEntries = auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
   const auditValid = auditVerifyQuery.data?.valid;
   const backups = backupsQuery.data?.backups ?? [];
   const taskStatus = taskStatusQuery.data;

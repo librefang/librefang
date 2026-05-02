@@ -820,6 +820,40 @@ pub enum FailoverReason {
     Unknown,
 }
 
+// ---------------------------------------------------------------------------
+// ProviderErrorCode — typed classification carried on `LlmError::Api`
+// ---------------------------------------------------------------------------
+
+/// Typed classification of a provider-returned API error, populated by the
+/// driver when it parses the provider's structured error response (JSON
+/// `error.code`, `error.type`, etc.). Carrying this lets `failover_reason()`
+/// classify the error without doing case-insensitive substring matching on
+/// the raw `message`, which silently breaks every time a provider rewords or
+/// localizes its error strings (#3745).
+///
+/// `LlmError::Api { code: None, .. }` keeps the legacy substring-free
+/// status-code-only fallback path in `failover_reason()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[non_exhaustive]
+pub enum ProviderErrorCode {
+    /// 429-equivalent — rate limit / quota throttling. Retry same provider.
+    RateLimit,
+    /// 402-equivalent — credit / billing / quota exhausted. Skip provider.
+    CreditExhausted,
+    /// Context window / token limit overflow. Caller must compress.
+    ContextLengthExceeded,
+    /// Requested model is not available on this provider slot.
+    ModelNotFound,
+    /// 401/403 authentication/permission failure on this slot.
+    AuthError,
+    /// Provider/model temporarily unavailable (503-equivalent).
+    ServerUnavailable,
+    /// Other server-side error (500-class) — skip to next provider.
+    ServerError,
+    /// Other client-side error (400-class) — skip to next provider.
+    BadRequest,
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

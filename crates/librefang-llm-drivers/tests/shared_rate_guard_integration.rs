@@ -89,7 +89,7 @@ fn simple_request(model: &str) -> CompletionRequest {
     CompletionRequest {
         model: model.to_string(),
         messages: std::sync::Arc::new(vec![Message::user("hello")]),
-        tools: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 16,
         temperature: 0.0,
         system: None,

@@ -176,10 +176,6 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::get(serve_upload),
         )
         .route(
-            "/agents/{id}/update",
-            axum::routing::put(update_agent),
-        )
-        .route(
             "/agents/{id}/push",
             axum::routing::post(push_message),
         )
@@ -442,7 +438,7 @@ fn validate_bulk_size(
     tag = "agents",
     request_body(content = BulkCreateRequest, description = "Array of agent spawn requests"),
     responses(
-        (status = 200, description = "Create multiple agents at once", body = serde_json::Value)
+        (status = 200, description = "Create multiple agents at once", body = crate::types::JsonObject)
     )
 )]
 pub async fn bulk_create_agents(
@@ -519,7 +515,7 @@ pub async fn bulk_create_agents(
     tag = "agents",
     request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to delete"),
     responses(
-        (status = 200, description = "Delete multiple agents at once", body = serde_json::Value)
+        (status = 200, description = "Delete multiple agents at once", body = crate::types::JsonObject)
     )
 )]
 pub async fn bulk_delete_agents(
@@ -604,7 +600,7 @@ pub async fn bulk_delete_agents(
     tag = "agents",
     request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to start"),
     responses(
-        (status = 200, description = "Start multiple agents (set to Full mode)", body = serde_json::Value)
+        (status = 200, description = "Start multiple agents (set to Full mode)", body = crate::types::JsonObject)
     )
 )]
 pub async fn bulk_start_agents(
@@ -680,7 +676,7 @@ pub async fn bulk_start_agents(
     tag = "agents",
     request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to stop"),
     responses(
-        (status = 200, description = "Stop multiple agents' current runs", body = serde_json::Value)
+        (status = 200, description = "Stop multiple agents' current runs", body = crate::types::JsonObject)
     )
 )]
 pub async fn bulk_stop_agents(
@@ -1940,7 +1936,7 @@ pub struct GetAgentSessionQuery {
         ("session_id" = Option<String>, Query, description = "Optional session id to load instead of the canonical active session"),
     ),
     responses(
-        (status = 200, description = "Get agent conversation session history", body = serde_json::Value)
+        (status = 200, description = "Get agent conversation session history", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_session(
@@ -2315,7 +2311,7 @@ pub async fn resume_agent(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = SetModeRequest, description = "New agent mode"),
     responses(
-        (status = 200, description = "Change an agent's operational mode", body = serde_json::Value)
+        (status = 200, description = "Change an agent's operational mode", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mode(
@@ -2361,7 +2357,7 @@ pub async fn set_agent_mode(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Agent details", body = serde_json::Value),
+        (status = 200, description = "Agent details", body = crate::types::JsonObject),
         (status = 404, description = "Agent not found")
     )
 )]
@@ -2820,7 +2816,7 @@ pub async fn attach_session_stream(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "List all sessions for an agent", body = serde_json::Value)
+        (status = 200, description = "List all sessions for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_agent_sessions(
@@ -2880,7 +2876,7 @@ pub async fn list_agent_sessions(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Optional label for the new session"),
     responses(
-        (status = 200, description = "Create a new session for an agent", body = serde_json::Value)
+        (status = 200, description = "Create a new session for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn create_agent_session(
@@ -2921,7 +2917,7 @@ pub async fn create_agent_session(
         ("session_id" = String, Path, description = "Session ID to switch to"),
     ),
     responses(
-        (status = 200, description = "Switch to an existing session", body = serde_json::Value)
+        (status = 200, description = "Switch to an existing session", body = crate::types::JsonObject)
     )
 )]
 pub async fn switch_agent_session(
@@ -2974,7 +2970,7 @@ pub async fn switch_agent_session(
         ("session_id" = String, Path, description = "Session ID to export"),
     ),
     responses(
-        (status = 200, description = "Exported session data", body = serde_json::Value)
+        (status = 200, description = "Exported session data", body = crate::types::JsonObject)
     )
 )]
 pub async fn export_session(
@@ -3036,7 +3032,7 @@ pub async fn export_session(
         ("format" = Option<String>, Query, description = "Response format: 'json' (default) or 'jsonl'"),
     ),
     responses(
-        (status = 200, description = "Redacted trajectory bundle", body = serde_json::Value),
+        (status = 200, description = "Redacted trajectory bundle", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent or session ID"),
         (status = 404, description = "Agent or session not found"),
     )
@@ -3204,7 +3200,7 @@ pub async fn export_session_trajectory(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Exported session JSON"),
     responses(
-        (status = 200, description = "Session imported successfully", body = serde_json::Value)
+        (status = 200, description = "Session imported successfully", body = crate::types::JsonObject)
     )
 )]
 pub async fn import_session(
@@ -3259,7 +3255,7 @@ pub async fn import_session(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Reset an agent's current session", body = serde_json::Value)
+        (status = 200, description = "Reset an agent's current session", body = crate::types::JsonObject)
     )
 )]
 pub async fn reset_session(
@@ -3298,7 +3294,7 @@ pub async fn reset_session(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Hard-reboot an agent's session without saving summary", body = serde_json::Value)
+        (status = 200, description = "Hard-reboot an agent's session without saving summary", body = crate::types::JsonObject)
     )
 )]
 pub async fn reboot_session(
@@ -3339,7 +3335,7 @@ pub async fn reboot_session(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Clear all conversation history for an agent", body = serde_json::Value)
+        (status = 200, description = "Clear all conversation history for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn clear_agent_history(
@@ -3384,7 +3380,7 @@ pub async fn clear_agent_history(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Trigger LLM session compaction", body = serde_json::Value)
+        (status = 200, description = "Trigger LLM session compaction", body = crate::types::JsonObject)
     )
 )]
 pub async fn compact_session(
@@ -3430,7 +3426,7 @@ pub async fn compact_session(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Cancel an agent's current LLM run", body = serde_json::Value)
+        (status = 200, description = "Cancel an agent's current LLM run", body = crate::types::JsonObject)
     )
 )]
 pub async fn stop_agent(
@@ -3476,7 +3472,7 @@ pub async fn stop_agent(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "List of in-flight sessions for the agent", body = serde_json::Value)
+        (status = 200, description = "List of in-flight sessions for the agent", body = crate::types::JsonArray)
     )
 )]
 pub async fn list_agent_runtime(
@@ -3514,7 +3510,7 @@ pub async fn list_agent_runtime(
         ("session_id" = String, Path, description = "Session ID"),
     ),
     responses(
-        (status = 200, description = "Cancel a single (agent, session) loop", body = serde_json::Value)
+        (status = 200, description = "Cancel a single (agent, session) loop", body = crate::types::JsonObject)
     )
 )]
 pub async fn stop_session(
@@ -3562,7 +3558,7 @@ pub async fn stop_session(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Model name and optional provider"),
     responses(
-        (status = 200, description = "Change an agent's LLM model", body = serde_json::Value)
+        (status = 200, description = "Change an agent's LLM model", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_model(
@@ -3645,7 +3641,7 @@ pub async fn set_model(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Get decision traces from the agent's most recent message", body = serde_json::Value)
+        (status = 200, description = "Get decision traces from the agent's most recent message", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_traces(
@@ -3692,7 +3688,7 @@ pub async fn get_agent_traces(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Get an agent's tool allowlist and blocklist", body = serde_json::Value)
+        (status = 200, description = "Get an agent's tool allowlist and blocklist", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_tools(
@@ -3751,7 +3747,7 @@ pub struct SetAgentToolsRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = SetAgentToolsRequest, description = "Tool configuration fields"),
     responses(
-        (status = 200, description = "Update an agent's tool allowlist and blocklist", body = serde_json::Value)
+        (status = 200, description = "Update an agent's tool allowlist and blocklist", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_tools(
@@ -3797,7 +3793,23 @@ pub async fn set_agent_tools(
         body.tool_allowlist,
         body.tool_blocklist,
     ) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        // Read the agent back so the dashboard can `setQueryData` directly
+        // instead of refetching. Returns the same shape as `GET /api/agents/{id}/tools`.
+        // If the registry entry vanished between the write and read (extremely
+        // unlikely — would mean the agent was deleted mid-PUT) fall back to a
+        // 200 ack so existing clients don't crash on the missing body.
+        Ok(()) => match state.kernel.agent_registry().get(agent_id) {
+            Some(entry) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "capabilities_tools": entry.manifest.capabilities.tools,
+                    "tool_allowlist": entry.manifest.tool_allowlist,
+                    "tool_blocklist": entry.manifest.tool_blocklist,
+                    "disabled": entry.manifest.tools_disabled,
+                })),
+            ),
+            None => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(
@@ -3816,7 +3828,7 @@ pub async fn set_agent_tools(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Get an agent's skill assignment info", body = serde_json::Value)
+        (status = 200, description = "Get an agent's skill assignment info", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_skills(
@@ -3868,7 +3880,7 @@ pub async fn get_agent_skills(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Array of skill names"),
     responses(
-        (status = 200, description = "Update an agent's skill allowlist", body = serde_json::Value)
+        (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_skills(
@@ -3916,7 +3928,7 @@ pub async fn set_agent_skills(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Get an agent's MCP server assignment info", body = serde_json::Value)
+        (status = 200, description = "Get an agent's MCP server assignment info", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_mcp_servers(
@@ -3987,7 +3999,7 @@ pub async fn get_agent_mcp_servers(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Array of MCP server names"),
     responses(
-        (status = 200, description = "Update an agent's MCP server allowlist", body = serde_json::Value)
+        (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
     )
 )]
 pub async fn set_agent_mcp_servers(
@@ -4034,76 +4046,10 @@ pub async fn set_agent_mcp_servers(
 // ---------------------------------------------------------------------------
 // Agent update endpoint
 // ---------------------------------------------------------------------------
-
-/// PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).
-#[utoipa::path(
-    put,
-    path = "/api/agents/{id}/update",
-    tag = "agents",
-    params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = AgentUpdateRequest, description = "New agent manifest TOML"),
-    responses(
-        (status = 200, description = "Update an agent's manifest", body = serde_json::Value)
-    )
-)]
-pub async fn update_agent(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<AgentUpdateRequest>,
-) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
-            );
-        }
-    };
-
-    if state.kernel.agent_registry().get(agent_id).is_none() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
-        );
-    }
-
-    // Parse the new manifest
-    let manifest: AgentManifest = match toml::from_str(&req.manifest_toml) {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
-                ),
-            );
-        }
-    };
-
-    drop(t);
-
-    // `update_manifest` preserves workspace/name/tags, re-grants capabilities,
-    // refreshes scheduler quotas, persists to SQLite, and writes agent.toml.
-    // Per-agent concurrency caps and session_mode caches still require
-    // kill+respawn — flagged in the response note.
-    match state.kernel.update_manifest(agent_id, manifest) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "agent_id": id,
-                "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
-}
+//
+// The legacy `PUT /api/agents/{id}/update` endpoint was removed in #3748 —
+// callers should send `{"manifest_toml": "..."}` to `PATCH /api/agents/{id}`
+// instead, which now also handles full-manifest replacement.
 
 #[utoipa::path(
     patch,
@@ -4112,7 +4058,7 @@ pub async fn update_agent(
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = serde_json::Value, description = "Partial agent fields to update"),
     responses(
-        (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = serde_json::Value)
+        (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject)
     )
 )]
 pub async fn patch_agent(
@@ -4137,6 +4083,42 @@ pub async fn patch_agent(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
+    }
+
+    // Full-manifest replacement path (folded in from the now-removed
+    // PUT /agents/{id}/update endpoint, #3748). When the caller supplies
+    // `manifest_toml`, parse it and run the kernel's `update_manifest`
+    // routine that preserves workspace/name/tags, re-grants capabilities,
+    // refreshes scheduler quotas, persists to SQLite, and writes
+    // agent.toml. Per-agent concurrency caps and session_mode caches
+    // still require kill+respawn.
+    if let Some(manifest_toml) = body.get("manifest_toml").and_then(|v| v.as_str()) {
+        let manifest: AgentManifest = match toml::from_str(manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
+                    ),
+                );
+            }
+        };
+        drop(t);
+        return match state.kernel.update_manifest(agent_id, manifest) {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "agent_id": id,
+                    "note": "Manifest persisted; capabilities and scheduler quotas refreshed in place. Per-agent concurrency caps and session-mode changes take effect after the agent is killed and respawned.",
+                })),
+            ),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            ),
+        };
     }
 
     // Apply partial updates using dedicated registry methods
@@ -4290,7 +4272,7 @@ pub(crate) struct UpdateIdentityRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = UpdateIdentityRequest, description = "Identity fields to update"),
     responses(
-        (status = 200, description = "Update an agent's visual identity", body = serde_json::Value)
+        (status = 200, description = "Update an agent's visual identity", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]
@@ -4408,7 +4390,7 @@ pub struct PatchAgentConfigRequest {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = PatchAgentConfigRequest, description = "Agent config fields to update"),
     responses(
-        (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = serde_json::Value)
+        (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]
@@ -4748,11 +4730,11 @@ fn map_hand_runtime_override_err(
         description = "Runtime override fields. Whitespace is trimmed on all string fields. For `model` and `provider` an empty (or whitespace-only) string is ignored ('leave unchanged'); for the nullable secrets `api_key_env` and `base_url` an empty (or whitespace-only) string clears the override."
     ),
     responses(
-        (status = 200, description = "Runtime override applied to the live manifest and persisted to hand_state.json", body = serde_json::Value),
-        (status = 400, description = "Invalid agent id or target agent is not managed by a hand", body = serde_json::Value),
-        (status = 404, description = "Agent not found", body = serde_json::Value),
-        (status = 409, description = "Hand role not found for the agent (hand registry inconsistency)", body = serde_json::Value),
-        (status = 500, description = "Internal kernel error", body = serde_json::Value),
+        (status = 200, description = "Runtime override applied to the live manifest and persisted to hand_state.json", body = crate::types::JsonObject),
+        (status = 400, description = "Invalid agent id or target agent is not managed by a hand", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found", body = crate::types::JsonObject),
+        (status = 409, description = "Hand role not found for the agent (hand registry inconsistency)", body = crate::types::JsonObject),
+        (status = 500, description = "Internal kernel error", body = crate::types::JsonObject),
     )
 )]
 pub async fn patch_hand_agent_runtime_config(
@@ -4840,10 +4822,10 @@ pub async fn patch_hand_agent_runtime_config(
     params(("id" = String, Path, description = "Hand agent ID")),
     responses(
         (status = 204, description = "Runtime overrides cleared; manifest restored to HAND.toml defaults"),
-        (status = 400, description = "Invalid agent id or target agent is not managed by a hand", body = serde_json::Value),
-        (status = 404, description = "Agent not found", body = serde_json::Value),
-        (status = 409, description = "Hand role not found for the agent (hand registry inconsistency)", body = serde_json::Value),
-        (status = 500, description = "Internal kernel error", body = serde_json::Value),
+        (status = 400, description = "Invalid agent id or target agent is not managed by a hand", body = crate::types::JsonObject),
+        (status = 404, description = "Agent not found", body = crate::types::JsonObject),
+        (status = 409, description = "Hand role not found for the agent (hand registry inconsistency)", body = crate::types::JsonObject),
+        (status = 500, description = "Internal kernel error", body = crate::types::JsonObject),
     )
 )]
 pub async fn delete_hand_agent_runtime_config(
@@ -4958,7 +4940,7 @@ fn format_schedule_mode(schedule: &librefang_types::agent::ScheduleMode) -> Stri
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = CloneAgentRequest, description = "New name for the cloned agent"),
     responses(
-        (status = 200, description = "Clone an agent with its workspace files", body = serde_json::Value)
+        (status = 200, description = "Clone an agent with its workspace files", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]
@@ -5084,7 +5066,7 @@ pub async fn clone_agent(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Agent manifest reloaded from agent.toml", body = serde_json::Value)
+        (status = 200, description = "Agent manifest reloaded from agent.toml", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_agent_manifest(
@@ -5139,7 +5121,7 @@ const KNOWN_IDENTITY_FILES: &[&str] = &[
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "List workspace identity files for an agent", body = serde_json::Value)
+        (status = 200, description = "List workspace identity files for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_agent_files(
@@ -5213,7 +5195,7 @@ pub async fn list_agent_files(
         ("filename" = String, Path, description = "Identity file name"),
     ),
     responses(
-        (status = 200, description = "Read a workspace identity file", body = serde_json::Value)
+        (status = 200, description = "Read a workspace identity file", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_file(
@@ -5333,7 +5315,7 @@ pub(crate) struct SetAgentFileRequest {
     ),
     request_body(content = SetAgentFileRequest, description = "File content to write"),
     responses(
-        (status = 200, description = "Write a workspace identity file", body = serde_json::Value)
+        (status = 200, description = "Write a workspace identity file", body = crate::types::JsonObject)
     )
 )]
 #[allow(private_interfaces)]
@@ -5469,8 +5451,8 @@ pub async fn set_agent_file(
         ("filename" = String, Path, description = "Identity file name"),
     ),
     responses(
-        (status = 200, description = "File deleted successfully", body = serde_json::Value),
-        (status = 404, description = "File not found", body = serde_json::Value)
+        (status = 200, description = "File deleted successfully", body = crate::types::JsonObject),
+        (status = 404, description = "File not found", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_agent_file(
@@ -5689,7 +5671,7 @@ fn is_allowed_content_type(ct: &str) -> bool {
     params(("id" = String, Path, description = "Agent ID")),
     request_body(content = String, content_type = "application/octet-stream"),
     responses(
-        (status = 200, description = "Upload a file attachment for an agent", body = serde_json::Value)
+        (status = 200, description = "Upload a file attachment for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn upload_file(
@@ -5841,7 +5823,7 @@ pub async fn upload_file(
     tag = "agents",
     params(("file_id" = String, Path, description = "Upload file ID (UUID)")),
     responses(
-        (status = 200, description = "Serve an uploaded file by ID", body = serde_json::Value)
+        (status = 200, description = "Serve an uploaded file by ID", body = crate::types::JsonObject)
     )
 )]
 pub async fn serve_upload(
@@ -5940,7 +5922,7 @@ pub async fn serve_upload(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "List recent delivery receipts for an agent", body = serde_json::Value)
+        (status = 200, description = "List recent delivery receipts for an agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_agent_deliveries(
@@ -6003,7 +5985,8 @@ pub async fn get_agent_deliveries(
         (status = 200, description = "Injection result", body = crate::types::InjectMessageResponse),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found"),
-        (status = 413, description = "Message too large")
+        (status = 413, description = "Message too large"),
+        (status = 503, description = "All injection channels for the agent are full; retry shortly (#3575)")
     )
 )]
 pub async fn inject_message(
@@ -6047,6 +6030,14 @@ pub async fn inject_message(
             Json(serde_json::json!({"injected": injected})),
         )
             .into_response(),
+        Err(librefang_kernel::error::KernelError::Backpressure(msg)) => {
+            // Stable machine-readable code so clients can distinguish this
+            // from other 503s without substring-matching the message body.
+            ApiErrorResponse::internal(msg)
+                .with_status(StatusCode::SERVICE_UNAVAILABLE)
+                .with_code("backpressure")
+                .into_response()
+        }
         Err(e) => if e.to_string().contains("not found") {
             ApiErrorResponse::not_found(e.to_string())
         } else {
@@ -6065,6 +6056,19 @@ pub async fn inject_message(
 /// The agent must exist, but the message is sent directly through the channel
 /// adapter without going through the agent loop. This is the REST API
 /// counterpart of the built-in `channel_send` tool that agents can self-invoke.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/push",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::PushMessageRequest,
+    responses(
+        (status = 200, description = "Message pushed to channel", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID or missing required fields"),
+        (status = 404, description = "Agent not found"),
+        (status = 502, description = "Channel adapter rejected the message")
+    )
+)]
 pub async fn push_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -6732,6 +6736,17 @@ mod tests {
 ///
 /// Includes message count, token usage, tool execution count, error count,
 /// average response time (estimated), and cost data.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/metrics",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Aggregated agent metrics", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn agent_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -6849,6 +6864,22 @@ pub async fn agent_metrics(
 /// - `n`: max number of log entries (default 100, max 1000)
 /// - `level`: filter by outcome (e.g. "error", "ok")
 /// - `offset`: number of matching entries to skip for pagination (default 0)
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/logs",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("n" = Option<usize>, Query, description = "Max entries to return (default 100, max 1000)"),
+        ("level" = Option<String>, Query, description = "Filter by audit outcome (e.g. \"error\", \"ok\")"),
+        ("offset" = Option<usize>, Query, description = "Pagination offset over filtered entries")
+    ),
+    responses(
+        (status = 200, description = "Recent agent execution log entries", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn agent_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -6954,7 +6985,6 @@ mod monitoring_tests {
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            peer_registry: None,
             bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -6966,8 +6996,6 @@ mod monitoring_tests {
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "telemetry")]
-            prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),

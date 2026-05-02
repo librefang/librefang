@@ -7,7 +7,7 @@
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
     },
-    "version": "2026.4.28-beta7"
+    "version": "2026.5.2-beta8"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -21,7 +21,9 @@
             "description": "Get the A2A agent card",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -40,7 +42,9 @@
             "description": "List all A2A agent cards",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -57,7 +61,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -67,7 +73,9 @@
             "description": "Submit a task to an agent via A2A",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -97,7 +105,9 @@
             "description": "Get A2A task status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -127,7 +137,9 @@
             "description": "Cancel a tracked A2A task",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -147,7 +159,9 @@
             "description": "List discovered external A2A agents",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -177,7 +191,9 @@
             "description": "Get a specific external A2A agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -194,7 +210,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -204,7 +222,9 @@
             "description": "Discover an external A2A agent by URL",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -221,7 +241,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -231,7 +253,9 @@
             "description": "Send a task to an external A2A agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -270,7 +294,9 @@
             "description": "Get external A2A task status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -405,7 +431,9 @@
             "description": "Create multiple agents at once",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -433,7 +461,9 @@
             "description": "Delete multiple agents at once",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -463,7 +493,9 @@
             "description": "Start multiple agents (set to Full mode)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -493,7 +525,9 @@
             "description": "Stop multiple agents' current runs",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -523,7 +557,9 @@
             "description": "Agent details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -588,7 +624,9 @@
             "description": "Partially update an agent (name, description, model, system prompt)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -629,7 +667,9 @@
             "description": "Clone an agent with its workspace files",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -670,7 +710,9 @@
             "description": "Hot-update agent name, description, system prompt, identity, and model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -700,7 +742,9 @@
             "description": "List recent delivery receipts for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -777,7 +821,9 @@
             "description": "List workspace identity files for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -816,7 +862,9 @@
             "description": "Read a workspace identity file",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -864,7 +912,9 @@
             "description": "Write a workspace identity file",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -901,7 +951,9 @@
             "description": "File deleted successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -909,7 +961,9 @@
             "description": "File not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -943,7 +997,9 @@
             "description": "Invalid agent id or target agent is not managed by a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -951,7 +1007,9 @@
             "description": "Agent not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -959,7 +1017,9 @@
             "description": "Hand role not found for the agent (hand registry inconsistency)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -967,7 +1027,9 @@
             "description": "Internal kernel error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1006,7 +1068,9 @@
             "description": "Runtime override applied to the live manifest and persisted to hand_state.json",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1014,7 +1078,9 @@
             "description": "Invalid agent id or target agent is not managed by a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1022,7 +1088,9 @@
             "description": "Agent not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1030,7 +1098,9 @@
             "description": "Hand role not found for the agent (hand registry inconsistency)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1038,7 +1108,9 @@
             "description": "Internal kernel error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1068,7 +1140,9 @@
             "description": "Clear all conversation history for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1109,9 +1183,132 @@
             "description": "Update an agent's visual identity",
             "content": {
               "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/inject": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/:id/inject — Inject a message into a running agent's tool loop.",
+        "description": "If the agent is currently executing tools (mid-turn), the injected message\nwill be processed between tool calls, interrupting the remaining sequence.\nReturns `{\"injected\": true}` if accepted, `{\"injected\": false}` if no\nactive tool loop is running for this agent.",
+        "operationId": "inject_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InjectMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Injection result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InjectMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "413": {
+            "description": "Message too large"
+          },
+          "503": {
+            "description": "All injection channels for the agent are full; retry shortly (#3575)"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/logs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/logs — Returns structured execution logs for an agent.",
+        "description": "Supports optional query parameters:\n- `n`: max number of log entries (default 100, max 1000)\n- `level`: filter by outcome (e.g. \"error\", \"ok\")\n- `offset`: number of matching entries to skip for pagination (default 0)",
+        "operationId": "agent_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "query",
+            "description": "Max entries to return (default 100, max 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Filter by audit outcome (e.g. \"error\", \"ok\")",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Pagination offset over filtered entries",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent agent execution log entries",
+            "content": {
+              "application/json": {
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
           }
         }
       }
@@ -1139,7 +1336,9 @@
             "description": "Get an agent's MCP server assignment info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1176,7 +1375,9 @@
             "description": "Update an agent's MCP server allowlist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1206,7 +1407,9 @@
             "description": "Exported memory",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1235,7 +1438,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1245,7 +1450,9 @@
             "description": "Memory imported",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1332,6 +1539,43 @@
         }
       }
     },
+    "/api/agents/{id}/metrics": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/metrics — Returns aggregated metrics for an agent.",
+        "description": "Includes message count, token usage, tool execution count, error count,\naverage response time (estimated), and cost data.",
+        "operationId": "agent_metrics",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated agent metrics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mode": {
       "put": {
         "tags": [
@@ -1366,7 +1610,9 @@
             "description": "Change an agent's operational mode",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1404,9 +1650,119 @@
             "description": "Change an agent's LLM model",
             "content": {
               "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/push": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`POST /api/agents/:id/push` — push a proactive outbound message from an\nagent to a channel recipient (e.g., Telegram chat, Slack channel, email).",
+        "description": "The agent must exist, but the message is sent directly through the channel\nadapter without going through the agent loop. This is the REST API\ncounterpart of the built-in `channel_send` tool that agents can self-invoke.",
+        "operationId": "push_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Message pushed to channel",
+            "content": {
+              "application/json": {
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "description": "Invalid agent ID or missing required fields"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "502": {
+            "description": "Channel adapter rejected the message"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/reload": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/reload — Re-read the agent's agent.toml from disk.",
+        "description": "Picks up manual edits to fields like `skills`, `mcp_servers`, `tools`,\nor `system_prompt` without restarting the daemon. Runtime-only fields\n(workspace path, tags) are preserved.",
+        "operationId": "reload_agent_manifest",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest reloaded from agent.toml",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/resume": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id/resume — Resume a suspended agent.",
+        "operationId": "resume_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent resumed"
           }
         }
       }
@@ -1435,7 +1791,9 @@
             "description": "List of in-flight sessions for the agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonArray"
+                }
               }
             }
           }
@@ -1474,7 +1832,9 @@
             "description": "Get agent conversation session history",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1504,7 +1864,9 @@
             "description": "Trigger LLM session compaction",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1534,7 +1896,9 @@
             "description": "Hard-reboot an agent's session without saving summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1564,7 +1928,9 @@
             "description": "Reset an agent's current session",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1593,7 +1959,9 @@
             "description": "List all sessions for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1630,7 +1998,9 @@
             "description": "Create a new session for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1669,7 +2039,9 @@
             "description": "Session found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1708,7 +2080,9 @@
             "description": "Session imported successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1747,7 +2121,9 @@
             "description": "Exported session data",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1787,7 +2163,9 @@
             "description": "Cancel a single (agent, session) loop",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1867,7 +2245,9 @@
             "description": "Switch to an existing session",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1916,7 +2296,9 @@
             "description": "Redacted trajectory bundle",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1952,7 +2334,9 @@
             "description": "Get an agent's skill assignment info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -1989,7 +2373,9 @@
             "description": "Update an agent's skill allowlist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2055,9 +2441,36 @@
             "description": "Cancel an agent's current LLM run",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/suspend": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id/suspend — Suspend an agent (stops cron, keeps in registry).",
+        "operationId": "suspend_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent suspended"
           }
         }
       }
@@ -2085,7 +2498,9 @@
             "description": "Get an agent's tool allowlist and blocklist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2124,7 +2539,9 @@
             "description": "Update an agent's tool allowlist and blocklist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2155,48 +2572,9 @@
             "description": "Get decision traces from the agent's most recent message",
             "content": {
               "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/agents/{id}/update": {
-      "put": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).",
-        "operationId": "update_agent",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Agent ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "New agent manifest TOML",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentUpdateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Update an agent's manifest",
-            "content": {
-              "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2237,7 +2615,9 @@
             "description": "Upload a file attachment for an agent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2279,7 +2659,9 @@
             "description": "Paginated list of pending and recent approvals",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2293,7 +2675,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2303,7 +2687,9 @@
             "description": "Approval created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2333,7 +2719,9 @@
             "description": "Single approval request",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2363,7 +2751,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2373,7 +2763,9 @@
             "description": "Request approved",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2403,7 +2795,9 @@
             "description": "Request rejected",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2585,7 +2979,9 @@
             "description": "Filtered audit log entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2626,7 +3022,9 @@
             "description": "Audit verification result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2645,7 +3043,9 @@
             "description": "OAuth callback — completes login flow",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2672,9 +3072,96 @@
             "description": "OAuth callback (POST) — completes login flow",
             "content": {
               "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/change-password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the dashboard password and/or username.",
+        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credentials updated and existing sessions invalidated",
+            "content": {
+              "application/json": {
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "description": "Missing required fields or password too short"
+          },
+          "401": {
+            "description": "Current password is incorrect"
+          }
+        }
+      }
+    },
+    "/api/auth/dashboard-check": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Check what auth mode the dashboard needs.",
+        "operationId": "dashboard_auth_check",
+        "responses": {
+          "200": {
+            "description": "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/dashboard-login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Dashboard credential login — validates username/password using Argon2id\n(with transparent fallback from legacy plaintext passwords) and returns\na randomly generated session token with expiration metadata.",
+        "operationId": "dashboard_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login outcome — returns session token on success or `requires_totp` when 2FA is needed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid username, password, or TOTP code"
           }
         }
       }
@@ -2690,7 +3177,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2700,7 +3189,9 @@
             "description": "Token introspection result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2746,6 +3237,26 @@
         }
       }
     },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Invalidate the caller's dashboard session and clear the browser cookie.",
+        "description": "Accepts the token via the `librefang_session` cookie, `Authorization:\nBearer ...`, or `X-API-Key`. Always clears the cookie client-side so a\ncaller who already lost their token can still wipe it locally.",
+        "operationId": "dashboard_logout",
+        "responses": {
+          "200": {
+            "description": "Session invalidated and cookie cleared",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/providers": {
       "get": {
         "tags": [
@@ -2758,9 +3269,49 @@
             "description": "List configured OAuth/OIDC providers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST /api/auth/refresh — Exchange a refresh token for a new access token.",
+        "description": "When the access token expires, clients can call this endpoint with the\nrefresh token received during login instead of forcing a full re-authorization.\nIf the request body omits `refresh_token`, the server looks up the token store\nfor a previously stored refresh token (from the OAuth callback).",
+        "operationId": "auth_refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "New access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid refresh token"
+          },
+          "502": {
+            "description": "Token refresh failed"
           }
         }
       }
@@ -2778,7 +3329,9 @@
             "description": "Get authenticated user info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2810,7 +3363,9 @@
             "description": "Abort outcome",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2852,7 +3407,9 @@
             "description": "Opt-in toggled",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2887,7 +3444,9 @@
             "description": "Trigger outcome",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2908,7 +3467,9 @@
             "description": "Auto-dream status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -2928,7 +3489,9 @@
             "description": "Backup created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3012,7 +3575,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3022,7 +3587,9 @@
             "description": "Binding added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3068,7 +3635,9 @@
             "description": "Global budget status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3093,7 +3662,9 @@
             "description": "Updated global budget status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3146,7 +3717,9 @@
             "description": "Per-agent budget and quota status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3179,10 +3752,12 @@
         },
         "responses": {
           "200": {
-            "description": "Updated agent budget",
+            "description": "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3215,7 +3790,9 @@
             "description": "Per-user cost ranking",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3246,7 +3823,9 @@
             "description": "Single user budget detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3265,7 +3844,9 @@
             "description": "Catalog sync status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3285,7 +3866,9 @@
             "description": "Catalog updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3298,6 +3881,7 @@
           "channels"
         ],
         "summary": "GET /api/channels — List all 40 channel adapters with status and field metadata.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).\nThe full channel registry is materialized in-memory, so this is a single\npage — `offset=0`, `limit=None`. The bespoke `configured_count` sibling\nis preserved for the dashboard's \"X of Y configured\" sub-line.",
         "operationId": "list_channels",
         "responses": {
           "200": {
@@ -3305,8 +3889,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -3326,7 +3909,9 @@
             "description": "Channels reloaded successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3334,7 +3919,9 @@
             "description": "Reload failed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3353,7 +3940,9 @@
             "description": "WeChat QR login initiated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3383,7 +3972,9 @@
             "description": "WeChat QR scan status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3403,7 +3994,9 @@
             "description": "WhatsApp QR session started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3434,7 +4027,9 @@
             "description": "WhatsApp QR scan status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3462,7 +4057,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3472,7 +4069,9 @@
             "description": "Channel configured successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3480,7 +4079,9 @@
             "description": "Bad request",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3488,7 +4089,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3516,7 +4119,9 @@
             "description": "Channel removed successfully",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3524,7 +4129,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3532,7 +4139,9 @@
             "description": "Internal server error",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3570,7 +4179,9 @@
             "description": "Channel test result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3578,7 +4189,9 @@
             "description": "Unknown channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3609,7 +4222,9 @@
             "description": "Browse ClawHub skills by sort order",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3627,7 +4242,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3637,7 +4254,9 @@
             "description": "Install a skill from ClawHub",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3668,7 +4287,9 @@
             "description": "Search ClawHub skills",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3698,7 +4319,9 @@
             "description": "Get detailed info about a ClawHub skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3728,7 +4351,9 @@
             "description": "Fetch source code of a ClawHub skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3780,7 +4405,9 @@
             "description": "Command details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3793,7 +4420,7 @@
           "network"
         ],
         "summary": "GET /api/comms/events — Return recent inter-agent communication events.",
-        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).",
+        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).\n\nEnvelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents` (#3842). Events are returned in a single\npage capped by `limit` (default 100, max 500); `offset` is always 0.",
         "operationId": "comms_events",
         "parameters": [
           {
@@ -3832,7 +4459,9 @@
             "description": "SSE stream of inter-agent events",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3849,7 +4478,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3859,7 +4490,9 @@
             "description": "Send a message between agents",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3876,7 +4509,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3886,7 +4521,9 @@
             "description": "Post a task to the agent task queue",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3905,7 +4542,9 @@
             "description": "Build agent topology graph",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3924,7 +4563,9 @@
             "description": "Get kernel configuration (secrets redacted)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3944,7 +4585,9 @@
             "description": "Reload configuration from disk",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3963,7 +4606,9 @@
             "description": "Get config structure schema",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3991,7 +4636,9 @@
             "description": "Set a single config value and persist",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4028,7 +4675,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4038,7 +4687,9 @@
             "description": "Cron job created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4066,7 +4717,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4076,7 +4729,9 @@
             "description": "Cron job updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4127,7 +4782,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4137,7 +4794,9 @@
             "description": "Cron job toggled",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4167,7 +4826,9 @@
             "description": "Cron job status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4186,7 +4847,9 @@
             "description": "List catalog entries with install/health status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4203,7 +4866,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4213,7 +4878,9 @@
             "description": "Install a catalog entry",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4230,7 +4897,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4240,7 +4909,9 @@
             "description": "Uninstall a catalog-backed MCP server",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4270,7 +4941,9 @@
             "description": "Catalog entry detail + install status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4289,7 +4962,9 @@
             "description": "List all hand definitions",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4308,7 +4983,9 @@
             "description": "List active hand instances",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4325,7 +5002,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4335,7 +5014,9 @@
             "description": "Install a hand from TOML content",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4365,7 +5046,9 @@
             "description": "Deactivate a hand (kills agent)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4395,7 +5078,9 @@
             "description": "Get live browser state for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4425,7 +5110,9 @@
             "description": "Pause a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4455,7 +5142,9 @@
             "description": "Resume a paused hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4485,7 +5174,9 @@
             "description": "Get dashboard stats for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4504,7 +5195,9 @@
             "description": "Reload hand definitions from disk",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4534,7 +5227,9 @@
             "description": "Get a single hand definition with requirements",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4562,7 +5257,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4572,7 +5269,9 @@
             "description": "Activate a hand (spawns agent)",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4602,7 +5301,9 @@
             "description": "Re-check dependency status for a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4632,7 +5333,9 @@
             "description": "Auto-install missing dependencies for a hand",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4662,7 +5365,9 @@
             "description": "Get settings schema and current values",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4688,7 +5393,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4698,7 +5405,9 @@
             "description": "Update settings for a hand instance",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4717,7 +5426,9 @@
             "description": "Health check",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4736,7 +5447,9 @@
             "description": "Detailed health diagnostics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4754,7 +5467,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4764,7 +5479,9 @@
             "description": "Agent hook triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4782,7 +5499,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4792,7 +5511,9 @@
             "description": "Wake hook triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4812,7 +5533,9 @@
             "description": "Quick init result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4857,7 +5580,9 @@
             "description": "Search the FangHub marketplace",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4876,7 +5601,9 @@
             "description": "MCP catalog entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4906,7 +5633,9 @@
             "description": "Catalog entry detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -4914,7 +5643,9 @@
             "description": "Catalog entry not found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4933,7 +5664,9 @@
             "description": "Health snapshot for all configured MCP servers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4952,7 +5685,9 @@
             "description": "Reload catalog and reconnect MCP servers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4971,7 +5706,9 @@
             "description": "List configured MCP servers and their tools",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4987,7 +5724,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4997,7 +5736,9 @@
             "description": "Add a new MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5028,7 +5769,9 @@
             "description": "MCP server details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -5058,7 +5801,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5068,7 +5813,9 @@
             "description": "Update an existing MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5096,7 +5843,9 @@
             "description": "Remove an MCP server configuration",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5126,7 +5875,9 @@
             "description": "Reconnect an MCP server",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -5134,7 +5885,9 @@
             "description": "MCP server not configured",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5154,7 +5907,9 @@
             "description": "List configured named taint rule sets",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonArray"
+                }
               }
             }
           }
@@ -5205,7 +5960,9 @@
             "description": "Paginated memory list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5220,7 +5977,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5230,7 +5989,9 @@
             "description": "Memories added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5289,7 +6050,9 @@
             "description": "Paginated agent memory list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5317,7 +6080,9 @@
             "description": "Memories reset",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5347,7 +6112,9 @@
             "description": "Consolidation result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5377,7 +6144,9 @@
             "description": "Duplicate memory groups",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5407,7 +6176,9 @@
             "description": "Exported memories",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5435,7 +6206,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5445,7 +6218,9 @@
             "description": "Import result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5475,7 +6250,9 @@
             "description": "Agent KV store",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5514,7 +6291,9 @@
             "description": "KV value",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5549,7 +6328,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5559,7 +6340,9 @@
             "description": "KV value set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5630,7 +6413,9 @@
             "description": "Memories cleared at level",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5679,7 +6464,9 @@
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5709,7 +6496,9 @@
             "description": "Agent memory statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5729,7 +6518,9 @@
             "description": "Cleanup result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5757,7 +6548,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -5767,7 +6560,9 @@
             "description": "Memory updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5795,7 +6590,9 @@
             "description": "Memory deleted",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5825,7 +6622,9 @@
             "description": "Memory version history",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5865,7 +6664,9 @@
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5885,7 +6686,9 @@
             "description": "Memory statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5915,7 +6718,9 @@
             "description": "User memories",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5935,7 +6740,9 @@
             "description": "Prometheus text-format metrics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5964,7 +6771,9 @@
             "description": "Run migration from another agent framework",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -5982,7 +6791,9 @@
             "description": "Detect migratable framework installation",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6011,7 +6822,9 @@
             "description": "Scan directory for migratable workspace",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6050,7 +6863,9 @@
             "description": "List model aliases",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6066,7 +6881,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6076,7 +6893,9 @@
             "description": "Alias created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6119,7 +6938,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6129,7 +6950,9 @@
             "description": "Custom model added",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6183,7 +7006,9 @@
             "description": "Model details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6202,7 +7027,9 @@
             "description": "OFP network status summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6219,7 +7046,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6229,7 +7058,9 @@
             "description": "Pairing completed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6293,7 +7124,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6303,7 +7136,9 @@
             "description": "Notification sent",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6322,7 +7157,9 @@
             "description": "Pairing request created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6341,7 +7178,9 @@
             "description": "List known OFP peers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6371,7 +7210,9 @@
             "description": "Peer details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6426,7 +7267,9 @@
             "description": "Profile details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6480,7 +7323,9 @@
             "description": "OAuth poll result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6500,7 +7345,9 @@
             "description": "OAuth flow started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6530,7 +7377,9 @@
             "description": "Provider details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6571,7 +7420,9 @@
             "description": "Default provider updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6604,7 +7455,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6614,7 +7467,9 @@
             "description": "API key set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6667,7 +7522,9 @@
             "description": "Provider test result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6695,7 +7552,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6705,7 +7564,9 @@
             "description": "Provider URL set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6724,7 +7585,9 @@
             "description": "Queue status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6742,7 +7605,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6752,7 +7617,9 @@
             "description": "Backup restored",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6765,6 +7632,7 @@
           "workflows"
         ],
         "summary": "GET /api/schedules — List all scheduled jobs.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\n(#3842) so the generated SDK can share one list-response type across all\nlist endpoints. The legacy `schedules` key was renamed to `items`; offset\nis always 0 and limit is null because this endpoint returns the full set.",
         "operationId": "list_schedules",
         "responses": {
           "200": {
@@ -6772,8 +7640,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -6789,7 +7656,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6799,7 +7668,9 @@
             "description": "Schedule created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -6832,7 +7703,9 @@
             "description": "Schedule details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6858,7 +7731,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -6868,7 +7743,9 @@
             "description": "Schedule updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6921,7 +7798,9 @@
             "description": "Schedule triggered",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6940,7 +7819,9 @@
             "description": "Security feature status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -6981,7 +7862,9 @@
             "description": "Paginated list of sessions",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7001,7 +7884,9 @@
             "description": "Cleanup result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7031,7 +7916,9 @@
             "description": "Session found",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7085,7 +7972,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7095,7 +7984,9 @@
             "description": "Label set",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7114,7 +8005,9 @@
             "description": "Graceful daemon shutdown",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7127,6 +8020,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -7134,8 +8028,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -7152,7 +8045,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7162,7 +8057,9 @@
             "description": "Create a new prompt-only skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7179,7 +8076,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7189,7 +8088,9 @@
             "description": "Install a skill from FangHub",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7206,7 +8107,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7216,7 +8119,9 @@
             "description": "Uninstall a skill",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7234,7 +8139,9 @@
             "description": "Daemon status",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7286,7 +8193,9 @@
             "description": "Template details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7338,7 +8247,9 @@
             "description": "Tool details",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7376,7 +8287,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7386,7 +8299,9 @@
             "description": "Tool execution result",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7424,7 +8339,9 @@
             "description": "List triggers",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7439,7 +8356,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7449,7 +8368,9 @@
             "description": "Trigger created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7482,7 +8403,9 @@
             "description": "Trigger detail",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7545,7 +8468,9 @@
             "description": "Updated trigger",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7578,7 +8503,9 @@
             "description": "Serve an uploaded file by ID",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7591,13 +8518,16 @@
           "budget"
         ],
         "summary": "GET /api/usage — Get per-agent usage statistics.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The\nper-agent rollup is materialized from the in-memory agent registry and\nreturned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
         "responses": {
           "200": {
             "description": "Per-agent usage statistics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7616,7 +8546,9 @@
             "description": "Usage grouped by model",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7635,7 +8567,9 @@
             "description": "Daily usage breakdown",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7654,7 +8588,9 @@
             "description": "Overall usage summary",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7900,7 +8836,9 @@
             "description": "Version information",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7919,7 +8857,9 @@
             "description": "API version info",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -7956,7 +8896,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7966,7 +8908,9 @@
             "description": "Workflow created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -7997,7 +8941,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8007,7 +8953,9 @@
             "description": "Workflow updated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -8077,7 +9025,9 @@
             "description": "Workflow run started",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8140,7 +9090,9 @@
             "description": "Template created",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -8161,7 +9113,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8171,7 +9125,9 @@
             "description": "Handle MCP JSON-RPC requests over HTTP",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8188,7 +9144,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -8198,7 +9156,9 @@
             "description": "OpenAI-compatible chat completion",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8217,7 +9177,9 @@
             "description": "OpenAI-compatible model list",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -8353,18 +9315,6 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
-          }
-        }
-      },
-      "AgentUpdateRequest": {
-        "type": "object",
-        "description": "Request to update an agent's manifest.",
-        "required": [
-          "manifest_toml"
-        ],
-        "properties": {
-          "manifest_toml": {
-            "type": "string"
           }
         }
       },
@@ -8571,6 +9521,32 @@
           }
         }
       },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "description": "Request body for POST /api/auth/change-password.",
+        "required": [
+          "current_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New password — optional, omit to keep the current password."
+          },
+          "new_username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New username — optional, omit to keep the current username."
+          }
+        }
+      },
       "ClawHubInstallRequest": {
         "type": "object",
         "description": "Request to install a skill from ClawHub.",
@@ -8636,6 +9612,50 @@
             "description": "Extension/integration ID to remove."
           }
         }
+      },
+      "InjectMessageRequest": {
+        "type": "object",
+        "description": "Request to inject a message into a running agent's tool-execution loop (#956).",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The message to inject between tool calls."
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional session id; when omitted the message broadcasts to all live sessions for the agent."
+          }
+        }
+      },
+      "InjectMessageResponse": {
+        "type": "object",
+        "description": "Response from a mid-turn message injection.",
+        "required": [
+          "injected"
+        ],
+        "properties": {
+          "injected": {
+            "type": "boolean",
+            "description": "Whether the message was accepted (true = injected, false = no active loop)."
+          }
+        }
+      },
+      "JsonArray": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        },
+        "description": "Arbitrary JSON array"
+      },
+      "JsonObject": {
+        "type": "object",
+        "description": "Arbitrary JSON object"
       },
       "MessageRequest": {
         "type": "object",
@@ -8960,6 +9980,56 @@
               "null"
             ],
             "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
+          }
+        }
+      },
+      "PushMessageRequest": {
+        "type": "object",
+        "description": "Request to push a proactive outbound message from an agent to a channel.",
+        "required": [
+          "channel",
+          "recipient",
+          "message"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Channel adapter name (e.g., \"telegram\", \"slack\", \"discord\")."
+          },
+          "message": {
+            "type": "string",
+            "description": "The message text to send."
+          },
+          "recipient": {
+            "type": "string",
+            "description": "Recipient identifier (platform-specific: chat_id, username, email, etc.)."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional thread/topic ID for threaded replies (platform-specific)."
+          }
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "description": "Request body for the refresh token endpoint.",
+        "properties": {
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional provider hint (if the user logged in with a specific provider)."
+          },
+          "refresh_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refresh token obtained from the initial login callback.\nIf omitted, the server looks up a stored refresh token from the token store."
           }
         }
       },

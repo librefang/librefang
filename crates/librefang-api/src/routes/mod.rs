@@ -104,8 +104,6 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
-    /// Optional peer registry for OFP mesh networking status.
-    pub peer_registry: Option<Arc<librefang_wire::registry::PeerRegistry>>,
     /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
     pub bridge_manager: tokio::sync::Mutex<Option<librefang_channels::bridge::BridgeManager>>,
     /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
@@ -160,7 +158,4 @@ pub struct AppState {
     /// task can call `retain_recent()` to evict stale per-IP entries and prevent
     /// the DashMap from growing unbounded over a long-running daemon. See #3668.
     pub gcra_limiter: Arc<KeyedRateLimiter>,
-    /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
-    #[cfg(feature = "telemetry")]
-    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }

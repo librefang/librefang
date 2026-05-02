@@ -188,7 +188,7 @@ mod tests {
         CompletionRequest {
             model: "placeholder".to_string(),
             messages: std::sync::Arc::new(messages),
-            tools,
+            tools: std::sync::Arc::new(tools),
             max_tokens: 4096,
             temperature: 0.7,
             system: None,

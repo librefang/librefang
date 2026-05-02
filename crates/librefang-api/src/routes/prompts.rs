@@ -63,7 +63,16 @@ async fn list_prompt_versions(
         }
     };
     match state.kernel.list_prompt_versions(agent_id) {
-        Ok(versions) => Json(versions).into_response(),
+        Ok(versions) => {
+            let total = versions.len();
+            Json(crate::types::PaginatedResponse {
+                items: versions,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -156,7 +165,16 @@ async fn list_experiments(
         }
     };
     match state.kernel.list_experiments(agent_id) {
-        Ok(experiments) => Json(experiments).into_response(),
+        Ok(experiments) => {
+            let total = experiments.len();
+            Json(crate::types::PaginatedResponse {
+                items: experiments,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -203,49 +221,65 @@ async fn get_experiment(
     }
 }
 
-async fn start_experiment(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Running)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
+// Apply a status transition and return the post-mutation `PromptExperiment` so
+// callers (dashboard React Query hooks, SDK consumers) can `setQueryData`
+// directly instead of doing a follow-up GET. If the experiment vanished
+// between the status write and the snapshot read (narrow race — e.g. a
+// concurrent delete), fall back to the legacy `{"success": true}` ack so the
+// call still appears successful. Refs #3832.
+async fn transition_experiment(
+    state: &AppState,
+    id: &str,
+    status: librefang_types::agent::ExperimentStatus,
+) -> axum::response::Response {
+    if let Err(e) = state.kernel.update_experiment_status(id, status) {
+        return ApiErrorResponse::internal(e)
+            .into_json_tuple()
+            .into_response();
+    }
+    match state.kernel.get_experiment(id) {
+        Ok(Some(experiment)) => Json(experiment).into_response(),
+        Ok(None) => Json(serde_json::json!({"success": true})).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
     }
+}
+
+async fn start_experiment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Running,
+    )
+    .await
 }
 
 async fn pause_experiment(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Paused)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
-    }
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Paused,
+    )
+    .await
 }
 
 async fn complete_experiment(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state
-        .kernel
-        .update_experiment_status(&id, librefang_types::agent::ExperimentStatus::Completed)
-    {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
-            .into_json_tuple()
-            .into_response(),
-    }
+    transition_experiment(
+        &state,
+        &id,
+        librefang_types::agent::ExperimentStatus::Completed,
+    )
+    .await
 }
 
 async fn get_experiment_metrics(

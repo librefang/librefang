@@ -1,0 +1,80 @@
+#!/bin/sh
+# Pre-push hook (#3303).
+#
+# This is where the heavy stuff lives — anything that takes more than
+# a couple of seconds belongs here, not in pre-commit. Push is rarer
+# than commit, so a 30-90s wait is acceptable; a 30s wait per commit
+# is not.
+#
+# Install: git config core.hooksPath scripts/hooks
+#
+# Checks performed:
+#   1. cargo clippy --workspace --all-targets -- -D warnings
+#   2. openapi.json drift (regen if route signatures changed since @{push})
+#   3. SDK drift (regen if openapi.json changed since @{push})
+#
+# Skip with `git push --no-verify` (only when CI is the safety net you
+# want — this hook exists so you don't push red builds to the team).
+
+set -eu
+
+# 1. Workspace-wide clippy. This is the load-bearing lint gate; it used
+# to live in pre-commit and made every commit wait 10+ seconds.
+echo "[pre-push] cargo clippy --workspace --all-targets ..."
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo "Error: clippy failed. Fix warnings before pushing, or rerun with --no-verify."
+    exit 1
+fi
+
+# 2. openapi.json drift detection.
+#
+# Heuristic: scan added/removed lines under crates/librefang-api/src/routes/
+# in commits being pushed. utoipa derives the spec from attributes,
+# signatures, and derives only — body-only diffs are safe.
+#
+# Range: `@{upstream}..HEAD` if a tracking branch exists, otherwise
+# fall back to the staged-cache form (covers first-push of new branch
+# by approximating "everything in this branch").
+if git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+    RANGE='@{upstream}..HEAD'
+else
+    # New branch — diff against origin/main as a reasonable default.
+    RANGE='origin/main..HEAD'
+fi
+
+ROUTES_CHANGED=$(git diff --name-only "$RANGE" 2>/dev/null | grep "crates/librefang-api/src/routes/" || true)
+if [ -n "$ROUTES_CHANGED" ]; then
+    SPEC_RELEVANT=$(git diff -U0 "$RANGE" -- crates/librefang-api/src/routes/ 2>/dev/null \
+        | grep -E '^[+-][^+-]' \
+        | grep -E '^[+-][[:space:]]*(#\[|pub |use |fn |struct |enum |impl |type |trait )' \
+        || true)
+
+    if [ -n "$SPEC_RELEVANT" ]; then
+        echo "[pre-push] regenerating openapi.json (spec-relevant route changes detected)..."
+        if ! cargo xtask codegen --openapi; then
+            echo "Error: openapi.json regeneration failed — fix build/codegen before pushing."
+            exit 1
+        fi
+        if ! git diff --quiet -- openapi.json; then
+            echo "Error: openapi.json is stale. Commit the regenerated spec before pushing:"
+            echo "  git add openapi.json && git commit --amend --no-edit"
+            exit 1
+        fi
+    fi
+fi
+
+# 3. SDK drift — if openapi.json changed in this push, SDKs must be in sync.
+if git diff --name-only "$RANGE" 2>/dev/null | grep -qx "openapi.json"; then
+    echo "[pre-push] regenerating SDKs from openapi.json..."
+    if ! python3 scripts/codegen-sdks.py; then
+        echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before pushing."
+        exit 1
+    fi
+    if ! git diff --quiet -- sdk/python sdk/javascript sdk/go sdk/rust; then
+        echo "Error: SDKs are stale. Commit the regenerated SDKs before pushing:"
+        echo "  git add sdk/python sdk/javascript sdk/go sdk/rust && git commit --amend --no-edit"
+        exit 1
+    fi
+fi
+
+exit 0

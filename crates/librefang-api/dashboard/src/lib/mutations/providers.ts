@@ -5,6 +5,7 @@ import {
   deleteProviderKey,
   setProviderUrl,
   setDefaultProvider,
+  createRegistryContent,
 } from "../http/client";
 import { modelKeys, providerKeys, runtimeKeys } from "../queries/keys";
 
@@ -61,6 +62,35 @@ export function useSetProviderUrl() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: providerKeys.all });
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
+    },
+  });
+}
+
+/**
+ * POST /registry/content/{contentType} — generic registry content creation.
+ *
+ * Today the only call site is the "Add provider" wizard on ProvidersPage,
+ * which writes a `provider` content entry. We invalidate `providerKeys.all`
+ * (list refresh) and `modelKeys.lists()` (a new provider may surface new
+ * models on the next list fetch) for that case. Other content types are
+ * accepted but currently invalidate the same scoped slices because no other
+ * caller exists yet — extend here when a non-provider call site lands.
+ */
+export function useCreateRegistryContent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      contentType,
+      values,
+    }: {
+      contentType: string;
+      values: Record<string, unknown>;
+    }) => createRegistryContent(contentType, values),
+    onSuccess: (_data, variables) => {
+      if (variables.contentType === "provider") {
+        qc.invalidateQueries({ queryKey: providerKeys.all });
+        qc.invalidateQueries({ queryKey: modelKeys.lists() });
+      }
     },
   });
 }

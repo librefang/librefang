@@ -1779,6 +1779,13 @@ jobs:
 
       - name: Initialise iOS project
         working-directory: crates/librefang-desktop
+        # cargo-mobile2 reads APPLE_DEVELOPMENT_TEAM at init time and bakes
+        # it into the generated xcodeproj's DEVELOPMENT_TEAM build setting.
+        # Without it, xcodebuild later fails with "Signing for ... requires a
+        # development team". Reuses the same secret as the macOS notarize
+        # step — same Apple Developer account.
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: cargo tauri ios init
 
       # Mirror of the Android version-derivation logic. Both jobs run in
@@ -1879,6 +1886,7 @@ jobs:
         working-directory: crates/librefang-desktop
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         # `-f mobile-no-email -- --no-default-features`: see android build
         # above for why `--no-default-features` goes after `--`. We keep iOS
         # on the same channel flavor as Android so mobile binaries are

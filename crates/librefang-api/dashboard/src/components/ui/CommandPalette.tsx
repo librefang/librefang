@@ -164,16 +164,16 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             value={search}
             onChange={(e) => { setSearch(e.target.value); setSelectedIndex(0); }}
             placeholder={t("command_palette.search_placeholder")}
-            className="flex-1 bg-transparent text-sm font-medium outline-none placeholder:text-text-dim/40"
+            className="flex-1 bg-transparent text-sm font-medium outline-none placeholder:text-text-dim"
             autoFocus
           />
           <kbd className="hidden sm:inline-flex h-5 items-center gap-1 rounded border border-border-subtle bg-main px-1.5 text-[10px] font-medium text-text-dim">ESC</kbd>
         </div>
-        <div className="px-4 py-2 border-b border-border-subtle/50 flex items-center gap-4 text-[10px] text-text-dim/50">
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↑↓</kbd> {t("command_palette.navigate")}</span>
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↵</kbd> {t("command_palette.open")}</span>
-          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">esc</kbd> {t("command_palette.close")}</span>
-          <span className="hidden sm:flex items-center gap-1 ml-auto"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">?</kbd> {t("command_palette.all_shortcuts", { defaultValue: "all shortcuts" })}</span>
+        <div className="px-4 py-2 border-b border-border-subtle/50 flex items-center gap-4 text-[11px] text-text-dim">
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[11px] font-mono">↑↓</kbd> {t("command_palette.navigate")}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[11px] font-mono">↵</kbd> {t("command_palette.open")}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[11px] font-mono">esc</kbd> {t("command_palette.close")}</span>
+          <span className="hidden sm:flex items-center gap-1 ml-auto"><kbd className="px-1 py-0.5 rounded bg-main text-[11px] font-mono">?</kbd> {t("command_palette.all_shortcuts", { defaultValue: "all shortcuts" })}</span>
         </div>
         <div className="max-h-[50vh] overflow-y-auto p-2 scrollbar-thin">
           {filteredCommands.length === 0 ? (
@@ -181,7 +181,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           ) : (
             Object.entries(groupedCommands).map(([category, cmds]) => (
               <div key={category}>
-                <p className="px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-text-dim/60">{category}</p>
+                <p className="px-3 py-2 text-[11px] font-bold uppercase tracking-widest text-text-dim">{category}</p>
                 {cmds.map((cmd) => {
                   const globalIndex = filteredCommands.indexOf(cmd);
                   return (
@@ -192,7 +192,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                     >
                       <cmd.icon className="h-4 w-4 shrink-0" />
                       <span className="flex-1 text-sm font-medium">{t(cmd.labelKey)}</span>
-                      {cmd.external && <ExternalLink className="h-3 w-3 shrink-0 text-text-dim/60" />}
+                      {cmd.external && <ExternalLink className="h-3 w-3 shrink-0 text-text-dim" />}
                     </button>
                   );
                 })}

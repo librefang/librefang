@@ -262,6 +262,62 @@ fn resolve_request_tools(
     out
 }
 
+/// Per-loop cache for the resolved tool list passed into `CompletionRequest`.
+///
+/// Before #3586 the agent loop called `resolve_request_tools` (which cloned
+/// every `ToolDefinition` via `available_tools.to_vec()`) on every iteration,
+/// even though the granted-tool set is constant for the duration of a turn
+/// and the lazy-mode fallback only grows when the LLM successfully invokes
+/// `tool_load`.  This cache hands out a shared `Arc<Vec<ToolDefinition>>` and
+/// only rebuilds when the lazy-mode `session_loaded_tools` vector grew since
+/// the last iteration — turning the per-iteration cost from a deep clone of
+/// the entire tool catalog into a refcount bump.
+struct ResolvedToolsCache {
+    cached: std::sync::Arc<Vec<ToolDefinition>>,
+    /// Snapshot of `session_loaded_tools.len()` at the time `cached` was
+    /// built.  Length-only is sufficient because `session_loaded_tools` is
+    /// only ever mutated via `push()` in the loop — never reordered or
+    /// removed — so a stable length implies stable content.
+    cached_loaded_len: usize,
+    lazy_mode: bool,
+}
+
+impl ResolvedToolsCache {
+    fn new(
+        available_tools: &[ToolDefinition],
+        session_loaded: &[ToolDefinition],
+        lazy_mode: bool,
+    ) -> Self {
+        Self {
+            cached: std::sync::Arc::new(resolve_request_tools(
+                available_tools,
+                session_loaded,
+                lazy_mode,
+            )),
+            cached_loaded_len: session_loaded.len(),
+            lazy_mode,
+        }
+    }
+
+    /// Return a cheap `Arc` clone of the resolved tool list, rebuilding only
+    /// when the lazy-mode loaded-tool set has grown since the last call.
+    fn get(
+        &mut self,
+        available_tools: &[ToolDefinition],
+        session_loaded: &[ToolDefinition],
+    ) -> std::sync::Arc<Vec<ToolDefinition>> {
+        if self.lazy_mode && session_loaded.len() != self.cached_loaded_len {
+            self.cached = std::sync::Arc::new(resolve_request_tools(
+                available_tools,
+                session_loaded,
+                self.lazy_mode,
+            ));
+            self.cached_loaded_len = session_loaded.len();
+        }
+        std::sync::Arc::clone(&self.cached)
+    }
+}
+
 /// Notify the stream consumer that the LLM has finished producing text for
 /// this turn so the UI can unblock input before the agent loop's remaining
 /// post-processing (session persistence, proactive memory extraction) lands
@@ -2629,7 +2685,7 @@ async fn generate_search_queries(
         messages: std::sync::Arc::new(vec![Message::user(format!(
             "{history}\nUser: {user_message}"
         ))]),
-        tools: vec![],
+        tools: std::sync::Arc::new(vec![]),
         max_tokens: 200,
         temperature: 0.0,
         system: Some(system),
@@ -3354,6 +3410,11 @@ pub async fn run_agent_loop(
     // This is a minor but measurable improvement for long autonomous runs.
     let system_prompt_snapshot = system_prompt.clone();
 
+    // Resolve tool list once before the loop and reuse via Arc on every
+    // iteration.  See `ResolvedToolsCache` for rationale (#3586).
+    let mut tools_cache =
+        ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
 
@@ -3552,7 +3613,7 @@ pub async fn run_agent_loop(
         let request = CompletionRequest {
             model: api_model,
             messages: std::sync::Arc::new(messages.clone()),
-            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
+            tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             // Clone from the pre-built snapshot rather than the original to
@@ -4748,6 +4809,11 @@ pub async fn run_agent_loop_streaming(
     // because CompletionRequest takes ownership, so clone once up-front.
     let system_prompt_snapshot = system_prompt.clone();
 
+    // Resolve tool list once before the loop and reuse via Arc on every
+    // iteration.  See `ResolvedToolsCache` for rationale (#3586).
+    let mut tools_cache =
+        ResolvedToolsCache::new(available_tools, &session_loaded_tools, lazy_tools);
+
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
 
@@ -4941,7 +5007,7 @@ pub async fn run_agent_loop_streaming(
         let request = CompletionRequest {
             model: api_model,
             messages: std::sync::Arc::new(messages.clone()),
-            tools: resolve_request_tools(available_tools, &session_loaded_tools, lazy_tools),
+            tools: tools_cache.get(available_tools, &session_loaded_tools),
             max_tokens: manifest.model.max_tokens,
             temperature: manifest.model.temperature,
             // Clone from pre-built snapshot (same rationale as non-streaming loop).
@@ -6522,6 +6588,74 @@ mod tests {
         assert!(
             resolved.len() < pool.len(),
             "lazy mode should trim when tool_load is present"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_reuses_arc_when_input_is_stable() {
+        // The whole point of #3586 is that an idle iteration (no new tools
+        // loaded via `tool_load`) MUST hand back the same `Arc` rather than
+        // rebuild the resolved tool list. Pin that with `Arc::ptr_eq` so a
+        // future regression that reverts the cache to a no-op fails here
+        // instead of silently in a profiler.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &[], true);
+        let a = cache.get(&pool, &[]);
+        let b = cache.get(&pool, &[]);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "stable input must reuse the cached Arc"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_rebuilds_when_session_loaded_grows() {
+        // Lazy mode + a new tool_load redemption mid-turn: the cache must
+        // rebuild so the LLM sees the just-loaded tool on the next turn.
+        let pool: Vec<ToolDefinition> = (0..LAZY_TOOLS_THRESHOLD + 5)
+            .map(|i| fake_tool(&format!("tool_{i}")))
+            .chain(std::iter::once(fake_tool("tool_load")))
+            .collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, true);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("late_arrival"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "growing session_loaded_tools must rebuild the cache"
+        );
+        assert!(
+            after.iter().any(|t| t.name == "late_arrival"),
+            "rebuilt cache must include the newly loaded tool"
+        );
+    }
+
+    #[test]
+    fn test_resolved_tools_cache_no_rebuild_when_lazy_mode_off() {
+        // In non-lazy mode `resolve_request_tools` ignores `session_loaded`,
+        // so the cache should never rebuild — even if the (unused) loaded
+        // vec grows. Guards against an over-eager invalidation that would
+        // re-clone the full eager list every iteration.
+        let pool: Vec<ToolDefinition> = (0..3).map(|i| fake_tool(&format!("t{i}"))).collect();
+        let mut session_loaded: Vec<ToolDefinition> = Vec::new();
+
+        let mut cache = ResolvedToolsCache::new(&pool, &session_loaded, false);
+        let before = cache.get(&pool, &session_loaded);
+
+        session_loaded.push(fake_tool("ignored"));
+        let after = cache.get(&pool, &session_loaded);
+
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &after),
+            "non-lazy mode must never rebuild on session_loaded growth"
         );
     }
 

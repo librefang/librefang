@@ -1283,6 +1283,38 @@ impl UsageStore {
         Ok(out)
     }
 
+    /// 24h message counts per channel — backs the dashboard's Channels
+    /// page so each row can show `slack · 142 msgs/24h` per the design.
+    /// Single grouped SQL pass (uses idx_usage_channel_time).
+    pub fn channels_msgs_24h_bulk(
+        &self,
+    ) -> LibreFangResult<std::collections::HashMap<String, u64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel, COUNT(*)
+                 FROM usage_events
+                 WHERE channel IS NOT NULL AND channel != '' AND timestamp >= ?1
+                 GROUP BY channel",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (ch, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            out.insert(ch, n.max(0) as u64);
+        }
+        Ok(out)
+    }
+
     /// Delete usage events older than the given number of days.
     pub fn cleanup_old(&self, days: u32) -> LibreFangResult<usize> {
         let conn = self

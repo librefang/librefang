@@ -886,6 +886,7 @@ impl OpenAIDriver {
                           this usually means aggressive history trimming emptied \
                           the conversation"
                     .to_string(),
+                code: None,
             });
         }
 
@@ -1168,6 +1169,7 @@ impl LlmDriver for OpenAIDriver {
                 return Err(LlmError::Api {
                     status,
                     message: body,
+                    code: None,
                 });
             }
 
@@ -1356,6 +1358,7 @@ impl LlmDriver for OpenAIDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 
@@ -1582,6 +1585,7 @@ impl LlmDriver for OpenAIDriver {
                 return Err(LlmError::Api {
                     status,
                     message: body,
+                    code: None,
                 });
             }
 
@@ -2024,6 +2028,7 @@ impl LlmDriver for OpenAIDriver {
         Err(LlmError::Api {
             status: 0,
             message: "Max retries exceeded".to_string(),
+            code: None,
         })
     }
 
@@ -2404,7 +2409,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 256,
             temperature: 0.7,
             system: None,
@@ -2432,7 +2437,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 256,
             temperature: 0.7,
             system: None,
@@ -2460,7 +2465,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 256,
             temperature: 0.7,
             system: None,

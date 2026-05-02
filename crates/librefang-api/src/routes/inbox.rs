@@ -17,7 +17,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
     path = "/api/inbox/status",
     tag = "inbox",
     responses(
-        (status = 200, description = "Inbox status", body = serde_json::Value)
+        (status = 200, description = "Inbox status", body = crate::types::JsonObject)
     )
 )]
 pub async fn inbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {

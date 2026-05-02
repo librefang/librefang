@@ -1142,18 +1142,33 @@ fn channel_config_values(
 }
 
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).
+/// The full channel registry is materialized in-memory, so this is a single
+/// page — `offset=0`, `limit=None`. The bespoke `configured_count` sibling
+/// is preserved for the dashboard's "X of Y configured" sub-line.
 #[utoipa::path(
     get,
     path = "/api/channels",
     tag = "channels",
     responses(
-        (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
+        (status = 200, description = "List configured channels", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
     let live_channels = state.channels_config.read().await;
+    // 24h activity per channel — backs the design's "slack · 142 msgs/24h"
+    // sub-line. One grouped SQL pass for the whole page; falls back to an
+    // empty map if the query fails so the listing itself still loads.
+    let msgs_24h = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .channels_msgs_24h_bulk()
+        .unwrap_or_default();
     let mut channels = Vec::new();
     let mut configured_count = 0u32;
 
@@ -1197,6 +1212,7 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "fields": fields,
             "setup_steps": meta.setup_steps,
             "config_template": meta.config_template,
+            "msgs_24h": msgs_24h.get(meta.name).copied().unwrap_or(0),
         });
         if let Some(endpoint) = webhook_endpoint_url(meta.name) {
             channel_json["webhook_endpoint"] = serde_json::Value::String(endpoint);
@@ -1204,9 +1220,15 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    let total = channels.len();
+    // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
+    // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
+    // `limit` without a new struct.
     Json(serde_json::json!({
-        "channels": channels,
-        "total": channels.len(),
+        "items": channels,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "configured_count": configured_count,
     }))
 }
@@ -1268,8 +1290,8 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
         ("name" = String, Path, description = "Channel adapter name (e.g. telegram, discord)")
     ),
     responses(
-        (status = 200, description = "Channel details", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel details", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_channel(
@@ -1335,11 +1357,11 @@ pub async fn get_channel(
     params(
         ("name" = String, Path, description = "Channel name")
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Channel configured successfully", body = serde_json::Value),
-        (status = 400, description = "Bad request", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel configured successfully", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
@@ -1463,9 +1485,9 @@ pub async fn configure_channel(
         ("name" = String, Path, description = "Channel name")
     ),
     responses(
-        (status = 200, description = "Channel removed successfully", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value),
-        (status = 500, description = "Internal server error", body = serde_json::Value)
+        (status = 200, description = "Channel removed successfully", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
@@ -1523,8 +1545,8 @@ pub async fn remove_channel(
     ),
     request_body(content = Option<serde_json::Value>, content_type = "application/json"),
     responses(
-        (status = 200, description = "Channel test result", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel test result", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/test — Connectivity check + optional live test message.
@@ -1678,8 +1700,8 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     path = "/api/channels/reload",
     tag = "channels",
     responses(
-        (status = 200, description = "Channels reloaded successfully", body = serde_json::Value),
-        (status = 500, description = "Reload failed", body = serde_json::Value)
+        (status = 200, description = "Channels reloaded successfully", body = crate::types::JsonObject),
+        (status = 500, description = "Reload failed", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
@@ -1710,7 +1732,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
     path = "/api/channels/whatsapp/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR session started", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
@@ -1774,7 +1796,7 @@ pub async fn whatsapp_qr_start() -> impl IntoResponse {
         ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
     ),
     responses(
-        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
@@ -1928,7 +1950,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     path = "/api/channels/wechat/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WeChat QR login initiated", body = serde_json::Value)
+        (status = 200, description = "WeChat QR login initiated", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
@@ -1993,7 +2015,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
         ("qr_code" = String, Query, description = "QR code value from /qr/start")
     ),
     responses(
-        (status = 200, description = "WeChat QR scan status", body = serde_json::Value)
+        (status = 200, description = "WeChat QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.

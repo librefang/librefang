@@ -100,6 +100,8 @@
     "resume": "Resume",
     "close": "Close",
     "clear_search": "Clear search",
+    "select": "Select",
+    "deselect": "Deselect",
     "yes": "Yes",
     "no": "No",
     "details": "Details",
@@ -775,7 +777,14 @@
     "qr_failed": "Failed to get QR code",
     "login_success": "Login successful! Saving configuration...",
     "config_failed": "Configuration failed",
-    "config_success": "Configuration saved"
+    "config_success": "Configuration saved",
+    "add": "Add",
+    "all_configured": "All channels configured",
+    "msgs_24h": "msgs/24h",
+    "empty_title": "No channels yet",
+    "empty_body": "Connect Slack, Discord, email, SMS, or any of the bundled bridges so agents can post and receive messages.",
+    "connect_first": "Connect a channel",
+    "picker_title": "Add channel"
   },
   "skills": {
     "title": "Skills",
@@ -3214,5 +3223,39 @@
     "error_disabled_body": "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "btn_try_again": "Try again"
+  },
+  "shortcuts_help": {
+    "title": "Keyboard shortcuts",
+    "general_heading": "General",
+    "nav_heading_prefix": "Navigate (press",
+    "nav_heading_suffix": "then…)",
+    "general": {
+      "cmd_k": "Open command palette",
+      "focus_search": "Focus search on current page",
+      "create_new": "Create new (agent / workflow / plugin, page-aware)",
+      "show_help": "Show this cheat sheet",
+      "close_dialog": "Close dialog / modal"
+    },
+    "nav": {
+      "overview": "Overview",
+      "chat": "Chat",
+      "agents": "Agents",
+      "hands": "Hands",
+      "skills": "Skills",
+      "workflows": "Workflows",
+      "models": "Models",
+      "providers": "Providers",
+      "channels": "Channels (Network)",
+      "goals": "Goals",
+      "logs": "Logs",
+      "runtime": "Runtime",
+      "memory": "Memory",
+      "analytics": "Analytics",
+      "settings": "Settings",
+      "plugins": "Plugins",
+      "scheduler": "Scheduler",
+      "approvals": "Approvals (reView)",
+      "sessions": "Sessions"
+    }
   }
 }

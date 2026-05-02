@@ -2462,25 +2462,49 @@ pub(crate) fn restrict_dir_permissions(path: &std::path::Path) {
 #[cfg(not(unix))]
 pub(crate) fn restrict_dir_permissions(_path: &std::path::Path) {}
 
-fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
+/// Normalize a daemon listen address for client-side probing.
+///
+/// `0.0.0.0` (the default bind-all address) is replaced with `127.0.0.1`,
+/// which avoids DNS/connectivity hangs on macOS when probing locally.
+fn normalize_daemon_addr(listen_addr: &str) -> String {
+    listen_addr.replace("0.0.0.0", "127.0.0.1")
+}
+
+/// Core daemon-detection logic, parameterized over the health-probe.
+///
+/// Returns `Some(base_url)` iff `daemon.json` is readable AND `probe`
+/// reports the daemon's `/api/health` endpoint is up. Extracted so unit
+/// tests can inject a fake probe instead of binding real sockets.
+fn find_daemon_with_probe<F>(home_dir: &std::path::Path, probe: F) -> Option<String>
+where
+    F: FnOnce(&str) -> bool,
+{
     let info = read_daemon_info(home_dir)?;
-
-    // Normalize listen address: replace 0.0.0.0 with 127.0.0.1 to avoid
-    // DNS/connectivity issues on macOS where 0.0.0.0 can hang.
-    let addr = info.listen_addr.replace("0.0.0.0", "127.0.0.1");
-    let url = format!("http://{addr}/api/health");
-
-    let client = crate::http_client::client_builder()
-        .connect_timeout(std::time::Duration::from_secs(1))
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .ok()?;
-    let resp = client.get(&url).send().ok()?;
-    if resp.status().is_success() {
+    let addr = normalize_daemon_addr(&info.listen_addr);
+    let health_url = format!("http://{addr}/api/health");
+    if probe(&health_url) {
         Some(format!("http://{addr}"))
     } else {
         None
     }
+}
+
+fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
+    find_daemon_with_probe(home_dir, |url| {
+        let client = match crate::http_client::client_builder()
+            .connect_timeout(std::time::Duration::from_secs(1))
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        client
+            .get(url)
+            .send()
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn find_daemon() -> Option<String> {
@@ -3513,9 +3537,14 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
     let pipe_write = fds[1];
     let pipe_read = fds[0];
 
-    // Save copy of original stdout/stderr (to restore on drop)
+    // Save a copy of original stdout (to restore both fd 1 and fd 2 on
+    // drop). We don't keep a separate stderr copy: by the time the tee
+    // thread reads from the pipe, stdout and stderr have already been
+    // merged at the fd level, so we cannot route output back to the
+    // correct original fd. Writing to both copies would simply duplicate
+    // every line in any consumer that captures both fds (e.g. the Docker
+    // log driver), which is the bug this code path used to cause.
     let stdout_copy = unsafe { libc::dup(libc::STDOUT_FILENO) };
-    let stderr_copy = unsafe { libc::dup(libc::STDERR_FILENO) };
 
     // Redirect stdout and stderr to the pipe. From here on any write to the
     // standard streams goes through the pipe and must be drained by the
@@ -3537,10 +3566,10 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 unsafe { libc::close(pipe_read) };
                 break;
             }
-            // Write to terminal (original stdout/stderr)
+            // Write to the saved stdout fd once. See comment at the dup site
+            // for why we don't also write to a stderr copy.
             unsafe {
                 libc::write(stdout_copy, buf.as_ptr() as *const libc::c_void, n as usize);
-                libc::write(stderr_copy, buf.as_ptr() as *const libc::c_void, n as usize);
             }
             // Write to log file
             if let Ok(mut f) = log_file.lock() {
@@ -3548,7 +3577,7 @@ fn setup_foreground_tee(log_path: &std::path::Path) -> ForegroundTeeGuard {
                 let _ = f.flush();
             }
         }
-        // guard Drop closes stdout_copy/stderr_copy; pipe_read is closed above on break
+        // guard Drop closes stdout_copy; pipe_read is closed above on break
     });
 
     ForegroundTeeGuard {
@@ -13148,9 +13177,10 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
-        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_toml_integer,
-        parse_version_core, resolve_device_auth_start, resolve_hand_instance, AuthCommands,
-        ChannelCommands, Cli, Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
+        daemon_log_path_for_home, detached_daemon_args, find_daemon_with_probe,
+        normalize_daemon_addr, normalize_release_tag, parse_toml_integer, parse_version_core,
+        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
+        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -13938,5 +13968,121 @@ input_schema = { type = "object" }
             "expected lowercase hex, got {hex:?}"
         );
         assert_eq!(hex, "0123456789abcdef0123456789abcdef");
+    }
+
+    // --- Daemon detection / launcher port logic (#3582) ---
+    //
+    // These exercise the `find_daemon_with_probe` core, which was extracted
+    // from `find_daemon_in_home` so the HTTP probe can be faked in unit
+    // tests instead of binding sockets or making real requests.
+
+    fn write_daemon_json(home: &Path, listen_addr: &str) {
+        let body = json!({
+            "pid": 4242u32,
+            "listen_addr": listen_addr,
+            "started_at": "1970-01-01T00:00:00Z",
+            "version": "0.0.0-test",
+            "platform": "test",
+        });
+        fs::write(home.join("daemon.json"), body.to_string()).expect("write daemon.json");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_rewrites_bind_all_to_loopback() {
+        // `0.0.0.0:4545` is the default bind-all address; on macOS, probing
+        // it directly can hang, so the launcher rewrites to 127.0.0.1.
+        assert_eq!(normalize_daemon_addr("0.0.0.0:4545"), "127.0.0.1:4545");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_leaves_explicit_loopback_alone() {
+        assert_eq!(normalize_daemon_addr("127.0.0.1:4545"), "127.0.0.1:4545");
+    }
+
+    #[test]
+    fn normalize_daemon_addr_leaves_other_hosts_alone() {
+        // A user who explicitly bound to a LAN IP should keep it.
+        assert_eq!(
+            normalize_daemon_addr("192.168.1.10:4545"),
+            "192.168.1.10:4545"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_when_no_daemon_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No daemon.json written. Probe must NOT be invoked.
+        let probe_called = std::cell::Cell::new(false);
+        let got = find_daemon_with_probe(tmp.path(), |_url| {
+            probe_called.set(true);
+            true
+        });
+        assert!(got.is_none());
+        assert!(
+            !probe_called.get(),
+            "probe must not run when daemon.json is absent — saves a network round-trip"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_on_unparseable_daemon_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("daemon.json"), "not valid json {{{").unwrap();
+        let got = find_daemon_with_probe(tmp.path(), |_url| true);
+        assert!(
+            got.is_none(),
+            "corrupt daemon.json must not be treated as a live daemon"
+        );
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_base_url_on_healthy_probe() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "127.0.0.1:4545");
+
+        let seen = std::cell::Cell::new(None);
+        let got = find_daemon_with_probe(tmp.path(), |url| {
+            seen.set(Some(url.to_string()));
+            true
+        });
+
+        // The probe receives the /api/health URL...
+        assert_eq!(
+            seen.into_inner().as_deref(),
+            Some("http://127.0.0.1:4545/api/health")
+        );
+        // ...and the caller gets back the *base* URL (no /api/health suffix).
+        assert_eq!(got.as_deref(), Some("http://127.0.0.1:4545"));
+    }
+
+    #[test]
+    fn find_daemon_with_probe_normalizes_bind_all_in_url() {
+        // Regression: ensure 0.0.0.0 in daemon.json is rewritten to 127.0.0.1
+        // BEFORE we hand the URL to the probe (and before we return it).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "0.0.0.0:4545");
+
+        let seen = std::cell::Cell::new(None);
+        let got = find_daemon_with_probe(tmp.path(), |url| {
+            seen.set(Some(url.to_string()));
+            true
+        });
+
+        assert_eq!(
+            seen.into_inner().as_deref(),
+            Some("http://127.0.0.1:4545/api/health"),
+            "probe must see normalized 127.0.0.1 URL, never 0.0.0.0"
+        );
+        assert_eq!(got.as_deref(), Some("http://127.0.0.1:4545"));
+    }
+
+    #[test]
+    fn find_daemon_with_probe_returns_none_on_failed_probe() {
+        // Stale daemon.json (process gone, port in use by something else, or
+        // returning 5xx) — probe returns false → caller gets None.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_daemon_json(tmp.path(), "127.0.0.1:4545");
+        let got = find_daemon_with_probe(tmp.path(), |_url| false);
+        assert!(got.is_none());
     }
 }

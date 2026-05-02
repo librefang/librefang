@@ -216,7 +216,7 @@ fn user_matches_loose(query: &str, recorded_uuid: &str) -> bool {
         ("to" = Option<String>, Query, description = "ISO-8601 upper bound (inclusive)"),
         ("limit" = Option<u32>, Query, description = "Max rows (default 200, hard cap 5000)"),
     ),
-    responses((status = 200, description = "Filtered audit log entries", body = serde_json::Value))
+    responses((status = 200, description = "Filtered audit log entries", body = crate::types::JsonObject))
 )]
 pub async fn audit_query(
     State(state): State<Arc<AppState>>,
@@ -270,9 +270,11 @@ pub async fn audit_query(
         })
         .collect();
 
+    let total = items.len();
     Json(serde_json::json!({
-        "entries": items,
-        "count": items.len(),
+        "items": items,
+        "total": total,
+        "offset": 0,
         "limit": limit,
     }))
     .into_response()

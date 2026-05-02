@@ -215,6 +215,7 @@ impl LlmDriver for CodexCliDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 

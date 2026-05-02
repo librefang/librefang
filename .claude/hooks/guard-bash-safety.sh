@@ -21,7 +21,7 @@ tool="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).g
 cmd="$(printf '%s' "$input" | py 'import sys,json; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))')"
 [ -n "$cmd" ] || exit 0
 
-rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch,cargo-add-remove-upgrade,gh-pr-merge"
+rules="force-push-main,no-verify,broad-git-add,sensitive-file-add,claude-attribution,rm-rf-dangerous,librefang-daemon-launch,cargo-add-remove-upgrade"
 
 msg="$(printf '%s' "$cmd" | python3 "$LIB" --rules "$rules" 2>/dev/null || true)"
 

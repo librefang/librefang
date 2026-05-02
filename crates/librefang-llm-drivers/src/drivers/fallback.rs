@@ -235,6 +235,7 @@ impl LlmDriver for FallbackDriver {
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "No drivers configured in fallback chain".to_string(),
+            code: None,
         }))
     }
 
@@ -291,6 +292,7 @@ impl LlmDriver for FallbackDriver {
         Err(last_error.unwrap_or_else(|| LlmError::Api {
             status: 0,
             message: "No drivers configured in fallback chain".to_string(),
+            code: None,
         }))
     }
 }
@@ -309,6 +311,7 @@ mod tests {
             Err(LlmError::Api {
                 status: 500,
                 message: "Internal error".to_string(),
+                code: None,
             })
         }
     }
@@ -405,7 +408,7 @@ mod tests {
         CompletionRequest {
             model: "test".to_string(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 100,
             temperature: 0.0,
             system: None,
@@ -551,6 +554,7 @@ mod tests {
                     Err(LlmError::Api {
                         status: 503,
                         message: "temporary".to_string(),
+                        code: None,
                     })
                 } else {
                     Ok(CompletionResponse {

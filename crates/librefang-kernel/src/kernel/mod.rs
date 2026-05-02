@@ -842,7 +842,7 @@ pub struct LibreFangKernel {
     /// URLs but old default model). Read-locked in message hot paths so multiple
     /// requests proceed in parallel but block briefly during a reload.
     /// Uses `tokio::sync::RwLock` so guards are `Send` and can be held across `.await`.
-    config_reload_lock: tokio::sync::RwLock<()>,
+    pub(crate) config_reload_lock: tokio::sync::RwLock<()>,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -2014,6 +2014,18 @@ impl LibreFangKernel {
     #[inline]
     pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
         self.peer_registry.get()
+    }
+
+    /// Test-only: install a `PeerRegistry` without booting the OFP node.
+    /// Used by route-handler regression tests for #3644 — never call from
+    /// production code; the OFP startup path owns this initialization
+    /// (see `start_peer_node` -> `self.peer_registry.set(...)`).
+    #[doc(hidden)]
+    pub fn install_peer_registry_for_test(
+        &self,
+        registry: librefang_wire::PeerRegistry,
+    ) -> Result<(), librefang_wire::PeerRegistry> {
+        self.peer_registry.set(registry)
     }
 
     /// Hook registry.
@@ -5564,11 +5576,18 @@ system_prompt = "You are a helpful assistant."
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
     ) -> KernelResult<AgentLoopResult> {
-        // Acquire a shared read lock on the config reload barrier.
-        // This is non-blocking under normal operation (many readers proceed in
-        // parallel) but will briefly wait if a config hot-reload is in progress,
-        // ensuring this request sees a fully-consistent configuration snapshot.
-        let _config_guard = self.config_reload_lock.read().await;
+        // Briefly acquire the config reload barrier to ensure we observe a
+        // fully-applied hot-reload (config swap + side effects are atomic
+        // under the writer's guard). We drop the guard immediately after —
+        // `self.config` is an `ArcSwap`, so any subsequent `.load()` already
+        // returns a consistent snapshot. Holding the read guard across the
+        // entire LLM call (multi-minute streams) was a bug (#3564):
+        // `tokio::sync::RwLock` is write-preferring, so a single
+        // `/api/config/reload` froze every new request behind the queued
+        // writer until the slowest in-flight stream completed.
+        {
+            let _config_guard = self.config_reload_lock.read().await;
+        }
 
         let agent_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
@@ -7458,11 +7477,14 @@ system_prompt = "You are a helpful assistant."
                 &entry.id.to_string(),
             )
             .await
-            .map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "WASM execution failed: {e}"
-                )))
-            })?;
+            // #3711 (2-of-21): propagate the typed `SandboxError` instead
+            // of collapsing it to `LibreFangError::Internal(String)`.
+            // Display output ("WASM execution failed: …") is preserved
+            // byte-for-byte by the format on `KernelError::WasmSandbox`,
+            // so existing log/UI strings remain identical while upstream
+            // callers gain the ability to match on typed variants
+            // (e.g., `FuelExhausted` → CPU-budget quota error).
+            .map_err(KernelError::from)?;
 
         // Extract response text from WASM output JSON
         let response = result
@@ -7647,7 +7669,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: String::new(), // use driver default
             messages: std::sync::Arc::new(vec![Message::user(message.to_string())]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 20,
             temperature: 0.0,
             system: Some(classify_prompt),
@@ -8451,7 +8473,7 @@ system_prompt = "You are a helpful assistant."
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     message,
                 )]),
-                tools: tools.clone(),
+                tools: std::sync::Arc::new(tools.clone()),
                 max_tokens: manifest.model.max_tokens,
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
@@ -8971,7 +8993,13 @@ system_prompt = "You are a helpful assistant."
 
     /// Session-aware variant of [`Self::inject_message`]; `None` fans out to all live sessions.
     ///
-    /// Returns `Ok(true)` if at least one channel accepted, `Ok(false)` if no loop was running.
+    /// Returns:
+    /// - `Ok(true)`  — at least one live session accepted the message.
+    /// - `Ok(false)` — no live loop is running for this agent (every target
+    ///   was closed, or there were zero targets).
+    /// - `Err(KernelError::Backpressure)` — every live target's bounded
+    ///   channel was full; the caller should retry. The API layer maps this
+    ///   to HTTP 503 (#3575).
     pub async fn inject_message_for_session(
         &self,
         agent_id: AgentId,
@@ -9010,6 +9038,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         let mut delivered = false;
+        let mut full_keys: Vec<(AgentId, SessionId)> = Vec::new();
         let mut closed_keys: Vec<(AgentId, SessionId)> = Vec::new();
         for (key, tx) in targets {
             match tx.try_send(AgentLoopSignal::Message {
@@ -9027,8 +9056,9 @@ system_prompt = "You are a helpful assistant."
                     warn!(
                         agent_id = %agent_id,
                         session_id = %key.1,
-                        "Injection channel full — message dropped"
+                        "Injection channel full — applying backpressure"
                     );
+                    full_keys.push(key);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     // Receiver dropped — loop is no longer running.
@@ -9036,9 +9066,22 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         }
-        for key in closed_keys {
-            self.injection_senders.remove(&key);
+        for key in &closed_keys {
+            self.injection_senders.remove(key);
         }
+        // If at least one live session accepted the message, the inject is a
+        // success from the caller's POV. If every live (non-closed) target
+        // was full, surface backpressure so the API can return 503 instead
+        // of pretending the message was queued.
+        if !delivered && !full_keys.is_empty() {
+            return Err(KernelError::Backpressure(format!(
+                "all {} injection channel(s) for agent {} are full; retry shortly",
+                full_keys.len(),
+                agent_id
+            )));
+        }
+        // No live loop at all (every target was closed, or zero targets after
+        // we filtered) — preserve the historical Ok(false) signal.
         Ok(delivered)
     }
 
@@ -9468,6 +9511,7 @@ system_prompt = "You are a helpful assistant."
             messages_generation: 0,
             last_repaired_generation: None,
         };
+        // Sync save_session: caller `import_session` is a sync fn, no `.await` allowed.
         self.memory
             .save_session(&new_session)
             .map_err(KernelError::LibreFang)?;
@@ -9581,6 +9625,7 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Persist if anything was injected.
+        // Sync save_session: caller `inject_reset_prompt` is a sync fn, no `.await` allowed.
         if !session.messages.is_empty() {
             if let Err(e) = self.memory.save_session(session) {
                 // Persist failed — roll back the Phase 4 BeforeUser injections
@@ -10585,7 +10630,8 @@ system_prompt = "You are a helpful assistant."
         let mut updated_session = session;
         updated_session.set_messages(repaired_messages);
         self.memory
-            .save_session(&updated_session)
+            .save_session_async(&updated_session)
+            .await
             .map_err(KernelError::LibreFang)?;
 
         // Build result message with audit summary
@@ -10786,7 +10832,6 @@ system_prompt = "You are a helpful assistant."
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         let cfg = self.config.load();
-        use librefang_hands::HandError;
 
         let def = self
             .hand_registry
@@ -10836,12 +10881,13 @@ system_prompt = "You are a helpful assistant."
                 instance_id,
                 timestamps,
             )
-            .map_err(|e| match e {
-                HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
-                    format!("Hand already active: {id}"),
-                )),
-                other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
-            })?;
+            // #3711: propagate the typed `HandError` instead of collapsing
+            // it to `LibreFangError::Internal(String)`. Display output is
+            // preserved by `#[error(transparent)]` on `KernelError::Hand`,
+            // so existing log/UI strings remain identical while upstream
+            // callers gain the ability to match on the typed variant
+            // (e.g., `AlreadyActive` → 409 Conflict).
+            .map_err(KernelError::from)?;
 
         // Pre-compute shared overrides from hand definition. The system-prompt
         // tail is materialized later (after per-role manifest cloning) via
@@ -11253,7 +11299,9 @@ system_prompt = "You are a helpful assistant."
                 agent_ids_map.clone(),
                 coordinator_role.clone(),
             )
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError; Display preserved by
+            // `#[error(transparent)]` on `KernelError::Hand`.
+            .map_err(KernelError::from)?;
 
         let display_manifest_path = last_manifest_path
             .as_deref()
@@ -11283,7 +11331,8 @@ system_prompt = "You are a helpful assistant."
         let instance = self
             .hand_registry
             .deactivate(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
 
         // Collect every hand-agent id touched by this instance so we can both
         // kill the live runtime and scrub the persisted SQLite rows below.
@@ -11375,7 +11424,8 @@ system_prompt = "You are a helpful assistant."
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         self.hand_registry
             .persist_state(&state_path)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)
     }
 
     /// Per-instance serialization lock for runtime-override mutations.
@@ -11521,7 +11571,8 @@ system_prompt = "You are a helpful assistant."
         let merged = self
             .hand_registry
             .merge_agent_runtime_override(instance.instance_id, &role, override_config)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         if let Err(err) = self.persist_hand_state_result() {
             let _ = self.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
@@ -11604,7 +11655,8 @@ system_prompt = "You are a helpful assistant."
         // returns Ok(None) — idempotent.
         self.hand_registry
             .clear_agent_runtime_override(instance.instance_id, &role)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
 
         // Step 2: persist before touching live state. If the disk write
         // fails, restore the in-memory entry and bail — the operator
@@ -11696,7 +11748,8 @@ system_prompt = "You are a helpful assistant."
         }
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         self.persist_hand_state();
         Ok(())
     }
@@ -11705,7 +11758,8 @@ system_prompt = "You are a helpful assistant."
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         // Resume the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {
@@ -12307,7 +12361,7 @@ system_prompt = "You are a helpful assistant."
                 messages: std::sync::Arc::new(vec![librefang_types::message::Message::user(
                     prompt,
                 )]),
-                tools: vec![],
+                tools: std::sync::Arc::new(vec![]),
                 max_tokens: 32,
                 temperature: 0.2,
                 system: Some(
@@ -12392,7 +12446,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: model.to_string(),
             messages: std::sync::Arc::new(vec![Message::user(prompt.to_string())]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 10,
             temperature: 0.0,
             system: None,
@@ -15966,7 +16020,7 @@ system_prompt = "You are a helpful assistant."
         let request = CompletionRequest {
             model: model_for_review,
             messages: std::sync::Arc::new(vec![Message::user(user_msg)]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 2000,
             temperature: 0.0,
             system: Some(review_prompt.to_string()),

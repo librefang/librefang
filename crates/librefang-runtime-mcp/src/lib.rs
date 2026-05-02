@@ -1286,14 +1286,31 @@ impl McpConnection {
         // Try loading a cached OAuth token and inject as Authorization header.
         let mut used_oauth_token = false;
         if let Some(provider) = oauth_provider {
-            if let Some(token) = provider.load_token(url).await {
-                debug!(url = %url, "Injecting cached OAuth token for MCP connection");
-                if let (Ok(hn), Ok(hv)) = (
-                    HeaderName::from_bytes(b"authorization"),
-                    HeaderValue::from_str(&format!("Bearer {token}")),
-                ) {
-                    custom_headers.insert(hn, hv);
-                    used_oauth_token = true;
+            // #3750: distinguish "no token stored" (Ok(None)) from "vault
+            // locked / I/O / crypto failure" (Err). On Err, log the
+            // structured cause; the connect attempt still proceeds without
+            // an Authorization header so the server can surface a 401 and
+            // the dashboard can drive re-auth (or vault unlock).
+            match provider.load_token(url).await {
+                Ok(Some(token)) => {
+                    debug!(url = %url, "Injecting cached OAuth token for MCP connection");
+                    if let (Ok(hn), Ok(hv)) = (
+                        HeaderName::from_bytes(b"authorization"),
+                        HeaderValue::from_str(&format!("Bearer {token}")),
+                    ) {
+                        custom_headers.insert(hn, hv);
+                        used_oauth_token = true;
+                    }
+                }
+                Ok(None) => {
+                    debug!(url = %url, "No cached OAuth token for MCP server");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        url = %url,
+                        error = %e,
+                        "OAuth provider load_token failed; proceeding without bearer token"
+                    );
                 }
             }
         }

@@ -1212,6 +1212,53 @@ admin_role = "admin"
     }
 
     #[test]
+    fn test_known_fields_cover_real_kernelconfig_fields() {
+        // Regression test for strict_config rejecting valid fields whose names
+        // were never added to the hand-maintained allowlists.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            max_history_messages = 20
+
+            [auto_dream]
+            enabled = false
+
+            [memory]
+            consolidation_interval_hours = 12
+            fts_only = true
+            soft_delete_retention_days = 14
+
+            [memory.decay]
+            decay_interval_hours = 24
+
+            [memory.chunking]
+            enabled = true
+
+            [proactive_memory]
+            extraction_threshold = 0.7
+            duplicate_threshold = 0.5
+            max_memories_per_agent = 500
+            extract_categories = ["preference"]
+
+            [triggers]
+            cooldown_secs = 10
+        "#,
+        )
+        .unwrap();
+
+        let unknown_top = KernelConfig::detect_unknown_fields(&raw);
+        assert!(
+            unknown_top.is_empty(),
+            "real top-level fields rejected: {unknown_top:?}"
+        );
+
+        let unknown_nested = KernelConfig::detect_unknown_nested_fields(&raw);
+        assert!(
+            unknown_nested.is_empty(),
+            "real nested fields rejected: {unknown_nested:?}"
+        );
+    }
+
+    #[test]
     fn test_validate_invalid_port_string() {
         let config = KernelConfig {
             api_listen: "0.0.0.0:notaport".to_string(),

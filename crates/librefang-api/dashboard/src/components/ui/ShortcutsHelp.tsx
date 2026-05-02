@@ -11,12 +11,12 @@ interface ShortcutsHelpProps {
   onClose: () => void;
 }
 
-const GENERAL_SHORTCUTS: Array<{ keys: string[]; label: string }> = [
-  { keys: ["⌘", "K"], label: "Open command palette" },
-  { keys: ["/"], label: "Focus search on current page" },
-  { keys: ["n"], label: "Create new (agent / workflow / plugin, page-aware)" },
-  { keys: ["?"], label: "Show this cheat sheet" },
-  { keys: ["Esc"], label: "Close dialog / modal" },
+const GENERAL_SHORTCUTS: Array<{ keys: string[]; labelKey: string }> = [
+  { keys: ["⌘", "K"], labelKey: "cmd_k" },
+  { keys: ["/"], labelKey: "focus_search" },
+  { keys: ["n"], labelKey: "create_new" },
+  { keys: ["?"], labelKey: "show_help" },
+  { keys: ["Esc"], labelKey: "close_dialog" },
 ];
 
 const NAV_ENTRIES = Object.entries(G_NAV_SHORTCUTS);
@@ -70,7 +70,7 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
             <div className="h-8 w-8 rounded-xl bg-primary/10 flex items-center justify-center text-primary">
               <Keyboard className="h-4 w-4" />
             </div>
-            <h2 id="shortcuts-help-title" className="text-sm font-black tracking-tight">Keyboard shortcuts</h2>
+            <h2 id="shortcuts-help-title" className="text-sm font-black tracking-tight">{t("shortcuts_help.title")}</h2>
           </div>
           <button
             onClick={onClose}
@@ -83,11 +83,11 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
 
         <div className="max-h-[70vh] overflow-y-auto p-5 scrollbar-thin">
           <section className="mb-6">
-            <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60 mb-3">General</h3>
+            <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60 mb-3">{t("shortcuts_help.general_heading")}</h3>
             <div className="space-y-2">
               {GENERAL_SHORTCUTS.map((s) => (
-                <div key={s.label} className="flex items-center justify-between py-1">
-                  <span className="text-xs text-text-dim">{s.label}</span>
+                <div key={s.labelKey} className="flex items-center justify-between py-1">
+                  <span className="text-xs text-text-dim">{t(`shortcuts_help.general.${s.labelKey}`)}</span>
                   <div className="flex items-center gap-1">
                     {s.keys.map((k, i) => (
                       <kbd key={i} className={KBD_CLASS}>
@@ -102,12 +102,12 @@ export function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
 
           <section>
             <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/60 mb-3">
-              Navigate (press <kbd className="inline-flex h-5 items-center rounded border border-border-subtle bg-main px-1 font-mono text-[9px]">g</kbd> then…)
+              {t("shortcuts_help.nav_heading_prefix")} <kbd className="inline-flex h-5 items-center rounded border border-border-subtle bg-main px-1 font-mono text-[9px]">g</kbd> {t("shortcuts_help.nav_heading_suffix")}
             </h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
-              {NAV_ENTRIES.map(([key, { label }]) => (
+              {NAV_ENTRIES.map(([key, { labelKey }]) => (
                 <div key={key} className="flex items-center justify-between py-1">
-                  <span className="text-xs text-text-dim">{label}</span>
+                  <span className="text-xs text-text-dim">{t(`shortcuts_help.nav.${labelKey}`)}</span>
                   <div className="flex items-center gap-1">
                     <kbd className={KBD_CLASS}>
                       g
