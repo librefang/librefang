@@ -230,12 +230,20 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 /// GET /api/skills — List installed skills.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents` / `/api/peers` / `/api/goals` (#3842). Skills
+/// are loaded from the kernel registry into a single in-memory list, so
+/// `offset=0` and `limit=None` always. The list is not paginated server-side.
+/// The bespoke `categories` sibling is preserved for the dashboard's
+/// sibling-tab UI — it intentionally reflects all skills, not just the
+/// `?category=` filtered subset.
 #[utoipa::path(
     get,
     path = "/api/skills",
     tag = "skills",
     responses(
-        (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
+        (status = 200, description = "List installed skills", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_skills(
@@ -310,9 +318,16 @@ pub async fn list_skills(
         .collect();
 
     let categories_vec: Vec<String> = categories.into_iter().collect();
+    let total = skills.len();
+    // Canonical PaginatedResponse envelope (#3842) with `categories` kept as
+    // a sibling field for the dashboard's category tabs. We hand-build the
+    // JSON so we can flatten the envelope and add the extra without a new
+    // bespoke struct.
     Json(serde_json::json!({
-        "skills": skills,
-        "total": skills.len(),
+        "items": skills,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "categories": categories_vec,
     }))
 }
@@ -1745,6 +1760,10 @@ fn server_platform() -> &'static str {
 }
 
 /// GET /api/hands — List all hand definitions (marketplace).
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape (#3842). Hand definitions come from the kernel registry as a single
+/// list — `offset=0`, `limit=None`.
 #[utoipa::path(
     get,
     path = "/api/hands",
@@ -1833,10 +1852,19 @@ pub async fn list_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
+    let total = hands.len();
+    Json(crate::types::PaginatedResponse {
+        items: hands,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/active — List active hand instances.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape (#3842). Active instances are returned in a single page.
 #[utoipa::path(
     get,
     path = "/api/hands/active",
@@ -1898,7 +1926,13 @@ pub async fn list_active_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "instances": items, "total": items.len() }))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.

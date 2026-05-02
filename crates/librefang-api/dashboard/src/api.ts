@@ -165,9 +165,15 @@ export interface SkillItem {
 }
 
 export interface SkillsResponse {
-  skills?: SkillItem[];
+  // Canonical PaginatedResponse envelope (#3842).
+  items?: SkillItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   categories?: string[];
+  // Legacy `skills` field — kept for transition; remove once all callers
+  // upgrade.
+  skills?: SkillItem[];
 }
 
 // Skill evolution types
@@ -1608,7 +1614,9 @@ export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
-  return data.skills ?? [];
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `skills`
+  // during the transition window.
+  return data.items ?? data.skills ?? [];
 }
 
 export async function listTools(): Promise<ToolDefinition[]> {
@@ -2690,8 +2698,13 @@ export async function postCommsTask(payload: {
 }
 
 export async function listHands(): Promise<HandDefinitionItem[]> {
-  const data = await get<{ hands?: HandDefinitionItem[]; total?: number }>("/api/hands");
-  return data.hands ?? [];
+  const data = await get<{
+    items?: HandDefinitionItem[];
+    hands?: HandDefinitionItem[];
+    total?: number;
+  }>("/api/hands");
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `hands`.
+  return data.items ?? data.hands ?? [];
 }
 
 export async function getHandManifestToml(handId: string): Promise<string> {
@@ -2703,8 +2716,13 @@ export async function getRawConfigToml(): Promise<string> {
 }
 
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
-  const data = await get<{ instances?: HandInstanceItem[]; total?: number }>("/api/hands/active");
-  return data.instances ?? [];
+  const data = await get<{
+    items?: HandInstanceItem[];
+    instances?: HandInstanceItem[];
+    total?: number;
+  }>("/api/hands/active");
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `instances`.
+  return data.items ?? data.instances ?? [];
 }
 
 export async function activateHand(
