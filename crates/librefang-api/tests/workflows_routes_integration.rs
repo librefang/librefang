@@ -128,11 +128,14 @@ async fn workflows_list_starts_empty() {
     let h = boot().await;
     let (status, body) = get(&h, "/api/workflows").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    let arr = body["workflows"].as_array().expect("workflows array");
+    // #3842: canonical PaginatedResponse envelope.
+    let arr = body["items"].as_array().expect("items array");
     assert!(
         arr.is_empty(),
         "fresh kernel must have no workflows: {body:?}"
     );
+    assert_eq!(body["total"].as_u64().unwrap(), 0);
+    assert_eq!(body["offset"].as_u64().unwrap(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -188,8 +191,10 @@ async fn workflow_create_then_list_then_get_round_trips() {
     // list now contains it
     let (status, body) = get(&h, "/api/workflows").await;
     assert_eq!(status, StatusCode::OK);
-    let arr = body["workflows"].as_array().expect("array");
+    // #3842: canonical PaginatedResponse envelope.
+    let arr = body["items"].as_array().expect("array");
     assert_eq!(arr.len(), 1);
+    assert_eq!(body["total"].as_u64().unwrap(), 1);
     assert_eq!(arr[0]["id"], wf_id);
     assert_eq!(arr[0]["name"], "demo");
     assert_eq!(arr[0]["steps"], 1);
