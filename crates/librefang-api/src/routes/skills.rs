@@ -215,6 +215,7 @@ use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
+use crate::mcp_oauth::KernelOAuthProvider;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -2509,7 +2510,7 @@ pub async fn uninstall_hand(
     let home_dir = state.kernel.home_dir().to_path_buf();
     match state.kernel.hands().uninstall_hand(&home_dir, &hand_id) {
         Ok(()) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.invalidate_hand_route_cache();
             state.kernel.persist_hand_state();
             (
                 StatusCode::OK,
@@ -2560,7 +2561,7 @@ pub async fn install_hand(
         skill_content,
     ) {
         Ok(def) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.invalidate_hand_route_cache();
             // Return the full canonical `HandDefinition` so dashboard /
             // SDK callers can `setQueryData` on the hands list directly
             // instead of doing a follow-up GET. The previous {id, name,
@@ -4153,9 +4154,7 @@ pub async fn delete_mcp_server(
 
     // Clean up OAuth vault tokens, auth state, and live connections
     if let Some(ref url) = server_url {
-        let provider = librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::new(
-            state.kernel.home_dir().to_path_buf(),
-        );
+        let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
         for field in &[
             "access_token",
             "refresh_token",
@@ -4166,9 +4165,7 @@ pub async fn delete_mcp_server(
             "pkce_state",
             "redirect_uri",
         ] {
-            let _ = provider.vault_remove(
-                &librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::vault_key(url, field),
-            );
+            let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(url, field));
         }
     }
     state

@@ -10,7 +10,7 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use librefang_kernel::auth::UserRole;
+pub use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::i18n;
 use std::collections::HashMap;

@@ -924,8 +924,6 @@ pub async fn save_workflow_as_template(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    use librefang_kernel::workflow::WorkflowEngine;
-
     let workflow_id = WorkflowId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
@@ -946,7 +944,7 @@ pub async fn save_workflow_as_template(
         }
     };
 
-    let template = WorkflowEngine::workflow_to_template(&workflow);
+    let template = state.kernel.workflow_to_template(&workflow);
 
     // Persist template to TOML file under the active kernel home directory.
     let templates_dir = state.kernel.home_dir().join("workflows").join("templates");
