@@ -10,7 +10,11 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use librefang_kernel::auth::UserRole;
+// Re-export so other modules in this crate can refer to the auth role type
+// via `crate::middleware::UserRole` instead of reaching into
+// `librefang_kernel::auth` directly. Keeps the kernel↔api touchpoint for
+// `UserRole` localized to this module (see #3744).
+pub use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::i18n;
 use std::collections::HashMap;
