@@ -127,8 +127,10 @@ async fn channels_list_returns_full_registry_with_zero_configured() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_list_flips_configured_flag_when_seeded() {
-    let mut channels = ChannelsConfig::default();
-    channels.telegram = OneOrMany(vec![TelegramConfig::default()]);
+    let channels = ChannelsConfig {
+        telegram: OneOrMany(vec![TelegramConfig::default()]),
+        ..ChannelsConfig::default()
+    };
     let h = boot_with_channels(channels).await;
 
     let (status, body) = json_request(&h, Method::GET, "/api/channels", None).await;
