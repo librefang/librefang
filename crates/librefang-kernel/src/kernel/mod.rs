@@ -7057,11 +7057,14 @@ system_prompt = "You are a helpful assistant."
                 &entry.id.to_string(),
             )
             .await
-            .map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "WASM execution failed: {e}"
-                )))
-            })?;
+            // #3711 (2-of-21): propagate the typed `SandboxError` instead
+            // of collapsing it to `LibreFangError::Internal(String)`.
+            // Display output ("WASM execution failed: …") is preserved
+            // byte-for-byte by the format on `KernelError::WasmSandbox`,
+            // so existing log/UI strings remain identical while upstream
+            // callers gain the ability to match on typed variants
+            // (e.g., `FuelExhausted` → CPU-budget quota error).
+            .map_err(KernelError::from)?;
 
         // Extract response text from WASM output JSON
         let response = result

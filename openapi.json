@@ -3924,6 +3924,7 @@
           "channels"
         ],
         "summary": "GET /api/channels — List all 40 channel adapters with status and field metadata.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).\nThe full channel registry is materialized in-memory, so this is a single\npage — `offset=0`, `limit=None`. The bespoke `configured_count` sibling\nis preserved for the dashboard's \"X of Y configured\" sub-line.",
         "operationId": "list_channels",
         "responses": {
           "200": {
@@ -3931,8 +3932,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -8065,6 +8065,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -8072,8 +8073,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
