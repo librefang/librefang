@@ -1,0 +1,217 @@
+name: Close Umbrella Issue on Last Referencing PR
+
+# When a PR merges that says "Refs #N" / "Part of #N" / "Tracking #N" in its
+# body, check whether N looks like an umbrella tracking issue and whether any
+# *other* open PR still references it. If none do, close N.
+#
+# Why this exists: umbrella issues like #3571 / #3853 are tracked across many
+# slice PRs. None of those PRs use `Closes #N` (because they don't individually
+# resolve the umbrella), so the umbrella never auto-closes. Without this, the
+# last slice's author has to remember to swap `Refs` -> `Closes`, or someone
+# closes the umbrella manually. Both fail in practice.
+#
+# Umbrella auto-detection (no manual labelling required):
+#  - The issue has been cross-referenced by >= UMBRELLA_MIN_REFS distinct PRs
+#    (default 3). A normal "fixed by one PR" issue can never reach this; an
+#    umbrella necessarily does.
+#
+# Safety:
+#  - Defaults to DRY_RUN: posts a comment ('🤖 last referencing PR merged')
+#    and adds `auto-close-candidate`, but does NOT close. Flip live mode via
+#    repo variable UMBRELLA_AUTOCLOSE_LIVE=true once dry-run output is trusted.
+#  - Skips issues that have ever been reopened (human override).
+#  - Skips if the umbrella body itself has unchecked task-list items — that's
+#    a strong signal there's still planned work even if no open PR exists yet.
+#  - Idempotent via hidden marker in the bot comment.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  maybe-close-umbrella:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          LIVE_VAR: ${{ vars.UMBRELLA_AUTOCLOSE_LIVE || '' }}
+        with:
+          script: |
+            const live = process.env.LIVE_VAR.toLowerCase() === 'true';
+            const UMBRELLA_MIN_REFS = 3;
+            const CANDIDATE_LABEL = 'auto-close-candidate';
+            const MARKER = '<!-- umbrella-autoclose:flagged -->';
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            core.info(`Mode: ${live ? 'LIVE (will close)' : 'DRY-RUN (comment + label only)'}`);
+            core.info(`Triggering PR: #${pr.number} "${pr.title}"`);
+
+            // Match Refs / Ref / Part of / Tracking / See — the non-closing
+            // keywords slice PRs use to point at an umbrella. Negative
+            // look-behind for "not"/"n't" to skip prose negations, mirroring
+            // auto-close-resolved-issues.yml.
+            const refRegex =
+              /(?<!\bnot )(?<!\bn't )\b(?:refs?|part of|tracking|see)\s+#(\d+)/gi;
+            const refs = new Set();
+            for (const m of body.matchAll(refRegex)) {
+              refs.add(parseInt(m[1], 10));
+            }
+            if (refs.size === 0) {
+              core.info('No Refs/Part-of/Tracking references in PR body — nothing to do.');
+              return;
+            }
+            core.info(`PR references: ${[...refs].map((n) => '#' + n).join(', ')}`);
+
+            const closed = [];
+            const flagged = [];
+            const skipped = [];
+
+            for (const num of refs) {
+              let issue;
+              try {
+                const r = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                });
+                issue = r.data;
+              } catch (e) {
+                if (e.status === 404) { skipped.push(`#${num} (not found)`); continue; }
+                throw e;
+              }
+
+              if (issue.pull_request) { skipped.push(`#${num} (is PR)`); continue; }
+              if (issue.state !== 'open') { skipped.push(`#${num} (already closed)`); continue; }
+
+              // Human override: if it was ever reopened, leave it alone.
+              const events = await github.paginate(
+                github.rest.issues.listEvents,
+                { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+              );
+              if (events.some((ev) => ev.event === 'reopened')) {
+                skipped.push(`#${num} (was reopened — human override)`);
+                continue;
+              }
+
+              // Unchecked task list items in body = there's still planned work
+              // even if no open PR has been filed yet.
+              if (/^\s*[-*]\s*\[ \]/m.test(issue.body || '')) {
+                skipped.push(`#${num} (has unchecked task-list items)`);
+                continue;
+              }
+
+              // Use the issue timeline to (a) auto-detect umbrella by counting
+              // distinct PR cross-references, and (b) check no other open PR still
+              // references it. GitHub code-search on PR bodies is unreliable;
+              // every PR that mentions the issue produces a `cross-referenced`
+              // event with the source PR.
+              const timeline = await github.paginate(
+                github.rest.issues.listEventsForTimeline,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  per_page: 100,
+                  mediaType: { previews: ['mockingbird'] },
+                }
+              );
+              const allRefPrs = new Set();
+              const otherOpenPrs = [];
+              for (const ev of timeline) {
+                if (ev.event !== 'cross-referenced') continue;
+                const src = ev.source && ev.source.issue;
+                if (!src || !src.pull_request) continue;
+                allRefPrs.add(src.number);
+                if (src.number === pr.number) continue;
+                if (src.state === 'open') otherOpenPrs.push(src.number);
+              }
+
+              if (allRefPrs.size < UMBRELLA_MIN_REFS) {
+                skipped.push(`#${num} (only ${allRefPrs.size} PR refs; not umbrella-shaped)`);
+                continue;
+              }
+
+              if (otherOpenPrs.length > 0) {
+                skipped.push(`#${num} (still referenced by open PRs: ${otherOpenPrs.map((n) => '#' + n).join(', ')})`);
+                continue;
+              }
+
+              // Idempotency: don't re-flag in dry-run.
+              if (!live) {
+                const comments = await github.paginate(
+                  github.rest.issues.listComments,
+                  { owner: context.repo.owner, repo: context.repo.repo, issue_number: num, per_page: 100 }
+                );
+                if (comments.some((c) => typeof c.body === 'string' && c.body.includes(MARKER))) {
+                  skipped.push(`#${num} (already flagged)`);
+                  continue;
+                }
+              }
+
+              if (live) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  body:
+                    `Auto-closing: PR #${pr.number} merged and was the last open PR ` +
+                    `referencing this umbrella issue. Reopen if more work is planned.`,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  state: 'closed',
+                  state_reason: 'completed',
+                });
+                closed.push(`#${num}`);
+              } else {
+                // Make sure the candidate label exists.
+                try {
+                  await github.rest.issues.createLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    name: CANDIDATE_LABEL,
+                    color: 'fbca04',
+                    description: 'Bot thinks this is resolved; awaiting confirmation',
+                  });
+                } catch (e) {
+                  if (e.status !== 422) throw e;
+                }
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  body:
+                    `${MARKER}\n` +
+                    `🤖 PR #${pr.number} just merged and appears to be the last open PR ` +
+                    `referencing this umbrella issue.\n\n` +
+                    `Dry-run flag from the umbrella-autoclose workflow. Close manually ` +
+                    `if correct, or reopen / add an unchecked task-list item if more work ` +
+                    `is planned. Delete this comment to let the bot re-flag later.`,
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: num,
+                  labels: [CANDIDATE_LABEL],
+                });
+                flagged.push(`#${num}`);
+              }
+            }
+
+            const summary = core.summary
+              .addHeading('Umbrella autoclose')
+              .addRaw(`Mode: **${live ? 'LIVE' : 'DRY-RUN'}**, triggered by PR #${pr.number}.`)
+              .addBreak();
+            if (closed.length) summary.addHeading('Closed', 3).addList(closed);
+            if (flagged.length) summary.addHeading('Flagged (dry-run)', 3).addList(flagged);
+            if (skipped.length) summary.addHeading('Skipped', 3).addList(skipped);
+            summary.write();
