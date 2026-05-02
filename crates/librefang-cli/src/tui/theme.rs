@@ -144,3 +144,111 @@ pub fn channel_off() -> Style {
 pub const SPINNER_FRAMES: &[&str] = &[
     "\u{25dc}", "\u{25dd}", "\u{25de}", "\u{25df}", // ◜ ◝ ◞ ◟ rotating arc
 ];
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+//
+// `state_badge` is the single funnel every TUI screen uses to map an agent's
+// free-form state string into a (badge_text, style) pair. The classifier is a
+// substring scan with **fixed branch order**, so priority matters: "Created"
+// must hit NEW before it could ever be misread, and unknown / empty inputs
+// must fall through to the dim placeholder rather than panic. Regression net
+// for issue #3582.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_state_matches_run_branch() {
+        let (text, _) = state_badge("Running");
+        assert_eq!(text, "\u{25cf} RUN");
+    }
+
+    #[test]
+    fn running_lowercase_also_matches() {
+        // Classifier lowercases input, so casing must not matter.
+        let (text, _) = state_badge("RUNNING");
+        assert_eq!(text, "\u{25cf} RUN");
+    }
+
+    #[test]
+    fn created_idle_and_new_all_map_to_new_branch() {
+        for s in ["Created", "Idle", "New", "idle", "CREATED"] {
+            let (text, _) = state_badge(s);
+            assert_eq!(text, "\u{25cb} NEW", "state {s:?} should map to NEW");
+        }
+    }
+
+    #[test]
+    fn suspended_and_paused_map_to_sus_branch() {
+        for s in ["Suspended", "Paused", "pausing", "SUS"] {
+            let (text, _) = state_badge(s);
+            assert_eq!(text, "\u{25d4} SUS", "state {s:?} should map to SUS");
+        }
+    }
+
+    #[test]
+    fn terminated_stopped_ended_map_to_end_branch() {
+        for s in ["Terminated", "Stopped", "Ended", "stop"] {
+            let (text, _) = state_badge(s);
+            assert_eq!(text, "\u{25cb} END", "state {s:?} should map to END");
+        }
+    }
+
+    #[test]
+    fn crashed_errored_failed_map_to_err_branch() {
+        for s in ["Crashed", "Errored", "Failed", "error: boom"] {
+            let (text, _) = state_badge(s);
+            assert_eq!(text, "\u{25cf} ERR", "state {s:?} should map to ERR");
+        }
+    }
+
+    #[test]
+    fn unknown_state_falls_through_to_placeholder() {
+        let (text, _) = state_badge("hibernating");
+        assert_eq!(text, "\u{25cb} ---");
+    }
+
+    #[test]
+    fn empty_state_falls_through_without_panic() {
+        let (text, _) = state_badge("");
+        assert_eq!(text, "\u{25cb} ---");
+    }
+
+    #[test]
+    fn run_branch_wins_over_later_branches() {
+        // "run" is the first checked substring — a state that *also* contains
+        // a later keyword (contrived "running-but-failing") must still classify
+        // as RUN, proving the branches are ordered, not OR'd.
+        let (text, _) = state_badge("running-but-failing");
+        assert_eq!(text, "\u{25cf} RUN");
+    }
+
+    #[test]
+    fn new_branch_wins_over_term_branch() {
+        // Order check: "creat" is matched before "term", so a hypothetical
+        // "created-then-terminated" string lands on NEW, not END.
+        let (text, _) = state_badge("created-then-terminated");
+        assert_eq!(text, "\u{25cb} NEW");
+    }
+
+    #[test]
+    fn badge_styles_match_dedicated_style_helpers() {
+        // Smoke check that each branch returns its dedicated style helper —
+        // catches accidental copy-paste regressions that swap, say, RUN's
+        // green for ERR's red.
+        let (_, run) = state_badge("running");
+        let (_, new) = state_badge("created");
+        let (_, sus) = state_badge("paused");
+        let (_, end) = state_badge("terminated");
+        let (_, err) = state_badge("crashed");
+        let (_, unk) = state_badge("???");
+
+        assert_eq!(run, badge_running());
+        assert_eq!(new, badge_created());
+        assert_eq!(sus, badge_suspended());
+        assert_eq!(end, badge_terminated());
+        assert_eq!(err, badge_crashed());
+        assert_eq!(unk, dim_style());
+    }
+}
