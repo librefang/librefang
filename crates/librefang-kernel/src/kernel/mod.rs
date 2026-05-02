@@ -10399,7 +10399,6 @@ system_prompt = "You are a helpful assistant."
         timestamps: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> KernelResult<librefang_hands::HandInstance> {
         let cfg = self.config.load();
-        use librefang_hands::HandError;
 
         let def = self
             .hand_registry
@@ -10449,12 +10448,13 @@ system_prompt = "You are a helpful assistant."
                 instance_id,
                 timestamps,
             )
-            .map_err(|e| match e {
-                HandError::AlreadyActive(id) => KernelError::LibreFang(LibreFangError::Internal(
-                    format!("Hand already active: {id}"),
-                )),
-                other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
-            })?;
+            // #3711: propagate the typed `HandError` instead of collapsing
+            // it to `LibreFangError::Internal(String)`. Display output is
+            // preserved by `#[error(transparent)]` on `KernelError::Hand`,
+            // so existing log/UI strings remain identical while upstream
+            // callers gain the ability to match on the typed variant
+            // (e.g., `AlreadyActive` → 409 Conflict).
+            .map_err(KernelError::from)?;
 
         // Pre-compute shared overrides from hand definition. The system-prompt
         // tail is materialized later (after per-role manifest cloning) via
