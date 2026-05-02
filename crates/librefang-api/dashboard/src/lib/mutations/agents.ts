@@ -24,7 +24,7 @@ import {
   uploadAgentFile,
   sendAgentMessage,
 } from "../http/client";
-import type { PromptExperiment, SendAgentMessageOptions } from "../../api";
+import type { PromptExperiment, PromptVersion, SendAgentMessageOptions } from "../../api";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -298,7 +298,25 @@ export function useActivatePromptVersion() {
   return useMutation({
     mutationFn: ({ versionId, agentId }: { versionId: string; agentId: string }) =>
       activatePromptVersion(versionId, agentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      // Patch the cached version list in place: flip is_active for the
+      // activated version and clear it on every other version of the same
+      // agent. Falls through to invalidate as a belt-and-suspenders guard
+      // (and to cover the narrow race where the kernel returned a fallback
+      // ack envelope without the entity body).
+      const hasEntity =
+        data && typeof data === "object" && "id" in data && (data as PromptVersion).id;
+      if (hasEntity) {
+        qc.setQueryData<PromptVersion[]>(
+          agentKeys.promptVersions(variables.agentId),
+          (prev) =>
+            prev?.map((v) =>
+              v.id === variables.versionId
+                ? { ...(data as PromptVersion) }
+                : { ...v, is_active: false },
+            ),
+        );
+      }
       qc.invalidateQueries({ queryKey: agentKeys.promptVersions(variables.agentId) });
       // Active version may be surfaced on the agent detail view.
       qc.invalidateQueries({ queryKey: agentKeys.detail(variables.agentId) });

@@ -2561,18 +2561,39 @@ pub async fn install_hand(
     ) {
         Ok(def) => {
             librefang_kernel::router::invalidate_hand_route_cache();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
-                    "category": format!("{:?}", def.category),
-                })),
-            )
+            // Return the full canonical `HandDefinition` so dashboard /
+            // SDK callers can `setQueryData` on the hands list directly
+            // instead of doing a follow-up GET. The previous {id, name,
+            // description, category} subset forced a refetch round-trip
+            // and was inconsistent with how list_hands serializes hand
+            // metadata. Refs #3832.
+            //
+            // We materialise as `serde_json::Value` so the OK arm and the
+            // Err arm (`ApiErrorResponse::into_json_tuple()`) line up on
+            // `Json<serde_json::Value>` — the tuple's match arms must
+            // share a body type.
+            let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(body))
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
+}
+
+/// Render a `HandInstance` to the canonical JSON shape used by every
+/// hand-instance mutation handler (activate / pause / resume).
+///
+/// Keeps activate, pause, and resume byte-identical so dashboard clients
+/// can `setQueryData` directly from any of them. Bug #3832 — mutation
+/// handlers must return the post-mutation entity, not an ack envelope.
+fn hand_instance_to_json(instance: &librefang_hands::HandInstance) -> serde_json::Value {
+    serde_json::json!({
+        "instance_id": instance.instance_id,
+        "hand_id": instance.hand_id,
+        "status": format!("{}", instance.status),
+        "agent_id": instance.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
+        "agent_name": instance.agent_name(),
+        "activated_at": instance.activated_at.to_rfc3339(),
+    })
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
@@ -2619,17 +2640,7 @@ pub async fn activate_hand(
                     }
                 }
             }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "instance_id": instance.instance_id,
-                    "hand_id": instance.hand_id,
-                    "status": format!("{}", instance.status),
-                    "agent_id": instance.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
-                    "agent_name": instance.agent_name(),
-                    "activated_at": instance.activated_at.to_rfc3339(),
-                })),
-            )
+            (StatusCode::OK, Json(hand_instance_to_json(&instance)))
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
@@ -2652,10 +2663,15 @@ pub async fn pause_hand(
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     match state.kernel.pause_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "paused", "instance_id": id})),
-        ),
+        Ok(()) => match state.kernel.hands().get_instance(id) {
+            // #3832: return the post-mutation entity instead of an ack envelope
+            // so the dashboard can setQueryData without a follow-up GET.
+            Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
+            None => {
+                ApiErrorResponse::internal(format!("hand instance {id} disappeared after pause"))
+                    .into_json_tuple()
+            }
+        },
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }
@@ -2677,10 +2693,15 @@ pub async fn resume_hand(
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     match state.kernel.resume_hand(id) {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "resumed", "instance_id": id})),
-        ),
+        Ok(()) => match state.kernel.hands().get_instance(id) {
+            // #3832: return the post-mutation entity instead of an ack envelope
+            // so the dashboard can setQueryData without a follow-up GET.
+            Some(instance) => (StatusCode::OK, Json(hand_instance_to_json(&instance))),
+            None => {
+                ApiErrorResponse::internal(format!("hand instance {id} disappeared after resume"))
+                    .into_json_tuple()
+            }
+        },
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }
 }

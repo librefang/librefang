@@ -202,15 +202,30 @@ describe("dashboard auth helpers", () => {
   it("updateAgentTools sends both allowlist and blocklist", async () => {
     setApiKey("secret-token");
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ status: "ok" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({
+          capabilities_tools: ["bash"],
+          tool_allowlist: ["bash", "webfetch"],
+          tool_blocklist: ["rm"],
+          disabled: false,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
     );
 
-    await updateAgentTools("agent-123", {
+    await expect(
+      updateAgentTools("agent-123", {
+        tool_allowlist: ["bash", "webfetch"],
+        tool_blocklist: ["rm"],
+      }),
+    ).resolves.toEqual({
+      capabilities_tools: ["bash"],
       tool_allowlist: ["bash", "webfetch"],
       tool_blocklist: ["rm"],
+      disabled: false,
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);

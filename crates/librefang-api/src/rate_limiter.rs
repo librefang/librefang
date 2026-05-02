@@ -88,7 +88,15 @@ pub fn operation_cost(method: &str, path: &str) -> NonZeroU32 {
         ("POST", "/api/skills/install") => NonZeroU32::new(50).unwrap(),
         ("POST", "/api/skills/uninstall") => NonZeroU32::new(10).unwrap(),
         ("POST", "/api/migrate") => NonZeroU32::new(100).unwrap(),
-        ("PUT", p) if p.contains("/update") => NonZeroU32::new(10).unwrap(),
+        // PATCH /api/agents/{id} accepts full-manifest replacement
+        // (`manifest_toml`) — same heavyweight write the legacy
+        // PUT /update endpoint used to handle (#3748). Match
+        // `/api/agents/<id>` exactly (no trailing sub-path).
+        ("PATCH", p)
+            if p.starts_with("/api/agents/") && !p["/api/agents/".len()..].contains('/') =>
+        {
+            NonZeroU32::new(10).unwrap()
+        }
         _ => NonZeroU32::new(5).unwrap(),
     }
 }

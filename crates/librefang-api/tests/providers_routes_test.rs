@@ -346,7 +346,13 @@ async fn model_overrides_set_then_get_then_delete_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"].as_str().unwrap(), "ok");
+    // PUT now returns the persisted ModelOverrides entity (Refs #3832), not
+    // an ack envelope — the value we just wrote should be reflected back.
+    assert_eq!(
+        body["temperature"].as_f64(),
+        Some(0.42_f32 as f64),
+        "PUT response should echo the persisted override, got {body}"
+    );
 
     // GET — overrides now present.
     let (status, body) = json_request(

@@ -396,7 +396,13 @@ pub async fn set_model_overrides(
         return ApiErrorResponse::internal(format!("Failed to persist overrides: {e}"))
             .into_json_tuple();
     }
-    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    // Return the persisted overrides entity so callers can `setQueryData`
+    // without a follow-up GET. (Refs #3832.)
+    let persisted = catalog.get_overrides(&id).cloned().unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(persisted).unwrap_or_else(|_| serde_json::json!({}))),
+    )
 }
 
 /// DELETE /api/models/overrides/{id} — Remove inference parameter overrides for a model.

@@ -53,6 +53,11 @@ export function useUpdateMemoryConfig() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: updateMemoryConfig,
-    onSuccess: () => qc.invalidateQueries({ queryKey: memoryKeys.config() }),
+    onSuccess: (entity) => {
+      // PATCH now returns the canonical post-mutation entity (issue #3832),
+      // so seed the cache directly to avoid a follow-up GET round-trip.
+      qc.setQueryData(memoryKeys.config(), entity);
+      qc.invalidateQueries({ queryKey: memoryKeys.config() });
+    },
   });
 }
