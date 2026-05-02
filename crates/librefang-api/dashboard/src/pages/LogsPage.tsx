@@ -31,7 +31,7 @@ export function LogsPage() {
     refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
   });
 
-  const logs = auditQuery.data?.entries ?? [];
+  const logs = auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
   const modules = useMemo(
     () => Array.from(new Set(logs.map(logModule).filter(Boolean))) as string[],
     [logs],

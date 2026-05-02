@@ -1078,8 +1078,10 @@ async fn test_workflow_crud() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let workflows = body["workflows"].as_array().unwrap();
+    // #3842: canonical PaginatedResponse envelope.
+    let workflows = body["items"].as_array().unwrap();
     assert_eq!(workflows.len(), 1);
+    assert_eq!(body["total"].as_u64().unwrap(), 1);
     assert_eq!(workflows[0]["name"], "test-workflow");
     assert_eq!(workflows[0]["steps"], 1);
 
@@ -2813,10 +2815,9 @@ async fn test_audit_query_rejects_viewer_admin_returns_200() {
         .unwrap();
     assert_eq!(admin.status(), 200, "Admin must be allowed");
     let body: serde_json::Value = admin.json().await.unwrap();
-    // Shape contract: `entries` array, `count`, `limit` fields all
-    // present even on an empty audit log.
-    assert!(body["entries"].is_array(), "response must carry entries[]");
-    assert!(body["count"].is_number(), "response must carry count");
+    assert!(body["items"].is_array(), "response must carry items[]");
+    assert!(body["total"].is_number(), "response must carry total");
+    assert!(body["offset"].is_number(), "response must carry offset");
     assert!(body["limit"].is_number(), "response must carry limit");
 }
 
@@ -3683,7 +3684,7 @@ async fn test_user_budget_put_audit_records_old_new_diff_and_caller() {
         .json()
         .await
         .unwrap();
-    let entries = q["entries"].as_array().expect("entries[] present");
+    let entries = q["items"].as_array().expect("items[] present");
     assert!(
         !entries.is_empty(),
         "ConfigChange audit row must be emitted by /api/budget/users/{{user}} PUT"

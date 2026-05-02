@@ -181,18 +181,23 @@ async fn list_hands_returns_envelope_with_total_and_array() {
         "/api/hands must return a JSON object envelope, got: {body}"
     );
     assert!(
-        body.get("hands").map(|v| v.is_array()).unwrap_or(false),
-        "missing/non-array `hands` field: {body}"
+        body.get("items").map(|v| v.is_array()).unwrap_or(false),
+        "missing/non-array `items` field (canonical PaginatedResponse #3842): {body}"
     );
     assert!(
         body.get("total").map(|v| v.is_u64()).unwrap_or(false),
         "missing/non-numeric `total` field: {body}"
     );
-    let arr_len = body["hands"].as_array().unwrap().len();
+    assert_eq!(
+        body.get("offset").and_then(|v| v.as_u64()),
+        Some(0),
+        "canonical envelope must include `offset`: {body}"
+    );
+    let arr_len = body["items"].as_array().unwrap().len();
     assert_eq!(
         body["total"].as_u64().unwrap(),
         arr_len as u64,
-        "`total` must equal `hands.len()`: {body}"
+        "`total` must equal `items.len()`: {body}"
     );
 }
 
@@ -228,9 +233,14 @@ async fn list_active_hands_starts_empty() {
         "fresh kernel must have no active hands: {body}"
     );
     assert_eq!(
-        body["instances"].as_array().map(|a| a.len()),
+        body["items"].as_array().map(|a| a.len()),
         Some(0),
         "fresh kernel must have no active hand instances: {body}"
+    );
+    assert_eq!(
+        body.get("offset").and_then(|v| v.as_u64()),
+        Some(0),
+        "canonical envelope must include `offset` (#3842): {body}"
     );
 }
 

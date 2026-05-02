@@ -841,9 +841,12 @@ pub async fn audit_recent(
         })
         .collect();
 
+    let total = state.kernel.audit().len();
     Json(serde_json::json!({
-        "entries": items,
-        "total": state.kernel.audit().len(),
+        "items": items,
+        "total": total,
+        "offset": 0,
+        "limit": n,
         "tip_hash": tip,
     }))
 }
@@ -2570,7 +2573,12 @@ pub async fn audit_log(
         .approvals()
         .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
 
-    Json(serde_json::json!({"entries": entries, "total": total}))
+    Json(serde_json::json!({
+        "items": entries,
+        "total": total,
+        "offset": params.offset,
+        "limit": limit,
+    }))
 }
 
 /// GET /api/approvals/count — Lightweight pending count for notification badges.

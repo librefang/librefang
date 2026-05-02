@@ -1,16 +1,66 @@
+# Slim pre-commit config (#3303).
+#
+# Philosophy: hooks must not block the dev loop. Pre-commit is fast and
+# cheap; heavy verification (clippy, codegen drift) runs at pre-push or
+# in CI. Pre-commit must average < 2s on a typical commit.
+#
+# Setup:
+#   pipx install pre-commit detect-secrets
+#   pre-commit install --install-hooks               # commit stage
+#   pre-commit install --install-hooks -t pre-push   # push stage
+#
+# Re-baseline on legitimate findings:
+#   detect-secrets scan --baseline .secrets.baseline
+#   detect-secrets audit .secrets.baseline
+
 repos:
   - repo: local
     hooks:
-      - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt -- --check
-        language: system
-        pass_filenames: false
-        always_run: true
+      # Format check on staged Rust files only (no full-workspace compile).
+      - id: cargo-fmt-staged
+        name: cargo fmt --check (staged files)
+        entry: scripts/hooks/cargo-fmt-staged.sh
+        language: script
+        types: [rust]
+        stages: [pre-commit]
 
+      # Heavy lint runs at push time, not commit time.
       - id: cargo-clippy
-        name: cargo clippy
+        name: cargo clippy --workspace
         entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
-        types: [rust]
         pass_filenames: false
+        stages: [pre-push]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets
+        args:
+          - --baseline
+          - .secrets.baseline
+        # Skip generated / vendored / lockfile / fixture content where
+        # high-entropy strings are expected and not real secrets.
+        exclude: |
+          (?x)^(
+            .*\.lock$
+          | Cargo\.lock$
+          | package-lock\.json$
+          | pnpm-lock\.yaml$
+          | yarn\.lock$
+          | poetry\.lock$
+          | go\.sum$
+          | sdk/.*
+          | openapi\.json$
+          | crates/librefang-api/dashboard/dist/.*
+          | crates/librefang-api/dashboard/node_modules/.*
+          | docs/.*\.(svg|png|jpg|jpeg|gif|ico)$
+          | .*\.snap$
+          | .*\.snapshot$
+          | .*/fixtures/.*
+          | .*/testdata/.*
+          | target/.*
+          | \.secrets\.baseline$
+          )$
+        stages: [pre-commit]

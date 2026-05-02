@@ -18,7 +18,7 @@ vi.mock("../http/client", () => ({
   dryRunWorkflow: vi.fn().mockResolvedValue({ valid: true, steps: [] }),
   deleteWorkflow: vi.fn().mockResolvedValue({ status: "ok" }),
   createWorkflow: vi.fn().mockResolvedValue({ id: "wf-1" }),
-  updateWorkflow: vi.fn().mockResolvedValue({ status: "ok" }),
+  updateWorkflow: vi.fn().mockResolvedValue({ id: "wf-1", name: "Updated workflow", description: "" }),
   instantiateTemplate: vi.fn().mockResolvedValue({ workflow_id: "wf-1" }),
   saveWorkflowAsTemplate: vi.fn().mockResolvedValue({ status: "ok" }),
 }));

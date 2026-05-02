@@ -1,20 +1,35 @@
 #!/bin/sh
-# Pre-commit hook: ensure Rust code is formatted, openapi.json is current, and
-# SDKs are regenerated whenever the spec changes.
+# Slim pre-commit hook (#3303).
+#
+# Goal: average run time < 2s. Only fast, staged-only checks live here.
+# Heavier verification (clippy, openapi/SDK codegen drift) is handled by
+# scripts/hooks/pre-push and CI.
+#
 # Install: git config core.hooksPath scripts/hooks
+#
+# Checks performed:
+#   1. cargo fmt --check on staged *.rs files only (no full-workspace scan)
+#   2. CHANGELOG guard: reject duplicate `## [Unreleased]` headings (#3395)
+#   3. detect-secrets scan against .secrets.baseline (if installed)
 
-cargo fmt --check 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo "Running cargo fmt..."
-    cargo fmt
-    echo "Formatted. Please re-stage and commit again."
-    exit 1
+set -eu
+
+# 1. Format check, staged Rust files only.
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' || true)
+if [ -n "$STAGED_RS" ]; then
+    # shellcheck disable=SC2086 # intentional word splitting on file list
+    if ! cargo fmt --check -- $STAGED_RS >/dev/null 2>&1; then
+        echo "Error: staged Rust files are not rustfmt-clean."
+        echo "Run: cargo fmt -- $STAGED_RS"
+        echo "Then re-stage and commit again."
+        exit 1
+    fi
 fi
 
-# Guard against duplicate `## [Unreleased]` headings in CHANGELOG.md.
-# Release tooling (`.github/workflows/release.yml` awk extractor and
-# `xtask/src/changelog.rs`) silently picks the first match and drops any
-# subsequent block, so a duplicate quietly loses entries. See #3395.
+# 2. CHANGELOG.md duplicate-Unreleased guard. Release tooling
+# (`.github/workflows/release.yml` awk extractor and
+# `xtask/src/changelog.rs`) silently picks the first match and drops
+# subsequent blocks. See #3395.
 if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
     UNRELEASED_COUNT=$(grep -c '^## \[Unreleased\]' CHANGELOG.md || true)
     if [ "$UNRELEASED_COUNT" -gt 1 ]; then
@@ -24,54 +39,25 @@ if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
     fi
 fi
 
-# Regenerate openapi.json only when staged route changes can actually move
-# the spec. OpenAPI output is driven by utoipa attributes, derives, and
-# handler signatures — pure function-body edits never change openapi.json,
-# but used to trigger a 1-2 minute codegen anyway.
-#
-# Heuristic: scan added/removed lines under crates/librefang-api/src/routes/.
-# If any look spec-relevant (attributes, item declarations, use statements,
-# trait/type references), run codegen. Otherwise skip — utoipa derives the
-# spec from signatures + attributes only, so body-only diffs are safe.
-#
-# Conservative bias: the regex is intentionally broad. False positives
-# (unnecessary codegen) only cost build time; false negatives are caught
-# by the `openapi-drift` CI job which regenerates and diffs authoritatively.
-# If you suspect the heuristic missed your change and want immediate local
-# feedback, run `cargo xtask codegen --openapi` manually.
-ROUTES_CHANGED=$(git diff --cached --name-only | grep "crates/librefang-api/src/routes/" || true)
-if [ -n "$ROUTES_CHANGED" ]; then
-    SPEC_RELEVANT=$(git diff --cached -U0 -- crates/librefang-api/src/routes/ \
-        | grep -E '^[+-][^+-]' \
-        | grep -E '^[+-][[:space:]]*(#\[|pub |use |fn |struct |enum |impl |type |trait )' \
-        || true)
-
-    if [ -n "$SPEC_RELEVANT" ]; then
-        echo "Regenerating openapi.json (spec-relevant route changes detected)..."
-        if ! cargo xtask codegen --openapi; then
-            echo "Error: openapi.json regeneration failed — fix build/codegen before committing."
-            exit 1
-        fi
-        # Only stage if codegen actually changed the spec; cosmetic touches
-        # produce a byte-identical file.
-        if ! git diff --quiet -- openapi.json; then
-            git add openapi.json
-            echo "openapi.json updated and staged."
-        else
-            echo "openapi.json unchanged."
+# 3. Secret detection. Soft-fail if detect-secrets is not installed —
+# the .pre-commit-config.yaml entry pins the canonical version, and CI
+# is the authoritative gate. We don't want to wedge contributors who
+# haven't installed it yet, but we do warn.
+if [ -f .secrets.baseline ]; then
+    if command -v detect-secrets >/dev/null 2>&1; then
+        STAGED=$(git diff --cached --name-only --diff-filter=ACMR || true)
+        if [ -n "$STAGED" ]; then
+            # shellcheck disable=SC2086
+            if ! detect-secrets-hook --baseline .secrets.baseline $STAGED; then
+                echo "Error: detect-secrets flagged a potential credential."
+                echo "If this is a false positive, audit & update the baseline:"
+                echo "  detect-secrets scan --baseline .secrets.baseline"
+                echo "  detect-secrets audit .secrets.baseline"
+                exit 1
+            fi
         fi
     else
-        echo "Routes touched but no spec-relevant lines (attributes/signatures/derives) — skipping codegen."
+        echo "warning: detect-secrets not installed; skipping secret scan." >&2
+        echo "  install with: pipx install detect-secrets" >&2
     fi
-fi
-
-# Regenerate SDKs whenever openapi.json is part of the commit.
-if git diff --cached --name-only | grep -qx "openapi.json"; then
-    echo "Regenerating SDKs from openapi.json..."
-    if ! python3 scripts/codegen-sdks.py; then
-        echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before committing."
-        exit 1
-    fi
-    git add sdk/python sdk/javascript sdk/go sdk/rust
-    echo "SDKs updated and staged."
 fi

@@ -270,9 +270,11 @@ pub async fn audit_query(
         })
         .collect();
 
+    let total = items.len();
     Json(serde_json::json!({
-        "entries": items,
-        "count": items.len(),
+        "items": items,
+        "total": total,
+        "offset": 0,
         "limit": limit,
     }))
     .into_response()
