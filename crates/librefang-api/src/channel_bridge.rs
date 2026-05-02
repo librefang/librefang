@@ -3786,6 +3786,56 @@ mod tests {
     }
 
     #[test]
+    fn test_looks_like_tool_call_allows_long_natural_language_discussing_tool_calls() {
+        // Regression for #4028: a long natural-language explanation of how
+        // tool calls work should NOT be filtered, even though it contains
+        // tool-call-like substrings (`<tool_call>`, `<function=`, ``` blocks
+        // with tool-name { ... } shapes inside example snippets).
+        let mut text = String::from(
+            "Let me explain how tool calls work in this system. \
+             A tool_call is a structured request emitted by the model. \
+             For instance, you might see <tool_call> tags or a <function= name. \
+             Internally, the runtime intercepts these via looks_like_tool_call. \
+             ",
+        );
+        // Pad with neutral prose well past MAX_HEURISTIC_LEN (2000 chars).
+        while text.len() <= 3000 {
+            text.push_str(
+                "This sentence is filler describing how the tool call pipeline \
+                 routes function calls and parameters through the runtime. ",
+            );
+        }
+        assert!(text.len() > 2000);
+        assert!(!looks_like_tool_call(&text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_long_text_with_named_json_in_codeblock() {
+        // Regression for #4028: a long response that happens to embed an
+        // example tool-call snippet inside a code block should not be
+        // suppressed once it exceeds the heuristic length cap.
+        let prose = "Here is a deep dive into agent orchestration. ".repeat(60);
+        let text = format!(
+            "{prose}\n\nFor example:\n```json\nweb_search {{\"query\":\"rust\"}}\n```\n\n{prose}",
+        );
+        assert!(text.len() > 2000);
+        assert!(!looks_like_tool_call(&text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_still_detects_start_of_text_patterns_when_long() {
+        // The length cap must not weaken start-of-text detection: a payload
+        // that literally begins with a tool-call array is always a leak,
+        // regardless of how much trailing text is appended.
+        let trailing = "lorem ipsum ".repeat(500);
+        let text = format!(
+            "[{{\"type\":\"function\",\"name\":\"shell_exec\",\"arguments\":{{}}}}]\n\n{trailing}",
+        );
+        assert!(text.len() > 2000);
+        assert!(looks_like_tool_call(&text));
+    }
+
+    #[test]
     fn test_looks_like_tool_call_detects_agent_send_json() {
         // agent_send tool call emitted as bare JSON by some providers (#2379)
         let text = r#"{"name": "agent_send", "parameters": {"agent_id": "AgentB", "message": "Hello from AgentA"}}"#;
