@@ -3225,16 +3225,18 @@ export async function createExperiment(agentId: string, experiment: Omit<PromptE
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 
-export async function startExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
+// Status-transition endpoints now return the post-mutation `PromptExperiment`
+// so callers can `setQueryData` directly without a follow-up GET. See #3832.
+export async function startExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
 }
 
-export async function pauseExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
+export async function pauseExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
 }
 
-export async function completeExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
+export async function completeExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
 }
 
 export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {

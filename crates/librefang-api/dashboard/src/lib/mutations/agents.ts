@@ -24,7 +24,7 @@ import {
   uploadAgentFile,
   sendAgentMessage,
 } from "../http/client";
-import type { SendAgentMessageOptions } from "../../api";
+import type { PromptExperiment, SendAgentMessageOptions } from "../../api";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -338,14 +338,29 @@ export function useCreateExperiment() {
   });
 }
 
+// After #3832, the start/pause/complete endpoints return the post-mutation
+// `PromptExperiment`, so we patch the experiments-list cache for `agentId`
+// directly via `setQueryData` (eliminates a stale-read window before the
+// invalidate-driven refetch lands). The `invalidateQueries` calls remain as
+// a belt-and-suspenders guard for any concurrent server-side mutation.
+function patchExperimentInCache(
+  qc: ReturnType<typeof useQueryClient>,
+  agentId: string,
+  updated: PromptExperiment,
+) {
+  qc.setQueryData<PromptExperiment[] | undefined>(
+    agentKeys.experiments(agentId),
+    (prev) => prev?.map((e) => (e.id === updated.id ? updated : e)),
+  );
+}
+
 export function useStartExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       startExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
@@ -355,11 +370,10 @@ export function useStartExperiment() {
 export function usePauseExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       pauseExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
@@ -369,11 +383,10 @@ export function usePauseExperiment() {
 export function useCompleteExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       completeExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
