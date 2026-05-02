@@ -3924,6 +3924,7 @@
           "channels"
         ],
         "summary": "GET /api/channels — List all 40 channel adapters with status and field metadata.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).\nThe full channel registry is materialized in-memory, so this is a single\npage — `offset=0`, `limit=None`. The bespoke `configured_count` sibling\nis preserved for the dashboard's \"X of Y configured\" sub-line.",
         "operationId": "list_channels",
         "responses": {
           "200": {
@@ -3931,8 +3932,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -7677,6 +7677,7 @@
           "workflows"
         ],
         "summary": "GET /api/schedules — List all scheduled jobs.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\n(#3842) so the generated SDK can share one list-response type across all\nlist endpoints. The legacy `schedules` key was renamed to `items`; offset\nis always 0 and limit is null because this endpoint returns the full set.",
         "operationId": "list_schedules",
         "responses": {
           "200": {
@@ -7684,8 +7685,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -8065,6 +8065,7 @@
           "skills"
         ],
         "summary": "GET /api/skills — List installed skills.",
+        "description": "`categories` always reflects all skills regardless of the `?category=` filter.",
         "operationId": "list_skills",
         "responses": {
           "200": {
@@ -8072,8 +8073,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }

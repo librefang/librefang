@@ -2007,8 +2007,12 @@ export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiAct
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {
-  const data = await get<{ schedules?: ScheduleItem[]; total?: number }>("/api/schedules");
-  return data.schedules ?? [];
+  // #3842 canonical envelope: `items`. `schedules` retained as a transitional
+  // fallback for any older daemon a dashboard pin might be talking to.
+  const data = await get<{ items?: ScheduleItem[]; schedules?: ScheduleItem[]; total?: number }>(
+    "/api/schedules",
+  );
+  return data.items ?? data.schedules ?? [];
 }
 
 export async function createSchedule(payload: {
