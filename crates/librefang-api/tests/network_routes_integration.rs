@@ -31,7 +31,8 @@ fn boot() -> Harness {
 }
 
 /// Boot a harness, allowing the caller to mutate the freshly-built
-/// `AppState` (e.g. to seed `peer_registry`) before the router clones it.
+/// `AppState` (e.g. to install a peer registry on the kernel) before the
+/// router clones it.
 fn boot_with<F: FnOnce(&mut AppState)>(mutator: F) -> Harness {
     let mut test = TestAppState::with_builder(MockKernelBuilder::new());
 
@@ -104,7 +105,7 @@ async fn peers_list_returns_empty_envelope_when_no_registry() {
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/peers", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["peers"], serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
     assert_eq!(body["total"], 0);
 }
 
@@ -113,17 +114,20 @@ async fn peers_list_surfaces_seeded_registry() {
     let registry = PeerRegistry::new();
     registry.add_peer(sample_peer("node-a", "Node A"));
     registry.add_peer(sample_peer("node-b", "Node B"));
-    let registry_arc = Arc::new(registry);
 
     let h = {
-        let cloned = registry_arc.clone();
-        boot_with(move |s| s.peer_registry = Some(cloned))
+        let cloned = registry.clone();
+        boot_with(move |s| {
+            s.kernel
+                .install_peer_registry_for_test(cloned)
+                .expect("registry not yet set");
+        })
     };
 
     let (status, body) = json_request(&h, Method::GET, "/api/peers", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 2);
-    let peers = body["peers"].as_array().expect("peers array");
+    let peers = body["items"].as_array().expect("items array");
     assert_eq!(peers.len(), 2);
     let names: Vec<&str> = peers
         .iter()
@@ -168,10 +172,14 @@ async fn peers_get_returns_404_when_no_registry() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn peers_get_returns_404_for_unknown_id() {
-    let registry = Arc::new(PeerRegistry::new());
+    let registry = PeerRegistry::new();
     let h = {
         let cloned = registry.clone();
-        boot_with(move |s| s.peer_registry = Some(cloned))
+        boot_with(move |s| {
+            s.kernel
+                .install_peer_registry_for_test(cloned)
+                .expect("registry not yet set");
+        })
     };
     let (status, body) = json_request(&h, Method::GET, "/api/peers/missing", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -189,10 +197,13 @@ async fn peers_get_returns_404_for_unknown_id() {
 async fn peers_get_returns_seeded_peer() {
     let registry = PeerRegistry::new();
     registry.add_peer(sample_peer("node-x", "Node X"));
-    let registry_arc = Arc::new(registry);
     let h = {
-        let cloned = registry_arc.clone();
-        boot_with(move |s| s.peer_registry = Some(cloned))
+        let cloned = registry.clone();
+        boot_with(move |s| {
+            s.kernel
+                .install_peer_registry_for_test(cloned)
+                .expect("registry not yet set");
+        })
     };
 
     let (status, body) = json_request(&h, Method::GET, "/api/peers/node-x", None).await;
