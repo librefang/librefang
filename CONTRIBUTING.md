@@ -165,9 +165,31 @@ cargo build
 ```
 
 `just setup` (which calls `cargo xtask setup`) does three things on a fresh clone:
-- Sets `git config core.hooksPath scripts/hooks` so the in-repo pre-commit (`cargo fmt --check` + conditional OpenAPI / SDK regen) and commit-msg hooks become active.
+- Sets `git config core.hooksPath scripts/hooks` so the in-repo `pre-commit`, `pre-push`, and `commit-msg` hooks become active.
 - Runs `cargo fetch` to warm up the dependency cache.
 - Runs `pnpm install` in the dashboard / web / docs sub-projects.
+
+The hooks are split by cost (#3303), so the dev loop stays fast:
+
+| Hook        | Runs                                                                  | Target time |
+|-------------|-----------------------------------------------------------------------|-------------|
+| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard, `detect-secrets` (if installed) | < 2s |
+| `pre-push`  | `cargo clippy --workspace --all-targets -- -D warnings`, OpenAPI / SDK drift regen | 30-90s |
+| `commit-msg`| Reject Claude / Anthropic attribution                                  | < 50ms |
+
+For secret scanning, install `detect-secrets` once (`pipx install detect-secrets`). False positives are managed via `.secrets.baseline`:
+
+```bash
+detect-secrets scan --baseline .secrets.baseline   # update findings
+detect-secrets audit .secrets.baseline             # mark each as real / false-positive
+```
+
+If you also use the `pre-commit` framework (`pipx install pre-commit`), the equivalent staged-only fmt + secret scan + push-stage clippy is wired in `.pre-commit-config.yaml`:
+
+```bash
+pre-commit install --install-hooks                 # commit stage
+pre-commit install --install-hooks -t pre-push     # push stage
+```
 
 You only need to run it once per clone — `git pull` keeps the hooks current automatically because they live in `scripts/hooks/` rather than being copied into `.git/hooks/`.
 
