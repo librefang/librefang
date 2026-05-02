@@ -1717,6 +1717,10 @@ fn audit_to_comms_event(
 ///
 /// Sources from both the event bus (for lifecycle events with full context)
 /// and the audit log (for message/spawn/kill events that are always captured).
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents` (#3842). Events are returned in a single
+/// page capped by `limit` (default 100, max 500); `offset` is always 0.
 #[utoipa::path(
     get,
     path = "/api/comms/events",
@@ -1725,7 +1729,7 @@ fn audit_to_comms_event(
         ("limit" = Option<usize>, Query, description = "Maximum number of results"),
     ),
     responses(
-        (status = 200, description = "Recent inter-agent communication events", body = crate::types::JsonArray)
+        (status = 200, description = "Recent inter-agent communication events", body = serde_json::Value)
     )
 )]
 pub async fn comms_events(
@@ -1764,7 +1768,13 @@ pub async fn comms_events(
     comms_events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     comms_events.truncate(limit);
 
-    Json(comms_events)
+    let total = comms_events.len();
+    Json(crate::types::PaginatedResponse {
+        items: comms_events,
+        total,
+        offset: 0,
+        limit: Some(limit),
+    })
 }
 
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.

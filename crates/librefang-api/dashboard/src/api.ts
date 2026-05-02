@@ -2700,7 +2700,13 @@ export async function getCommsTopology(): Promise<CommsTopology> {
 
 export async function listCommsEvents(limit = 200): Promise<CommsEventItem[]> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200;
-  return get<CommsEventItem[]>(`/api/comms/events?limit=${encodeURIComponent(String(n))}`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<CommsEventItem[] | { items?: CommsEventItem[] }>(
+    `/api/comms/events?limit=${encodeURIComponent(String(n))}`,
+  );
+  if (Array.isArray(data)) return data;
+  return data.items ?? [];
 }
 
 export async function sendCommsMessage(payload: {

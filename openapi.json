@@ -4463,7 +4463,7 @@
           "network"
         ],
         "summary": "GET /api/comms/events — Return recent inter-agent communication events.",
-        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).",
+        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).\n\nEnvelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents` (#3842). Events are returned in a single\npage capped by `limit` (default 100, max 500); `offset` is always 0.",
         "operationId": "comms_events",
         "parameters": [
           {
@@ -4482,9 +4482,7 @@
             "description": "Recent inter-agent communication events",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonArray"
-                }
+                "schema": {}
               }
             }
           }
