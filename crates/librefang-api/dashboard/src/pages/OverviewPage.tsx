@@ -489,9 +489,14 @@ export function OverviewPage() {
                     {agentsError > 0 ? <>{agentsIdle > 0 ? " · " : "· "}{agentsError} {t("overview.error", { defaultValue: "error" })}</> : null}
                   </span>
                 ) : null}
-                <Pill kind={snapshot?.health?.status === "ok" ? "running" : "pending"} size="sm" mono>
-                  {snapshot?.health?.status === "ok" ? "live" : "degraded"}
-                </Pill>
+                {/* Bug #3849: announce health flips (ok ↔ degraded) to screen
+                 *  readers. Wrap only the text pill — icons stay silent to
+                 *  avoid noisy spam on every snapshot poll. */}
+                <div aria-live="polite" aria-atomic="true">
+                  <Pill kind={snapshot?.health?.status === "ok" ? "running" : "pending"} size="sm" mono>
+                    {snapshot?.health?.status === "ok" ? "live" : "degraded"}
+                  </Pill>
+                </div>
               </>
             )}
           </h1>
@@ -1046,9 +1051,13 @@ export function OverviewPage() {
               {t("overview.uptime", { defaultValue: "Uptime" })}{" "}
               <span className="font-mono text-text-main">{formatUptime(snapshot?.status?.uptime_seconds)}</span>
             </span>
-            <Pill kind={snapshot?.health?.status === "ok" ? "ok" : "pending"} size="sm">
-              {snapshot?.health?.status === "ok" ? "OK" : "DEGRADED"}
-            </Pill>
+            {/* Bug #3849: same aria-live wrap for the Health column pill so
+             *  status changes announced once per region (text only). */}
+            <div aria-live="polite" aria-atomic="true">
+              <Pill kind={snapshot?.health?.status === "ok" ? "ok" : "pending"} size="sm">
+                {snapshot?.health?.status === "ok" ? "OK" : "DEGRADED"}
+              </Pill>
+            </div>
           </div>
         </Card>
       </div>
