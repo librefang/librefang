@@ -1069,6 +1069,53 @@ impl LibreFangKernel {
         crate::inbox::inbox_status(&cfg.inbox, self.home_dir())
     }
 
+    /// Snapshot of the auto-dream subsystem's status (global config + per-agent
+    /// rows) for the dashboard `/api/auto-dream/status` endpoint.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to reach
+    /// into the `librefang_kernel::auto_dream` module directly. See issue #3744.
+    pub async fn auto_dream_status(&self) -> crate::auto_dream::AutoDreamStatus {
+        crate::auto_dream::current_status(self).await
+    }
+
+    /// Manually fire an auto-dream consolidation for `agent_id`, bypassing
+    /// time and session gates but respecting the per-agent dream lock.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to reach
+    /// into the `librefang_kernel::auto_dream` module directly. See issue #3744.
+    pub async fn auto_dream_trigger_manual(
+        self: std::sync::Arc<Self>,
+        agent_id: librefang_types::agent::AgentId,
+    ) -> crate::auto_dream::TriggerOutcome {
+        crate::auto_dream::trigger_manual(self, agent_id).await
+    }
+
+    /// Abort an in-flight manual auto-dream for `agent_id`. Scheduled dreams
+    /// cannot be aborted.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to reach
+    /// into the `librefang_kernel::auto_dream` module directly. See issue #3744.
+    pub async fn auto_dream_abort(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+    ) -> crate::auto_dream::AbortOutcome {
+        crate::auto_dream::abort_dream(agent_id).await
+    }
+
+    /// Toggle an agent's `auto_dream_enabled` opt-in flag. Returns `Err` if
+    /// the agent doesn't exist; the scheduler picks up the change on its
+    /// next tick.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to reach
+    /// into the `librefang_kernel::auto_dream` module directly. See issue #3744.
+    pub fn auto_dream_set_enabled(
+        &self,
+        agent_id: librefang_types::agent::AgentId,
+        enabled: bool,
+    ) -> librefang_types::error::LibreFangResult<()> {
+        crate::auto_dream::set_agent_enabled(self, agent_id, enabled)
+    }
+
     /// Build the roots list for a specific MCP server config.
     ///
     /// Starts with the default roots (workspaces directory) and, for stdio
