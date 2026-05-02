@@ -1949,7 +1949,7 @@ metrics = []
         .await
         .expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
-    let instances = json["instances"].as_array().expect("instances array");
+    let instances = json["items"].as_array().expect("items array");
     let hand = instances
         .iter()
         .find(|i| i["hand_id"] == "test-grouping-hand")
