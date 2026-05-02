@@ -279,9 +279,9 @@ fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorM
     post,
     path = "/api/workflows",
     tag = "workflows",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Workflow created", body = serde_json::Value),
+        (status = 200, description = "Workflow created", body = crate::types::JsonObject),
         (status = 400, description = "Invalid workflow definition")
     )
 )]
@@ -476,7 +476,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     tag = "workflows",
     params(("id" = String, Path, description = "Workflow ID")),
     responses(
-        (status = 200, description = "Workflow details", body = serde_json::Value),
+        (status = 200, description = "Workflow details", body = crate::types::JsonObject),
         (status = 404, description = "Workflow not found")
     )
 )]
@@ -534,9 +534,9 @@ pub async fn get_workflow(
     path = "/api/workflows/{id}",
     tag = "workflows",
     params(("id" = String, Path, description = "Workflow ID")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Workflow updated", body = serde_json::Value),
+        (status = 200, description = "Workflow updated", body = crate::types::JsonObject),
         (status = 400, description = "Invalid workflow definition"),
         (status = 404, description = "Workflow not found")
     )
@@ -696,7 +696,7 @@ pub async fn delete_workflow(
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
-#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = crate::types::JsonObject)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -762,9 +762,9 @@ pub async fn run_workflow(
     path = "/api/workflows/{id}/dry-run",
     tag = "workflows",
     params(("id" = String, Path, description = "Workflow ID")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Dry-run preview", body = serde_json::Value),
+        (status = 200, description = "Dry-run preview", body = crate::types::JsonObject),
         (status = 404, description = "Workflow not found")
     )
 )]
@@ -814,7 +814,7 @@ pub async fn dry_run_workflow(
     tag = "workflows",
     params(("run_id" = String, Path, description = "Workflow run ID")),
     responses(
-        (status = 200, description = "Workflow run details", body = serde_json::Value),
+        (status = 200, description = "Workflow run details", body = crate::types::JsonObject),
         (status = 404, description = "Run not found")
     )
 )]
@@ -892,7 +892,7 @@ pub async fn list_workflow_runs(
     tag = "workflows",
     params(("id" = String, Path, description = "Workflow ID")),
     responses(
-        (status = 200, description = "Template created", body = serde_json::Value),
+        (status = 200, description = "Template created", body = crate::types::JsonObject),
         (status = 404, description = "Workflow not found")
     )
 )]
@@ -966,9 +966,9 @@ pub async fn save_workflow_as_template(
     post,
     path = "/api/triggers",
     tag = "workflows",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Trigger created", body = serde_json::Value),
+        (status = 200, description = "Trigger created", body = crate::types::JsonObject),
         (status = 400, description = "Invalid trigger definition")
     )
 )]
@@ -1083,7 +1083,7 @@ pub async fn create_trigger(
     path = "/api/triggers",
     tag = "workflows",
     responses(
-        (status = 200, description = "List triggers", body = serde_json::Value)
+        (status = 200, description = "List triggers", body = crate::types::JsonObject)
     )
 )]
 /// Serialize a `Trigger` to a JSON value (shared by list and get endpoints).
@@ -1106,7 +1106,7 @@ fn trigger_to_json(t: &Trigger) -> serde_json::Value {
     v
 }
 
-#[utoipa::path(get, path = "/api/triggers", tag = "workflows", params(("agent_id" = Option<String>, Query, description = "Filter by agent ID")), responses((status = 200, description = "List triggers", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/triggers", tag = "workflows", params(("agent_id" = Option<String>, Query, description = "Filter by agent ID")), responses((status = 200, description = "List triggers", body = crate::types::JsonObject)))]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
@@ -1164,7 +1164,7 @@ pub async fn list_triggers(
     Json(serde_json::json!({"triggers": list, "total": total})).into_response()
 }
 
-#[utoipa::path(get, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger detail", body = serde_json::Value), (status = 404, description = "Not found")))]
+#[utoipa::path(get, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger detail", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
 /// GET /api/triggers/:id — Fetch a single trigger by ID.
 pub async fn get_trigger(
     State(state): State<Arc<AppState>>,
@@ -1207,7 +1207,7 @@ pub async fn delete_trigger(
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = serde_json::Value), (status = 404, description = "Not found")))]
+#[utoipa::path(patch, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Updated trigger", body = crate::types::JsonObject), (status = 404, description = "Not found")))]
 /// PATCH /api/triggers/:id — Partially update a trigger.
 ///
 /// All body fields are optional. Only provided fields are changed.
@@ -1412,7 +1412,7 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/schedules/{id} — Get a specific schedule by ID.
-#[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = crate::types::JsonObject)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1432,9 +1432,9 @@ pub async fn get_schedule(
     post,
     path = "/api/schedules",
     tag = "workflows",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Schedule created", body = serde_json::Value),
+        (status = 200, description = "Schedule created", body = crate::types::JsonObject),
         (status = 400, description = "Invalid schedule definition")
     )
 )]
@@ -1614,7 +1614,7 @@ pub async fn create_schedule(
 }
 
 /// PUT /api/schedules/:id — Update a scheduled job (toggle enabled, edit fields).
-#[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = serde_json::Value, responses((status = 200, description = "Schedule updated", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Schedule updated", body = crate::types::JsonObject)))]
 pub async fn update_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1754,7 +1754,7 @@ pub async fn delete_schedule(
 }
 
 /// POST /api/schedules/:id/run — Manually trigger a scheduled job now.
-#[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = crate::types::JsonObject)))]
 pub async fn run_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1890,7 +1890,7 @@ pub async fn list_cron_jobs(
 }
 
 /// POST /api/cron/jobs — Create a new cron job.
-#[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = serde_json::Value, responses((status = 200, description = "Cron job created", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job created", body = crate::types::JsonObject)))]
 pub async fn create_cron_job(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1935,7 +1935,7 @@ pub async fn delete_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id} — Update a cron job's configuration.
-#[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job updated", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job updated", body = crate::types::JsonObject)))]
 pub async fn update_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1960,7 +1960,7 @@ pub async fn update_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.
-#[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job toggled", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job toggled", body = crate::types::JsonObject)))]
 pub async fn toggle_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1988,7 +1988,7 @@ pub async fn toggle_cron_job(
 }
 
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
-#[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = serde_json::Value), (status = 404, description = "Job not found")))]
+#[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2009,7 +2009,7 @@ pub async fn get_cron_job(
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
-#[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2103,7 +2103,7 @@ pub async fn list_workflow_templates(
     tag = "workflows",
     params(("id" = String, Path, description = "Template ID")),
     responses(
-        (status = 200, description = "Template details", body = serde_json::Value),
+        (status = 200, description = "Template details", body = crate::types::JsonObject),
         (status = 404, description = "Template not found")
     )
 )]
@@ -2130,7 +2130,7 @@ pub async fn get_workflow_template(
     params(("id" = String, Path, description = "Template ID")),
     request_body = HashMap<String, serde_json::Value>,
     responses(
-        (status = 201, description = "Workflow created from template", body = serde_json::Value),
+        (status = 201, description = "Workflow created from template", body = crate::types::JsonObject),
         (status = 400, description = "Invalid parameters"),
         (status = 404, description = "Template not found")
     )

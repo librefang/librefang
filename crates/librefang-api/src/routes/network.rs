@@ -83,7 +83,7 @@ use crate::types::ApiErrorResponse;
     path = "/api/peers",
     tag = "network",
     responses(
-        (status = 200, description = "List known OFP peers", body = serde_json::Value)
+        (status = 200, description = "List known OFP peers", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -122,7 +122,7 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     tag = "network",
     params(("id" = String, Path, description = "Peer node ID")),
     responses(
-        (status = 200, description = "Peer details", body = serde_json::Value),
+        (status = 200, description = "Peer details", body = crate::types::JsonObject),
         (status = 404, description = "Peer not found")
     )
 )]
@@ -163,7 +163,7 @@ pub async fn get_peer(
     path = "/api/network/status",
     tag = "network",
     responses(
-        (status = 200, description = "OFP network status summary", body = serde_json::Value)
+        (status = 200, description = "OFP network status summary", body = crate::types::JsonObject)
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -212,7 +212,7 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/api/network/trusted-peers",
     tag = "network",
     responses(
-        (status = 200, description = "List TOFU-pinned peers", body = serde_json::Value)
+        (status = 200, description = "List TOFU-pinned peers", body = crate::types::JsonObject)
     )
 )]
 pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -238,7 +238,7 @@ pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl I
     path = "/.well-known/agent.json",
     tag = "a2a",
     responses(
-        (status = 200, description = "Get the A2A agent card", body = serde_json::Value)
+        (status = 200, description = "Get the A2A agent card", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -294,7 +294,7 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/a2a/agents",
     tag = "a2a",
     responses(
-        (status = 200, description = "List all A2A agent cards", body = serde_json::Value)
+        (status = 200, description = "List all A2A agent cards", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -324,9 +324,9 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
     post,
     path = "/a2a/tasks/send",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Submit a task to an agent via A2A", body = serde_json::Value)
+        (status = 200, description = "Submit a task to an agent via A2A", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_send_task(
@@ -476,7 +476,7 @@ pub async fn a2a_send_task(
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Get A2A task status", body = serde_json::Value)
+        (status = 200, description = "Get A2A task status", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_get_task(
@@ -503,7 +503,7 @@ pub async fn a2a_get_task(
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Cancel a tracked A2A task", body = serde_json::Value)
+        (status = 200, description = "Cancel a tracked A2A task", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_cancel_task(
@@ -536,7 +536,7 @@ pub async fn a2a_cancel_task(
     path = "/api/a2a/agents",
     tag = "a2a",
     responses(
-        (status = 200, description = "List discovered external A2A agents", body = serde_json::Value)
+        (status = 200, description = "List discovered external A2A agents", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -765,7 +765,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
         ("id" = String, Path, description = "Id"),
     ),
     responses(
-        (status = 200, description = "Get a specific external A2A agent", body = serde_json::Value)
+        (status = 200, description = "Get a specific external A2A agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_get_external_agent(
@@ -813,9 +813,9 @@ pub async fn a2a_get_external_agent(
     post,
     path = "/api/a2a/discover",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Discover an external A2A agent by URL", body = serde_json::Value)
+        (status = 200, description = "Discover an external A2A agent by URL", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_discover_external(
@@ -969,9 +969,9 @@ pub async fn a2a_discover_external(
     post,
     path = "/api/a2a/send",
     tag = "a2a",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a task to an external A2A agent", body = serde_json::Value)
+        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_send_external(
@@ -1063,7 +1063,7 @@ pub async fn a2a_send_external(
         ("url" = String, Query, description = "URL of the external A2A agent"),
     ),
     responses(
-        (status = 200, description = "Get external A2A task status", body = serde_json::Value)
+        (status = 200, description = "Get external A2A task status", body = crate::types::JsonObject)
     )
 )]
 pub async fn a2a_external_task_status(
@@ -1149,7 +1149,7 @@ pub async fn a2a_external_task_status(
         ("id" = String, Path, description = "Discovery URL of the pending agent (URL-encoded)"),
     ),
     responses(
-        (status = 200, description = "Agent approved and promoted to trusted list", body = serde_json::Value),
+        (status = 200, description = "Agent approved and promoted to trusted list", body = crate::types::JsonObject),
         (status = 404, description = "No pending agent found for the given URL")
     )
 )]
@@ -1246,9 +1246,9 @@ pub async fn a2a_approve_external(
     post,
     path = "/mcp",
     tag = "mcp",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Handle MCP JSON-RPC requests over HTTP", body = serde_json::Value)
+        (status = 200, description = "Handle MCP JSON-RPC requests over HTTP", body = crate::types::JsonObject)
     )
 )]
 pub async fn mcp_http(
@@ -1430,7 +1430,7 @@ pub async fn mcp_http(
     path = "/api/comms/topology",
     tag = "network",
     responses(
-        (status = 200, description = "Build agent topology graph", body = serde_json::Value)
+        (status = 200, description = "Build agent topology graph", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1714,7 +1714,7 @@ fn audit_to_comms_event(
         ("limit" = Option<usize>, Query, description = "Maximum number of results"),
     ),
     responses(
-        (status = 200, description = "Recent inter-agent communication events", body = serde_json::Value)
+        (status = 200, description = "Recent inter-agent communication events", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events(
@@ -1764,7 +1764,7 @@ pub async fn comms_events(
     path = "/api/comms/events/stream",
     tag = "network",
     responses(
-        (status = 200, description = "SSE stream of inter-agent events", body = serde_json::Value)
+        (status = 200, description = "SSE stream of inter-agent events", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
@@ -1819,9 +1819,9 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
     post,
     path = "/api/comms/send",
     tag = "network",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a message between agents", body = serde_json::Value)
+        (status = 200, description = "Send a message between agents", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_send(
@@ -1900,9 +1900,9 @@ pub async fn comms_send(
     post,
     path = "/api/comms/task",
     tag = "network",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Post a task to the agent task queue", body = serde_json::Value)
+        (status = 200, description = "Post a task to the agent task queue", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_task(

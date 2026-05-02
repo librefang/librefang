@@ -322,9 +322,9 @@ pub async fn list_skills(
     post,
     path = "/api/skills/install",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a skill from FangHub", body = serde_json::Value)
+        (status = 200, description = "Install a skill from FangHub", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_skill(
@@ -399,9 +399,9 @@ pub async fn install_skill(
     post,
     path = "/api/skills/uninstall",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Uninstall a skill", body = serde_json::Value)
+        (status = 200, description = "Uninstall a skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn uninstall_skill(
@@ -438,7 +438,7 @@ pub async fn uninstall_skill(
     path = "/api/skills/reload",
     tag = "skills",
     responses(
-        (status = 200, description = "Rescan the skills directory from disk", body = serde_json::Value)
+        (status = 200, description = "Rescan the skills directory from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -461,7 +461,7 @@ pub async fn reload_skills(State(state): State<Arc<AppState>>) -> impl IntoRespo
     path = "/api/skills/registry",
     tag = "skills",
     responses(
-        (status = 200, description = "Official skills available in the FangHub registry", body = serde_json::Value)
+        (status = 200, description = "Official skills available in the FangHub registry", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_skill_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -610,7 +610,7 @@ fn parse_skill_md_frontmatter(content: &str) -> Option<SkillMdFrontmatter> {
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Search the FangHub marketplace", body = serde_json::Value)
+        (status = 200, description = "Search the FangHub marketplace", body = crate::types::JsonObject)
     )
 )]
 pub async fn marketplace_search(
@@ -672,7 +672,7 @@ pub async fn marketplace_search(
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Search ClawHub skills", body = serde_json::Value)
+        (status = 200, description = "Search ClawHub skills", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_search(
@@ -758,7 +758,7 @@ pub async fn clawhub_search(
         ("q" = Option<String>, Query, description = "Search query"),
     ),
     responses(
-        (status = 200, description = "Browse ClawHub skills by sort order", body = serde_json::Value)
+        (status = 200, description = "Browse ClawHub skills by sort order", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_browse(
@@ -832,7 +832,7 @@ pub async fn clawhub_browse(
         ("slug" = String, Path, description = "Skill slug"),
     ),
     responses(
-        (status = 200, description = "Get detailed info about a ClawHub skill", body = serde_json::Value)
+        (status = 200, description = "Get detailed info about a ClawHub skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_skill_detail(
@@ -908,7 +908,7 @@ pub async fn clawhub_skill_detail(
         ("slug" = String, Path, description = "Skill slug"),
     ),
     responses(
-        (status = 200, description = "Fetch source code of a ClawHub skill", body = serde_json::Value)
+        (status = 200, description = "Fetch source code of a ClawHub skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_skill_code(
@@ -956,9 +956,9 @@ pub async fn clawhub_skill_code(
     post,
     path = "/api/clawhub/install",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a skill from ClawHub", body = serde_json::Value)
+        (status = 200, description = "Install a skill from ClawHub", body = crate::types::JsonObject)
     )
 )]
 pub async fn clawhub_install(
@@ -1750,7 +1750,7 @@ fn server_platform() -> &'static str {
     path = "/api/hands",
     tag = "hands",
     responses(
-        (status = 200, description = "List all hand definitions", body = serde_json::Value)
+        (status = 200, description = "List all hand definitions", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_hands(
@@ -1842,7 +1842,7 @@ pub async fn list_hands(
     path = "/api/hands/active",
     tag = "hands",
     responses(
-        (status = 200, description = "List active hand instances", body = serde_json::Value)
+        (status = 200, description = "List active hand instances", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_active_hands(
@@ -1910,7 +1910,7 @@ pub async fn list_active_hands(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Get a single hand definition with requirements", body = serde_json::Value)
+        (status = 200, description = "Get a single hand definition with requirements", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_hand(
@@ -2135,7 +2135,7 @@ pub async fn get_hand_manifest(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Re-check dependency status for a hand", body = serde_json::Value)
+        (status = 200, description = "Re-check dependency status for a hand", body = crate::types::JsonObject)
     )
 )]
 pub async fn check_hand_deps(
@@ -2197,7 +2197,7 @@ pub async fn check_hand_deps(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Auto-install missing dependencies for a hand", body = serde_json::Value)
+        (status = 200, description = "Auto-install missing dependencies for a hand", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_hand_deps(
@@ -2479,7 +2479,7 @@ pub async fn install_hand_deps(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Hand uninstalled", body = serde_json::Value),
+        (status = 200, description = "Hand uninstalled", body = crate::types::JsonObject),
         (status = 404, description = "Hand not found or is a built-in"),
         (status = 409, description = "Hand is still active — deactivate first"),
     )
@@ -2520,9 +2520,9 @@ pub async fn uninstall_hand(
     post,
     path = "/api/hands/install",
     tag = "hands",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a hand from TOML content", body = serde_json::Value)
+        (status = 200, description = "Install a hand from TOML content", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_hand(
@@ -2565,9 +2565,9 @@ pub async fn install_hand(
     params(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Activate a hand (spawns agent)", body = serde_json::Value)
+        (status = 200, description = "Activate a hand (spawns agent)", body = crate::types::JsonObject)
     )
 )]
 pub async fn activate_hand(
@@ -2626,7 +2626,7 @@ pub async fn activate_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Pause a hand instance", body = serde_json::Value)
+        (status = 200, description = "Pause a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn pause_hand(
@@ -2651,7 +2651,7 @@ pub async fn pause_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Resume a paused hand instance", body = serde_json::Value)
+        (status = 200, description = "Resume a paused hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn resume_hand(
@@ -2676,7 +2676,7 @@ pub async fn resume_hand(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Deactivate a hand (kills agent)", body = serde_json::Value)
+        (status = 200, description = "Deactivate a hand (kills agent)", body = crate::types::JsonObject)
     )
 )]
 pub async fn deactivate_hand(
@@ -2698,8 +2698,8 @@ pub async fn deactivate_hand(
     path = "/api/hands/{hand_id}/secret",
     tag = "hands",
     params(("hand_id" = String, Path, description = "Hand ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Secret saved", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Secret saved", body = crate::types::JsonObject))
 )]
 pub async fn set_hand_secret(
     State(state): State<Arc<AppState>>,
@@ -2777,7 +2777,7 @@ pub async fn set_hand_secret(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
     responses(
-        (status = 200, description = "Get settings schema and current values", body = serde_json::Value)
+        (status = 200, description = "Get settings schema and current values", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_hand_settings(
@@ -2830,9 +2830,9 @@ pub async fn get_hand_settings(
     params(
         ("hand_id" = String, Path, description = "Hand ID"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Update settings for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Update settings for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn update_hand_settings(
@@ -2878,7 +2878,7 @@ pub async fn update_hand_settings(
     path = "/api/hands/reload",
     tag = "hands",
     responses(
-        (status = 200, description = "Reload hand definitions from disk", body = serde_json::Value)
+        (status = 200, description = "Reload hand definitions from disk", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2904,7 +2904,7 @@ pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoRespon
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Get dashboard stats for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Get dashboard stats for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn hand_stats(
@@ -2979,7 +2979,7 @@ pub async fn hand_stats(
         ("id" = String, Path, description = "Instance ID"),
     ),
     responses(
-        (status = 200, description = "Get live browser state for a hand instance", body = serde_json::Value)
+        (status = 200, description = "Get live browser state for a hand instance", body = crate::types::JsonObject)
     )
 )]
 pub async fn hand_instance_browser(
@@ -3460,7 +3460,7 @@ fn serialize_mcp_transport(
     path = "/api/mcp/taint-rules",
     tag = "mcp",
     responses(
-        (status = 200, description = "List configured named taint rule sets", body = serde_json::Value)
+        (status = 200, description = "List configured named taint rule sets", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -3486,7 +3486,7 @@ pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/mcp/servers",
     tag = "mcp",
     responses(
-        (status = 200, description = "List configured MCP servers and their tools", body = serde_json::Value)
+        (status = 200, description = "List configured MCP servers and their tools", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -3593,7 +3593,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         ("name" = String, Path, description = "Server name"),
     ),
     responses(
-        (status = 200, description = "MCP server details", body = serde_json::Value),
+        (status = 200, description = "MCP server details", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
@@ -3660,9 +3660,9 @@ pub async fn get_mcp_server(
     post,
     path = "/api/mcp/servers",
     tag = "mcp",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Add a new MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Add a new MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn add_mcp_server(
@@ -3847,9 +3847,9 @@ pub async fn add_mcp_server(
     params(
         ("name" = String, Path, description = "Server name"),
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Update an existing MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Update an existing MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn update_mcp_server(
@@ -3968,10 +3968,10 @@ pub(crate) struct PatchMcpTaintRequest {
     path = "/api/mcp/servers/{name}/taint",
     tag = "mcp",
     params(("name" = String, Path, description = "Server name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Taint settings updated", body = serde_json::Value),
-        (status = 404, description = "Server not found", body = serde_json::Value),
+        (status = 200, description = "Taint settings updated", body = crate::types::JsonObject),
+        (status = 404, description = "Server not found", body = crate::types::JsonObject),
     )
 )]
 #[allow(private_interfaces)]
@@ -4066,7 +4066,7 @@ pub async fn patch_mcp_server_taint(
         ("name" = String, Path, description = "Server name"),
     ),
     responses(
-        (status = 200, description = "Remove an MCP server configuration", body = serde_json::Value)
+        (status = 200, description = "Remove an MCP server configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn delete_mcp_server(
@@ -4275,9 +4275,9 @@ fn validate_static_file_path(
     post,
     path = "/api/skills/create",
     tag = "skills",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Create a new prompt-only skill", body = serde_json::Value)
+        (status = 200, description = "Create a new prompt-only skill", body = crate::types::JsonObject)
     )
 )]
 pub async fn create_skill(
@@ -4352,7 +4352,7 @@ pub async fn create_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill detail with evolution history", body = serde_json::Value),
+        (status = 200, description = "Skill detail with evolution history", body = crate::types::JsonObject),
         (status = 404, description = "Skill not found")
     )
 )]
@@ -4530,7 +4530,7 @@ fn evolution_ok_response(
         ("path" = String, Query, description = "Relative file path inside the skill directory")
     ),
     responses(
-        (status = 200, description = "File contents", body = serde_json::Value),
+        (status = 200, description = "File contents", body = crate::types::JsonObject),
         (status = 400, description = "Invalid path"),
         (status = 404, description = "Skill or file not found")
     )
@@ -4636,9 +4636,9 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
     path = "/api/skills/{name}/evolve/update",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Skill updated", body = serde_json::Value),
+        (status = 200, description = "Skill updated", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request / security-blocked content"),
         (status = 404, description = "Skill not found")
     )
@@ -4683,9 +4683,9 @@ pub async fn evolve_update_skill(
     path = "/api/skills/{name}/evolve/patch",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Skill patched", body = serde_json::Value),
+        (status = 200, description = "Skill patched", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request / fuzzy match failed"),
         (status = 404, description = "Skill not found")
     )
@@ -4737,7 +4737,7 @@ pub async fn evolve_patch_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill rolled back", body = serde_json::Value),
+        (status = 200, description = "Skill rolled back", body = crate::types::JsonObject),
         (status = 404, description = "Skill or snapshot not found")
     )
 )]
@@ -4774,7 +4774,7 @@ pub async fn evolve_rollback_skill(
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
     responses(
-        (status = 200, description = "Skill deleted", body = serde_json::Value),
+        (status = 200, description = "Skill deleted", body = crate::types::JsonObject),
         (status = 400, description = "Non-local skill — deletion refused"),
         (status = 404, description = "Skill not found")
     )
@@ -4803,9 +4803,9 @@ pub async fn evolve_delete_skill(
     path = "/api/skills/{name}/evolve/file",
     tag = "skills",
     params(("name" = String, Path, description = "Skill name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "File written", body = serde_json::Value),
+        (status = 200, description = "File written", body = crate::types::JsonObject),
         (status = 400, description = "Invalid path / over size limit"),
         (status = 404, description = "Skill not found")
     )
@@ -4850,7 +4850,7 @@ pub async fn evolve_write_file(
         ("path" = String, Query, description = "Relative path of the file to remove")
     ),
     responses(
-        (status = 200, description = "File removed", body = serde_json::Value),
+        (status = 200, description = "File removed", body = crate::types::JsonObject),
         (status = 400, description = "Missing 'path' parameter"),
         (status = 404, description = "Skill or file not found")
     )
@@ -5222,7 +5222,7 @@ fn render_catalog_entry(
     path = "/api/mcp/catalog",
     tag = "mcp",
     responses(
-        (status = 200, description = "MCP catalog entries", body = serde_json::Value)
+        (status = 200, description = "MCP catalog entries", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_mcp_catalog(
@@ -5255,8 +5255,8 @@ pub async fn list_mcp_catalog(
     tag = "mcp",
     params(("id" = String, Path, description = "Catalog entry id")),
     responses(
-        (status = 200, description = "Catalog entry detail", body = serde_json::Value),
-        (status = 404, description = "Catalog entry not found", body = serde_json::Value),
+        (status = 200, description = "Catalog entry detail", body = crate::types::JsonObject),
+        (status = 404, description = "Catalog entry not found", body = crate::types::JsonObject),
     )
 )]
 pub async fn get_mcp_catalog_entry(
@@ -5289,8 +5289,8 @@ pub async fn get_mcp_catalog_entry(
     tag = "mcp",
     params(("name" = String, Path, description = "Server name")),
     responses(
-        (status = 200, description = "Reconnect an MCP server", body = serde_json::Value),
-        (status = 404, description = "MCP server not configured", body = serde_json::Value),
+        (status = 200, description = "Reconnect an MCP server", body = crate::types::JsonObject),
+        (status = 404, description = "MCP server not configured", body = crate::types::JsonObject),
     )
 )]
 pub async fn reconnect_mcp_server_handler(
@@ -5334,7 +5334,7 @@ pub async fn reconnect_mcp_server_handler(
     path = "/api/mcp/health",
     tag = "mcp",
     responses(
-        (status = 200, description = "Health snapshot for all configured MCP servers", body = serde_json::Value)
+        (status = 200, description = "Health snapshot for all configured MCP servers", body = crate::types::JsonObject)
     )
 )]
 pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5368,7 +5368,7 @@ pub async fn mcp_health_handler(State(state): State<Arc<AppState>>) -> impl Into
     path = "/api/mcp/reload",
     tag = "mcp",
     responses(
-        (status = 200, description = "Reload catalog and reconnect MCP servers", body = serde_json::Value)
+        (status = 200, description = "Reload catalog and reconnect MCP servers", body = crate::types::JsonObject)
     )
 )]
 pub async fn reload_mcp_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5435,7 +5435,7 @@ fn status_str_for_catalog(
     path = "/api/extensions",
     tag = "extensions",
     responses(
-        (status = 200, description = "List catalog entries with install/health status", body = serde_json::Value)
+        (status = 200, description = "List catalog entries with install/health status", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -5486,7 +5486,7 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
         ("name" = String, Path, description = "Catalog entry id"),
     ),
     responses(
-        (status = 200, description = "Catalog entry detail + install status", body = serde_json::Value)
+        (status = 200, description = "Catalog entry detail + install status", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_extension(
@@ -5554,9 +5554,9 @@ pub async fn get_extension(
     post,
     path = "/api/extensions/install",
     tag = "extensions",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Install a catalog entry", body = serde_json::Value)
+        (status = 200, description = "Install a catalog entry", body = crate::types::JsonObject)
     )
 )]
 pub async fn install_extension(
@@ -5656,9 +5656,9 @@ pub async fn install_extension(
     post,
     path = "/api/extensions/uninstall",
     tag = "extensions",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Uninstall a catalog-backed MCP server", body = serde_json::Value)
+        (status = 200, description = "Uninstall a catalog-backed MCP server", body = crate::types::JsonObject)
     )
 )]
 pub async fn uninstall_extension(

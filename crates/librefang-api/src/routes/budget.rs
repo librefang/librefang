@@ -132,7 +132,7 @@ fn fmt_global_budget_diff(
     get,
     path = "/api/usage",
     tag = "budget",
-    responses((status = 200, description = "Per-agent usage statistics", body = serde_json::Value))
+    responses((status = 200, description = "Per-agent usage statistics", body = crate::types::JsonObject))
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
@@ -171,7 +171,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     get,
     path = "/api/usage/summary",
     tag = "budget",
-    responses((status = 200, description = "Overall usage summary", body = serde_json::Value))
+    responses((status = 200, description = "Overall usage summary", body = crate::types::JsonObject))
 )]
 pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_summary(None) {
@@ -197,7 +197,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     get,
     path = "/api/usage/by-model",
     tag = "budget",
-    responses((status = 200, description = "Usage grouped by model", body = serde_json::Value))
+    responses((status = 200, description = "Usage grouped by model", body = crate::types::JsonObject))
 )]
 pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory_substrate().usage().query_by_model() {
@@ -225,7 +225,7 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     get,
     path = "/api/usage/by-model/performance",
     tag = "budget",
-    responses((status = 200, description = "Model performance metrics", body = serde_json::Value))
+    responses((status = 200, description = "Model performance metrics", body = crate::types::JsonObject))
 )]
 pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state
@@ -263,7 +263,7 @@ pub async fn usage_by_model_performance(State(state): State<Arc<AppState>>) -> i
     get,
     path = "/api/usage/daily",
     tag = "budget",
-    responses((status = 200, description = "Daily usage breakdown", body = serde_json::Value))
+    responses((status = 200, description = "Daily usage breakdown", body = crate::types::JsonObject))
 )]
 pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let days = state
@@ -310,7 +310,7 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
     path = "/api/budget",
     tag = "budget",
     responses(
-        (status = 200, description = "Global budget status", body = serde_json::Value)
+        (status = 200, description = "Global budget status", body = crate::types::JsonObject)
     )
 )]
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -326,7 +326,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     put,
     path = "/api/budget",
     tag = "budget",
-    responses((status = 200, description = "Updated global budget status", body = serde_json::Value))
+    responses((status = 200, description = "Updated global budget status", body = crate::types::JsonObject))
 )]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
@@ -392,7 +392,7 @@ pub async fn update_budget(
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Per-agent budget and quota status", body = serde_json::Value))
+    responses((status = 200, description = "Per-agent budget and quota status", body = crate::types::JsonObject))
 )]
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
@@ -508,7 +508,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Updated agent budget", body = serde_json::Value))
+    responses((status = 200, description = "Updated agent budget", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
@@ -651,7 +651,7 @@ fn require_admin_for_user_budget(
     path = "/api/budget/users",
     tag = "budget",
     params(("limit" = Option<u32>, Query, description = "Top N users (default 25, cap 1000)")),
-    responses((status = 200, description = "Per-user cost ranking", body = serde_json::Value))
+    responses((status = 200, description = "Per-user cost ranking", body = crate::types::JsonObject))
 )]
 pub async fn user_budget_ranking(
     State(state): State<Arc<AppState>>,
@@ -735,7 +735,7 @@ pub async fn user_budget_ranking(
     path = "/api/budget/users/{user_id}",
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
-    responses((status = 200, description = "Single user budget detail", body = serde_json::Value))
+    responses((status = 200, description = "Single user budget detail", body = crate::types::JsonObject))
 )]
 pub async fn user_budget_detail(
     State(state): State<Arc<AppState>>,
@@ -848,7 +848,7 @@ pub async fn user_budget_detail(
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Budget written and reloaded", body = serde_json::Value),
+        (status = 200, description = "Budget written and reloaded", body = crate::types::JsonObject),
         (status = 400, description = "Invalid or partial budget payload"),
         (status = 403, description = "Caller is not an admin"),
         (status = 404, description = "No user matches the given id/name"),

@@ -274,7 +274,7 @@ pub async fn list_profiles() -> impl IntoResponse {
 }
 
 /// GET /api/profiles/:name — Get a single profile by name.
-#[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = crate::types::JsonObject)))]
 pub async fn get_profile(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -414,7 +414,7 @@ pub async fn list_agent_templates() -> impl IntoResponse {
 }
 
 /// GET /api/templates/:name — Get template details.
-#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = crate::types::JsonObject)))]
 pub async fn get_agent_template(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -524,7 +524,7 @@ pub async fn get_agent_template_toml(
 // ---------------------------------------------------------------------------
 
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
-#[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -572,7 +572,7 @@ pub async fn get_agent_kv(
 }
 
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
-#[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = crate::types::JsonObject)))]
 pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
@@ -606,7 +606,7 @@ pub async fn get_agent_kv_key(
 }
 
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
-#[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = serde_json::Value, responses((status = 200, description = "KV value set", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = crate::types::JsonObject, responses((status = 200, description = "KV value set", body = crate::types::JsonObject)))]
 pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
@@ -671,7 +671,7 @@ pub async fn delete_agent_kv_key(
 }
 
 /// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
-#[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = crate::types::JsonObject)))]
 pub async fn export_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -714,7 +714,7 @@ pub async fn export_agent_memory(
 ///
 /// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
 /// Optionally accepts `clear_existing: true` to wipe existing memory before import.
-#[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = serde_json::Value, responses((status = 200, description = "Memory imported", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Memory imported", body = crate::types::JsonObject)))]
 pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -849,7 +849,7 @@ pub async fn audit_recent(
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
-#[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = crate::types::JsonObject)))]
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let entry_count = state.kernel.audit().len();
     match state.kernel.audit().verify_integrity() {
@@ -1029,7 +1029,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/tools/:name — Get a single tool definition by name.
-#[utoipa::path(get, path = "/api/tools/{name}", tag = "skills", params(("name" = String, Path, description = "Tool name")), responses((status = 200, description = "Tool details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/tools/{name}", tag = "skills", params(("name" = String, Path, description = "Tool name")), responses((status = 200, description = "Tool details", body = crate::types::JsonObject)))]
 pub async fn get_tool(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1088,9 +1088,9 @@ pub async fn get_tool(
         ("name" = String, Path, description = "Tool name"),
         ("agent_id" = Option<String>, Query, description = "Caller agent UUID (required for approval-gated tools)")
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Tool execution result", body = serde_json::Value),
+        (status = 200, description = "Tool execution result", body = crate::types::JsonObject),
         (status = 400, description = "Tool invocation failed or requires an agent context"),
         (status = 403, description = "Endpoint disabled or tool not in allowlist"),
         (status = 404, description = "Tool not found")
@@ -1285,7 +1285,7 @@ impl PaginationParams {
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
-        (status = 200, description = "Paginated list of sessions", body = serde_json::Value)
+        (status = 200, description = "Paginated list of sessions", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_sessions(
@@ -1314,7 +1314,7 @@ pub async fn list_sessions(
 }
 
 /// GET /api/sessions/:id — Get a single session by ID.
-#[utoipa::path(get, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session found", body = serde_json::Value), (status = 404, description = "Session not found")))]
+#[utoipa::path(get, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session found", body = crate::types::JsonObject), (status = 404, description = "Session not found")))]
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1384,7 +1384,7 @@ pub async fn delete_session(
 }
 
 /// PUT /api/sessions/:id/label — Set a session label.
-#[utoipa::path(put, path = "/api/sessions/{id}/label", tag = "sessions", params(("id" = String, Path, description = "Session ID")), request_body = serde_json::Value, responses((status = 200, description = "Label set", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/sessions/{id}/label", tag = "sessions", params(("id" = String, Path, description = "Session ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Label set", body = crate::types::JsonObject)))]
 pub async fn set_session_label(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1433,7 +1433,7 @@ pub async fn set_session_label(
 }
 
 /// GET /api/sessions/by-label/:label — Find session by label (scoped to agent).
-#[utoipa::path(get, path = "/api/agents/{id}/sessions/by-label/{label}", tag = "sessions", params(("id" = String, Path, description = "Agent ID"), ("label" = String, Path, description = "Session label")), responses((status = 200, description = "Session found", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/agents/{id}/sessions/by-label/{label}", tag = "sessions", params(("id" = String, Path, description = "Agent ID"), ("label" = String, Path, description = "Session label")), responses((status = 200, description = "Session found", body = crate::types::JsonObject)))]
 pub async fn find_session_by_label(
     State(state): State<Arc<AppState>>,
     Path((agent_id_str, label)): Path<(String, String)>,
@@ -1486,7 +1486,7 @@ pub async fn find_session_by_label(
 ///
 /// Runs both expired-session and excess-session cleanup using the configured
 /// `[session]` policy. Returns `{"sessions_deleted": N}`.
-#[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = crate::types::JsonObject)))]
 pub async fn session_cleanup(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -1548,7 +1548,7 @@ pub async fn session_cleanup(
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
     responses(
-        (status = 200, description = "Search results", body = serde_json::Value),
+        (status = 200, description = "Search results", body = crate::types::JsonObject),
         (status = 400, description = "Missing query parameter"),
     )
 )]
@@ -1652,7 +1652,7 @@ fn approval_to_json(
         ("limit" = Option<usize>, Query, description = "Max items (default 50, max 500)"),
         ("offset" = Option<usize>, Query, description = "Items to skip"),
     ),
-    responses((status = 200, description = "Paginated list of pending and recent approvals", body = serde_json::Value))
+    responses((status = 200, description = "Paginated list of pending and recent approvals", body = crate::types::JsonObject))
 )]
 pub async fn list_approvals(
     State(state): State<Arc<AppState>>,
@@ -1735,7 +1735,7 @@ pub async fn list_approvals(
 }
 
 /// GET /api/approvals/{id} — Get a single approval request by ID.
-#[utoipa::path(get, path = "/api/approvals/{id}", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Single approval request", body = serde_json::Value), (status = 404, description = "Approval not found")))]
+#[utoipa::path(get, path = "/api/approvals/{id}", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Single approval request", body = crate::types::JsonObject), (status = 404, description = "Approval not found")))]
 pub async fn get_approval(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1781,7 +1781,7 @@ pub(crate) struct CreateApprovalRequest {
     pub session_id: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Approval created", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn create_approval(
     State(state): State<Arc<AppState>>,
@@ -1836,7 +1836,7 @@ pub(crate) struct ApproveRequestBody {
     totp_code: Option<String>,
 }
 
-#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request approved", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request approved", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
@@ -2062,7 +2062,7 @@ pub async fn approve_request(
 }
 
 /// POST /api/approvals/{id}/reject — Reject a pending request.
-#[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = crate::types::JsonObject)))]
 pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2111,7 +2111,7 @@ pub(crate) struct ModifyRequestBody {
     feedback: String,
 }
 
-#[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = serde_json::Value, responses((status = 200, description = "Request modified", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals/{id}/modify", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Request modified", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn modify_request(
     State(state): State<Arc<AppState>>,
@@ -2164,7 +2164,7 @@ pub(crate) struct BatchResolveRequest {
     decision: String,
 }
 
-#[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Batch resolve results", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/approvals/batch", tag = "approvals", request_body = crate::types::JsonObject, responses((status = 200, description = "Batch resolve results", body = crate::types::JsonObject)))]
 #[allow(private_interfaces)]
 pub async fn batch_resolve(
     State(state): State<Arc<AppState>>,
@@ -2272,7 +2272,7 @@ pub async fn batch_resolve(
     tag = "approvals",
     params(("session_id" = String, Path, description = "Session ID")),
     responses(
-        (status = 200, description = "Pending approvals for session", body = serde_json::Value)
+        (status = 200, description = "Pending approvals for session", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_approvals_for_session(
@@ -2346,9 +2346,9 @@ pub(crate) struct ApproveAllForSessionRequest {
     params(("session_id" = String, Path, description = "Session ID")),
     request_body = ApproveAllForSessionRequest,
     responses(
-        (status = 200, description = "All pending session approvals approved", body = serde_json::Value),
-        (status = 400, description = "TOTP required for one or more items", body = serde_json::Value),
-        (status = 409, description = "Pending set changed since request was issued", body = serde_json::Value),
+        (status = 200, description = "All pending session approvals approved", body = crate::types::JsonObject),
+        (status = 400, description = "TOTP required for one or more items", body = crate::types::JsonObject),
+        (status = 409, description = "Pending set changed since request was issued", body = crate::types::JsonObject),
     )
 )]
 #[allow(private_interfaces)]
@@ -2475,7 +2475,7 @@ pub async fn approve_all_for_session(
     tag = "approvals",
     params(("session_id" = String, Path, description = "Session ID")),
     responses(
-        (status = 200, description = "All pending session approvals rejected", body = serde_json::Value)
+        (status = 200, description = "All pending session approvals rejected", body = crate::types::JsonObject)
     )
 )]
 pub async fn reject_all_for_session(
@@ -2546,7 +2546,7 @@ fn default_audit_limit() -> usize {
     50
 }
 
-#[utoipa::path(get, path = "/api/approvals/audit", tag = "approvals", params(("limit" = Option<usize>, Query, description = "Max entries"), ("offset" = Option<usize>, Query, description = "Offset"), ("agent_id" = Option<String>, Query, description = "Filter by agent"), ("tool_name" = Option<String>, Query, description = "Filter by tool")), responses((status = 200, description = "Audit log entries", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/approvals/audit", tag = "approvals", params(("limit" = Option<usize>, Query, description = "Max entries"), ("offset" = Option<usize>, Query, description = "Offset"), ("agent_id" = Option<String>, Query, description = "Filter by agent"), ("tool_name" = Option<String>, Query, description = "Filter by tool")), responses((status = 200, description = "Audit log entries", body = crate::types::JsonObject)))]
 pub async fn audit_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQueryParams>,
@@ -2568,7 +2568,7 @@ pub async fn audit_log(
 }
 
 /// GET /api/approvals/count — Lightweight pending count for notification badges.
-#[utoipa::path(get, path = "/api/approvals/count", tag = "approvals", responses((status = 200, description = "Pending approval count", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/approvals/count", tag = "approvals", responses((status = 200, description = "Pending approval count", body = crate::types::JsonObject)))]
 pub async fn approval_count(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let pending = state.kernel.approvals().pending_count();
     Json(serde_json::json!({"pending": pending}))
@@ -3030,7 +3030,7 @@ pub async fn totp_revoke(
 ///
 /// Publishes a custom event through the kernel's event system, which can
 /// trigger proactive agents that subscribe to the event type.
-#[utoipa::path(post, path = "/api/hooks/wake", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Wake hook triggered", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/hooks/wake", tag = "webhooks", request_body = crate::types::JsonObject, responses((status = 200, description = "Wake hook triggered", body = crate::types::JsonObject)))]
 pub async fn webhook_wake(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -3095,7 +3095,7 @@ pub async fn webhook_wake(
 ///
 /// Sends a message directly to the specified agent and returns the response.
 /// This enables external systems (CI/CD, Slack, etc.) to trigger agent work.
-#[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Agent hook triggered", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = crate::types::JsonObject, responses((status = 200, description = "Agent hook triggered", body = crate::types::JsonObject)))]
 pub async fn webhook_agent(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -3197,7 +3197,7 @@ pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// POST /api/bindings — Add a new agent binding.
-#[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Binding added", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Binding added", body = crate::types::JsonObject)))]
 pub async fn add_binding(
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
@@ -3284,7 +3284,7 @@ fn resolve_pairing_base_url(
 }
 
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
-#[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = crate::types::JsonObject)))]
 pub async fn pairing_request(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -3372,7 +3372,7 @@ fn default_unknown() -> String {
 }
 
 /// POST /api/pairing/complete — Complete pairing with token + device info.
-#[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Pairing completed", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = crate::types::JsonObject, responses((status = 200, description = "Pairing completed", body = crate::types::JsonObject)))]
 pub async fn pairing_complete(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -3549,7 +3549,7 @@ pub async fn pairing_remove_device(
 }
 
 /// POST /api/pairing/notify — Push a notification to all paired devices.
-#[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Notification sent", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = crate::types::JsonObject, responses((status = 200, description = "Notification sent", body = crate::types::JsonObject)))]
 pub async fn pairing_notify(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -3623,7 +3623,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// GET /api/commands/{name} — Lookup a single command by name.
-#[utoipa::path(get, path = "/api/commands/{name}", tag = "system", params(("name" = String, Path, description = "Command name")), responses((status = 200, description = "Command details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/commands/{name}", tag = "system", params(("name" = String, Path, description = "Command name")), responses((status = 200, description = "Command details", body = crate::types::JsonObject)))]
 pub async fn get_command(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -3717,7 +3717,7 @@ struct BackupManifest {
 ///
 /// Returns the backup metadata including the filename. The archive is stored
 /// in `<home_dir>/backups/` with a timestamped filename.
-#[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = crate::types::JsonObject)))]
 pub async fn create_backup(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -4078,7 +4078,7 @@ pub async fn delete_backup(
 ///
 /// **Warning**: This overwrites existing state files. The daemon should be
 /// restarted after a restore for all changes to take effect.
-#[utoipa::path(post, path = "/api/restore", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Backup restored", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/restore", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Backup restored", body = crate::types::JsonObject)))]
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
@@ -4252,7 +4252,7 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 }
 
 /// GET /api/queue/status — Command queue status and occupancy.
-#[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = crate::types::JsonObject)))]
 pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let occupancy = state.kernel.command_queue_ref().occupancy();
     let lanes: Vec<serde_json::Value> = occupancy
@@ -4330,7 +4330,7 @@ fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> b
     path = "/api/versions",
     tag = "system",
     responses(
-        (status = 200, description = "API version info", body = serde_json::Value)
+        (status = 200, description = "API version info", body = crate::types::JsonObject)
     )
 )]
 pub async fn api_versions() -> impl IntoResponse {

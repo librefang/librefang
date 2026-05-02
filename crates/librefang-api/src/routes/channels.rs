@@ -1278,8 +1278,8 @@ pub(crate) async fn channels_snapshot(state: &Arc<AppState>) -> Vec<serde_json::
         ("name" = String, Path, description = "Channel adapter name (e.g. telegram, discord)")
     ),
     responses(
-        (status = 200, description = "Channel details", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel details", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 pub async fn get_channel(
@@ -1345,11 +1345,11 @@ pub async fn get_channel(
     params(
         ("name" = String, Path, description = "Channel name")
     ),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Channel configured successfully", body = serde_json::Value),
-        (status = 400, description = "Bad request", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel configured successfully", body = crate::types::JsonObject),
+        (status = 400, description = "Bad request", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
@@ -1473,9 +1473,9 @@ pub async fn configure_channel(
         ("name" = String, Path, description = "Channel name")
     ),
     responses(
-        (status = 200, description = "Channel removed successfully", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value),
-        (status = 500, description = "Internal server error", body = serde_json::Value)
+        (status = 200, description = "Channel removed successfully", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 500, description = "Internal server error", body = crate::types::JsonObject)
     )
 )]
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
@@ -1533,8 +1533,8 @@ pub async fn remove_channel(
     ),
     request_body(content = Option<serde_json::Value>, content_type = "application/json"),
     responses(
-        (status = 200, description = "Channel test result", body = serde_json::Value),
-        (status = 404, description = "Unknown channel", body = serde_json::Value)
+        (status = 200, description = "Channel test result", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/test — Connectivity check + optional live test message.
@@ -1688,8 +1688,8 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     path = "/api/channels/reload",
     tag = "channels",
     responses(
-        (status = 200, description = "Channels reloaded successfully", body = serde_json::Value),
-        (status = 500, description = "Reload failed", body = serde_json::Value)
+        (status = 200, description = "Channels reloaded successfully", body = crate::types::JsonObject),
+        (status = 500, description = "Reload failed", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
@@ -1720,7 +1720,7 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
     path = "/api/channels/whatsapp/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR session started", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
@@ -1784,7 +1784,7 @@ pub async fn whatsapp_qr_start() -> impl IntoResponse {
         ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
     ),
     responses(
-        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+        (status = 200, description = "WhatsApp QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
@@ -1938,7 +1938,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
     path = "/api/channels/wechat/qr/start",
     tag = "channels",
     responses(
-        (status = 200, description = "WeChat QR login initiated", body = serde_json::Value)
+        (status = 200, description = "WeChat QR login initiated", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
@@ -2003,7 +2003,7 @@ pub async fn wechat_qr_start() -> impl IntoResponse {
         ("qr_code" = String, Query, description = "QR code value from /qr/start")
     ),
     responses(
-        (status = 200, description = "WeChat QR scan status", body = serde_json::Value)
+        (status = 200, description = "WeChat QR scan status", body = crate::types::JsonObject)
     )
 )]
 /// GET /api/channels/wechat/qr/status — Poll iLink for QR scan confirmation.

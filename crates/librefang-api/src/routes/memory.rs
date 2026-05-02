@@ -382,7 +382,7 @@ fn auth_denied(
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = serde_json::Value))
+    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
 )]
 pub async fn memory_search(
     State(state): State<Arc<AppState>>,
@@ -427,7 +427,7 @@ pub async fn memory_search(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated memory list", body = serde_json::Value))
+    responses((status = 200, description = "Paginated memory list", body = crate::types::JsonObject))
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
@@ -488,7 +488,7 @@ pub async fn memory_list(
     path = "/api/memory/user/{user_id}",
     tag = "proactive-memory",
     params(("user_id" = String, Path, description = "User ID")),
-    responses((status = 200, description = "User memories", body = serde_json::Value))
+    responses((status = 200, description = "User memories", body = crate::types::JsonObject))
 )]
 pub async fn memory_get_user(
     State(state): State<Arc<AppState>>,
@@ -522,8 +522,8 @@ pub async fn memory_get_user(
     post,
     path = "/api/memory",
     tag = "proactive-memory",
-    request_body = serde_json::Value,
-    responses((status = 201, description = "Memories added", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 201, description = "Memories added", body = crate::types::JsonObject))
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
@@ -560,8 +560,8 @@ pub async fn memory_add(
     path = "/api/memory/items/{memory_id}",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Memory updated", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Memory updated", body = crate::types::JsonObject))
 )]
 pub async fn memory_update(
     State(state): State<Arc<AppState>>,
@@ -611,7 +611,7 @@ pub async fn memory_update(
     path = "/api/memory/items/{memory_id}",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    responses((status = 200, description = "Memory deleted", body = serde_json::Value))
+    responses((status = 200, description = "Memory deleted", body = crate::types::JsonObject))
 )]
 pub async fn memory_delete(
     State(state): State<Arc<AppState>>,
@@ -649,8 +649,8 @@ pub async fn memory_delete(
     post,
     path = "/api/memory/bulk-delete",
     tag = "proactive-memory",
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Bulk delete results", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Bulk delete results", body = crate::types::JsonObject))
 )]
 pub async fn memory_bulk_delete(
     State(state): State<Arc<AppState>>,
@@ -709,7 +709,7 @@ pub async fn memory_bulk_delete(
     get,
     path = "/api/memory/stats",
     tag = "proactive-memory",
-    responses((status = 200, description = "Memory statistics", body = serde_json::Value))
+    responses((status = 200, description = "Memory statistics", body = crate::types::JsonObject))
 )]
 pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Graceful degradation: proactive memory disabled → null stats, not 500.
@@ -751,7 +751,7 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
     path = "/api/memory/agents/{id}",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Memories reset", body = serde_json::Value))
+    responses((status = 200, description = "Memories reset", body = crate::types::JsonObject))
 )]
 pub async fn memory_reset_agent(
     State(state): State<Arc<AppState>>,
@@ -781,7 +781,7 @@ pub async fn memory_reset_agent(
         ("id" = String, Path, description = "Agent ID"),
         ("level" = String, Path, description = "Memory level: user, session, or agent"),
     ),
-    responses((status = 200, description = "Memories cleared at level", body = serde_json::Value))
+    responses((status = 200, description = "Memories cleared at level", body = crate::types::JsonObject))
 )]
 pub async fn memory_clear_level(
     State(state): State<Arc<AppState>>,
@@ -832,7 +832,7 @@ pub async fn memory_clear_level(
         ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
         ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Paginated agent memory list", body = serde_json::Value))
+    responses((status = 200, description = "Paginated agent memory list", body = crate::types::JsonObject))
 )]
 pub async fn memory_list_agent(
     State(state): State<Arc<AppState>>,
@@ -887,7 +887,7 @@ pub async fn memory_list_agent(
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
-    responses((status = 200, description = "Search results", body = serde_json::Value))
+    responses((status = 200, description = "Search results", body = crate::types::JsonObject))
 )]
 pub async fn memory_search_agent(
     State(state): State<Arc<AppState>>,
@@ -927,7 +927,7 @@ pub async fn memory_search_agent(
     path = "/api/memory/agents/{id}/stats",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Agent memory statistics", body = serde_json::Value))
+    responses((status = 200, description = "Agent memory statistics", body = crate::types::JsonObject))
 )]
 pub async fn memory_stats_agent(
     State(state): State<Arc<AppState>>,
@@ -954,7 +954,7 @@ pub async fn memory_stats_agent(
     path = "/api/memory/agents/{id}/duplicates",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Duplicate memory groups", body = serde_json::Value))
+    responses((status = 200, description = "Duplicate memory groups", body = crate::types::JsonObject))
 )]
 pub async fn memory_duplicates(
     State(state): State<Arc<AppState>>,
@@ -987,7 +987,7 @@ pub async fn memory_duplicates(
     path = "/api/memory/items/{memory_id}/history",
     tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
-    responses((status = 200, description = "Memory version history", body = serde_json::Value))
+    responses((status = 200, description = "Memory version history", body = crate::types::JsonObject))
 )]
 pub async fn memory_history(
     State(state): State<Arc<AppState>>,
@@ -1024,7 +1024,7 @@ pub async fn memory_history(
     path = "/api/memory/agents/{id}/consolidate",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Consolidation result", body = serde_json::Value))
+    responses((status = 200, description = "Consolidation result", body = crate::types::JsonObject))
 )]
 pub async fn memory_consolidate(
     State(state): State<Arc<AppState>>,
@@ -1059,7 +1059,7 @@ pub async fn memory_consolidate(
     post,
     path = "/api/memory/cleanup",
     tag = "proactive-memory",
-    responses((status = 200, description = "Cleanup result", body = serde_json::Value))
+    responses((status = 200, description = "Cleanup result", body = crate::types::JsonObject))
 )]
 pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1090,7 +1090,7 @@ pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResp
     path = "/api/memory/agents/{id}/export",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Exported memories", body = serde_json::Value))
+    responses((status = 200, description = "Exported memories", body = crate::types::JsonObject))
 )]
 pub async fn memory_export_agent(
     State(state): State<Arc<AppState>>,
@@ -1124,8 +1124,8 @@ pub async fn memory_export_agent(
     path = "/api/memory/agents/{id}/import",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Import result", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Import result", body = crate::types::JsonObject))
 )]
 pub async fn memory_import_agent(
     State(state): State<Arc<AppState>>,
@@ -1163,7 +1163,7 @@ pub async fn memory_import_agent(
     post,
     path = "/api/memory/decay",
     tag = "proactive-memory",
-    responses((status = 200, description = "Decay result", body = serde_json::Value))
+    responses((status = 200, description = "Decay result", body = crate::types::JsonObject))
 )]
 pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let store = match get_pm_store(&state) {
@@ -1201,7 +1201,7 @@ pub struct MemoryCountQuery {
         ("id" = String, Path, description = "Agent ID"),
         ("level" = Option<String>, Query, description = "Memory level filter (user, session, agent)"),
     ),
-    responses((status = 200, description = "Memory count", body = serde_json::Value))
+    responses((status = 200, description = "Memory count", body = crate::types::JsonObject))
 )]
 pub async fn memory_count_agent(
     State(state): State<Arc<AppState>>,
@@ -1246,8 +1246,8 @@ pub async fn memory_count_agent(
     path = "/api/memory/agents/{id}/relations",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body = serde_json::Value,
-    responses((status = 200, description = "Relations stored", body = serde_json::Value))
+    request_body = crate::types::JsonObject,
+    responses((status = 200, description = "Relations stored", body = crate::types::JsonObject))
 )]
 pub async fn memory_store_relations(
     State(state): State<Arc<AppState>>,
@@ -1296,7 +1296,7 @@ pub struct RelationQueryParams {
         ("relation" = Option<String>, Query, description = "Relation type"),
         ("target" = Option<String>, Query, description = "Target entity name or ID"),
     ),
-    responses((status = 200, description = "Matching relations", body = serde_json::Value))
+    responses((status = 200, description = "Matching relations", body = crate::types::JsonObject))
 )]
 pub async fn memory_query_relations(
     State(state): State<Arc<AppState>>,
@@ -1359,7 +1359,7 @@ pub async fn memory_query_relations(
 // GET /api/memory/config — Get memory configuration
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/memory/config", tag = "memory", responses((status = 200, description = "Memory configuration", body = crate::types::JsonObject)))]
 pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = state.kernel.config_ref();
     Json(serde_json::json!({
@@ -1381,7 +1381,7 @@ pub async fn memory_config_get(State(state): State<Arc<AppState>>) -> impl IntoR
 // PATCH /api/memory/config — Update memory configuration (writes config.toml)
 // ---------------------------------------------------------------------------
 
-#[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = serde_json::Value, responses((status = 200, description = "Memory configuration updated", body = serde_json::Value)))]
+#[utoipa::path(patch, path = "/api/memory/config", tag = "memory", request_body = crate::types::JsonObject, responses((status = 200, description = "Memory configuration updated", body = crate::types::JsonObject)))]
 pub async fn memory_config_patch(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,

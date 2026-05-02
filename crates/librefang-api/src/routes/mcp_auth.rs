@@ -60,7 +60,7 @@ fn auth_failed(detail: impl std::fmt::Display) -> Response {
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth status for the MCP server", body = serde_json::Value),
+        (status = 200, description = "Auth status for the MCP server", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
@@ -256,7 +256,7 @@ fn percent_encode_param(s: &str) -> String {
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth flow started — returns auth URL", body = serde_json::Value),
+        (status = 200, description = "Auth flow started — returns auth URL", body = crate::types::JsonObject),
         (status = 400, description = "Server has no HTTP transport or discovery failed"),
         (status = 404, description = "MCP server not found")
     )
@@ -843,7 +843,7 @@ pub async fn auth_callback(
         ("name" = String, Path, description = "MCP server name"),
     ),
     responses(
-        (status = 200, description = "Auth revoked", body = serde_json::Value),
+        (status = 200, description = "Auth revoked", body = crate::types::JsonObject),
         (status = 404, description = "MCP server not found")
     )
 )]
