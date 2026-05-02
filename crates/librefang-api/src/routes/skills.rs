@@ -2509,7 +2509,7 @@ pub async fn uninstall_hand(
     let home_dir = state.kernel.home_dir().to_path_buf();
     match state.kernel.hands().uninstall_hand(&home_dir, &hand_id) {
         Ok(()) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.invalidate_hand_route_cache();
             state.kernel.persist_hand_state();
             (
                 StatusCode::OK,
@@ -2560,7 +2560,7 @@ pub async fn install_hand(
         skill_content,
     ) {
         Ok(def) => {
-            librefang_kernel::router::invalidate_hand_route_cache();
+            state.kernel.invalidate_hand_route_cache();
             // Return the full canonical `HandDefinition` so dashboard /
             // SDK callers can `setQueryData` on the hands list directly
             // instead of doing a follow-up GET. The previous {id, name,

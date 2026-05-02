@@ -1116,6 +1116,17 @@ impl LibreFangKernel {
         crate::auto_dream::set_agent_enabled(self, agent_id, enabled)
     }
 
+    /// Drop the cached hand-route resolver so the next dispatch rebuilds it
+    /// from the current registry. Call after any hand install / uninstall
+    /// that mutates the routing surface.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to
+    /// reach into the `librefang_kernel::router` module directly. See
+    /// issue #3744.
+    pub fn invalidate_hand_route_cache(&self) {
+        crate::router::invalidate_hand_route_cache();
+    }
+
     /// Build the roots list for a specific MCP server config.
     ///
     /// Starts with the default roots (workspaces directory) and, for stdio
