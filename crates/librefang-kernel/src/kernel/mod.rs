@@ -10876,7 +10876,9 @@ system_prompt = "You are a helpful assistant."
                 agent_ids_map.clone(),
                 coordinator_role.clone(),
             )
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError; Display preserved by
+            // `#[error(transparent)]` on `KernelError::Hand`.
+            .map_err(KernelError::from)?;
 
         let display_manifest_path = last_manifest_path
             .as_deref()
@@ -10906,7 +10908,8 @@ system_prompt = "You are a helpful assistant."
         let instance = self
             .hand_registry
             .deactivate(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
 
         // Collect every hand-agent id touched by this instance so we can both
         // kill the live runtime and scrub the persisted SQLite rows below.
@@ -10984,7 +10987,8 @@ system_prompt = "You are a helpful assistant."
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
         self.hand_registry
             .persist_state(&state_path)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)
     }
 
     /// Per-instance serialization lock for runtime-override mutations.
@@ -11130,7 +11134,8 @@ system_prompt = "You are a helpful assistant."
         let merged = self
             .hand_registry
             .merge_agent_runtime_override(instance.instance_id, &role, override_config)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         if let Err(err) = self.persist_hand_state_result() {
             let _ = self.hand_registry.restore_agent_runtime_override(
                 instance.instance_id,
@@ -11213,7 +11218,8 @@ system_prompt = "You are a helpful assistant."
         // returns Ok(None) — idempotent.
         self.hand_registry
             .clear_agent_runtime_override(instance.instance_id, &role)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
 
         // Step 2: persist before touching live state. If the disk write
         // fails, restore the in-memory entry and bail — the operator
@@ -11305,7 +11311,8 @@ system_prompt = "You are a helpful assistant."
         }
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         self.persist_hand_state();
         Ok(())
     }
@@ -11314,7 +11321,8 @@ system_prompt = "You are a helpful assistant."
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+            // #3711: propagate typed HandError (Display preserved).
+            .map_err(KernelError::from)?;
         // Resume the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
             for &agent_id in instance.agent_ids.values() {

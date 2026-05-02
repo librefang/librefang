@@ -128,6 +128,11 @@ fn fmt_global_budget_diff(
 // ---------------------------------------------------------------------------
 
 /// GET /api/usage — Get per-agent usage statistics.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The
+/// per-agent rollup is materialized from the in-memory agent registry and
+/// returned in one page — `offset=0` and `limit=None` always.
 #[utoipa::path(
     get,
     path = "/api/usage",
@@ -136,7 +141,7 @@ fn fmt_global_budget_diff(
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
-    let agents: Vec<serde_json::Value> = state
+    let items: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
         .list()
@@ -158,8 +163,13 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
             })
         })
         .collect();
-
-    Json(serde_json::json!({"agents": agents}))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +518,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Updated agent budget", body = crate::types::JsonObject))
+    responses((status = 200, description = "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
@@ -577,11 +587,22 @@ pub async fn update_agent_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
-            )
-                .into_response()
+            // Return the post-mutation ResourceQuota so callers can
+            // setQueryData / hydrate caches without an extra GET.
+            // If the agent vanished between update and snapshot (race),
+            // fall back to a minimal ack so the call still appears to
+            // have succeeded — `update_resources` already returned Ok.
+            match new_resources {
+                Some(resources) => (StatusCode::OK, Json(resources)).into_response(),
+                None => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "message": "Agent budget updated"
+                    })),
+                )
+                    .into_response(),
+            }
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     }

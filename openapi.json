@@ -1192,6 +1192,127 @@
         }
       }
     },
+    "/api/agents/{id}/inject": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/:id/inject — Inject a message into a running agent's tool loop.",
+        "description": "If the agent is currently executing tools (mid-turn), the injected message\nwill be processed between tool calls, interrupting the remaining sequence.\nReturns `{\"injected\": true}` if accepted, `{\"injected\": false}` if no\nactive tool loop is running for this agent.",
+        "operationId": "inject_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InjectMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Injection result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InjectMessageResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "413": {
+            "description": "Message too large"
+          },
+          "503": {
+            "description": "All injection channels for the agent are full; retry shortly (#3575)"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/logs": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/logs — Returns structured execution logs for an agent.",
+        "description": "Supports optional query parameters:\n- `n`: max number of log entries (default 100, max 1000)\n- `level`: filter by outcome (e.g. \"error\", \"ok\")\n- `offset`: number of matching entries to skip for pagination (default 0)",
+        "operationId": "agent_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "query",
+            "description": "Max entries to return (default 100, max 1000)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Filter by audit outcome (e.g. \"error\", \"ok\")",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Pagination offset over filtered entries",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent agent execution log entries",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mcp_servers": {
       "get": {
         "tags": [
@@ -1418,6 +1539,43 @@
         }
       }
     },
+    "/api/agents/{id}/metrics": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/metrics — Returns aggregated metrics for an agent.",
+        "description": "Includes message count, token usage, tool execution count, error count,\naverage response time (estimated), and cost data.",
+        "operationId": "agent_metrics",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated agent metrics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/mode": {
       "put": {
         "tags": [
@@ -1497,6 +1655,114 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/push": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "`POST /api/agents/:id/push` — push a proactive outbound message from an\nagent to a channel recipient (e.g., Telegram chat, Slack channel, email).",
+        "description": "The agent must exist, but the message is sent directly through the channel\nadapter without going through the agent loop. This is the REST API\ncounterpart of the built-in `channel_send` tool that agents can self-invoke.",
+        "operationId": "push_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PushMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Message pushed to channel",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid agent ID or missing required fields"
+          },
+          "404": {
+            "description": "Agent not found"
+          },
+          "502": {
+            "description": "Channel adapter rejected the message"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/reload": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/reload — Re-read the agent's agent.toml from disk.",
+        "description": "Picks up manual edits to fields like `skills`, `mcp_servers`, `tools`,\nor `system_prompt` without restarting the daemon. Runtime-only fields\n(workspace path, tags) are preserved.",
+        "operationId": "reload_agent_manifest",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent manifest reloaded from agent.toml",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/resume": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id/resume — Resume a suspended agent.",
+        "operationId": "resume_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent resumed"
           }
         }
       }
@@ -2184,6 +2450,31 @@
         }
       }
     },
+    "/api/agents/{id}/suspend": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id/suspend — Suspend an agent (stops cron, keeps in registry).",
+        "operationId": "suspend_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent suspended"
+          }
+        }
+      }
+    },
     "/api/agents/{id}/tools": {
       "get": {
         "tags": [
@@ -2833,6 +3124,91 @@
         }
       }
     },
+    "/api/auth/change-password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the dashboard password and/or username.",
+        "description": "Verifies the current password, then updates whichever credentials are\nprovided in the request body. At least one of `new_password` or\n`new_username` must be non-empty. All existing sessions are invalidated on success.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credentials updated and existing sessions invalidated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields or password too short"
+          },
+          "401": {
+            "description": "Current password is incorrect"
+          }
+        }
+      }
+    },
+    "/api/auth/dashboard-check": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Check what auth mode the dashboard needs.",
+        "operationId": "dashboard_auth_check",
+        "responses": {
+          "200": {
+            "description": "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/dashboard-login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Dashboard credential login — validates username/password using Argon2id\n(with transparent fallback from legacy plaintext passwords) and returns\na randomly generated session token with expiration metadata.",
+        "operationId": "dashboard_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Login outcome — returns session token on success or `requires_totp` when 2FA is needed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid username, password, or TOTP code"
+          }
+        }
+      }
+    },
     "/api/auth/introspect": {
       "post": {
         "tags": [
@@ -2904,6 +3280,26 @@
         }
       }
     },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Invalidate the caller's dashboard session and clear the browser cookie.",
+        "description": "Accepts the token via the `librefang_session` cookie, `Authorization:\nBearer ...`, or `X-API-Key`. Always clears the cookie client-side so a\ncaller who already lost their token can still wipe it locally.",
+        "operationId": "dashboard_logout",
+        "responses": {
+          "200": {
+            "description": "Session invalidated and cookie cleared",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/providers": {
       "get": {
         "tags": [
@@ -2921,6 +3317,44 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/auth/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST /api/auth/refresh — Exchange a refresh token for a new access token.",
+        "description": "When the access token expires, clients can call this endpoint with the\nrefresh token received during login instead of forcing a full re-authorization.\nIf the request body omits `refresh_token`, the server looks up the token store\nfor a previously stored refresh token (from the OAuth callback).",
+        "operationId": "auth_refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "New access token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid refresh token"
+          },
+          "502": {
+            "description": "Token refresh failed"
           }
         }
       }
@@ -3361,7 +3795,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated agent budget",
+            "description": "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)",
             "content": {
               "application/json": {
                 "schema": {
@@ -8129,6 +8563,7 @@
           "budget"
         ],
         "summary": "GET /api/usage — Get per-agent usage statistics.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The\nper-agent rollup is materialized from the in-memory agent registry and\nreturned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
         "responses": {
           "200": {
@@ -9143,6 +9578,32 @@
           }
         }
       },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "description": "Request body for POST /api/auth/change-password.",
+        "required": [
+          "current_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string"
+          },
+          "new_password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New password — optional, omit to keep the current password."
+          },
+          "new_username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New username — optional, omit to keep the current username."
+          }
+        }
+      },
       "ClawHubInstallRequest": {
         "type": "object",
         "description": "Request to install a skill from ClawHub.",
@@ -9206,6 +9667,39 @@
           "name": {
             "type": "string",
             "description": "Extension/integration ID to remove."
+          }
+        }
+      },
+      "InjectMessageRequest": {
+        "type": "object",
+        "description": "Request to inject a message into a running agent's tool-execution loop (#956).",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The message to inject between tool calls."
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional session id; when omitted the message broadcasts to all live sessions for the agent."
+          }
+        }
+      },
+      "InjectMessageResponse": {
+        "type": "object",
+        "description": "Response from a mid-turn message injection.",
+        "required": [
+          "injected"
+        ],
+        "properties": {
+          "injected": {
+            "type": "boolean",
+            "description": "Whether the message was accepted (true = injected, false = no active loop)."
           }
         }
       },
@@ -9543,6 +10037,56 @@
               "null"
             ],
             "description": "Web search augmentation mode: \"off\", \"auto\", or \"always\"."
+          }
+        }
+      },
+      "PushMessageRequest": {
+        "type": "object",
+        "description": "Request to push a proactive outbound message from an agent to a channel.",
+        "required": [
+          "channel",
+          "recipient",
+          "message"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Channel adapter name (e.g., \"telegram\", \"slack\", \"discord\")."
+          },
+          "message": {
+            "type": "string",
+            "description": "The message text to send."
+          },
+          "recipient": {
+            "type": "string",
+            "description": "Recipient identifier (platform-specific: chat_id, username, email, etc.)."
+          },
+          "thread_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional thread/topic ID for threaded replies (platform-specific)."
+          }
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "description": "Request body for the refresh token endpoint.",
+        "properties": {
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional provider hint (if the user logged in with a specific provider)."
+          },
+          "refresh_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The refresh token obtained from the initial login callback.\nIf omitted, the server looks up a stored refresh token from the token store."
           }
         }
       },

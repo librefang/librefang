@@ -262,20 +262,26 @@ fn platform_install_path() -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if let Some(home) = dirs::home_dir() {
-            let p = home.join(".local/bin/librefang-desktop");
-            if p.exists() {
-                return Some(p);
-            }
-        }
-        // Also check common AppImage locations
-        if let Some(home) = dirs::home_dir() {
-            let p = home.join("Applications/LibreFang.AppImage");
-            if p.exists() {
-                return Some(p);
-            }
+            return linux_install_path_in(&home);
         }
     }
 
+    None
+}
+
+/// Linux variant of [`platform_install_path`] parameterised on the home
+/// directory so it can be exercised under a tempdir in tests.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[allow(dead_code)]
+fn linux_install_path_in(home: &Path) -> Option<PathBuf> {
+    let local_bin = home.join(".local/bin/librefang-desktop");
+    if local_bin.exists() {
+        return Some(local_bin);
+    }
+    let appimage = home.join("Applications/LibreFang.AppImage");
+    if appimage.exists() {
+        return Some(appimage);
+    }
     None
 }
 
@@ -394,8 +400,16 @@ fn install_linux_appimage(appimage_path: &Path) -> Result<PathBuf, String> {
     let dest_dir = dirs::home_dir()
         .ok_or_else(|| "Cannot determine home directory".to_string())?
         .join(".local/bin");
+    install_linux_appimage_to(appimage_path, &dest_dir)
+}
 
-    std::fs::create_dir_all(&dest_dir)
+/// Inner, dependency-injected variant of [`install_linux_appimage`] that
+/// takes an explicit destination directory so tests can route writes into a
+/// tempdir instead of the user's real `~/.local/bin`.
+#[cfg_attr(not(test), cfg(target_os = "linux"))]
+#[allow(dead_code)]
+fn install_linux_appimage_to(appimage_path: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("Failed to create {}: {e}", dest_dir.display()))?;
 
     let dest = dest_dir.join("librefang-desktop");
@@ -425,7 +439,8 @@ fn which_lookup(name: &str) -> Option<PathBuf> {
 }
 
 /// Walk up from a binary path to find the enclosing `.app` bundle (macOS).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(test), cfg(target_os = "macos"))]
+#[allow(dead_code)]
 fn find_parent_app_bundle(path: &Path) -> Option<PathBuf> {
     let mut current = path.to_path_buf();
     while let Some(parent) = current.parent() {
@@ -435,4 +450,195 @@ fn find_parent_app_bundle(path: &Path) -> Option<PathBuf> {
         current = parent.to_path_buf();
     }
     None
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Scoped tests for #3582 — `desktop_install.rs` previously had 0 tests
+    //! and writes to the user filesystem. All filesystem mutations here are
+    //! routed through `tempfile::TempDir` so nothing escapes the tempdir.
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn desktop_binary_name_matches_platform() {
+        let name = desktop_binary_name();
+        if cfg!(windows) {
+            assert_eq!(name, "librefang-desktop.exe");
+        } else {
+            assert_eq!(name, "librefang-desktop");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::nonminimal_bool)]
+    fn platform_asset_suffix_is_consistent_with_target() {
+        let suffix = platform_asset_suffix();
+        // Every supported (os, arch) triple known to the function returns
+        // Some; on any other platform it must return None rather than
+        // panicking. The expression mirrors the matrix in
+        // `platform_asset_suffix` one-for-one for auditability — clippy's
+        // suggested simplification merges unrelated platforms and obscures
+        // intent, so we keep the explicit form.
+        let supported = (cfg!(target_os = "macos")
+            && (cfg!(target_arch = "aarch64") || cfg!(target_arch = "x86_64")))
+            || (cfg!(target_os = "windows")
+                && (cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")))
+            || (cfg!(target_os = "linux") && cfg!(target_arch = "x86_64"));
+        assert_eq!(suffix.is_some(), supported);
+
+        if let Some(s) = suffix {
+            // Must be a recognised installer extension.
+            assert!(
+                s.ends_with(".dmg") || s.ends_with(".exe") || s.ends_with(".AppImage"),
+                "unexpected asset suffix: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn which_lookup_finds_existing_binary_in_path() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin_name = "librefang-desktop-test-marker";
+        let bin_path = bin_dir.join(bin_name);
+        std::fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+
+        // Scoped PATH override; restored before drop.
+        let prev = std::env::var_os("PATH");
+        // SAFETY: tests are single-threaded for this module under cargo's
+        // default test runner per-binary; we restore in this same scope.
+        unsafe {
+            std::env::set_var("PATH", bin_dir.as_os_str());
+        }
+        let found = which_lookup(bin_name);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+
+        assert_eq!(found.as_deref(), Some(bin_path.as_path()));
+    }
+
+    #[test]
+    fn which_lookup_returns_none_when_missing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let prev = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", tmp.path().as_os_str());
+        }
+        let found = which_lookup("definitely-not-a-real-binary-xyzzy-3582");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn linux_install_path_in_returns_none_on_empty_home() {
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(linux_install_path_in(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn linux_install_path_in_finds_local_bin_first() {
+        let tmp = TempDir::new().expect("tempdir");
+        let local_bin = tmp.path().join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bin = local_bin.join("librefang-desktop");
+        std::fs::write(&bin, b"x").unwrap();
+
+        let found = linux_install_path_in(tmp.path()).expect("should find binary");
+        assert_eq!(found, bin);
+        // Must stay inside the tempdir — no escape to the real home.
+        assert!(found.starts_with(tmp.path()));
+    }
+
+    #[test]
+    fn linux_install_path_in_falls_back_to_appimage() {
+        let tmp = TempDir::new().expect("tempdir");
+        let app_dir = tmp.path().join("Applications");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let appimage = app_dir.join("LibreFang.AppImage");
+        std::fs::write(&appimage, b"AI\x02").unwrap();
+
+        let found = linux_install_path_in(tmp.path()).expect("should find AppImage");
+        assert_eq!(found, appimage);
+        assert!(found.starts_with(tmp.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_linux_appimage_to_copies_into_dest_and_marks_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let src = tmp.path().join("LibreFang_amd64.AppImage");
+        std::fs::write(&src, b"FAKE-APPIMAGE-PAYLOAD").unwrap();
+
+        let dest_dir = tmp.path().join("home/.local/bin");
+        // Note: dest_dir does NOT exist yet — install must create it.
+        let installed = install_linux_appimage_to(&src, &dest_dir).expect("install ok");
+
+        assert_eq!(installed, dest_dir.join("librefang-desktop"));
+        assert!(installed.starts_with(tmp.path()), "must not escape tempdir");
+        assert!(installed.exists());
+
+        let copied = std::fs::read(&installed).unwrap();
+        assert_eq!(copied, b"FAKE-APPIMAGE-PAYLOAD");
+
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "AppImage must be marked executable");
+    }
+
+    #[test]
+    fn install_linux_appimage_to_errors_on_missing_source() {
+        let tmp = TempDir::new().expect("tempdir");
+        let missing = tmp.path().join("nope.AppImage");
+        let dest_dir = tmp.path().join("dest");
+
+        let err =
+            install_linux_appimage_to(&missing, &dest_dir).expect_err("missing source must fail");
+        assert!(
+            err.contains("Failed to copy AppImage"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn find_parent_app_bundle_walks_up_to_dot_app() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bundle = tmp.path().join("LibreFang.app");
+        let macos = bundle.join("Contents/MacOS");
+        std::fs::create_dir_all(&macos).unwrap();
+        let bin = macos.join("LibreFang");
+        std::fs::write(&bin, b"x").unwrap();
+
+        let found = find_parent_app_bundle(&bin).expect("should locate .app");
+        // Compare canonicalised paths to tolerate /private/var vs /var on macOS.
+        assert_eq!(
+            std::fs::canonicalize(found).unwrap(),
+            std::fs::canonicalize(&bundle).unwrap()
+        );
+    }
+
+    #[test]
+    fn find_parent_app_bundle_returns_none_when_no_bundle() {
+        let tmp = TempDir::new().expect("tempdir");
+        let bin_dir = tmp.path().join("usr/local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin = bin_dir.join("librefang-desktop");
+        std::fs::write(&bin, b"x").unwrap();
+
+        assert!(find_parent_app_bundle(&bin).is_none());
+    }
 }

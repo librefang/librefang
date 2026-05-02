@@ -418,12 +418,15 @@ async fn usage_stats_lists_each_registered_agent() {
 
     let (status, body) = request(&h, Method::GET, "/api/usage", None).await;
     assert_eq!(status, StatusCode::OK);
-    let agents = body["agents"].as_array().unwrap();
+    // #3842: canonical envelope is `{items,total,offset,limit}`.
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["total"].as_u64().unwrap() as usize, items.len());
     // The kernel may auto-register internal agents (system hands etc.) so we
     // locate our scribe by id rather than asserting the total count — what
     // we're verifying here is that recorded usage is rolled up onto the row
     // for the registered agent, not the size of the registry.
-    let row = agents
+    let row = items
         .iter()
         .find(|r| r["agent_id"] == id.to_string())
         .unwrap_or_else(|| panic!("scribe row missing from /api/usage: {body:?}"));
