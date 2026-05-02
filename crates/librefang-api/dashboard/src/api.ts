@@ -1466,8 +1466,8 @@ export async function getModelOverrides(modelKey: string): Promise<ModelOverride
   return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
 }
 
-export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ModelOverrides> {
+  return put<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
 }
 
 export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
