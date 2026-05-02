@@ -1683,6 +1683,19 @@ impl LibreFangKernel {
         &self.template_registry
     }
 
+    /// Convert a workflow into a reusable template.
+    ///
+    /// Thin wrapper around [`WorkflowEngine::workflow_to_template`] so that
+    /// callers (e.g. `librefang-api`) do not need to import the engine type
+    /// directly. See issue #3744 for the broader API/kernel decoupling effort.
+    #[inline]
+    pub fn workflow_to_template(
+        &self,
+        workflow: &crate::workflow::Workflow,
+    ) -> librefang_types::workflow_template::WorkflowTemplate {
+        WorkflowEngine::workflow_to_template(workflow)
+    }
+
     /// Event-driven trigger engine.
     #[inline]
     pub fn trigger_engine(&self) -> &TriggerEngine {
