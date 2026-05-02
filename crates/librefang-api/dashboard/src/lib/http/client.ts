@@ -91,6 +91,7 @@ export {
   // sessions
   listSessions,
   getSessionDetails,
+  loadAgentSession,
   // skills (local + hubs)
   listSkills,
   getSkillDetail,
@@ -189,6 +190,10 @@ export {
   postCommsTask,
   // attachments
   uploadAgentFile,
+  // chat — imperative (HTTP) send, fallback when WS unavailable
+  sendAgentMessage,
+  // registry — generic content creation (provider, hand, etc.)
+  createRegistryContent,
   // media
   generateImage,
   synthesizeSpeech,
