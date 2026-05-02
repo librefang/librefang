@@ -44,7 +44,16 @@ export function groupedPicker(
     };
   }
 
-  const activeHands = (handInstances ?? []).filter(isUsableHandInstance);
+  // Distinguish "still loading" from "no active hands". When `handInstances`
+  // is undefined the hands query hasn't resolved yet; dropping is_hand agents
+  // here would let URL-pinned hand agents disappear from the picker during the
+  // bootstrap window (issue #4296 Bug A). Surface them as standalone until
+  // the second query resolves; the next render with real data re-groups them.
+  if (handInstances === undefined) {
+    return { standalone: agents.slice(), handGroups: [] };
+  }
+
+  const activeHands = handInstances.filter(isUsableHandInstance);
 
   // Build agent_id → { hand metadata, role, isCoordinator } lookup.
   type Membership = {
