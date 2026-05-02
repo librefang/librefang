@@ -11002,6 +11002,15 @@ system_prompt = "You are a helpful assistant."
         (added, updated)
     }
 
+    /// Invalidate the hand route resolution cache.
+    ///
+    /// Thin wrapper around `librefang_kernel_router::invalidate_hand_route_cache`
+    /// so API callers don't need to reach into the router crate path directly
+    /// (refs #3744).
+    pub fn invalidate_hand_route_cache(&self) {
+        router::invalidate_hand_route_cache();
+    }
+
     /// Persist active hand state to disk.
     pub fn persist_hand_state(&self) {
         let state_path = self.home_dir_boot.join("data").join("hand_state.json");
