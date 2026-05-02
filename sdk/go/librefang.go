@@ -354,6 +354,14 @@ func (r *AgentsResource) UpdateAgentIdentity(id string, data map[string]interfac
 	return r.client.request("PATCH", fmt.Sprintf("/api/agents/%s/identity", id), data, nil)
 }
 
+func (r *AgentsResource) InjectMessage(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/inject", id), data, nil)
+}
+
+func (r *AgentsResource) AgentLogs(id string, query map[string]string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/logs", id), nil, query)
+}
+
 func (r *AgentsResource) GetAgentMcpServers(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/mcp_servers", id), nil, nil)
 }
@@ -370,12 +378,28 @@ func (r *AgentsResource) SendMessageStream(id string, data map[string]interface{
 	return r.client.stream("POST", fmt.Sprintf("/api/agents/%s/message/stream", id), data, nil)
 }
 
+func (r *AgentsResource) AgentMetrics(id string) (interface{}, error) {
+	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/metrics", id), nil, nil)
+}
+
 func (r *AgentsResource) SetAgentMode(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/mode", id), data, nil)
 }
 
 func (r *AgentsResource) SetModel(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/model", id), data, nil)
+}
+
+func (r *AgentsResource) PushMessage(id string, data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/push", id), data, nil)
+}
+
+func (r *AgentsResource) ReloadAgentManifest(id string) (interface{}, error) {
+	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/reload", id), nil, nil)
+}
+
+func (r *AgentsResource) ResumeAgent(id string) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/resume", id), nil, nil)
 }
 
 func (r *AgentsResource) ListAgentRuntime(id string) (interface{}, error) {
@@ -446,6 +470,10 @@ func (r *AgentsResource) StopAgent(id string) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/stop", id), nil, nil)
 }
 
+func (r *AgentsResource) SuspendAgent(id string) (interface{}, error) {
+	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/suspend", id), nil, nil)
+}
+
 func (r *AgentsResource) GetAgentTools(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/tools", id), nil, nil)
 }
@@ -506,6 +534,18 @@ func (r *AuthResource) AuthCallbackPost(data map[string]interface{}) (interface{
 	return r.client.request("POST", "/api/auth/callback", data, nil)
 }
 
+func (r *AuthResource) ChangePassword(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/change-password", data, nil)
+}
+
+func (r *AuthResource) DashboardAuthCheck() (interface{}, error) {
+	return r.client.request("GET", "/api/auth/dashboard-check", nil, nil)
+}
+
+func (r *AuthResource) DashboardLogin(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/dashboard-login", data, nil)
+}
+
 func (r *AuthResource) AuthIntrospect(data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", "/api/auth/introspect", data, nil)
 }
@@ -518,8 +558,16 @@ func (r *AuthResource) AuthLoginProvider(provider string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/auth/login/%s", provider), nil, nil)
 }
 
+func (r *AuthResource) DashboardLogout() (interface{}, error) {
+	return r.client.request("POST", "/api/auth/logout", nil, nil)
+}
+
 func (r *AuthResource) AuthProviders() (interface{}, error) {
 	return r.client.request("GET", "/api/auth/providers", nil, nil)
+}
+
+func (r *AuthResource) AuthRefresh(data map[string]interface{}) (interface{}, error) {
+	return r.client.request("POST", "/api/auth/refresh", data, nil)
 }
 
 func (r *AuthResource) AuthUserinfo() (interface{}, error) {
