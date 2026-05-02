@@ -508,7 +508,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
-    responses((status = 200, description = "Updated agent budget", body = crate::types::JsonObject))
+    responses((status = 200, description = "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
@@ -577,11 +577,22 @@ pub async fn update_agent_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ok", "message": "Agent budget updated"})),
-            )
-                .into_response()
+            // Return the post-mutation ResourceQuota so callers can
+            // setQueryData / hydrate caches without an extra GET.
+            // If the agent vanished between update and snapshot (race),
+            // fall back to a minimal ack so the call still appears to
+            // have succeeded — `update_resources` already returned Ok.
+            match new_resources {
+                Some(resources) => (StatusCode::OK, Json(resources)).into_response(),
+                None => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "message": "Agent budget updated"
+                    })),
+                )
+                    .into_response(),
+            }
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
     }

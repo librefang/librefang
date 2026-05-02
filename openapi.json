@@ -3361,7 +3361,7 @@
         },
         "responses": {
           "200": {
-            "description": "Updated agent budget",
+            "description": "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)",
             "content": {
               "application/json": {
                 "schema": {
