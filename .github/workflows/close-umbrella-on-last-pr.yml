@@ -10,10 +10,12 @@ name: Close Umbrella Issue on Last Referencing PR
 # last slice's author has to remember to swap `Refs` -> `Closes`, or someone
 # closes the umbrella manually. Both fail in practice.
 #
-# Umbrella auto-detection (no manual labelling required):
-#  - The issue has been cross-referenced by >= UMBRELLA_MIN_REFS distinct PRs
-#    (default 3). A normal "fixed by one PR" issue can never reach this; an
-#    umbrella necessarily does.
+# Why no umbrella shape heuristic:
+#  - The fact that a PR used `Refs #N` instead of `Closes #N` is itself the
+#    signal of intent ("I am not by myself resolving this"). Combined with
+#    "no other open PR still points at it", "never reopened", and "no
+#    unchecked task-list items left in the body", that's enough to close.
+#    A PR-count threshold would silently leave 2-PR trackers open forever.
 #
 # Safety:
 #  - Defaults to DRY_RUN: posts a comment ('🤖 last referencing PR merged')
@@ -23,6 +25,12 @@ name: Close Umbrella Issue on Last Referencing PR
 #  - Skips if the umbrella body itself has unchecked task-list items — that's
 #    a strong signal there's still planned work even if no open PR exists yet.
 #  - Idempotent via hidden marker in the bot comment.
+#
+# Known limitation: PRs from forks run with a read-only GITHUB_TOKEN on the
+# `pull_request: closed` event, so close/comment/label calls will silently
+# fail-403 for fork-merged PRs. Switching to `pull_request_target` would
+# fix this but exposes write-token scripts to fork-controlled refs; not
+# worth it for the volume of fork merges we see. Internal PRs work fine.
 
 on:
   pull_request:
@@ -44,7 +52,6 @@ jobs:
         with:
           script: |
             const live = process.env.LIVE_VAR.toLowerCase() === 'true';
-            const UMBRELLA_MIN_REFS = 3;
             const CANDIDATE_LABEL = 'auto-close-candidate';
             const MARKER = '<!-- umbrella-autoclose:flagged -->';
             const pr = context.payload.pull_request;
@@ -58,7 +65,7 @@ jobs:
             // look-behind for "not"/"n't" to skip prose negations, mirroring
             // auto-close-resolved-issues.yml.
             const refRegex =
-              /(?<!\bnot )(?<!\bn't )\b(?:refs?|part of|tracking|see)\s+#(\d+)/gi;
+              /(?<!\bnot )(?<!\bn't )(?<!\bnever )(?<!\bwon't )(?<!\bwouldn't )(?<!\bcannot )(?<!\bcan't )\b(?:refs?|part of|tracking|see)\s+#(\d+)/gi;
             const refs = new Set();
             for (const m of body.matchAll(refRegex)) {
               refs.add(parseInt(m[1], 10));
@@ -107,11 +114,16 @@ jobs:
                 continue;
               }
 
-              // Use the issue timeline to (a) auto-detect umbrella by counting
-              // distinct PR cross-references, and (b) check no other open PR still
-              // references it. GitHub code-search on PR bodies is unreliable;
-              // every PR that mentions the issue produces a `cross-referenced`
-              // event with the source PR.
+              // Find every PR that has cross-referenced this issue, then fetch
+              // each one's CURRENT state. We can't trust `source.issue.state`
+              // from the timeline payload — it can be a snapshot from when the
+              // event fired (always 'open' at first reference time), which would
+              // make this check vacuously fail-safe and never close anything.
+              //
+              // Cross-references include comment / commit-message mentions, not
+              // just PR body. That's conservative on the "other open PR" check
+              // (we may keep an issue open because some unrelated PR commented
+              // on it), which we accept over the alternative of false closes.
               const timeline = await github.paginate(
                 github.rest.issues.listEventsForTimeline,
                 {
@@ -119,23 +131,30 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: num,
                   per_page: 100,
-                  mediaType: { previews: ['mockingbird'] },
                 }
               );
-              const allRefPrs = new Set();
-              const otherOpenPrs = [];
+              const candidatePrs = new Set();
               for (const ev of timeline) {
                 if (ev.event !== 'cross-referenced') continue;
                 const src = ev.source && ev.source.issue;
                 if (!src || !src.pull_request) continue;
-                allRefPrs.add(src.number);
                 if (src.number === pr.number) continue;
-                if (src.state === 'open') otherOpenPrs.push(src.number);
+                candidatePrs.add(src.number);
               }
 
-              if (allRefPrs.size < UMBRELLA_MIN_REFS) {
-                skipped.push(`#${num} (only ${allRefPrs.size} PR refs; not umbrella-shaped)`);
-                continue;
+              const otherOpenPrs = [];
+              for (const n of candidatePrs) {
+                try {
+                  const { data: other } = await github.rest.pulls.get({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    pull_number: n,
+                  });
+                  if (other.state === 'open') otherOpenPrs.push(n);
+                } catch (e) {
+                  if (e.status === 404) continue;
+                  throw e;
+                }
               }
 
               if (otherOpenPrs.length > 0) {
