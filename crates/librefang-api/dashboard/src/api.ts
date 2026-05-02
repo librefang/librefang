@@ -2716,12 +2716,14 @@ export async function activateHand(
   });
 }
 
-export async function pauseHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
+// #3832: pause/resume return the post-mutation HandInstanceItem so the
+// dashboard can setQueryData on the live instance without a follow-up GET.
+export async function pauseHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
 }
 
-export async function resumeHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
+export async function resumeHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
 }
 
 export async function deactivateHand(instanceId: string): Promise<ApiActionResponse> {
