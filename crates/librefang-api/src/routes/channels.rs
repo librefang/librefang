@@ -1142,12 +1142,18 @@ fn channel_config_values(
 }
 
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents`, `/api/peers`, `/api/skills`, etc. (#3842).
+/// The full channel registry is materialized in-memory, so this is a single
+/// page — `offset=0`, `limit=None`. The bespoke `configured_count` sibling
+/// is preserved for the dashboard's "X of Y configured" sub-line.
 #[utoipa::path(
     get,
     path = "/api/channels",
     tag = "channels",
     responses(
-        (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
+        (status = 200, description = "List configured channels", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1214,9 +1220,15 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         channels.push(channel_json);
     }
 
+    let total = channels.len();
+    // Canonical PaginatedResponse envelope (#3842) hand-built so the bespoke
+    // `configured_count` sibling can ride alongside `items`/`total`/`offset`/
+    // `limit` without a new struct.
     Json(serde_json::json!({
-        "channels": channels,
-        "total": channels.len(),
+        "items": channels,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "configured_count": configured_count,
     }))
 }

@@ -17,7 +17,7 @@ LibreFang provides official SDK support for multiple programming languages for e
 
 ### Auto-generated from `openapi.json`
 
-All four SDKs (`sdk/python/`, `sdk/javascript/`, `sdk/go/`, `sdk/rust/`) are mechanically generated from `openapi.json` by `scripts/codegen-sdks.py`. A pre-commit hook (`scripts/hooks/pre-commit`) re-runs the generator whenever the OpenAPI spec changes, so the SDKs never drift from the live API.
+All four SDKs (`sdk/python/`, `sdk/javascript/`, `sdk/go/`, `sdk/rust/`) are mechanically generated from `openapi.json` by `scripts/codegen-sdks.py`. A pre-push hook (`scripts/hooks/pre-push`) re-runs the generator whenever the OpenAPI spec changed in the commits being pushed, so the SDKs never drift from the live API. (Pre-commit is kept fast — fmt + secret scan only — per #3303.)
 
 To regenerate manually:
 

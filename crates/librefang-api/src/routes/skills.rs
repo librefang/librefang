@@ -230,12 +230,14 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 /// GET /api/skills — List installed skills.
+///
+/// `categories` always reflects all skills regardless of the `?category=` filter.
 #[utoipa::path(
     get,
     path = "/api/skills",
     tag = "skills",
     responses(
-        (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
+        (status = 200, description = "List installed skills", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_skills(
@@ -310,9 +312,13 @@ pub async fn list_skills(
         .collect();
 
     let categories_vec: Vec<String> = categories.into_iter().collect();
+    let total = skills.len();
+    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
-        "skills": skills,
-        "total": skills.len(),
+        "items": skills,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
         "categories": categories_vec,
     }))
 }
@@ -1833,7 +1839,13 @@ pub async fn list_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "hands": hands, "total": hands.len() }))
+    let total = hands.len();
+    Json(crate::types::PaginatedResponse {
+        items: hands,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/active — List active hand instances.
@@ -1898,7 +1910,13 @@ pub async fn list_active_hands(
         })
         .collect();
 
-    Json(serde_json::json!({ "instances": items, "total": items.len() }))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.

@@ -221,6 +221,14 @@ class AgentsResource {
     return this._c._request("PATCH", `/api/agents/${id}/identity`, data, undefined);
   }
 
+  async injectMessage(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/inject`, data, undefined);
+  }
+
+  async agentLogs(id, query) {
+    return this._c._request("GET", `/api/agents/${id}/logs`, undefined, query);
+  }
+
   async getAgentMcpServers(id) {
     return this._c._request("GET", `/api/agents/${id}/mcp_servers`);
   }
@@ -237,12 +245,28 @@ class AgentsResource {
     yield* this._c._stream("POST", `/api/agents/${id}/message/stream`, data, undefined);
   }
 
+  async agentMetrics(id) {
+    return this._c._request("GET", `/api/agents/${id}/metrics`);
+  }
+
   async setAgentMode(id, data) {
     return this._c._request("PUT", `/api/agents/${id}/mode`, data, undefined);
   }
 
   async setModel(id, data) {
     return this._c._request("PUT", `/api/agents/${id}/model`, data, undefined);
+  }
+
+  async pushMessage(id, data) {
+    return this._c._request("POST", `/api/agents/${id}/push`, data, undefined);
+  }
+
+  async reloadAgentManifest(id) {
+    return this._c._request("POST", `/api/agents/${id}/reload`);
+  }
+
+  async resumeAgent(id) {
+    return this._c._request("PUT", `/api/agents/${id}/resume`);
   }
 
   async listAgentRuntime(id) {
@@ -313,6 +337,10 @@ class AgentsResource {
     return this._c._request("POST", `/api/agents/${id}/stop`);
   }
 
+  async suspendAgent(id) {
+    return this._c._request("PUT", `/api/agents/${id}/suspend`);
+  }
+
   async getAgentTools(id) {
     return this._c._request("GET", `/api/agents/${id}/tools`);
   }
@@ -377,6 +405,18 @@ class AuthResource {
     return this._c._request("POST", "/api/auth/callback", data, undefined);
   }
 
+  async changePassword(data) {
+    return this._c._request("POST", "/api/auth/change-password", data, undefined);
+  }
+
+  async dashboardAuthCheck() {
+    return this._c._request("GET", "/api/auth/dashboard-check");
+  }
+
+  async dashboardLogin(data) {
+    return this._c._request("POST", "/api/auth/dashboard-login", data, undefined);
+  }
+
   async authIntrospect(data) {
     return this._c._request("POST", "/api/auth/introspect", data, undefined);
   }
@@ -389,8 +429,16 @@ class AuthResource {
     return this._c._request("GET", `/api/auth/login/${provider}`);
   }
 
+  async dashboardLogout() {
+    return this._c._request("POST", "/api/auth/logout");
+  }
+
   async authProviders() {
     return this._c._request("GET", "/api/auth/providers");
+  }
+
+  async authRefresh(data) {
+    return this._c._request("POST", "/api/auth/refresh", data, undefined);
   }
 
   async authUserinfo() {

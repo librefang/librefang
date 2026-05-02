@@ -111,6 +111,38 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::types::ApiErrorResponse;
+
+/// Render a `Workflow` into the JSON shape used by the GET handler.
+///
+/// Centralized so that mutation handlers (PUT) can return the post-mutation
+/// entity in the same shape the dashboard already consumes for GET, letting
+/// the caller patch caches in place via `setQueryData` instead of a follow-up
+/// refetch (#3832).
+fn workflow_to_json(w: &Workflow) -> serde_json::Value {
+    serde_json::json!({
+        "id": w.id.to_string(),
+        "name": w.name,
+        "description": w.description,
+        "steps": w.steps.iter().map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "agent": match &s.agent {
+                    StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
+                    StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
+                },
+                "prompt_template": s.prompt_template,
+                "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
+                "timeout_secs": s.timeout_secs,
+                "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
+                "output_var": s.output_var,
+                "depends_on": s.depends_on,
+            })
+        }).collect::<Vec<_>>(),
+        "created_at": w.created_at.to_rfc3339(),
+        "layout": w.layout,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Helpers – parse StepMode / ErrorMode from both flat-string and nested-object
 // formats so the frontend can send either:
@@ -418,7 +450,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     // Load cron jobs to find workflow-bound schedules
     let all_cron_jobs = state.kernel.cron().list_all_jobs();
 
-    let list: Vec<serde_json::Value> = workflows
+    let items: Vec<serde_json::Value> = workflows
         .iter()
         .map(|w| {
             let wid = w.id.to_string();
@@ -466,7 +498,16 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    Json(serde_json::json!({ "workflows": list }))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // Workflows are loaded from the engine in a single page, so offset=0 /
+    // limit=None.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.
@@ -497,31 +538,7 @@ pub async fn get_workflow(
         .get_workflow(workflow_id)
         .await
     {
-        Some(w) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": w.id.to_string(),
-                "name": w.name,
-                "description": w.description,
-                "steps": w.steps.iter().map(|s| {
-                    serde_json::json!({
-                        "name": s.name,
-                        "agent": match &s.agent {
-                            StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
-                            StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
-                        },
-                        "prompt_template": s.prompt_template,
-                        "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
-                        "timeout_secs": s.timeout_secs,
-                        "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
-                        "output_var": s.output_var,
-                        "depends_on": s.depends_on,
-                    })
-                }).collect::<Vec<_>>(),
-                "created_at": w.created_at.to_rfc3339(),
-                "layout": w.layout,
-            })),
-        ),
+        Some(w) => (StatusCode::OK, Json(workflow_to_json(&w))),
         None => {
             ApiErrorResponse::not_found(format!("Workflow '{}' not found", id)).into_json_tuple()
         }
@@ -643,19 +660,28 @@ pub async fn update_workflow(
     if !state
         .kernel
         .workflow_engine()
-        .update_workflow(workflow_id, updated)
+        .update_workflow(workflow_id, updated.clone())
         .await
     {
         return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": "updated",
-            "workflow_id": id,
-        })),
-    )
+    // Return the post-mutation entity in the same shape as GET so the
+    // dashboard can `setQueryData` instead of round-tripping a refetch
+    // (#3832). Read back from the engine in case the kernel normalized
+    // anything during persist; fall back to `updated` if the row vanished
+    // between write and read (narrow race — concurrent delete) so the
+    // mutation still appears successful.
+    let body = match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
+        Some(persisted) => workflow_to_json(&persisted),
+        None => workflow_to_json(&updated),
+    };
+    (StatusCode::OK, Json(body))
 }
 
 /// DELETE /api/workflows/:id — Remove a workflow.

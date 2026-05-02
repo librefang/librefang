@@ -165,9 +165,13 @@ export interface SkillItem {
 }
 
 export interface SkillsResponse {
-  skills?: SkillItem[];
+  items?: SkillItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   categories?: string[];
+  // Legacy fallback — remove once all callers adopt the #3842 envelope.
+  skills?: SkillItem[];
 }
 
 // Skill evolution types
@@ -238,9 +242,14 @@ export interface ProvidersResponse {
 }
 
 export interface ChannelsResponse {
-  channels?: ChannelItem[];
+  // Canonical PaginatedResponse envelope (#3842).
+  items?: ChannelItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   configured_count?: number;
+  // Legacy field kept for transition window — pre-#3842 daemons.
+  channels?: ChannelItem[];
 }
 
 export interface DashboardSnapshot {
@@ -621,8 +630,12 @@ export interface AuditEntry {
 }
 
 export interface AuditRecentResponse {
+  items?: AuditEntry[];
+  /** @deprecated #3842 — use `items`. Populated by older daemons only. */
   entries?: AuditEntry[];
   total?: number;
+  offset?: number;
+  limit?: number;
   tip_hash?: string;
 }
 
@@ -1561,7 +1574,8 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
 
 export async function listChannels(): Promise<ChannelItem[]> {
   const data = await get<ChannelsResponse>("/api/channels");
-  return data.channels ?? [];
+  // Prefer canonical `items` (#3842); fall back to legacy `channels` field.
+  return data.items ?? data.channels ?? [];
 }
 
 export async function testChannel(channelName: string): Promise<ApiActionResponse> {
@@ -1608,7 +1622,9 @@ export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
-  return data.skills ?? [];
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `skills`
+  // during the transition window.
+  return data.items ?? data.skills ?? [];
 }
 
 export async function listTools(): Promise<ToolDefinition[]> {
@@ -1864,8 +1880,15 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
-  return data.workflows ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{workflows}` shape during the transition so older daemons keep
+  // working.
+  const data = await get<{
+    items?: WorkflowItem[];
+    workflows?: WorkflowItem[];
+    total?: number;
+  }>("/api/workflows");
+  return data.items ?? data.workflows ?? [];
 }
 
 export async function createWorkflow(payload: {
@@ -1911,8 +1934,8 @@ export async function updateWorkflow(workflowId: string, payload: {
     timeout_secs?: number;
   }>;
   layout?: unknown;
-}): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
+}): Promise<WorkflowItem> {
+  return put<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
 
 export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunItem[]> {
@@ -2458,7 +2481,14 @@ export async function queryApprovalAudit(params: {
   offset?: number;
   agent_id?: string;
   tool_name?: string;
-}): Promise<{ entries: ApprovalAuditEntry[]; total: number }> {
+}): Promise<{
+  items?: ApprovalAuditEntry[];
+  /** @deprecated #3842 — older daemons populated this; prefer `items`. */
+  entries?: ApprovalAuditEntry[];
+  total: number;
+  offset?: number;
+  limit?: number;
+}> {
   const query = new URLSearchParams();
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
@@ -2690,8 +2720,13 @@ export async function postCommsTask(payload: {
 }
 
 export async function listHands(): Promise<HandDefinitionItem[]> {
-  const data = await get<{ hands?: HandDefinitionItem[]; total?: number }>("/api/hands");
-  return data.hands ?? [];
+  const data = await get<{
+    items?: HandDefinitionItem[];
+    hands?: HandDefinitionItem[];
+    total?: number;
+  }>("/api/hands");
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `hands`.
+  return data.items ?? data.hands ?? [];
 }
 
 export async function getHandManifestToml(handId: string): Promise<string> {
@@ -2703,8 +2738,13 @@ export async function getRawConfigToml(): Promise<string> {
 }
 
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
-  const data = await get<{ instances?: HandInstanceItem[]; total?: number }>("/api/hands/active");
-  return data.instances ?? [];
+  const data = await get<{
+    items?: HandInstanceItem[];
+    instances?: HandInstanceItem[];
+    total?: number;
+  }>("/api/hands/active");
+  // Canonical envelope (#3842) ships `items`; fall back to legacy `instances`.
+  return data.items ?? data.instances ?? [];
 }
 
 export async function activateHand(
@@ -3239,16 +3279,18 @@ export async function createExperiment(agentId: string, experiment: Omit<PromptE
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 
-export async function startExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
+// Status-transition endpoints now return the post-mutation `PromptExperiment`
+// so callers can `setQueryData` directly without a follow-up GET. See #3832.
+export async function startExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
 }
 
-export async function pauseExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
+export async function pauseExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/pause`, {});
 }
 
-export async function completeExperiment(experimentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
+export async function completeExperiment(experimentId: string): Promise<PromptExperiment> {
+  return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/complete`, {});
 }
 
 export async function getExperimentMetrics(experimentId: string): Promise<ExperimentVariantMetrics[]> {

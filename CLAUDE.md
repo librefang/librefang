@@ -42,8 +42,12 @@ and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
 These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
-- `pre-commit` — runs `cargo fmt --check` on staged Rust files; conditionally
-  regenerates `openapi.json` and SDKs when route signatures change.
+- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
+  duplicate-`[Unreleased]` guard; `detect-secrets` scan against
+  `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
+- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
+  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
+  generated SDKs are stale. Expected 30-90s on a warm cache.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).

@@ -126,7 +126,8 @@ async fn skills_list_starts_empty() {
     let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
-    assert_eq!(body["skills"], serde_json::json!([]));
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"], serde_json::json!([]));
     assert_eq!(body["categories"], serde_json::json!([]));
 }
 
@@ -141,7 +142,7 @@ async fn skills_list_returns_installed_skill_metadata() {
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["total"], 2, "{body:?}");
 
-    let names: Vec<&str> = body["skills"]
+    let names: Vec<&str> = body["items"]
         .as_array()
         .unwrap()
         .iter()
@@ -151,7 +152,7 @@ async fn skills_list_returns_installed_skill_metadata() {
     assert!(names.contains(&"beta"));
 
     // Each entry exposes the dashboard-visible flags.
-    for s in body["skills"].as_array().unwrap() {
+    for s in body["items"].as_array().unwrap() {
         assert_eq!(s["enabled"], true);
         assert_eq!(s["tools_count"], 1);
         assert!(s["source"]["type"].is_string());
@@ -218,7 +219,8 @@ async fn skills_list_unknown_category_returns_zero() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
-    assert_eq!(body["skills"], serde_json::json!([]));
+    assert_eq!(body["offset"], 0);
+    assert_eq!(body["items"], serde_json::json!([]));
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +354,7 @@ async fn skills_reload_picks_up_filesystem_drops() {
 
     let (_, after) = json_request(&h, Method::GET, "/api/skills", None).await;
     assert_eq!(after["total"], 1);
-    assert_eq!(after["skills"][0]["name"], "dropped");
+    assert_eq!(after["items"][0]["name"], "dropped");
 }
 
 // ---------------------------------------------------------------------------
