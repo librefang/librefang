@@ -230,12 +230,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// TOTP helpers
-// ---------------------------------------------------------------------------
-
-use librefang_kernel::approval::ApprovalManager;
-
-// ---------------------------------------------------------------------------
 // Profile + Mode endpoints
 // ---------------------------------------------------------------------------
 
@@ -1910,7 +1904,7 @@ pub async fn approve_request(
         }
         match body.totp_code.as_deref() {
             Some(code) => {
-                if ApprovalManager::is_recovery_code_format(code) {
+                if state.kernel.approvals().recovery_code_format_matches(code) {
                     // Atomically redeem the recovery code (fixes TOCTOU #3560
                     // and vault_set-failure bypass #3633).
                     match state.kernel.vault_redeem_recovery_code(code) {
@@ -2659,7 +2653,7 @@ pub async fn totp_setup(
                 .into_json_tuple();
             }
             Some(code) => {
-                let verified = if ApprovalManager::is_recovery_code_format(code) {
+                let verified = if state.kernel.approvals().recovery_code_format_matches(code) {
                     // Atomically redeem the recovery code (fixes TOCTOU #3560 / #3633).
                     match state.kernel.vault_redeem_recovery_code(code) {
                         Ok(matched) => matched,
@@ -2948,7 +2942,11 @@ pub async fn totp_revoke(
     // Verify the provided code (recovery codes are consumed on use).
     // For recovery codes, use the atomic vault_redeem_recovery_code path
     // (fixes TOCTOU #3560 and vault_set-failure bypass #3633).
-    let verified = if ApprovalManager::is_recovery_code_format(&body.code) {
+    let verified = if state
+        .kernel
+        .approvals()
+        .recovery_code_format_matches(&body.code)
+    {
         match state.kernel.vault_redeem_recovery_code(&body.code) {
             Ok(matched) => matched,
             Err(e) => {

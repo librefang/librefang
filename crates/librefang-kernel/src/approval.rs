@@ -1103,6 +1103,16 @@ impl ApprovalManager {
             .collect()
     }
 
+    /// Instance wrapper around [`Self::is_recovery_code_format`].
+    ///
+    /// Lets callers go through `state.kernel.approvals().recovery_code_format_matches(code)`
+    /// instead of importing `librefang_kernel::approval::ApprovalManager` directly,
+    /// preserving the `KernelHandle`-style boundary tracked in #3744. The static
+    /// helper is retained for back-compat with existing in-kernel callers.
+    pub fn recovery_code_format_matches(&self, code: &str) -> bool {
+        Self::is_recovery_code_format(code)
+    }
+
     /// Check if a string matches any supported recovery code format.
     ///
     /// Accepts both:
@@ -3513,5 +3523,31 @@ mod tests {
             s, TOTP_MAX_FAILURES,
             "exactly {TOTP_MAX_FAILURES} calls should succeed before lockout, got {s}"
         );
+    }
+
+    /// `recovery_code_format_matches` instance wrapper must agree with the
+    /// static `is_recovery_code_format` helper across new + old + invalid
+    /// formats. Lets `librefang-api` route handlers go through
+    /// `state.kernel.approvals()` instead of importing
+    /// `librefang_kernel::approval::ApprovalManager` directly (#3744).
+    #[test]
+    fn recovery_code_format_matches_agrees_with_static_helper() {
+        let m = ApprovalManager::new(ApprovalPolicy::default());
+        let cases = [
+            "abcd-ef01-2345-6789", // new format, valid hex
+            "ABCD-EF01-2345-6789", // new format, uppercase hex
+            "1234-5678",           // old format, valid digits
+            "abcd-efgh-2345-6789", // new format, invalid (g/h not hex)
+            "12345-6789",          // wrong dash position
+            "",                    // empty
+            "not-a-code",          // garbage
+        ];
+        for c in cases {
+            assert_eq!(
+                m.recovery_code_format_matches(c),
+                ApprovalManager::is_recovery_code_format(c),
+                "instance wrapper must mirror static helper for input {c:?}",
+            );
+        }
     }
 }
