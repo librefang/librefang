@@ -2832,8 +2832,14 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 }
 
 export async function listGoals(): Promise<GoalItem[]> {
-  const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
-  return data.goals ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{goals}` shape during the transition so older daemons keep working.
+  const data = await get<{
+    items?: GoalItem[];
+    goals?: GoalItem[];
+    total?: number;
+  }>("/api/goals");
+  return data.items ?? data.goals ?? [];
 }
 
 export interface GoalTemplate {
