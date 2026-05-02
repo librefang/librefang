@@ -38,6 +38,7 @@ import { toastErr } from "../lib/errors";
 import { filterVisible } from "../lib/hiddenModels";
 import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap, FlaskConical, GitBranch, Trash2, Check, BarChart3, Copy, RotateCcw, Pencil, Bot, Database, FileText, MoreHorizontal, Sparkles } from "lucide-react";
 import { truncateId } from "../lib/string";
+import { pickLatestSessionId } from "../lib/sessionSelector";
 import { getStatusVariant } from "../lib/status";
 import { useDashboardSnapshot } from "../lib/queries/overview";
 import { useSessions, useSessionDetails } from "../lib/queries/sessions";
@@ -514,16 +515,14 @@ export function AgentsPage() {
   // global /api/sessions used previously was paginated to 50, so the
   // agent's latest session was often not in the page.
   const agentSessionsQuery = useAgentSessions(detailAgent?.id ?? "");
-  const latestSessionForAgent = useMemo(() => {
-    const list = agentSessionsQuery.data ?? [];
-    if (list.length === 0) return undefined;
-    let best: { session_id: string; ts: number } | undefined;
-    for (const s of list) {
-      const ts = s.created_at ? Date.parse(s.created_at) : 0;
-      if (!best || ts > best.ts) best = { session_id: s.session_id, ts };
-    }
-    return best?.session_id;
-  }, [agentSessionsQuery.data]);
+  // Sourced from useAgentSessions (/api/agents/{id}/sessions) — NOT the
+  // global useSessions() — to avoid the global endpoint's 50-row pagination
+  // cap silently hiding this agent's newest session on busy systems. See
+  // issue #4294 and lib/sessionSelector.ts for the regression test.
+  const latestSessionForAgent = useMemo(
+    () => pickLatestSessionId(agentSessionsQuery.data),
+    [agentSessionsQuery.data],
+  );
   const sessionDetailQuery = useSessionDetails(latestSessionForAgent ?? "");
   // Row-level aggregate only — detail-panel KPI reads from the per-agent
   // /stats endpoint (useAgentStats) which doesn't suffer from the global
