@@ -21,8 +21,22 @@ type UpdateHandSettingsInput = Parameters<ReturnType<typeof useUpdateHandSetting
 vi.mock("../http/client", () => ({
   activateHand: vi.fn(() => Promise.resolve({})),
   deactivateHand: vi.fn(() => Promise.resolve({})),
-  pauseHand: vi.fn(() => Promise.resolve({})),
-  resumeHand: vi.fn(() => Promise.resolve({})),
+  pauseHand: vi.fn(() =>
+    Promise.resolve({
+      instance_id: "inst-1",
+      hand_id: "hand-1",
+      status: "Paused",
+      activated_at: "2026-01-01T00:00:00Z",
+    }),
+  ),
+  resumeHand: vi.fn(() =>
+    Promise.resolve({
+      instance_id: "inst-1",
+      hand_id: "hand-1",
+      status: "Active",
+      activated_at: "2026-01-01T00:00:00Z",
+    }),
+  ),
   uninstallHand: vi.fn(() => Promise.resolve({})),
   setHandSecret: vi.fn(() => Promise.resolve({})),
   updateHandSettings: vi.fn(() => Promise.resolve({})),
@@ -72,44 +86,48 @@ describe("useDeactivateHand", () => {
 });
 
 describe("usePauseHand", () => {
-  it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
+  it("patches active-hands cache with the returned entity and invalidates broad caches", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(handKeys.active(), [
+      { instance_id: "inst-1", hand_id: "hand-1", status: "Active" },
+      { instance_id: "inst-2", hand_id: "hand-2", status: "Active" },
+    ]);
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => usePauseHand(), { wrapper });
 
-    await result.current.mutateAsync("hand-1");
+    await result.current.mutateAsync("inst-1");
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: agentKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: overviewKeys.snapshot(),
-    });
+    const cached = queryClient.getQueryData<Array<{ instance_id: string; status?: string }>>(
+      handKeys.active(),
+    );
+    expect(cached?.find((i) => i.instance_id === "inst-1")?.status).toBe("Paused");
+    expect(cached?.find((i) => i.instance_id === "inst-2")?.status).toBe("Active");
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: handKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });
 
 describe("useResumeHand", () => {
-  it("invalidates handKeys.all, agentKeys.all, and overviewKeys.snapshot()", async () => {
+  it("patches active-hands cache with the returned entity and invalidates broad caches", async () => {
     const { queryClient, wrapper } = createQueryClientWrapper();
+    queryClient.setQueryData(handKeys.active(), [
+      { instance_id: "inst-1", hand_id: "hand-1", status: "Paused" },
+    ]);
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     const { result } = renderHook(() => useResumeHand(), { wrapper });
 
-    await result.current.mutateAsync("hand-1");
+    await result.current.mutateAsync("inst-1");
 
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: handKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: agentKeys.all,
-    });
-    expect(invalidateSpy).toHaveBeenCalledWith({
-      queryKey: overviewKeys.snapshot(),
-    });
+    const cached = queryClient.getQueryData<Array<{ instance_id: string; status?: string }>>(
+      handKeys.active(),
+    );
+    expect(cached?.[0].status).toBe("Active");
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: handKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: agentKeys.all });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: overviewKeys.snapshot() });
   });
 });
 

@@ -163,16 +163,22 @@ async fn list_sessions_returns_paginated_envelope() {
     let (status, body) = get_json(&h, "/api/sessions").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
 
-    // The handler always returns the paginated envelope. Pinning the shape
-    // keeps dashboard consumers honest about reading `sessions`/`total`/
-    // `offset`/`limit`. We do NOT assert empty here — `MockKernelBuilder`
-    // boots with a seeded agent that already has a canonical session.
-    assert!(body["sessions"].is_array(), "{body:?}");
+    // The handler always returns the canonical paginated envelope (#3842):
+    // {items,total,offset,limit}. We do NOT assert empty here —
+    // `MockKernelBuilder` boots with a seeded agent that already has a
+    // canonical session.
+    assert!(body["items"].is_array(), "{body:?}");
     assert!(body["total"].is_number(), "{body:?}");
     assert_eq!(body["offset"].as_u64().unwrap_or(u64::MAX), 0);
     assert!(
         body["limit"].as_u64().unwrap_or(0) > 0,
         "limit must default to > 0: {body:?}"
+    );
+    // Legacy field must be gone — clients that haven't migrated should fail
+    // loudly rather than silently render empty lists.
+    assert!(
+        body.get("sessions").is_none(),
+        "legacy `sessions` field must be removed: {body:?}"
     );
 }
 
@@ -206,7 +212,7 @@ async fn list_sessions_surfaces_seeded_session() {
         baseline + 1,
         "total must increment after seeding: {body:?}"
     );
-    let arr = body["sessions"].as_array().expect("sessions array");
+    let arr = body["items"].as_array().expect("items array");
 
     // The seeded id must be present in the returned page. The wire field
     // is `session_id` (substrate's `Session::session_id` JSON shape).
@@ -243,7 +249,7 @@ async fn list_sessions_honours_pagination_query() {
         "{body:?}"
     );
     assert_eq!(
-        body["sessions"].as_array().map(|a| a.len()).unwrap_or(0),
+        body["items"].as_array().map(|a| a.len()).unwrap_or(0),
         1,
         "page window must respect ?limit=1: {body:?}"
     );
@@ -286,15 +292,16 @@ async fn search_sessions_returns_envelope_on_no_match() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert!(body["results"].is_array(), "{body:?}");
-    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+    // Canonical paginated envelope (#3842).
+    assert!(body["items"].is_array(), "{body:?}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
     assert_eq!(body["limit"].as_u64().unwrap_or(0), 10, "{body:?}");
     assert_eq!(body["offset"].as_u64().unwrap_or(u64::MAX), 0, "{body:?}");
-    // Page is not full → next_offset must be `null`, signalling EOF.
-    assert!(
-        body["next_offset"].is_null(),
-        "next_offset must be null when results.len() < limit: {body:?}"
-    );
+    // No matches and a non-full page → exact total of 0 (EOF).
+    assert_eq!(body["total"].as_u64().unwrap_or(u64::MAX), 0, "{body:?}");
+    // Legacy fields must be gone.
+    assert!(body.get("results").is_none(), "{body:?}");
+    assert!(body.get("next_offset").is_none(), "{body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -306,5 +313,5 @@ async fn search_sessions_malformed_agent_id_is_silently_ignored() {
     let h = boot().await;
     let (status, body) = get_json(&h, "/api/sessions/search?q=anything&agent_id=not-a-uuid").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert!(body["results"].is_array(), "{body:?}");
+    assert!(body["items"].is_array(), "{body:?}");
 }

@@ -95,7 +95,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/a2a/agents — List discovered external A2A agents. */
+        /**
+         * GET /api/a2a/agents — List discovered external A2A agents.
+         * @description Returns both `trusted` agents (approved and able to receive tasks) and
+         *     `pending` agents (discovered but not yet approved by the operator).
+         */
         get: operations["a2a_list_external_agents"];
         put?: never;
         post?: never;
@@ -320,6 +324,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/agents/{id}/events — Recent turn-level events for one agent.
+         * @description Backs the dashboard's agent-detail Logs tab. Returns rows sourced
+         *     from `usage_events` (newest first) so the panel shows real
+         *     operational data — model dispatch, latency, tokens, cost — instead
+         *     of the audit ledger, which is mostly admin lifecycle entries.
+         */
+        get: operations["list_agent_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{id}/files": {
         parameters: {
             query?: never;
@@ -354,6 +381,30 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/hand-runtime-config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * DELETE /api/agents/{id}/hand-runtime-config — Drop all runtime overrides
+         *     for the hand agent's role, restoring the live manifest to the HAND.toml
+         *     defaults and persisting the cleared state to `hand_state.json`.
+         * @description Returns 204 No Content on success (idempotent — a second call against an
+         *     already-clean role is also 204).
+         */
+        delete: operations["delete_hand_agent_runtime_config"];
+        options?: never;
+        head?: never;
+        /** PATCH /api/agents/{id}/hand-runtime-config — Runtime-only config override for hand agents. */
+        patch: operations["patch_hand_agent_runtime_config"];
         trace?: never;
     };
     "/api/agents/{id}/history": {
@@ -513,6 +564,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{id}/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/agents/{id}/runtime — Snapshot of in-flight loops for the agent.
+         * @description Returns one entry per `(agent, session)` pair that's currently executing.
+         *     Empty array when the agent is idle.
+         */
+        get: operations["list_agent_runtime"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{id}/session": {
         parameters: {
             query?: never;
@@ -649,6 +721,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{id}/sessions/{session_id}/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/agents/{id}/sessions/{session_id}/stop — Cancel a single
+         *     in-flight `(agent, session)` loop without affecting the agent's other
+         *     concurrent sessions.
+         * @description Returns `{"status":"ok","stopped":true}` when a loop was running for that
+         *     pair, `{"status":"ok","stopped":false}` when nothing was running (already
+         *     finished, never started, or the session belongs to a different agent).
+         */
+        post: operations["stop_session"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/sessions/{session_id}/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/agents/{id}/sessions/{session_id}/stream — attach to a session's
+         *     in-flight stream events (SSE).
+         * @description Any client can subscribe to the events emitted by an active turn on this
+         *     session: the originating client (CLI, Tauri desktop, web) plus any number
+         *     of additional clients. Late attachers begin receiving events from the
+         *     moment they subscribe — partial-turn snapshots are not replayed.
+         *
+         *     Returns 404 if the session does not exist or belongs to a different agent.
+         */
+        get: operations["attach_session_stream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{id}/sessions/{session_id}/switch": {
         parameters: {
             query?: never;
@@ -666,6 +788,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agents/{id}/sessions/{session_id}/trajectory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/agents/{id}/sessions/{session_id}/trajectory — Export a redacted
+         *     trajectory (audit trail) for the given session.
+         * @description Returns a privacy-redacted bundle of the session messages plus metadata
+         *     (agent name, model, system prompt fingerprint, librefang version). Intended
+         *     for support, audit, and compliance flows.
+         *
+         *     Query parameters:
+         *     - `format=json` (default): single JSON object response.
+         *     - `format=jsonl`: NDJSON, first line is metadata header, subsequent lines
+         *       are messages one-per-line. `Content-Type: application/x-ndjson`.
+         */
+        get: operations["export_session_trajectory"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents/{id}/skills": {
         parameters: {
             query?: never;
@@ -677,6 +827,29 @@ export interface paths {
         get: operations["get_agent_skills"];
         /** PUT /api/agents/{id}/skills — Update an agent's skill allowlist. */
         put: operations["set_agent_skills"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agents/{id}/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/agents/{id}/stats — 24-hour KPI rollup for one agent.
+         * @description Returns sessions/cost/P95-latency/active-now in a single round trip so
+         *     the dashboard's per-agent KPI tiles don't have to scan the global
+         *     `/api/sessions` page (which is paginated and was clipping data for
+         *     agents that hadn't appeared in the latest N sessions).
+         */
+        get: operations["get_agent_stats"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -733,23 +906,6 @@ export interface paths {
          */
         get: operations["get_agent_traces"];
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/agents/{id}/update": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** PUT /api/agents/:id — Update an agent (currently: re-set manifest fields). */
-        put: operations["update_agent"];
         post?: never;
         delete?: never;
         options?: never;
@@ -844,6 +1000,39 @@ export interface paths {
         put?: never;
         /** POST /api/approvals/{id}/reject — Reject a pending request. */
         post: operations["reject_request"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["audit_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /api/audit/query — admin-only filtered audit log. */
+        get: operations["audit_query"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -994,6 +1183,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auto-dream/agents/{id}/abort": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["auto_dream_abort"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auto-dream/agents/{id}/enabled": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["auto_dream_set_enabled"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auto-dream/agents/{id}/trigger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["auto_dream_trigger"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auto-dream/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["auto_dream_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/backup": {
         parameters: {
             query?: never;
@@ -1109,7 +1362,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/budget/agents — Per-agent cost ranking (top spenders). */
+        /**
+         * GET /api/budget/agents — Per-agent cost ranking (top spenders).
+         * @description Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to
+         *     eliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal
+         *     dashboard polling at 100 agents. See #3684.
+         */
         get: operations["agent_budget_ranking"];
         put?: never;
         post?: never;
@@ -1130,6 +1388,54 @@ export interface paths {
         get: operations["agent_budget_status"];
         /** PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime. */
         put: operations["update_agent_budget"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/budget/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/budget/users — admin-only per-user spend ranking.
+         * @description Query params:
+         *       - `limit` (default 25, hard cap 1000) — max rows returned.
+         *
+         *     Response: `{ "users": [...], "total": N }`. Each row carries the
+         *     rolled-up hourly / daily / monthly cost plus the per-user budget
+         *     limits (when configured) so the dashboard can render % bars without
+         *     a follow-up call.
+         */
+        get: operations["user_budget_ranking"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/budget/users/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/budget/users/{user_id} — admin-only single-user budget detail.
+         * @description `user_id` accepts either a UUID (the canonical `UserId` form) or the
+         *     raw configured name (re-derived via `UserId::from_name`) so operators
+         *     can paste a name from `config.toml` directly into the URL.
+         */
+        get: operations["user_budget_detail"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -2290,6 +2596,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mcp/taint-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * GET /api/mcp/taint-rules — List configured `[[taint_rules]]`.
+         * @description Issue #3050 follow-up: the dashboard `TaintPolicyEditor` references
+         *     rule-set names by free-form string. Without this read-only endpoint,
+         *     the editor cannot tell the operator that a typed name doesn't match
+         *     any registered set — and the scanner silently treats unknown names
+         *     as no-ops (one-shot WARN in
+         *     `librefang_runtime_mcp::warn_unknown_rule_set_once`). The dashboard
+         *     uses this list to render an inline validation hint next to the
+         *     `rule_sets` field.
+         */
+        get: operations["list_mcp_taint_rules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/memory": {
         parameters: {
             query?: never;
@@ -2297,7 +2630,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List all proactive memories, optionally filtered by category, with pagination. */
+        /**
+         * List all proactive memories, optionally filtered by category, with pagination.
+         * @description When proactive memory is disabled in config, returns an empty list with
+         *     `proactive_enabled: false` (HTTP 200) so the dashboard can render an
+         *     explanatory note instead of treating a config state as a server error.
+         */
         get: operations["memory_list"];
         put?: never;
         /** Add memories from messages (uses extraction pipeline). */
@@ -2561,7 +2899,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get memory statistics across all agents. */
+        /**
+         * Get memory statistics across all agents.
+         * @description When proactive memory is disabled, returns `{stats: null, proactive_enabled: false}`
+         *     at HTTP 200 — disabled is a config state, not an error.
+         */
         get: operations["memory_stats"];
         put?: never;
         post?: never;
@@ -2678,7 +3020,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get: operations["list_models"];
+        get: operations["list_all_models"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3458,6 +3800,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tools/{name}/invoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * POST /api/tools/{name}/invoke — Invoke a kernel tool directly.
+         * @description External integrations (MCP bridges, scripts, automations) can call kernel
+         *     tools without going through an agent loop. Fail-closed: the endpoint
+         *     rejects every request unless the tool is listed in
+         *     `[tool_invoke] allowlist` and `tool_invoke.enabled = true`. Pass
+         *     `?agent_id=<uuid>` when invoking approval-gated tools so the approval
+         *     callback can resolve the correct agent; without an `agent_id` those
+         *     tools are rejected to avoid orphaned deferred executions.
+         */
+        post: operations["invoke_tool"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/triggers": {
         parameters: {
             query?: never;
@@ -3465,7 +3833,6 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /api/triggers — List all triggers (optionally filter by ?agent_id=...). */
         get: operations["list_triggers"];
         put?: never;
         /** POST /api/triggers — Register a new event trigger. */
@@ -3483,15 +3850,22 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
-        /** PUT /api/triggers/:id — Update a trigger (enable/disable toggle). */
-        put: operations["update_trigger"];
+        /** GET /api/triggers/:id — Fetch a single trigger by ID. */
+        get: operations["get_trigger"];
+        put?: never;
         post?: never;
         /** DELETE /api/triggers/:id — Remove a trigger. */
         delete: operations["delete_trigger"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * PATCH /api/triggers/:id — Partially update a trigger.
+         * @description All body fields are optional. Only provided fields are changed.
+         *     Supported fields: `pattern`, `prompt_template`, `enabled`, `max_fires`,
+         *     `cooldown_secs` (pass `null` to clear), `session_mode` (pass `null` to clear),
+         *     `target_agent_id` (pass `null` to clear, omit to leave unchanged).
+         */
+        patch: operations["update_trigger"];
         trace?: never;
     };
     "/api/uploads/{file_id}": {
@@ -3573,6 +3947,98 @@ export interface paths {
         get: operations["usage_summary"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_users"];
+        put?: never;
+        post: operations["create_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["import_users"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_user"];
+        put: operations["update_user"];
+        post?: never;
+        delete: operations["delete_user"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{name}/rotate-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate a user's API key.
+         * @description Generates a fresh 32-byte random plaintext key, hashes it with Argon2id,
+         *     stores the hash in `config.toml`, and **swaps the live in-memory snapshot
+         *     the auth middleware reads from** so the next request that presents the
+         *     old plaintext token immediately fails authentication. Without the live
+         *     swap a leaked key could only be revoked by restarting the daemon — which
+         *     defeats the point of rotation. See the `user_api_keys` field on
+         *     [`AppState`] for the shared `Arc<RwLock<…>>` that makes this work.
+         *
+         *     Owner-only, gated by `is_owner_only_write` in `middleware.rs` — same
+         *     blast radius as user create/delete. The request takes no body; the new
+         *     plaintext key is returned in the response and is **never written to the
+         *     audit log or echoed again**.
+         *
+         *     Dashboard sessions (`AppState.active_sessions`) are intentionally NOT
+         *     invalidated here. The active-sessions store is keyed by an opaque token
+         *     and the stored [`crate::password_hash::SessionToken`] does not carry a
+         *     `user_id` — it tracks the single shared dashboard credential pair
+         *     (`dashboard_user` / `dashboard_pass`), not the per-user API keys this
+         *     endpoint rotates. The two auth surfaces are independent: a per-user
+         *     bearer-token caller never lands in `active_sessions` at all (see
+         *     `middleware.rs:618`), so the per-user key swap completes the kill on
+         *     its own. If a future change ties dashboard sessions to a `UserId`, we
+         *     can extend `sessions_invalidated` to include those evictions; today
+         *     the count reflects the per-user-bearer-token kill, which is the actual
+         *     revocation that matters for this surface.
+         */
+        post: operations["rotate_user_key"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3746,7 +4212,7 @@ export interface paths {
             cookie?: never;
         };
         /** GET /v1/models — List available agents as OpenAI model objects. */
-        get: operations["list_models"];
+        get: operations["list_openai_models"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3759,9 +4225,57 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @description Request to update an agent's manifest. */
-        AgentUpdateRequest: {
-            manifest_toml: string;
+        /**
+         * @description Wire-shape for one row in [`list_agent_events`]. Mirrors
+         *     [`librefang_memory::usage::AgentEventRow`] but defined here as a
+         *     utoipa::ToSchema view so we can register it with the OpenAPI doc
+         *     without forcing utoipa into the memory crate.
+         */
+        AgentEventRowView: {
+            /** Format: double */
+            cost_usd: number;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            latency_ms: number;
+            model: string;
+            /** Format: int64 */
+            output_tokens: number;
+            provider: string;
+            timestamp: string;
+            /** Format: int64 */
+            tool_calls: number;
+        };
+        AgentEventsResponse: {
+            events: components["schemas"]["AgentEventRowView"][];
+        };
+        /**
+         * @description 24-hour KPI rollup view returned by `GET /api/agents/{id}/stats`.
+         *     Mirrors [`librefang_memory::session::AgentStats24h`] — defined here as a
+         *     view so we can derive `utoipa::ToSchema` without forcing utoipa into the
+         *     memory crate. Generated SDKs and the OpenAPI spec pick up this shape.
+         */
+        AgentStats24hView: {
+            /** Format: int64 */
+            active_now: number;
+            /** Format: double */
+            cost_24h: number;
+            /** Format: int64 */
+            p95_latency_ms: number;
+            prev: components["schemas"]["AgentStatsPrevView"];
+            /** Format: int64 */
+            samples: number;
+            /** Format: int64 */
+            sessions_24h: number;
+        };
+        /** @description Prior 24-48h window scoped fields backing the KPI tile trend deltas. */
+        AgentStatsPrevView: {
+            /** Format: double */
+            cost_24h: number;
+            /** Format: int64 */
+            p95_latency_ms: number;
+            /** Format: int64 */
+            sessions_24h: number;
         };
         /** @description A file attachment reference (from a prior upload). */
         AttachmentRef: {
@@ -3791,6 +4305,27 @@ export interface components {
             index: number;
             name?: string | null;
             success: boolean;
+        };
+        /**
+         * @description Bulk-import payload. `rows` are pre-parsed by the frontend (drag-drop
+         *     CSV, dialect-aware). `dry_run = true` returns counts without persisting.
+         */
+        BulkImportRequest: {
+            dry_run?: boolean;
+            rows?: components["schemas"]["UserUpsert"][];
+        };
+        BulkImportResult: {
+            created: number;
+            dry_run: boolean;
+            failed: number;
+            rows: components["schemas"]["BulkImportRow"][];
+            updated: number;
+        };
+        BulkImportRow: {
+            error?: string | null;
+            index: number;
+            name: string;
+            status: string;
         };
         /** @description POST body for the callback (programmatic clients). */
         CallbackBody: {
@@ -3855,6 +4390,17 @@ export interface components {
             /** @description Optional sender display name. */
             sender_name?: string | null;
             /**
+             * @description Optional explicit session ID (UUID string) to use for this message.
+             *
+             *     When set, overrides the default session resolution (channel-derived or
+             *     registry canonical). Enables multi-tab / multi-session UIs where the
+             *     caller tracks which session each conversation belongs to.
+             *
+             *     Safety: the server rejects a `session_id` that belongs to a different
+             *     agent with 400 Bad Request.
+             */
+            session_id?: string | null;
+            /**
              * @description Whether the response should include the model's thinking/reasoning trace.
              *
              *     `None` defaults to `true` when thinking content is available.
@@ -3901,6 +4447,15 @@ export interface components {
             memory_conflicts?: unknown[];
             /** Format: int64 */
             output_tokens: number;
+            /**
+             * @description §A — Optional private notice destined for the agent's owner DM,
+             *     produced when the model invoked the `notify_owner` tool during the
+             *     turn. Channel adapters (e.g. whatsapp-gateway) MUST route this to
+             *     the owner's address (e.g. OWNER_JID) and NOT to the source chat.
+             *     Adapters that don't support owner-side delivery should ignore it
+             *     (BC-01 — Telegram/Discord/Slack continue to function unchanged).
+             */
+            owner_notice?: string | null;
             response: string;
             /**
              * @description Combined thinking/reasoning trace from the model, when the caller
@@ -3962,9 +4517,38 @@ export interface components {
             /** @description Web search augmentation mode: "off", "auto", or "always". */
             web_search_augmentation?: string | null;
         };
+        /**
+         * @description Response payload for `POST /api/users/{name}/rotate-key`.
+         *
+         *     `new_api_key` is the **plaintext** rotated key — this is the only time
+         *     the server will surface it. Operators must copy and store it now;
+         *     nothing else (audit log included) records the plaintext.
+         *
+         *     `sessions_invalidated` reports how many in-memory per-user API key
+         *     records were swapped — typically `1`. See the doc-comment on
+         *     [`rotate_user_key`] for why dashboard sessions are NOT included in
+         *     this count.
+         */
+        RotateKeyResponse: {
+            new_api_key: string;
+            sessions_invalidated: number;
+            status: string;
+        };
         /** @description Request body for writing a workspace identity file. */
         SetAgentFileRequest: {
             content: string;
+        };
+        /** @description Request body for updating an agent's tool configuration. */
+        SetAgentToolsRequest: {
+            /** @description Declared tools (capabilities.tools). `None` = no change, `Some([])` = unrestricted. */
+            capabilities_tools?: string[] | null;
+            /** @description Tool allowlist — additional filter. `None` = no change, `Some([])` = clear. */
+            tool_allowlist?: string[] | null;
+            /** @description Tool blocklist — exclusion filter. `None` = no change, `Some([])` = clear. */
+            tool_blocklist?: string[] | null;
+        };
+        SetEnabledRequest: {
+            enabled: boolean;
         };
         /** @description Request to change an agent's operational mode. */
         SetModeRequest: {
@@ -4013,6 +4597,45 @@ export interface components {
             emoji?: string | null;
             greeting_style?: string | null;
             vibe?: string | null;
+        };
+        /**
+         * @description Payload for creating or replacing a user. `api_key_hash` is accepted
+         *     pre-hashed (Argon2 phc string) — the dashboard hashes locally before
+         *     sending. `None` clears any existing hash on update; absent on create.
+         */
+        UserUpsert: {
+            api_key_hash?: string | null;
+            channel_bindings?: {
+                [key: string]: string;
+            };
+            name: string;
+            role?: string;
+        };
+        /**
+         * @description Sanitized user view returned over the wire — never echoes the
+         *     `api_key_hash` value, nor the contents of `tool_policy`,
+         *     `memory_access`, `budget`, etc. The list view only needs presence
+         *     flags so the dashboard can show a "this user is policy-customized"
+         *     badge; the per-user detail endpoints already surface the bodies.
+         */
+        UserView: {
+            channel_bindings: {
+                [key: string]: string;
+            };
+            has_api_key: boolean;
+            /** @description True when the user has a per-user budget cap configured. */
+            has_budget: boolean;
+            /** @description True when the user has a custom memory namespace ACL. */
+            has_memory_access: boolean;
+            /**
+             * @description True when the user has any per-user tool policy configured —
+             *     either an allow/deny list, tool-category overrides, or
+             *     per-channel rules. Summary only; the contents stay behind
+             *     `/api/users/{name}/policy`.
+             */
+            has_policy: boolean;
+            name: string;
+            role: string;
         };
     };
     responses: never;
@@ -4577,6 +5200,39 @@ export interface operations {
             };
         };
     };
+    list_agent_events: {
+        parameters: {
+            query?: {
+                /** @description Max rows (default 30, max 200) */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Recent agent events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentEventsResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_agent_files: {
         parameters: {
             query?: never;
@@ -4680,6 +5336,127 @@ export interface operations {
             };
             /** @description File not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    delete_hand_agent_runtime_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Hand agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Runtime overrides cleared; manifest restored to HAND.toml defaults */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid agent id or target agent is not managed by a hand */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Hand role not found for the agent (hand registry inconsistency) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Internal kernel error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    patch_hand_agent_runtime_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Hand agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description Runtime override fields. Whitespace is trimmed on all string fields. For `model` and `provider` an empty (or whitespace-only) string is ignored ('leave unchanged'); for the nullable secrets `api_key_env` and `base_url` an empty (or whitespace-only) string clears the override. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchAgentConfigRequest"];
+            };
+        };
+        responses: {
+            /** @description Runtime override applied to the live manifest and persisted to hand_state.json */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Invalid agent id or target agent is not managed by a hand */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Hand role not found for the agent (hand registry inconsistency) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Internal kernel error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4956,9 +5733,35 @@ export interface operations {
             };
         };
     };
-    get_agent_session: {
+    list_agent_runtime: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of in-flight sessions for the agent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    get_agent_session: {
+        parameters: {
+            query?: {
+                /** @description Optional session id to load instead of the canonical active session */
+                session_id?: string;
+            };
             header?: never;
             path: {
                 /** @description Agent ID */
@@ -5177,6 +5980,68 @@ export interface operations {
             };
         };
     };
+    stop_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+                /** @description Session ID */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancel a single (agent, session) loop */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    attach_session_stream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+                /** @description Session ID to attach to */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Server-sent events stream of session events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid agent or session ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent or session not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     switch_agent_session: {
         parameters: {
             query?: never;
@@ -5199,6 +6064,48 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+        };
+    };
+    export_session_trajectory: {
+        parameters: {
+            query?: {
+                /** @description Response format: 'json' (default) or 'jsonl' */
+                format?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+                /** @description Session ID to export */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redacted trajectory bundle */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Invalid agent or session ID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent or session not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5250,6 +6157,36 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+        };
+    };
+    get_agent_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 24-hour stats rollup */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentStats24hView"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -5309,10 +6246,10 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description Tool allowlist and/or blocklist arrays */
+        /** @description Tool configuration fields */
         requestBody: {
             content: {
-                "application/json": unknown;
+                "application/json": components["schemas"]["SetAgentToolsRequest"];
             };
         };
         responses: {
@@ -5340,34 +6277,6 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Get decision traces from the agent's most recent message */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-        };
-    };
-    update_agent: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Agent ID */
-                id: string;
-            };
-            cookie?: never;
-        };
-        /** @description New agent manifest TOML */
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["AgentUpdateRequest"];
-            };
-        };
-        responses: {
-            /** @description Update an agent's manifest */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5407,20 +6316,25 @@ export interface operations {
     };
     list_approvals: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Max items (default 50, max 500) */
+                limit?: number;
+                /** @description Items to skip */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description List pending and recent approvals */
+            /** @description Paginated list of pending and recent approvals */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown[];
+                    "application/json": unknown;
                 };
             };
         };
@@ -5519,6 +6433,78 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Request rejected */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    audit_export: {
+        parameters: {
+            query?: {
+                /** @description json (default) or csv */
+                format?: string;
+                /** @description Filter by user id */
+                user?: string;
+                /** @description Filter by AuditAction variant */
+                action?: string;
+                /** @description Filter by agent id */
+                agent?: string;
+                /** @description Filter by channel */
+                channel?: string;
+                /** @description ISO-8601 lower bound */
+                from?: string;
+                /** @description ISO-8601 upper bound */
+                to?: string;
+                /** @description Max rows (default 5000, hard cap 50000) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Audit export (JSON or CSV) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+        };
+    };
+    audit_query: {
+        parameters: {
+            query?: {
+                /** @description Filter by user id (UUID) or name */
+                user?: string;
+                /** @description Filter by AuditAction variant name (case-insensitive) */
+                action?: string;
+                /** @description Filter by agent id */
+                agent?: string;
+                /** @description Filter by channel (telegram, api, …) */
+                channel?: string;
+                /** @description ISO-8601 lower bound (inclusive) */
+                from?: string;
+                /** @description ISO-8601 upper bound (inclusive) */
+                to?: string;
+                /** @description Max rows (default 200, hard cap 5000) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Filtered audit log entries */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5720,6 +6706,127 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    auto_dream_abort: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Abort outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Invalid agent id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    auto_dream_set_enabled: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetEnabledRequest"];
+            };
+        };
+        responses: {
+            /** @description Opt-in toggled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Invalid agent id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    auto_dream_trigger: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent UUID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Trigger outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Invalid agent id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    auto_dream_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Auto-dream status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
             };
         };
     };
@@ -5953,6 +7060,52 @@ export interface operations {
         };
         responses: {
             /** @description Updated agent budget */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    user_budget_ranking: {
+        parameters: {
+            query?: {
+                /** @description Top N users (default 25, cap 1000) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-user cost ranking */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    user_budget_detail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User UUID or configured name */
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Single user budget detail */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -7589,6 +8742,26 @@ export interface operations {
             };
         };
     };
+    list_mcp_taint_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List configured named taint rule sets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     memory_list: {
         parameters: {
             query?: {
@@ -8214,7 +9387,7 @@ export interface operations {
             };
         };
     };
-    list_models: {
+    list_all_models: {
         parameters: {
             query?: never;
             header?: never;
@@ -9032,20 +10205,25 @@ export interface operations {
     };
     list_sessions: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Max items (default 50, max 500) */
+                limit?: number;
+                /** @description Items to skip */
+                offset?: number;
+            };
             header?: never;
             path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description List sessions */
+            /** @description Paginated list of sessions */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown[];
+                    "application/json": unknown;
                 };
             };
         };
@@ -9366,9 +10544,63 @@ export interface operations {
             };
         };
     };
+    invoke_tool: {
+        parameters: {
+            query?: {
+                /** @description Caller agent UUID (required for approval-gated tools) */
+                agent_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Tool name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            /** @description Tool execution result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Tool invocation failed or requires an agent context */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Endpoint disabled or tool not in allowlist */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Tool not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_triggers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Filter by agent ID */
+                agent_id?: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -9417,7 +10649,7 @@ export interface operations {
             };
         };
     };
-    update_trigger: {
+    get_trigger: {
         parameters: {
             query?: never;
             header?: never;
@@ -9427,13 +10659,9 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": unknown;
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Trigger updated */
+            /** @description Trigger detail */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -9441,6 +10669,13 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -9458,6 +10693,40 @@ export interface operations {
         responses: {
             /** @description Trigger deleted */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_trigger: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trigger ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            /** @description Updated trigger */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Not found */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9565,6 +10834,217 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+        };
+    };
+    list_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of registered users */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserView"][];
+                };
+            };
+        };
+    };
+    create_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpsert"];
+            };
+        };
+        responses: {
+            /** @description User created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserView"];
+                };
+            };
+            /** @description Validation error */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description User already exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    import_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Import result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkImportResult"];
+                };
+            };
+        };
+    };
+    get_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User name (case-sensitive) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User detail */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserView"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User name (case-sensitive) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpsert"];
+            };
+        };
+        responses: {
+            /** @description User updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserView"];
+                };
+            };
+            /** @description Validation error */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User name (case-sensitive) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description User deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rotate_user_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User name (case-sensitive) */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Key rotated. `new_api_key` is the only time the plaintext is exposed — the server cannot reproduce it later. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotateKeyResponse"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -9856,7 +11336,7 @@ export interface operations {
             };
         };
     };
-    list_models: {
+    list_openai_models: {
         parameters: {
             query?: never;
             header?: never;

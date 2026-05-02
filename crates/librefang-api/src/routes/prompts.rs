@@ -63,7 +63,16 @@ async fn list_prompt_versions(
         }
     };
     match state.kernel.list_prompt_versions(agent_id) {
-        Ok(versions) => Json(versions).into_response(),
+        Ok(versions) => {
+            let total = versions.len();
+            Json(crate::types::PaginatedResponse {
+                items: versions,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -156,7 +165,16 @@ async fn list_experiments(
         }
     };
     match state.kernel.list_experiments(agent_id) {
-        Ok(experiments) => Json(experiments).into_response(),
+        Ok(experiments) => {
+            let total = experiments.len();
+            Json(crate::types::PaginatedResponse {
+                items: experiments,
+                total,
+                offset: 0,
+                limit: None,
+            })
+            .into_response()
+        }
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
