@@ -24,6 +24,7 @@ use librefang_kernel::auth::UserRole;
 use librefang_runtime::audit::AuditEntry;
 use librefang_types::agent::UserId;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Build admin-gated audit query / export routes.
@@ -31,6 +32,8 @@ pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/audit/query", axum::routing::get(audit_query))
         .route("/audit/export", axum::routing::get(audit_export))
+        .route("/audit/recent", axum::routing::get(audit_recent))
+        .route("/audit/verify", axum::routing::get(audit_verify))
 }
 
 /// Filter parameters shared by `/api/audit/query` and `/api/audit/export`.
@@ -478,6 +481,101 @@ fn csv_escape(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ---------------------------------------------------------------------------
+// Audit endpoints (moved from system.rs as part of #3749 system split)
+// ---------------------------------------------------------------------------
+
+/// GET /api/audit/recent — Get recent audit log entries.
+#[utoipa::path(get, path = "/api/audit/recent", tag = "system", responses((status = 200, description = "Recent audit entries", body = Vec<serde_json::Value>)))]
+pub async fn audit_recent(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let n: usize = params
+        .get("n")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50)
+        .min(1000); // Cap at 1000
+
+    let entries = state.kernel.audit().recent(n);
+    let tip = state.kernel.audit().tip_hash();
+
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "seq": e.seq,
+                "timestamp": e.timestamp,
+                "agent_id": e.agent_id,
+                "action": format!("{:?}", e.action),
+                "detail": e.detail,
+                "outcome": e.outcome,
+                "hash": e.hash,
+            })
+        })
+        .collect();
+
+    let total = state.kernel.audit().len();
+    Json(serde_json::json!({
+        "items": items,
+        "total": total,
+        "offset": 0,
+        "limit": n,
+        "tip_hash": tip,
+    }))
+}
+
+/// GET /api/audit/verify — Verify the audit chain integrity.
+#[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = crate::types::JsonObject)))]
+pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let audit = state.kernel.audit();
+    let entry_count = audit.len();
+    // External tip-anchor surfacing (see SECURITY.md "Audit"). When
+    // anchor_path() is None the chain is self-consistent only — the UI
+    // shows "anchor: none" rather than misleading "anchor: ok".
+    let anchor_path = audit
+        .anchor_path()
+        .map(|p| p.to_string_lossy().into_owned());
+    let anchor_enabled = anchor_path.is_some();
+    match audit.verify_integrity() {
+        Ok(()) => {
+            let mut body = serde_json::json!({
+                "valid": true,
+                "entries": entry_count,
+                "tip_hash": audit.tip_hash(),
+                "anchor_enabled": anchor_enabled,
+                "anchor_path": anchor_path,
+                // verify_integrity() already reconciles the anchor file
+                // against the in-DB tip; reaching this branch means
+                // either no anchor is configured or it matched.
+                "anchor_status": if anchor_enabled { "ok" } else { "none" },
+            });
+            if entry_count == 0 {
+                // SECURITY: Warn that an empty audit log has no forensic value
+                body["warning"] = serde_json::Value::String(
+                    "Audit log is empty — no events have been recorded yet".to_string(),
+                );
+            }
+            Json(body)
+        }
+        Err(msg) => {
+            // verify_integrity() returns Err when the chain is broken
+            // OR when the anchor file diverges from the in-DB tip.
+            // Surface "diverged" so the UI can distinguish anchor
+            // failure from chain failure even though both are fatal.
+            let anchor_status = if anchor_enabled { "diverged" } else { "none" };
+            Json(serde_json::json!({
+                "valid": false,
+                "error": msg,
+                "entries": entry_count,
+                "anchor_enabled": anchor_enabled,
+                "anchor_path": anchor_path,
+                "anchor_status": anchor_status,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
