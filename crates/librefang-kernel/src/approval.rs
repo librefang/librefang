@@ -994,6 +994,21 @@ impl ApprovalManager {
         Self::verify_totp_code_with_issuer(secret_base32, code, "LibreFang")
     }
 
+    /// Instance-method wrapper around `verify_totp_code_with_issuer`.
+    ///
+    /// Lets API-layer callers verify a TOTP code via
+    /// `kernel.approvals().verify_totp(...)` without reaching into the
+    /// `librefang_kernel::approval` module path directly (see #3744 — the
+    /// API crate should not import kernel-internal types).
+    pub fn verify_totp(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        Self::verify_totp_code_with_issuer(secret_base32, code, issuer)
+    }
+
     /// Like `verify_totp_code` but uses the provided issuer label.
     pub fn verify_totp_code_with_issuer(
         secret_base32: &str,
@@ -2842,6 +2857,21 @@ mod tests {
         let mgr = make_manager_with_db();
         // A fresh code should not be marked as used.
         assert!(!mgr.is_totp_code_used("123456"));
+    }
+
+    #[test]
+    fn test_verify_totp_instance_matches_static_helper() {
+        // The instance-method wrapper added for #3744 must agree with the
+        // existing static helper for the same inputs. Use a deliberately
+        // bogus code so both paths return Ok(false) without time dependency.
+        let mgr = make_manager_with_db();
+        let (secret, _uri, _qr) =
+            ApprovalManager::generate_totp_secret("LibreFang", "test").expect("totp secret");
+        let via_instance = mgr.verify_totp(&secret, "000000", "LibreFang");
+        let via_static =
+            ApprovalManager::verify_totp_code_with_issuer(&secret, "000000", "LibreFang");
+        assert_eq!(via_instance.is_ok(), via_static.is_ok());
+        assert_eq!(via_instance.unwrap_or(true), via_static.unwrap_or(false));
     }
 
     #[test]

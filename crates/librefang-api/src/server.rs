@@ -463,9 +463,11 @@ pub(crate) async fn dashboard_login(
                     // Verify TOTP code
                     let secret = state.kernel.vault_get("totp_secret").unwrap_or_default();
                     let issuer = policy.totp_issuer.clone();
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                        &secret, totp_code, &issuer,
-                    ) {
+                    match state
+                        .kernel
+                        .approvals()
+                        .verify_totp(&secret, totp_code, &issuer)
+                    {
                         Ok(true) => {
                             // Mark code as used so it cannot be replayed.
                             state.kernel.approvals().record_totp_code_used(totp_code);
