@@ -4152,10 +4152,18 @@ async fn download_file_to_blocks(
             path: path_str,
         }]
     } else {
-        vec![ContentBlock::Text {
+        // Content-aware enrichment (#4448): when the file is a PDF or a
+        // text-like format, surface its actual content to the LLM in
+        // addition to the saved-path block. The path block is preserved
+        // so tools that legitimately want raw bytes (media_transcribe,
+        // custom file readers) still work.
+        let mut blocks =
+            crate::attachment_enrich::enrich_saved_file(&file_path, &media_type, filename);
+        blocks.push(ContentBlock::Text {
             text: format!("{FILE_SAVED_BLOCK_PREFIX}{filename}] saved to {path_str}"),
             provider_metadata: None,
-        }]
+        });
+        blocks
     }
 }
 

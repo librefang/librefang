@@ -829,11 +829,23 @@ pub async fn execute_tool_raw(
         "knowledge_query" => tool_knowledge_query(input, *kernel).await,
 
         // Image analysis tool
-        "image_analyze" => tool_image_analyze(input, *workspace_root).await,
+        "image_analyze" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_image_analyze(input, *workspace_root, &extra_refs).await
+        }
 
         // Media understanding tools
-        "media_describe" => tool_media_describe(input, *media_engine, *workspace_root).await,
-        "media_transcribe" => tool_media_transcribe(input, *media_engine, *workspace_root).await,
+        "media_describe" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_media_describe(input, *media_engine, *workspace_root, &extra_refs).await
+        }
+        "media_transcribe" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_media_transcribe(input, *media_engine, *workspace_root, &extra_refs).await
+        }
 
         // Media generation tools (MediaDriver-based)
         "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
@@ -845,7 +857,11 @@ pub async fn execute_tool_raw(
         "text_to_speech" => {
             tool_text_to_speech(input, *media_drivers, *tts_engine, *workspace_root).await
         }
-        "speech_to_text" => tool_speech_to_text(input, *media_engine, *workspace_root).await,
+        "speech_to_text" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_speech_to_text(input, *media_engine, *workspace_root, &extra_refs).await
+        }
 
         // Docker sandbox tool
         "docker_exec" => {
@@ -884,7 +900,11 @@ pub async fn execute_tool_raw(
         "cron_cancel" => tool_cron_cancel(input, *kernel, *caller_agent_id).await,
 
         // Channel send tool (proactive outbound messaging)
-        "channel_send" => tool_channel_send(input, *kernel, *workspace_root, *sender_id).await,
+        "channel_send" => {
+            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
+            tool_channel_send(input, *kernel, *workspace_root, *sender_id, &extra_refs).await
+        }
 
         // Persistent process tools
         "process_start" => tool_process_start(input, *process_manager, *caller_agent_id).await,
@@ -2397,18 +2417,15 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
 // Filesystem tools
 // ---------------------------------------------------------------------------
 
-/// Resolve a file path through the workspace sandbox.
+/// Resolve a file path through the workspace sandbox, with optional
+/// additional canonical roots that should also be considered "inside the
+/// sandbox" — used to honor named workspaces declared in the agent's
+/// manifest.
 ///
 /// SECURITY: Returns an error when `workspace_root` is `None` to prevent
-/// unrestricted filesystem access. All file operations MUST be confined
-/// to the agent's workspace directory.
-fn resolve_file_path(raw_path: &str, workspace_root: Option<&Path>) -> Result<PathBuf, String> {
-    resolve_file_path_ext(raw_path, workspace_root, &[])
-}
-
-/// Like [`resolve_file_path`] but accepts additional canonical roots that
-/// should also be considered "inside the sandbox" — used to honor named
-/// workspaces declared in the agent's manifest.
+/// unrestricted filesystem access. All file operations MUST be confined to
+/// the agent's workspace directory or one of the explicitly allow-listed
+/// `additional_roots`.
 fn resolve_file_path_ext(
     raw_path: &str,
     workspace_root: Option<&Path>,
@@ -4043,6 +4060,7 @@ async fn tool_channel_send(
     kernel: Option<&Arc<dyn KernelHandle>>,
     workspace_root: Option<&Path>,
     sender_id: Option<&str>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
 
@@ -4104,9 +4122,11 @@ async fn tool_channel_send(
             .await;
     }
 
-    // Local file attachment: read from disk and send as FileData
+    // Local file attachment: read from disk and send as FileData. Honor named
+    // workspace prefixes so agents can attach files that live under declared
+    // `[workspaces]` mounts.
     if let Some(raw_path) = file_path {
-        let resolved = resolve_file_path(raw_path, workspace_root)?;
+        let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
         let data = tokio::fs::read(&resolved)
             .await
             .map_err(|e| format!("Failed to read file '{}': {e}", resolved.display()))?;
@@ -4460,12 +4480,15 @@ async fn tool_a2a_send(
 async fn tool_image_analyze(
     input: &serde_json::Value,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let prompt = input["prompt"].as_str().unwrap_or("");
     // Route through the workspace sandbox so user-supplied paths cannot
-    // escape to arbitrary filesystem locations (e.g. /etc/passwd).
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // escape to arbitrary filesystem locations (e.g. /etc/passwd). Named
+    // workspace prefixes are honored via `additional_roots` so agents can
+    // analyze images that live under declared `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     let data = tokio::fs::read(&resolved)
         .await
@@ -4695,14 +4718,17 @@ async fn tool_media_describe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
-    // `/etc/passwd`.
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // `/etc/passwd`. Named workspace prefixes are honored via
+    // `additional_roots` so agents can describe media that lives under
+    // declared `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read image file
     let data = tokio::fs::read(&resolved)
@@ -4744,14 +4770,17 @@ async fn tool_media_transcribe(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     use base64::Engine;
     let engine = media_engine.ok_or("Media engine not available. Check media configuration.")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     // Route through the workspace sandbox so all media reads stay inside
     // the agent's dir — a plain `..` check would miss absolute paths like
-    // `/etc/passwd`.
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    // `/etc/passwd`. Named workspace prefixes are honored via
+    // `additional_roots` so agents can transcribe audio under declared
+    // `[workspaces]` mounts.
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read audio file
     let data = tokio::fs::read(&resolved)
@@ -5449,12 +5478,13 @@ async fn tool_speech_to_text(
     input: &serde_json::Value,
     media_engine: Option<&crate::media_understanding::MediaEngine>,
     workspace_root: Option<&Path>,
+    additional_roots: &[&Path],
 ) -> Result<String, String> {
     let engine = media_engine.ok_or("Media engine not available for speech-to-text")?;
     let raw_path = input["path"].as_str().ok_or("Missing 'path' parameter")?;
     let _language = input["language"].as_str();
 
-    let resolved = resolve_file_path(raw_path, workspace_root)?;
+    let resolved = resolve_file_path_ext(raw_path, workspace_root, additional_roots)?;
 
     // Read the audio file
     let data = tokio::fs::read(&resolved)
@@ -6333,7 +6363,7 @@ mod tests {
             "recipient": "@user",
             "message": "here is the api_key=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("channel_send must reject tainted message");
         assert!(
@@ -6354,7 +6384,7 @@ mod tests {
             "image_url": "https://example.com/cat.png",
             "message": "see attached. token=sk-abcdefghijklmnop",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("image caption must be sink-checked");
         assert!(
@@ -6375,7 +6405,7 @@ mod tests {
             "poll_question": "guess my api_key=sk-abcdefghijklmnop",
             "poll_options": ["yes", "no"],
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"))
+        let err = tool_channel_send(&input, Some(&kernel), None, Some("test_user_id"), &[])
             .await
             .expect_err("poll question must be sink-checked");
         assert!(
@@ -6399,7 +6429,8 @@ mod tests {
         // This should NOT error with "Missing recipient" because sender_id is provided
         // It will error with "Channel file data send not available" because the mock kernel
         // doesn't implement channel_send, but that's expected
-        let result = tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram")).await;
+        let result =
+            tool_channel_send(&input, Some(&kernel), None, Some("12345_telegram"), &[]).await;
         // The error should NOT be about missing recipient
         let err_msg = result.unwrap_err();
         assert!(
@@ -6420,7 +6451,7 @@ mod tests {
             // recipient intentionally omitted
             "message": "Hello!",
         });
-        let err = tool_channel_send(&input, Some(&kernel), None, None)
+        let err = tool_channel_send(&input, Some(&kernel), None, None, &[])
             .await
             .expect_err("channel_send must require recipient without sender_id");
         assert!(
@@ -8593,6 +8624,53 @@ mod tests {
             result.content.contains("Failed to read"),
             "unexpected error content: {}",
             result.content
+        );
+    }
+
+    /// Regression test for #4450: the media/image read-only tools must accept
+    /// paths inside named-workspace prefixes (the "additional_roots" allowlist),
+    /// not just the primary workspace root. Before the fix these tools called
+    /// the bare `resolve_file_path` wrapper which threaded `&[]` and produced
+    /// "resolves outside workspace" even when the agent had declared the mount
+    /// under `[workspaces]`.
+    #[tokio::test]
+    async fn test_media_tools_honor_named_workspace_prefixes() {
+        // Two disjoint dirs: `workspace_root` is the agent's primary workspace,
+        // `mount` is the named-workspace prefix. The test file lives only in
+        // `mount`, so success proves the prefix was honored.
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let mount = tempfile::tempdir().expect("mount tempdir");
+        let mount_canon = mount.path().canonicalize().expect("canonicalize mount");
+        let img_path = mount_canon.join("photo.png");
+        // Minimal PNG signature so detect_image_format() returns "png".
+        let png_bytes: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        std::fs::write(&img_path, png_bytes).expect("write png");
+
+        let raw_path = img_path.to_string_lossy().to_string();
+        let input = serde_json::json!({ "path": raw_path });
+
+        // Without prefixes -> rejected as outside the sandbox.
+        let denied = tool_image_analyze(&input, Some(workspace.path()), &[]).await;
+        assert!(
+            denied.is_err(),
+            "image_analyze should reject paths outside the workspace when \
+             no named-workspace prefixes are provided, got: {:?}",
+            denied
+        );
+        let err = denied.unwrap_err();
+        assert!(
+            err.contains("resolves outside workspace") || err.contains("Access denied"),
+            "expected sandbox rejection, got: {err}"
+        );
+
+        // With the mount as an additional root -> accepted.
+        let extra: &[&Path] = &[mount_canon.as_path()];
+        let ok = tool_image_analyze(&input, Some(workspace.path()), extra).await;
+        assert!(
+            ok.is_ok(),
+            "image_analyze must accept files under a named-workspace prefix, \
+             got: {:?}",
+            ok
         );
     }
 
