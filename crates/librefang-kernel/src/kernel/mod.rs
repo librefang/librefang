@@ -10160,6 +10160,16 @@ system_prompt = "You are a helpful assistant."
         self.running_tasks.iter().any(|e| e.key().0 == agent_id)
     }
 
+    /// Snapshot of every `SessionId` whose agent loop is currently in flight,
+    /// kernel-wide. Used by `/api/sessions` (and friends) to populate the
+    /// `active` field on each session row so the dashboard can distinguish
+    /// running vs idle. DashMap iteration is unordered; the caller treats
+    /// the result as a set lookup, never as a list. Cheap: one
+    /// `(AgentId, SessionId)` clone per running task.
+    pub fn running_session_ids(&self) -> std::collections::HashSet<SessionId> {
+        self.running_tasks.iter().map(|e| e.key().1).collect()
+    }
+
     /// Suspend an agent — sets state to Suspended, persists enabled=false to TOML.
     pub fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         use librefang_types::agent::AgentState;

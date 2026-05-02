@@ -3726,6 +3726,71 @@ fn test_running_tasks_two_concurrent_sessions_for_same_agent() {
     kernel.shutdown();
 }
 
+/// `/api/sessions` joins the SQLite session list with this snapshot to set
+/// the per-row `active` flag (#4290). Verify it surfaces every running
+/// session across agents and shrinks back to empty after stops.
+#[test]
+fn test_running_session_ids_reflects_live_tasks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-running-ids-test");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Empty kernel: snapshot must be empty.
+    assert!(kernel.running_session_ids().is_empty());
+
+    let agent_a = AgentId(uuid::Uuid::new_v4());
+    let agent_b = AgentId(uuid::Uuid::new_v4());
+    let s1 = SessionId::new();
+    let s2 = SessionId::new();
+    let s3 = SessionId::new();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mk_handle = || {
+        rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        })
+        .abort_handle()
+    };
+
+    for (a, s) in [(agent_a, s1), (agent_a, s2), (agent_b, s3)] {
+        kernel.running_tasks.insert(
+            (a, s),
+            RunningTask {
+                abort: mk_handle(),
+                started_at: chrono::Utc::now(),
+                task_id: uuid::Uuid::new_v4(),
+            },
+        );
+    }
+
+    let ids = kernel.running_session_ids();
+    assert_eq!(ids.len(), 3, "all three live sessions must be present");
+    assert!(ids.contains(&s1));
+    assert!(ids.contains(&s2));
+    assert!(ids.contains(&s3));
+
+    // Stop one — snapshot must drop exactly that one.
+    assert!(kernel.stop_session_run(agent_a, s1).unwrap());
+    let ids = kernel.running_session_ids();
+    assert_eq!(ids.len(), 2);
+    assert!(!ids.contains(&s1));
+    assert!(ids.contains(&s2));
+    assert!(ids.contains(&s3));
+
+    let _ = kernel.stop_session_run(agent_a, s2);
+    let _ = kernel.stop_session_run(agent_b, s3);
+    assert!(kernel.running_session_ids().is_empty());
+
+    drop(rt);
+    kernel.shutdown();
+}
+
 #[test]
 fn test_stop_agent_run_fans_out_across_sessions() {
     let tmp = tempfile::tempdir().unwrap();

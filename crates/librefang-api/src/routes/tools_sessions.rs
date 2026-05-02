@@ -357,18 +357,47 @@ pub async fn list_sessions(
     let substrate = state.kernel.memory_substrate();
     // Push pagination into SQLite so we don't deserialize every session blob (#3485).
     let total = substrate.count_sessions().unwrap_or(0);
+    // Snapshot of in-flight session IDs from the kernel runtime — the
+    // SQLite substrate has no view into liveness, so we merge it in here
+    // (#4290). Taken once per request before the SQL call so every row
+    // sees a consistent view.
+    let running = state.kernel.running_session_ids();
     // Canonical paginated envelope (#3842): {items,total,offset,limit}.
-    let (items, total, offset_out, limit_out) =
+    let (mut items, total, offset_out, limit_out) =
         match substrate.list_sessions_paginated(Some(limit), offset) {
             Ok(items) => (items, total, offset, limit),
             Err(_) => (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT),
         };
+    annotate_sessions_active(&mut items, &running);
     Json(crate::types::PaginatedResponse {
         items,
         total,
         offset: offset_out,
         limit: Some(limit_out),
     })
+}
+
+/// Inject an `"active": bool` field into each session JSON row by looking
+/// up its `session_id` in the running-tasks snapshot. Rows whose
+/// `session_id` doesn't parse as a UUID get `active: false` (a corrupt
+/// row can't possibly be in the live registry keyed by `SessionId`).
+/// Used by `/api/sessions` and `/api/sessions/search` (#4290).
+fn annotate_sessions_active(
+    items: &mut [serde_json::Value],
+    running: &std::collections::HashSet<librefang_types::agent::SessionId>,
+) {
+    for item in items.iter_mut() {
+        let active = item
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .map(librefang_types::agent::SessionId)
+            .map(|id| running.contains(&id))
+            .unwrap_or(false);
+        if let Some(obj) = item.as_object_mut() {
+            obj.insert("active".to_string(), serde_json::Value::Bool(active));
+        }
+    }
 }
 
 /// GET /api/sessions/:id — Get a single session by ID.
@@ -392,18 +421,25 @@ pub async fn get_session(
         .memory_substrate()
         .get_session_with_created_at(session_id)
     {
-        Ok(Some((session, created_at))) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "session_id": session.id.0.to_string(),
-                "agent_id": session.agent_id.0.to_string(),
-                "message_count": session.messages.len(),
-                "messages": session.messages,
-                "context_window_tokens": session.context_window_tokens,
-                "label": session.label,
-                "created_at": created_at,
-            })),
-        ),
+        Ok(Some((session, created_at))) => {
+            // Mirror the list endpoint and surface the kernel runtime's
+            // liveness bit (#4290) so single-session fetches don't lie
+            // about idle state either.
+            let active = state.kernel.running_session_ids().contains(&session.id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "session_id": session.id.0.to_string(),
+                    "agent_id": session.agent_id.0.to_string(),
+                    "message_count": session.messages.len(),
+                    "messages": session.messages,
+                    "context_window_tokens": session.context_window_tokens,
+                    "label": session.label,
+                    "created_at": created_at,
+                    "active": active,
+                })),
+            )
+        }
         Ok(None) => {
             ApiErrorResponse::not_found(t.t("api-error-session-not-found")).into_json_tuple()
         }
@@ -656,11 +692,20 @@ pub async fn search_sessions(
             } else {
                 offset + results.len() + 1
             };
+            // Project SessionSearchResult into untyped JSON so we can merge
+            // the kernel runtime's `active` bit per row (#4290) — same
+            // contract as /api/sessions.
+            let mut items: Vec<serde_json::Value> = results
+                .into_iter()
+                .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+                .collect();
+            let running = state.kernel.running_session_ids();
+            annotate_sessions_active(&mut items, &running);
             (
                 StatusCode::OK,
                 Json(
                     serde_json::to_value(crate::types::PaginatedResponse {
-                        items: results,
+                        items,
                         total,
                         offset,
                         limit: Some(limit),
