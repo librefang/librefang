@@ -971,7 +971,7 @@ where
     let mut parsed: librefang_types::config::KernelConfig = toml::from_str(&new_toml)
         .map_err(|e| PersistError::Internal(format!("invalid config after edit: {e}")))?;
     parsed.clamp_bounds();
-    if let Err(errors) = librefang_kernel::config_reload::validate_config_for_reload(&parsed) {
+    if let Err(errors) = state.kernel.validate_config_for_reload(&parsed) {
         return Err(PersistError::BadRequest(format!(
             "invalid config: {}",
             errors.join("; ")

@@ -1161,6 +1161,18 @@ impl LibreFangKernel {
         }
     }
 
+    /// Validate a `KernelConfig` candidate for hot-reload eligibility.
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to
+    /// reach into the `librefang_kernel::config_reload` module directly.
+    /// See issue #3744.
+    pub fn validate_config_for_reload(
+        &self,
+        config: &librefang_types::config::KernelConfig,
+    ) -> Result<(), Vec<String>> {
+        crate::config_reload::validate_config_for_reload(config)
+    }
+
     /// Build the roots list for a specific MCP server config.
     ///
     /// Starts with the default roots (workspaces directory) and, for stdio
