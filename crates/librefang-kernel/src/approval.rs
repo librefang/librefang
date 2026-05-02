@@ -1032,6 +1032,22 @@ impl ApprovalManager {
         Ok(totp.check_current(code).unwrap_or(false))
     }
 
+    /// Instance wrapper around [`Self::verify_totp_code_with_issuer`].
+    ///
+    /// Lets callers go through `kernel.approvals().verify_totp_with_issuer(...)`
+    /// instead of importing `librefang_kernel::approval::ApprovalManager`
+    /// directly (see #3744 — the API crate should not reach into kernel
+    /// internals). The static helper is retained for back-compat with
+    /// existing in-kernel callers.
+    pub fn verify_totp_with_issuer(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        Self::verify_totp_code_with_issuer(secret_base32, code, issuer)
+    }
+
     /// Instance-method wrapper around the static `generate_totp_secret`.
     ///
     /// Lets API-layer callers go through `kernel.approvals().new_totp_secret(...)`
@@ -3549,5 +3565,31 @@ mod tests {
                 "instance wrapper must mirror static helper for input {c:?}",
             );
         }
+    }
+
+    /// `verify_totp_with_issuer` instance wrapper must agree with the static
+    /// `verify_totp_code_with_issuer` helper for valid + invalid codes and
+    /// for malformed secrets. Lets `librefang-api::channel_bridge` go through
+    /// `kernel.approvals()` instead of importing `ApprovalManager` (#3744).
+    #[test]
+    fn verify_totp_with_issuer_matches_static_helper() {
+        let (secret, _uri, _qr) =
+            ApprovalManager::generate_totp_secret("LibreFang", "test@example.com")
+                .expect("secret generation");
+        let mgr = ApprovalManager::new(ApprovalPolicy::default());
+
+        // Wrong code: both forms must return Ok(false).
+        let static_res =
+            ApprovalManager::verify_totp_code_with_issuer(&secret, "000000", "LibreFang");
+        let instance_res = mgr.verify_totp_with_issuer(&secret, "000000", "LibreFang");
+        assert_eq!(static_res, instance_res);
+        assert_eq!(instance_res, Ok(false));
+
+        // Malformed secret: both forms must return the same Err.
+        let static_err =
+            ApprovalManager::verify_totp_code_with_issuer("not-base32!!", "123456", "LibreFang");
+        let instance_err = mgr.verify_totp_with_issuer("not-base32!!", "123456", "LibreFang");
+        assert!(static_err.is_err());
+        assert_eq!(static_err, instance_err);
     }
 }
