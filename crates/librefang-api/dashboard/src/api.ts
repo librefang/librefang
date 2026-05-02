@@ -1313,8 +1313,8 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
 export async function listAgents(

@@ -3792,7 +3792,23 @@ pub async fn set_agent_tools(
         body.tool_allowlist,
         body.tool_blocklist,
     ) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        // Read the agent back so the dashboard can `setQueryData` directly
+        // instead of refetching. Returns the same shape as `GET /api/agents/{id}/tools`.
+        // If the registry entry vanished between the write and read (extremely
+        // unlikely — would mean the agent was deleted mid-PUT) fall back to a
+        // 200 ack so existing clients don't crash on the missing body.
+        Ok(()) => match state.kernel.agent_registry().get(agent_id) {
+            Some(entry) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "capabilities_tools": entry.manifest.capabilities.tools,
+                    "tool_allowlist": entry.manifest.tool_allowlist,
+                    "tool_blocklist": entry.manifest.tool_blocklist,
+                    "disabled": entry.manifest.tools_disabled,
+                })),
+            ),
+            None => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(
