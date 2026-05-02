@@ -2733,20 +2733,20 @@ pub async fn totp_setup(
         );
     }
 
-    let (secret_base32, otpauth_uri, qr_base64) =
-        match librefang_kernel::approval::ApprovalManager::generate_totp_secret(
-            &totp_issuer,
-            "admin",
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                return ApiErrorResponse::internal(e).into_json_tuple();
-            }
-        };
+    let (secret_base32, otpauth_uri, qr_base64) = match state
+        .kernel
+        .approvals()
+        .new_totp_secret(&totp_issuer, "admin")
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return ApiErrorResponse::internal(e).into_json_tuple();
+        }
+    };
     let qr_data_uri = format!("data:image/png;base64,{qr_base64}");
 
     // Generate recovery codes
-    let recovery_codes = librefang_kernel::approval::ApprovalManager::generate_recovery_codes();
+    let recovery_codes = state.kernel.approvals().new_recovery_codes();
     let recovery_json = serde_json::to_string(&recovery_codes).unwrap_or_default();
 
     // Store secret and recovery codes in vault (not yet active — totp_confirmed = false)

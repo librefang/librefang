@@ -1017,6 +1017,28 @@ impl ApprovalManager {
         Ok(totp.check_current(code).unwrap_or(false))
     }
 
+    /// Instance-method wrapper around the static `generate_totp_secret`.
+    ///
+    /// Lets API-layer callers go through `kernel.approvals().new_totp_secret(...)`
+    /// without importing `librefang_kernel::approval::ApprovalManager` directly
+    /// (see #3744 — the API crate should not reach into kernel-internal types).
+    /// The static method is retained for callers that already have it imported
+    /// and for symmetry with `verify_totp_code_with_issuer`.
+    pub fn new_totp_secret(
+        &self,
+        issuer: &str,
+        account: &str,
+    ) -> Result<(String, String, String), String> {
+        Self::generate_totp_secret(issuer, account)
+    }
+
+    /// Instance-method wrapper around the static `generate_recovery_codes`.
+    ///
+    /// See `new_totp_secret` for the rationale (#3744).
+    pub fn new_recovery_codes(&self) -> Vec<String> {
+        Self::generate_recovery_codes()
+    }
+
     /// Generate a new TOTP secret and return (base32_secret, otpauth_uri, qr_base64_png).
     pub fn generate_totp_secret(
         issuer: &str,
@@ -2655,6 +2677,29 @@ mod tests {
     fn test_verify_totp_code_invalid_secret() {
         let result = ApprovalManager::verify_totp_code("not-valid-base32!!!", "123456");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_instance_totp_wrappers_match_static_helpers() {
+        // The instance-method wrappers added for #3744 must produce shapes
+        // equivalent to the static helpers so the API layer can switch over
+        // without behavior changes. Secrets are random so we compare shape,
+        // not bytes.
+        let mgr = make_manager_with_db();
+        let (secret, uri, qr) = mgr.new_totp_secret("LibreFang", "admin").unwrap();
+        assert!(!secret.is_empty());
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(uri.contains("LibreFang"));
+        assert!(!qr.is_empty());
+
+        let codes = mgr.new_recovery_codes();
+        let static_codes = ApprovalManager::generate_recovery_codes();
+        assert_eq!(codes.len(), static_codes.len());
+        for c in &codes {
+            // Same XXXX-XXXX-XXXX-XXXX hex shape as the static helper.
+            assert_eq!(c.len(), 19);
+            assert_eq!(c.matches('-').count(), 3);
+        }
     }
 
     #[test]
