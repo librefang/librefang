@@ -5271,7 +5271,7 @@ impl std::fmt::Debug for NetworkConfig {
 ///
 /// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
 /// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Telegram bot configuration(s).
@@ -5380,6 +5380,66 @@ pub struct ChannelsConfig {
 /// Default max file download size: 50 MB.
 fn default_file_download_max_bytes() -> u64 {
     50 * 1024 * 1024
+}
+
+impl Default for ChannelsConfig {
+    // Manual impl so `file_download_max_bytes` matches the
+    // `#[serde(default = "default_file_download_max_bytes")]` value (50 MiB)
+    // instead of `u64::default() == 0`. Without this, code paths that build
+    // a `ChannelsConfig` programmatically (e.g. `KernelConfig::default()`,
+    // tests, configs without a `[channels]` section) would silently set
+    // `file_download_max_bytes = 0`, causing the bridge to reject every
+    // channel attachment as oversized. See issue #4436.
+    fn default() -> Self {
+        Self {
+            telegram: OneOrMany::default(),
+            discord: OneOrMany::default(),
+            slack: OneOrMany::default(),
+            whatsapp: OneOrMany::default(),
+            signal: OneOrMany::default(),
+            matrix: OneOrMany::default(),
+            email: OneOrMany::default(),
+            teams: OneOrMany::default(),
+            mattermost: OneOrMany::default(),
+            irc: OneOrMany::default(),
+            google_chat: OneOrMany::default(),
+            twitch: OneOrMany::default(),
+            rocketchat: OneOrMany::default(),
+            zulip: OneOrMany::default(),
+            xmpp: OneOrMany::default(),
+            line: OneOrMany::default(),
+            viber: OneOrMany::default(),
+            messenger: OneOrMany::default(),
+            reddit: OneOrMany::default(),
+            mastodon: OneOrMany::default(),
+            bluesky: OneOrMany::default(),
+            feishu: OneOrMany::default(),
+            revolt: OneOrMany::default(),
+            nextcloud: OneOrMany::default(),
+            guilded: OneOrMany::default(),
+            keybase: OneOrMany::default(),
+            threema: OneOrMany::default(),
+            nostr: OneOrMany::default(),
+            webex: OneOrMany::default(),
+            pumble: OneOrMany::default(),
+            flock: OneOrMany::default(),
+            twist: OneOrMany::default(),
+            mumble: OneOrMany::default(),
+            dingtalk: OneOrMany::default(),
+            qq: OneOrMany::default(),
+            discourse: OneOrMany::default(),
+            gitter: OneOrMany::default(),
+            ntfy: OneOrMany::default(),
+            gotify: OneOrMany::default(),
+            webhook: OneOrMany::default(),
+            voice: OneOrMany::default(),
+            linkedin: OneOrMany::default(),
+            wechat: OneOrMany::default(),
+            wecom: OneOrMany::default(),
+            file_download_max_bytes: default_file_download_max_bytes(),
+            file_download_dir: None,
+        }
+    }
 }
 
 /// Telegram channel adapter configuration.
