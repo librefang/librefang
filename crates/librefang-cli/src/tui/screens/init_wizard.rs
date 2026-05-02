@@ -589,20 +589,26 @@ fn default_model_for_provider(provider: &str, model_catalog: &ModelCatalog) -> S
         .unwrap_or_else(|| "local-model".to_string())
 }
 
-/// Build the `[routing]` TOML section emitted into `config.toml`.
+/// Build the `[default_routing]` TOML section emitted into `config.toml`.
 ///
 /// Pure helper extracted from `save_config` (#3582) so the formatting can be
 /// unit-tested without touching the filesystem or the wizard `State`. When
 /// `enabled` is `false`, the wizard writes no routing section at all and we
 /// must return an empty string (callers concat this directly into the
 /// rendered template).
+///
+/// Issue #4466: this previously emitted `[routing]`, which is not a known
+/// `KernelConfig` field — strict-config mode warned and the kernel silently
+/// ignored the user's Smart Router selection. The kernel now reads
+/// `[default_routing]` as a fallback for any agent without its own per-agent
+/// `routing` block, so the wizard emits that exact key here.
 fn build_routing_section(enabled: bool, models: &[String; 3]) -> String {
     if !enabled {
         return String::new();
     }
     format!(
         r#"
-[routing]
+[default_routing]
 simple_model = "{fast}"
 medium_model = "{balanced}"
 complex_model = "{frontier}"
@@ -2554,9 +2560,26 @@ mod tests {
     #[test]
     fn routing_section_disabled_is_empty() {
         // When the user picks "No" in the routing prompt the wizard must emit
-        // no `[routing]` block at all — an empty section, not a stub.
+        // no `[default_routing]` block at all — an empty section, not a stub.
         let out = build_routing_section(false, &models("a", "b", "c"));
         assert!(out.is_empty(), "expected empty section, got {out:?}");
+    }
+
+    #[test]
+    fn routing_section_uses_default_routing_key_not_legacy_routing() {
+        // Regression for issue #4466: the wizard previously emitted `[routing]`
+        // which is NOT a recognised KernelConfig field, so the user's Smart
+        // Router selection was silently ignored. The kernel reads
+        // `[default_routing]` as the agent-fallback Smart Router config.
+        let out = build_routing_section(true, &models("a", "b", "c"));
+        assert!(
+            out.contains("[default_routing]"),
+            "expected `[default_routing]` header, got {out:?}"
+        );
+        assert!(
+            !out.contains("[routing]"),
+            "wizard must not emit the dead `[routing]` key, got {out:?}"
+        );
     }
 
     #[test]
@@ -2630,7 +2653,7 @@ mod tests {
             &build_api_key_line("ANTHROPIC_API_KEY"),
             &build_routing_section(true, &models("haiku", "sonnet", "opus")),
         );
-        assert!(rendered.contains("[routing]"));
+        assert!(rendered.contains("[default_routing]"));
         assert!(rendered.contains("simple_model = \"haiku\""));
         assert!(rendered.contains("complex_model = \"opus\""));
     }
