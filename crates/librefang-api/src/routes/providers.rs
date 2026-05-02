@@ -2241,7 +2241,7 @@ pub async fn detect_ollama() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::routes::system::{get_profile, list_profiles};
+    use crate::routes::profiles::{get_profile, list_profiles};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;

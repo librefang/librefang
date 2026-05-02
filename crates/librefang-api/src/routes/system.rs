@@ -7,9 +7,7 @@ use super::AppState;
 /// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
-        // Profiles and templates
-        .route("/profiles", axum::routing::get(list_profiles))
-        .route("/profiles/{name}", axum::routing::get(get_profile))
+        // Templates (profile routes live in routes::profiles)
         .route("/templates", axum::routing::get(list_agent_templates))
         .route("/templates/{name}", axum::routing::get(get_agent_template))
         .route("/templates/{name}/toml", axum::routing::get(get_agent_template_toml))
@@ -244,77 +242,7 @@ fn librefang_home() -> PathBuf {
         .join(".librefang")
 }
 
-// ---------------------------------------------------------------------------
-// Profile + Mode endpoints
-// ---------------------------------------------------------------------------
-
-/// GET /api/profiles — List all tool profiles and their tool lists.
-#[utoipa::path(
-    get,
-    path = "/api/profiles",
-    tag = "system",
-    responses(
-        (status = 200, description = "List tool profiles", body = Vec<serde_json::Value>)
-    )
-)]
-pub async fn list_profiles() -> impl IntoResponse {
-    use librefang_types::agent::ToolProfile;
-
-    let profiles = [
-        ("minimal", ToolProfile::Minimal),
-        ("coding", ToolProfile::Coding),
-        ("research", ToolProfile::Research),
-        ("messaging", ToolProfile::Messaging),
-        ("automation", ToolProfile::Automation),
-        ("full", ToolProfile::Full),
-    ];
-
-    let result: Vec<serde_json::Value> = profiles
-        .iter()
-        .map(|(name, profile)| {
-            serde_json::json!({
-                "name": name,
-                "tools": profile.tools(),
-            })
-        })
-        .collect();
-
-    Json(result)
-}
-
-/// GET /api/profiles/:name — Get a single profile by name.
-#[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = crate::types::JsonObject)))]
-pub async fn get_profile(
-    Path(name): Path<String>,
-    lang: Option<axum::Extension<RequestLanguage>>,
-) -> impl IntoResponse {
-    use librefang_types::agent::ToolProfile;
-
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-
-    let profiles: &[(&str, ToolProfile)] = &[
-        ("minimal", ToolProfile::Minimal),
-        ("coding", ToolProfile::Coding),
-        ("research", ToolProfile::Research),
-        ("messaging", ToolProfile::Messaging),
-        ("automation", ToolProfile::Automation),
-        ("full", ToolProfile::Full),
-    ];
-
-    match profiles.iter().find(|(n, _)| *n == name) {
-        Some((n, profile)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "name": n,
-                "tools": profile.tools(),
-            })),
-        ),
-        None => {
-            ApiErrorResponse::not_found(t.t_args("api-error-profile-not-found", &[("name", &name)]))
-                .into_json_tuple()
-        }
-    }
-}
+// Profile endpoints have moved to routes::profiles (issue #3749).
 
 // ---------------------------------------------------------------------------
 // Template endpoints
