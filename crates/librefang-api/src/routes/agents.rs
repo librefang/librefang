@@ -6069,6 +6069,19 @@ pub async fn inject_message(
 /// The agent must exist, but the message is sent directly through the channel
 /// adapter without going through the agent loop. This is the REST API
 /// counterpart of the built-in `channel_send` tool that agents can self-invoke.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/push",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::PushMessageRequest,
+    responses(
+        (status = 200, description = "Message pushed to channel", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID or missing required fields"),
+        (status = 404, description = "Agent not found"),
+        (status = 502, description = "Channel adapter rejected the message")
+    )
+)]
 pub async fn push_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -6645,6 +6658,17 @@ mod tests {
 ///
 /// Includes message count, token usage, tool execution count, error count,
 /// average response time (estimated), and cost data.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/metrics",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Aggregated agent metrics", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn agent_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -6762,6 +6786,22 @@ pub async fn agent_metrics(
 /// - `n`: max number of log entries (default 100, max 1000)
 /// - `level`: filter by outcome (e.g. "error", "ok")
 /// - `offset`: number of matching entries to skip for pagination (default 0)
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/logs",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("n" = Option<usize>, Query, description = "Max entries to return (default 100, max 1000)"),
+        ("level" = Option<String>, Query, description = "Filter by audit outcome (e.g. \"error\", \"ok\")"),
+        ("offset" = Option<usize>, Query, description = "Pagination offset over filtered entries")
+    ),
+    responses(
+        (status = 200, description = "Recent agent execution log entries", body = serde_json::Value),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn agent_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
