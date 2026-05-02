@@ -231,10 +231,14 @@ async fn network_status_disabled_when_secret_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn network_trusted_peers_empty_when_no_peer_node() {
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/network/trusted-peers", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["peers"], serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["offset"], 0);
+    assert!(body["limit"].is_null());
 }
 
 // ---------------------------------------------------------------------------

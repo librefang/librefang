@@ -2979,10 +2979,12 @@ export async function listPeers(): Promise<PeerItem[]> {
 }
 
 export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
-  const data = await get<{ peers?: TrustedPeerItem[] }>(
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{peers}` shape during the transition so older daemons keep working.
+  const data = await get<{ items?: TrustedPeerItem[]; peers?: TrustedPeerItem[] }>(
     "/api/network/trusted-peers",
   );
-  return data.peers ?? [];
+  return data.items ?? data.peers ?? [];
 }
 
 export async function getPeerDetail(peerId: string): Promise<PeerItem> {

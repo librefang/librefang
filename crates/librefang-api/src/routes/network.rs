@@ -227,7 +227,10 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entries: Vec<serde_json::Value> = match state.kernel.peer_node_ref() {
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // The pin store is in-memory and small, so all entries are returned in a
+    // single page (`offset=0`, `limit=None`).
+    let items: Vec<serde_json::Value> = match state.kernel.peer_node_ref() {
         Some(peer_node) => peer_node
             .list_pinned_peers()
             .into_iter()
@@ -241,7 +244,13 @@ pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl I
             .collect(),
         None => Vec::new(),
     };
-    Json(serde_json::json!({ "peers": entries }))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 #[utoipa::path(
