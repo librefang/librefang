@@ -90,8 +90,13 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     // Peers are tracked in the wire module's PeerRegistry.
     // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
     // unless one is available. The API server can be extended to inject a registry.
-    if let Some(ref peer_registry) = state.peer_registry {
-        let peers: Vec<serde_json::Value> = peer_registry
+    //
+    // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+    // shape used by `/api/agents` (#3842). All peers are returned in a single
+    // page — the registry is in-memory and small — so `offset=0` and
+    // `limit=None` always.
+    let items: Vec<serde_json::Value> = if let Some(ref peer_registry) = state.peer_registry {
+        peer_registry
             .all_peers()
             .iter()
             .map(|p| {
@@ -108,11 +113,17 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
                     "protocol_version": p.protocol_version,
                 })
             })
-            .collect();
-        Json(serde_json::json!({"peers": peers, "total": peers.len()}))
+            .collect()
     } else {
-        Json(serde_json::json!({"peers": [], "total": 0}))
-    }
+        Vec::new()
+    };
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/peers/{id} — Get a single peer by node ID.

@@ -2916,8 +2916,12 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 }
 
 export async function listPeers(): Promise<PeerItem[]> {
-  const data = await get<{ peers?: PeerItem[] }>("/api/peers");
-  return data.peers ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{peers}` shape during the transition so older daemons keep working.
+  const data = await get<{ items?: PeerItem[]; peers?: PeerItem[] }>(
+    "/api/peers",
+  );
+  return data.items ?? data.peers ?? [];
 }
 
 export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
