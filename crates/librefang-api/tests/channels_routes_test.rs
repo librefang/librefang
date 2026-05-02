@@ -97,9 +97,12 @@ async fn channels_list_returns_full_registry_with_zero_configured() {
     assert_eq!(status, StatusCode::OK);
 
     let total = body["total"].as_u64().expect("total must be a number");
-    let arr = body["channels"].as_array().expect("channels must be array");
-    assert_eq!(total as usize, arr.len(), "total must match channels.len()");
+    let arr = body["items"].as_array().expect("items must be array");
+    assert_eq!(total as usize, arr.len(), "total must match items.len()");
     assert!(total > 0, "registry must be non-empty");
+    // Canonical PaginatedResponse envelope (#3842).
+    assert_eq!(body["offset"], 0, "offset must be 0: {body}");
+    assert!(body["limit"].is_null(), "limit must be null: {body}");
     assert_eq!(
         body["configured_count"], 0,
         "no channels seeded, configured_count must be 0: {body}"
@@ -140,7 +143,7 @@ async fn channels_list_flips_configured_flag_when_seeded() {
         "exactly one channel was seeded: {body}"
     );
 
-    let arr = body["channels"].as_array().expect("array");
+    let arr = body["items"].as_array().expect("array");
     let telegram = arr
         .iter()
         .find(|r| r["name"] == "telegram")

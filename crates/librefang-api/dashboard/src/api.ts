@@ -238,9 +238,14 @@ export interface ProvidersResponse {
 }
 
 export interface ChannelsResponse {
-  channels?: ChannelItem[];
+  // Canonical PaginatedResponse envelope (#3842).
+  items?: ChannelItem[];
   total?: number;
+  offset?: number;
+  limit?: number | null;
   configured_count?: number;
+  // Legacy field kept for transition window — pre-#3842 daemons.
+  channels?: ChannelItem[];
 }
 
 export interface DashboardSnapshot {
@@ -1561,7 +1566,8 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
 
 export async function listChannels(): Promise<ChannelItem[]> {
   const data = await get<ChannelsResponse>("/api/channels");
-  return data.channels ?? [];
+  // Prefer canonical `items` (#3842); fall back to legacy `channels` field.
+  return data.items ?? data.channels ?? [];
 }
 
 export async function testChannel(channelName: string): Promise<ApiActionResponse> {
