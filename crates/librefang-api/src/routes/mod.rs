@@ -32,6 +32,7 @@ pub mod providers;
 pub mod skills;
 pub mod system;
 pub mod terminal;
+pub mod tools_sessions;
 pub mod users;
 pub mod workflows;
 
@@ -63,6 +64,7 @@ pub use providers::*;
 pub use skills::*;
 pub use system::*;
 pub use terminal::*;
+pub use tools_sessions::*;
 pub use users::*;
 pub use workflows::*;
 
