@@ -32,7 +32,6 @@ net, not your plan.
 - Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
   (port 4545 contention with the user's session — Live Integration Testing is human-only)
 - `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
-- `gh pr merge` and `gh pr merge --admin` (publish-level + branch-protection bypass)
 
 `session-start-worktree-check.sh` (SessionStart) emits a banner telling
 the model whether the session started in the main tree or a linked worktree,
