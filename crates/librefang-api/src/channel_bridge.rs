@@ -7,7 +7,6 @@ use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
-use librefang_kernel::approval::ApprovalManager;
 
 /// Sanitize LLM/driver errors into user-friendly messages for channel delivery.
 ///
@@ -1521,7 +1520,9 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         return "Too many failed TOTP attempts. Try again later.".into();
                     }
                     match totp_code {
-                        Some(code) if ApprovalManager::is_recovery_code_format(code) => {
+                        Some(code)
+                            if self.kernel.approvals().recovery_code_format_matches(code) =>
+                        {
                             // Atomic redeem: read + verify + consume under
                             // the kernel's recovery-code mutex.  The
                             // earlier vault_get → verify → vault_set
@@ -1568,7 +1569,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 None => return "TOTP not configured. Set up TOTP first.".into(),
                             };
                             let totp_issuer = self.kernel.approvals().policy().totp_issuer.clone();
-                            match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                            match self.kernel.approvals().verify_totp_with_issuer(
                                 &secret,
                                 code,
                                 &totp_issuer,
