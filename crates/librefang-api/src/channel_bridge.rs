@@ -325,7 +325,6 @@ use librefang_channels::wechat::WeChatAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
-use librefang_kernel::error::KernelResult;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -371,15 +370,18 @@ fn tr_progress_failed(language: &str) -> &'static str {
     }
 }
 
-fn start_stream_text_bridge(
+fn start_stream_text_bridge<E>(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
     language: &str,
-) -> mpsc::Receiver<String> {
+) -> mpsc::Receiver<String>
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let (rx, _status) = start_stream_text_bridge_with_status(
         event_rx,
         kernel_handle,
@@ -401,10 +403,10 @@ fn start_stream_text_bridge(
 /// text stream. When `false`, the stream is pure model output — useful for
 /// agents whose responses are consumed by parsers or whose channel context
 /// must not have inline status markers.
-fn start_stream_text_bridge_with_status(
+fn start_stream_text_bridge_with_status<E>(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -412,7 +414,10 @@ fn start_stream_text_bridge_with_status(
 ) -> (
     mpsc::Receiver<String>,
     tokio::sync::oneshot::Receiver<Result<(), String>>,
-) {
+)
+where
+    E: std::fmt::Display + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<String>(64);
     let (status_tx, status_rx) = tokio::sync::oneshot::channel();
     let error_tx = tx.clone();
@@ -3793,7 +3798,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3832,7 +3837,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3895,7 +3900,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -3937,7 +3942,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -4002,7 +4007,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(
             event_rx,
@@ -4073,7 +4078,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let mut rx = start_stream_text_bridge(event_rx, kernel_handle, false, true, "en");
 
@@ -4109,7 +4114,7 @@ mod tests {
         use librefang_runtime::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
-        let kernel_handle = tokio::spawn(async { Ok(AgentLoopResult::default()) });
+        let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
 
         let (mut rx, status_rx) =
             start_stream_text_bridge_with_status(event_rx, kernel_handle, false, true, "en");
