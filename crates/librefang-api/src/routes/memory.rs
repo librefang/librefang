@@ -1677,7 +1677,6 @@ mod tests {
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
-            peer_registry: None,
             bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(Default::default()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),

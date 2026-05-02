@@ -87,36 +87,38 @@ use crate::types::ApiErrorResponse;
     )
 )]
 pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Peers are tracked in the wire module's PeerRegistry.
-    // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
-    // unless one is available. The API server can be extended to inject a registry.
+    // Peers are tracked in the wire module's PeerRegistry, owned by the kernel
+    // and lazily initialized when the OFP peer node starts. Read it live on every
+    // request — caching at boot would return a stale (or empty) snapshot if the
+    // OFP node initialized after AppState was constructed (#3644).
     //
     // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
     // shape used by `/api/agents` (#3842). All peers are returned in a single
     // page — the registry is in-memory and small — so `offset=0` and
     // `limit=None` always.
-    let items: Vec<serde_json::Value> = if let Some(ref peer_registry) = state.peer_registry {
-        peer_registry
-            .all_peers()
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "node_id": p.node_id,
-                    "node_name": p.node_name,
-                    "address": p.address.to_string(),
-                    "state": format!("{:?}", p.state),
-                    "agents": p.agents.iter().map(|a| serde_json::json!({
-                        "id": a.id,
-                        "name": a.name,
-                    })).collect::<Vec<_>>(),
-                    "connected_at": p.connected_at.to_rfc3339(),
-                    "protocol_version": p.protocol_version,
+    let items: Vec<serde_json::Value> =
+        if let Some(peer_registry) = state.kernel.peer_registry_ref() {
+            peer_registry
+                .all_peers()
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "node_id": p.node_id,
+                        "node_name": p.node_name,
+                        "address": p.address.to_string(),
+                        "state": format!("{:?}", p.state),
+                        "agents": p.agents.iter().map(|a| serde_json::json!({
+                            "id": a.id,
+                            "name": a.name,
+                        })).collect::<Vec<_>>(),
+                        "connected_at": p.connected_at.to_rfc3339(),
+                        "protocol_version": p.protocol_version,
+                    })
                 })
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+                .collect()
+        } else {
+            Vec::new()
+        };
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,
@@ -141,8 +143,8 @@ pub async fn get_peer(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let registry = match state.peer_registry {
-        Some(ref r) => r,
+    let registry = match state.kernel.peer_registry_ref() {
+        Some(r) => r,
         None => {
             return ApiErrorResponse::not_found("Peer networking is not enabled").into_json_tuple();
         }
@@ -1971,6 +1973,100 @@ pub(crate) fn remove_toml_section(content: &str, section: &str) -> String {
 mod tests {
     use super::{canonical_ip, is_cloud_metadata_ip, is_private_ip};
     use std::net::{IpAddr, Ipv4Addr};
+
+    // -----------------------------------------------------------------
+    // Regression test for #3644: /api/peers must reflect the live kernel
+    // PeerRegistry, not a boot-time snapshot. Previously AppState held
+    // `peer_registry: Option<Arc<PeerRegistry>>` populated once in
+    // `serve()` from `kernel.peer_registry_ref()`. If the OFP node
+    // initialized the registry *after* AppState was built (or never),
+    // the cached `Option::None` was permanent and `/api/peers` always
+    // returned an empty list even after peers connected.
+    //
+    // The fix removes the cache and reads `state.kernel.peer_registry_ref()`
+    // live in the handler. This test:
+    //   1. Boots a kernel with no OFP node started (registry == None).
+    //   2. Builds AppState.
+    //   3. Installs a registry into the kernel (simulating OFP startup
+    //      AFTER AppState construction).
+    //   4. Adds a peer to that registry.
+    //   5. Calls `list_peers` and asserts the peer is visible.
+    // Pre-fix this test would see `peers: []`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_peers_reflects_peers_added_after_appstate_boot() {
+        use crate::routes::AppState;
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use chrono::Utc;
+        use http_body_util::BodyExt;
+        use librefang_types::config::KernelConfig;
+        use librefang_wire::registry::{PeerEntry, PeerRegistry, PeerState};
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-peer-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+
+        // No OFP node => registry is None at AppState-build time.
+        assert!(kernel.peer_registry_ref().is_none());
+
+        let state = Arc::new(AppState {
+            kernel: kernel.clone(),
+            started_at: std::time::Instant::now(),
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            skillhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_test_cache: dashmap::DashMap::new(),
+            webhook_store: crate::webhook_store::WebhookStore::load(
+                home_dir.join("data").join("webhooks.json"),
+            ),
+            active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
+            api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
+            user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            config_write_lock: tokio::sync::Mutex::new(()),
+            pending_a2a_agents: dashmap::DashMap::new(),
+            auth_login_limiter: Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
+            gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+        });
+
+        // Simulate OFP startup happening AFTER AppState construction.
+        let registry = PeerRegistry::new();
+        kernel
+            .install_peer_registry_for_test(registry.clone())
+            .expect("registry not yet set");
+
+        // Register a peer post-boot — the bug was these never appeared.
+        registry.add_peer(PeerEntry {
+            node_id: "node-abc".to_string(),
+            node_name: "test-peer".to_string(),
+            address: "127.0.0.1:9090".parse().unwrap(),
+            agents: Vec::new(),
+            state: PeerState::Connected,
+            connected_at: Utc::now(),
+            protocol_version: 1,
+        });
+
+        let resp = super::list_peers(State(state)).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["total"], 1,
+            "expected post-boot peer to appear, got {json}"
+        );
+        assert_eq!(json["peers"][0]["node_id"], "node-abc");
+    }
 
     #[test]
     fn canonical_ip_unwraps_ipv4_mapped_v6() {

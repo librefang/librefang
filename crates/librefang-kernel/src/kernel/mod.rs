@@ -1924,6 +1924,18 @@ impl LibreFangKernel {
         self.peer_registry.get()
     }
 
+    /// Test-only: install a `PeerRegistry` without booting the OFP node.
+    /// Used by route-handler regression tests for #3644 — never call from
+    /// production code; the OFP startup path owns this initialization
+    /// (see `start_peer_node` -> `self.peer_registry.set(...)`).
+    #[doc(hidden)]
+    pub fn install_peer_registry_for_test(
+        &self,
+        registry: librefang_wire::PeerRegistry,
+    ) -> Result<(), librefang_wire::PeerRegistry> {
+        self.peer_registry.set(registry)
+    }
+
     /// Hook registry.
     #[inline]
     pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
@@ -7057,11 +7069,14 @@ system_prompt = "You are a helpful assistant."
                 &entry.id.to_string(),
             )
             .await
-            .map_err(|e| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "WASM execution failed: {e}"
-                )))
-            })?;
+            // #3711 (2-of-21): propagate the typed `SandboxError` instead
+            // of collapsing it to `LibreFangError::Internal(String)`.
+            // Display output ("WASM execution failed: …") is preserved
+            // byte-for-byte by the format on `KernelError::WasmSandbox`,
+            // so existing log/UI strings remain identical while upstream
+            // callers gain the ability to match on typed variants
+            // (e.g., `FuelExhausted` → CPU-budget quota error).
+            .map_err(KernelError::from)?;
 
         // Extract response text from WASM output JSON
         let response = result

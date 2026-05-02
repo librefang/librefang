@@ -486,10 +486,6 @@ func (r *AgentsResource) GetAgentTraces(id string) (interface{}, error) {
 	return r.client.request("GET", fmt.Sprintf("/api/agents/%s/traces", id), nil, nil)
 }
 
-func (r *AgentsResource) UpdateAgent(id string, data map[string]interface{}) (interface{}, error) {
-	return r.client.request("PUT", fmt.Sprintf("/api/agents/%s/update", id), data, nil)
-}
-
 func (r *AgentsResource) UploadFile(id string, data map[string]interface{}) (interface{}, error) {
 	return r.client.request("POST", fmt.Sprintf("/api/agents/%s/upload", id), data, nil)
 }
