@@ -1725,7 +1725,7 @@ jobs:
     if: >
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
       || (github.event_name == 'workflow_dispatch' && inputs.channel == 'current' && startsWith(github.ref, 'refs/tags/v'))
-    needs: [create_release]
+      || github.event_name == 'workflow_dispatch'
     continue-on-error: true
     # macos-26 ships Xcode 26 (default 26.2). Use the default Xcode
     # rather than pinning a specific SDK — for a Tauri release build the
