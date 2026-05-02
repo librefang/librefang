@@ -556,6 +556,26 @@ export function RuntimePage() {
                     {auditValid ? t("runtime.audit_valid") : t("runtime.audit_invalid")}
                   </Badge>
                 )}
+                {/* External tip-anchor status (#3339): distinguishes
+                    "chain is self-consistent only" (anchor: none) from
+                    "chain matches the off-DB anchor" (anchor: ok) and
+                    flags forgery attempts (anchor: diverged). The badge
+                    only renders once verify has produced data so we
+                    don't show stale or speculative status. */}
+                {auditVerifyQuery.data?.anchor_status && (
+                  <Badge
+                    variant={
+                      auditVerifyQuery.data.anchor_status === "ok"
+                        ? "success"
+                        : auditVerifyQuery.data.anchor_status === "diverged"
+                          ? "error"
+                          : "warning"
+                    }
+                    title={auditVerifyQuery.data.anchor_path ?? undefined}
+                  >
+                    {t("runtime.audit_anchor", { defaultValue: "anchor" })}: {auditVerifyQuery.data.anchor_status}
+                  </Badge>
+                )}
               </div>
 
               {auditEntries.length > 0 ? (

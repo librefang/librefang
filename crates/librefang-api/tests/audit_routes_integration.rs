@@ -538,3 +538,33 @@ async fn audit_verify_omits_warning_when_chain_has_entries() {
         "populated chain must NOT carry the empty-chain warning; body={body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_verify_surfaces_anchor_status_field() {
+    // #3339 Tier-1: the verify response must surface anchor_status so the
+    // dashboard can show "anchor: ok / diverged / none" alongside the
+    // chain-validity badge. The audit harness wires an anchored AuditLog
+    // by default (audit.anchor next to the temp DB), so on a clean chain
+    // we expect anchor_enabled: true and anchor_status: "ok". We pin the
+    // field names + happy-path value so a future refactor can't silently
+    // drop the contract the dashboard relies on.
+    let h = build_audit_harness("", vec![]);
+    seed_audit_entries(&h.state);
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    assert_eq!(
+        body["anchor_enabled"],
+        serde_json::json!(true),
+        "harness wires audit.anchor next to the DB; body={body}"
+    );
+    assert_eq!(
+        body["anchor_status"],
+        serde_json::json!("ok"),
+        "clean chain with anchor present must report 'ok'; body={body}"
+    );
+    assert!(
+        body["anchor_path"].is_string(),
+        "anchor_path must surface for the UI; body={body}"
+    );
+}
