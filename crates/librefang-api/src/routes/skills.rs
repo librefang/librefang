@@ -215,6 +215,7 @@ use super::channels::FieldType;
 use super::config::json_to_toml_value;
 use super::AppState;
 use super::RequestLanguage;
+use crate::mcp_oauth::KernelOAuthProvider;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -4153,9 +4154,7 @@ pub async fn delete_mcp_server(
 
     // Clean up OAuth vault tokens, auth state, and live connections
     if let Some(ref url) = server_url {
-        let provider = librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::new(
-            state.kernel.home_dir().to_path_buf(),
-        );
+        let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
         for field in &[
             "access_token",
             "refresh_token",
@@ -4166,9 +4165,7 @@ pub async fn delete_mcp_server(
             "pkce_state",
             "redirect_uri",
         ] {
-            let _ = provider.vault_remove(
-                &librefang_kernel::mcp_oauth_provider::KernelOAuthProvider::vault_key(url, field),
-            );
+            let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(url, field));
         }
     }
     state
