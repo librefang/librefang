@@ -589,6 +589,44 @@ fn default_model_for_provider(provider: &str, model_catalog: &ModelCatalog) -> S
         .unwrap_or_else(|| "local-model".to_string())
 }
 
+/// Build the `[routing]` TOML section emitted into `config.toml`.
+///
+/// Pure helper extracted from `save_config` (#3582) so the formatting can be
+/// unit-tested without touching the filesystem or the wizard `State`. When
+/// `enabled` is `false`, the wizard writes no routing section at all and we
+/// must return an empty string (callers concat this directly into the
+/// rendered template).
+fn build_routing_section(enabled: bool, models: &[String; 3]) -> String {
+    if !enabled {
+        return String::new();
+    }
+    format!(
+        r#"
+[routing]
+simple_model = "{fast}"
+medium_model = "{balanced}"
+complex_model = "{frontier}"
+simple_threshold = 100
+complex_threshold = 500
+"#,
+        fast = models[0],
+        balanced = models[1],
+        frontier = models[2],
+    )
+}
+
+/// Build the `api_key_env = "..."` line for providers that read their key
+/// from an environment variable. Returns an empty string for providers that
+/// don't need a key (e.g. `claude-code`, `local`) so the rendered template
+/// has no dangling assignment.
+fn build_api_key_line(env_var: &str) -> String {
+    if env_var.is_empty() {
+        String::new()
+    } else {
+        format!("api_key_env = \"{env_var}\"")
+    }
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 pub fn run() -> InitResult {
@@ -1222,30 +1260,10 @@ fn save_config(state: &mut State) {
         &state.model_input
     };
 
-    let routing_section = if state.routing_enabled {
-        format!(
-            r#"
-[routing]
-simple_model = "{fast}"
-medium_model = "{balanced}"
-complex_model = "{frontier}"
-simple_threshold = 100
-complex_threshold = 500
-"#,
-            fast = state.routing_models[0],
-            balanced = state.routing_models[1],
-            frontier = state.routing_models[2],
-        )
-    } else {
-        String::new()
-    };
+    let routing_section = build_routing_section(state.routing_enabled, &state.routing_models);
 
     let config_path = librefang_dir.join("config.toml");
-    let api_key_line = if p.env_var.is_empty() {
-        String::new()
-    } else {
-        format!("api_key_env = \"{}\"", p.env_var)
-    };
+    let api_key_line = build_api_key_line(p.env_var);
 
     let config = render_init_wizard_config(p.name, model, &api_key_line, &routing_section);
 
@@ -2525,5 +2543,118 @@ mod tests {
             !matches!(s, KeyTestState::Ok | KeyTestState::Warn),
             "SaveFailed must NOT match the auto-advance arm"
         );
+    }
+
+    // ── #3582: pure-helper coverage for the wizard's config-emission path ──
+
+    fn models(fast: &str, balanced: &str, frontier: &str) -> [String; 3] {
+        [fast.to_string(), balanced.to_string(), frontier.to_string()]
+    }
+
+    #[test]
+    fn routing_section_disabled_is_empty() {
+        // When the user picks "No" in the routing prompt the wizard must emit
+        // no `[routing]` block at all — an empty section, not a stub.
+        let out = build_routing_section(false, &models("a", "b", "c"));
+        assert!(out.is_empty(), "expected empty section, got {out:?}");
+    }
+
+    #[test]
+    fn routing_section_enabled_contains_all_three_tiers() {
+        let out =
+            build_routing_section(true, &models("llama-3-8b", "llama-3-70b", "claude-opus-4"));
+        assert!(out.contains("simple_model = \"llama-3-8b\""));
+        assert!(out.contains("medium_model = \"llama-3-70b\""));
+        assert!(out.contains("complex_model = \"claude-opus-4\""));
+    }
+
+    #[test]
+    fn routing_section_includes_threshold_defaults() {
+        // Threshold values are wizard policy, not user-tunable in the TUI;
+        // a regression that drops them would leave routing inert.
+        let out = build_routing_section(true, &models("f", "b", "x"));
+        assert!(out.contains("simple_threshold = 100"));
+        assert!(out.contains("complex_threshold = 500"));
+    }
+
+    #[test]
+    fn routing_section_starts_with_blank_line_for_template_concat() {
+        // The section is concatenated directly after the rendered base config;
+        // a leading newline keeps `[routing]` on its own line.
+        let out = build_routing_section(true, &models("a", "b", "c"));
+        assert!(
+            out.starts_with('\n'),
+            "expected leading newline, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn api_key_line_empty_for_keyless_provider() {
+        // claude-code / local providers have no env_var; the rendered template
+        // must not contain a dangling `api_key_env = ""`.
+        assert_eq!(build_api_key_line(""), "");
+    }
+
+    #[test]
+    fn api_key_line_quotes_env_var_name() {
+        assert_eq!(
+            build_api_key_line("GROQ_API_KEY"),
+            "api_key_env = \"GROQ_API_KEY\""
+        );
+    }
+
+    #[test]
+    fn render_init_wizard_config_substitutes_all_placeholders() {
+        // If a placeholder survives substitution the user's config.toml is
+        // unparseable and the daemon refuses to start. Guard against drift
+        // between the template file and the renderer.
+        let rendered = render_init_wizard_config(
+            "groq",
+            "llama-3-70b",
+            &build_api_key_line("GROQ_API_KEY"),
+            &build_routing_section(false, &models("", "", "")),
+        );
+        assert!(!rendered.contains("{{provider}}"));
+        assert!(!rendered.contains("{{model}}"));
+        assert!(!rendered.contains("{{api_key_line}}"));
+        assert!(!rendered.contains("{{routing_section}}"));
+        assert!(rendered.contains("groq"));
+        assert!(rendered.contains("llama-3-70b"));
+    }
+
+    #[test]
+    fn render_init_wizard_config_inlines_enabled_routing_section() {
+        let rendered = render_init_wizard_config(
+            "anthropic",
+            "claude-opus-4",
+            &build_api_key_line("ANTHROPIC_API_KEY"),
+            &build_routing_section(true, &models("haiku", "sonnet", "opus")),
+        );
+        assert!(rendered.contains("[routing]"));
+        assert!(rendered.contains("simple_model = \"haiku\""));
+        assert!(rendered.contains("complex_model = \"opus\""));
+    }
+
+    #[test]
+    fn default_model_for_unknown_provider_falls_back_to_local() {
+        // The catalog lookup may return None for providers that ship no
+        // bundled defaults; the wizard must still produce a non-empty model
+        // string so the rendered template is valid TOML.
+        let catalog = ModelCatalog::default();
+        let m = default_model_for_provider("definitely-not-a-provider", &catalog);
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn tier_label_is_total_over_known_tiers() {
+        // tier_label is called from the model-list renderer for every catalog
+        // entry; a missing arm would surface as "unknown" badges next to real
+        // models. Lock the mapping for the tiers the wizard actually displays.
+        assert_eq!(tier_label(ModelTier::Frontier), "frontier");
+        assert_eq!(tier_label(ModelTier::Smart), "smart");
+        assert_eq!(tier_label(ModelTier::Balanced), "balanced");
+        assert_eq!(tier_label(ModelTier::Fast), "fast");
+        assert_eq!(tier_label(ModelTier::Local), "local");
+        assert_eq!(tier_label(ModelTier::Custom), "custom");
     }
 }
