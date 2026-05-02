@@ -998,3 +998,163 @@ fn sanitize_function_tags(text: &str) -> String {
     out.push_str(rest);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pure-function tests for chat screen helpers.
+    //!
+    //! Refs #3582 — `chat.rs` (1000 LOC) previously had 0 tests.
+
+    use super::*;
+
+    // -------------------------- wrap_text --------------------------
+
+    #[test]
+    fn wrap_text_zero_width_returns_input_verbatim() {
+        // Width 0 is a degenerate caller bug; helper returns the original
+        // string instead of looping forever.
+        let out = wrap_text("hello world", 0);
+        assert_eq!(out, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn wrap_text_empty_input_yields_single_empty_line() {
+        // Drawing logic relies on at least one row so the message body
+        // still occupies a line in the rendered list.
+        assert_eq!(wrap_text("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn wrap_text_preserves_blank_lines_between_paragraphs() {
+        let out = wrap_text("a\n\nb", 10);
+        assert_eq!(out, vec!["a".to_string(), String::new(), "b".to_string()]);
+    }
+
+    #[test]
+    fn wrap_text_breaks_on_word_boundary_when_exceeding_width() {
+        let out = wrap_text("hello world foo", 8);
+        // "hello" (5) + ' ' + "world" (5) = 11 > 8, wrap; then
+        // "world" (5) + ' ' + "foo" (3) = 9 > 8, wrap again.
+        assert_eq!(
+            out,
+            vec!["hello".to_string(), "world".to_string(), "foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn wrap_text_keeps_long_word_intact_even_when_over_width() {
+        // Long words aren't hyphenated — they overflow the column. Verify
+        // we don't drop characters or panic.
+        let out = wrap_text("supercalifragilistic", 5);
+        assert_eq!(out, vec!["supercalifragilistic".to_string()]);
+    }
+
+    // -------------------- sanitize_function_tags -------------------
+
+    #[test]
+    fn sanitize_function_tags_strips_well_formed_tag() {
+        let out = sanitize_function_tags("hi <function>raw</function> there");
+        assert_eq!(out, "hi  there");
+    }
+
+    #[test]
+    fn sanitize_function_tags_strips_multiple_occurrences() {
+        let out = sanitize_function_tags("a<function>1</function>b<function>2</function>c");
+        assert_eq!(out, "abc");
+    }
+
+    #[test]
+    fn sanitize_function_tags_drops_unclosed_tail() {
+        // Mid-stream a tag may arrive without its closing partner; we
+        // truncate from the opening tag rather than leak raw payload.
+        let out = sanitize_function_tags("ok <function>partial chunk");
+        assert_eq!(out, "ok ");
+    }
+
+    #[test]
+    fn sanitize_function_tags_passthrough_when_no_tag() {
+        let s = "plain text with </function> close-only";
+        assert_eq!(sanitize_function_tags(s), s);
+    }
+
+    // -------------------- input history navigation -----------------
+
+    #[test]
+    fn push_input_history_dedupes_consecutive_duplicates() {
+        let mut s = ChatState::new();
+        s.push_input_history("hi".into());
+        s.push_input_history("hi".into());
+        s.push_input_history("there".into());
+        s.push_input_history("there".into());
+        assert_eq!(s.input_history, vec!["hi".to_string(), "there".to_string()]);
+    }
+
+    #[test]
+    fn push_input_history_caps_at_one_hundred_entries() {
+        let mut s = ChatState::new();
+        for i in 0..150 {
+            s.push_input_history(format!("msg-{i}"));
+        }
+        assert_eq!(s.input_history.len(), 100);
+        // Oldest 50 should have been evicted from the front.
+        assert_eq!(s.input_history.first().unwrap(), "msg-50");
+        assert_eq!(s.input_history.last().unwrap(), "msg-149");
+    }
+
+    #[test]
+    fn history_up_saves_current_draft_before_navigating() {
+        let mut s = ChatState::new();
+        s.push_input_history("a".into());
+        s.push_input_history("b".into());
+        s.input = "draft-in-progress".into();
+        s.history_up();
+        assert_eq!(s.input, "b");
+        assert_eq!(s.history_idx, Some(1));
+        assert_eq!(s.history_draft, "draft-in-progress");
+    }
+
+    #[test]
+    fn history_up_clamps_at_oldest_entry() {
+        let mut s = ChatState::new();
+        s.push_input_history("a".into());
+        s.push_input_history("b".into());
+        s.history_up(); // -> "b" (idx 1)
+        s.history_up(); // -> "a" (idx 0)
+        s.history_up(); // already at oldest, stays on "a"
+        assert_eq!(s.input, "a");
+        assert_eq!(s.history_idx, Some(0));
+    }
+
+    #[test]
+    fn history_down_restores_draft_when_passing_newest() {
+        let mut s = ChatState::new();
+        s.push_input_history("a".into());
+        s.push_input_history("b".into());
+        s.input = "my-draft".into();
+        s.history_up(); // enter history, draft saved
+        s.history_down(); // step past newest entry — restore draft
+        assert_eq!(s.input, "my-draft");
+        assert_eq!(s.history_idx, None);
+        // Draft buffer is taken (cleared) on restore so we don't double-restore.
+        assert!(s.history_draft.is_empty());
+    }
+
+    #[test]
+    fn history_down_without_active_navigation_is_noop() {
+        let mut s = ChatState::new();
+        s.push_input_history("a".into());
+        s.input = "untouched".into();
+        s.history_down();
+        assert_eq!(s.input, "untouched");
+        assert_eq!(s.history_idx, None);
+    }
+
+    #[test]
+    fn history_up_on_empty_history_is_noop() {
+        let mut s = ChatState::new();
+        s.input = "draft".into();
+        s.history_up();
+        assert_eq!(s.input, "draft");
+        assert_eq!(s.history_idx, None);
+    }
+}
