@@ -5451,13 +5451,17 @@ impl Default for ChannelsConfig {
 }
 
 impl ChannelsConfig {
-    /// Resolve the effective directory channel bridges write downloaded
-    /// attachments to. Returns the operator-configured `file_download_dir`
-    /// when set, or `std::env::temp_dir()/librefang_uploads` otherwise.
+    /// Resolve the effective directory for storing downloaded channel
+    /// attachments (and any other code path that historically wrote into
+    /// `<temp>/librefang_uploads`). Returns the operator-configured
+    /// `[channels].file_download_dir` when set, otherwise the legacy
+    /// `std::env::temp_dir()/librefang_uploads` default.
     ///
-    /// Centralizing the fallback here lets the kernel hand the same path
-    /// to the file-read sandbox so agents can actually open the files the
-    /// bridge tells them about (issue #4434).
+    /// This helper is the single source of truth — no other site in the
+    /// codebase should hardcode the literal `"librefang_uploads"` so the
+    /// kernel can hand the same path to the file-read sandbox and agents
+    /// can actually open the files the bridge tells them about. See
+    /// issues #4434 and #4435.
     pub fn effective_file_download_dir(&self) -> std::path::PathBuf {
         self.file_download_dir
             .as_ref()

@@ -858,7 +858,12 @@ pub async fn execute_tool_raw(
         }
 
         // Media generation tools (MediaDriver-based)
-        "image_generate" => tool_image_generate(input, *media_drivers, *workspace_root).await,
+        "image_generate" => {
+            let upload_dir = kernel
+                .map(|k| k.effective_upload_dir())
+                .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+            tool_image_generate(input, *media_drivers, *workspace_root, &upload_dir).await
+        }
         "video_generate" => tool_video_generate(input, *media_drivers).await,
         "video_status" => tool_video_status(input, *media_drivers).await,
         "music_generate" => tool_music_generate(input, *media_drivers, *workspace_root).await,
@@ -988,7 +993,10 @@ pub async fn execute_tool_raw(
         "browser_screenshot" => match browser_ctx {
             Some(mgr) => {
                 let aid = caller_agent_id.unwrap_or("default");
-                crate::browser::tool_browser_screenshot(input, mgr, aid).await
+                let upload_dir = kernel
+                    .map(|k| k.effective_upload_dir())
+                    .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+                crate::browser::tool_browser_screenshot(input, mgr, aid, &upload_dir).await
             }
             None => {
                 Err("Browser tools not available. Ensure Chrome/Chromium is installed.".to_string())
@@ -4836,6 +4844,7 @@ async fn tool_image_generate(
     input: &serde_json::Value,
     media_drivers: Option<&crate::media::MediaDriverCache>,
     workspace_root: Option<&Path>,
+    upload_dir: &Path,
 ) -> Result<String, String> {
     let prompt = input["prompt"]
         .as_str()
@@ -4879,7 +4888,7 @@ async fn tool_image_generate(
 
         // Save images to workspace and uploads dir
         let saved_paths = save_media_images_to_workspace(&result.images, workspace_root);
-        let image_urls = save_media_images_to_uploads(&result.images);
+        let image_urls = save_media_images_to_uploads(&result.images, upload_dir);
 
         let response = serde_json::json!({
             "model": result.model,
@@ -4936,8 +4945,7 @@ async fn tool_image_generate(
     let mut image_urls: Vec<String> = Vec::new();
     {
         use base64::Engine;
-        let upload_dir = std::env::temp_dir().join("librefang_uploads");
-        let _ = std::fs::create_dir_all(&upload_dir);
+        let _ = std::fs::create_dir_all(upload_dir);
         for img in &result.images {
             let file_id = uuid::Uuid::new_v4().to_string();
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&img.data_base64)
@@ -4989,10 +4997,12 @@ fn save_media_images_to_workspace(
 }
 
 /// Save MediaImageResult images to uploads temp dir, returning /api/uploads/... URLs.
-fn save_media_images_to_uploads(images: &[librefang_types::media::GeneratedImage]) -> Vec<String> {
+fn save_media_images_to_uploads(
+    images: &[librefang_types::media::GeneratedImage],
+    upload_dir: &Path,
+) -> Vec<String> {
     use base64::Engine;
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
-    let _ = std::fs::create_dir_all(&upload_dir);
+    let _ = std::fs::create_dir_all(upload_dir);
     let mut urls = Vec::new();
     for img in images {
         // If provider returned a URL directly, use it as-is

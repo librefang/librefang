@@ -719,4 +719,12 @@ pub trait KernelHandle: Send + Sync {
     fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    /// Return the effective directory for storing runtime-generated uploads
+    /// (image_generate, browser_screenshot, etc.). Honors operator-configured
+    /// `[channels].file_download_dir` when set, otherwise falls back to the
+    /// legacy `<temp>/librefang_uploads`. See issue #4435.
+    fn effective_upload_dir(&self) -> std::path::PathBuf {
+        std::env::temp_dir().join("librefang_uploads")
+    }
 }

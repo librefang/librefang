@@ -504,6 +504,14 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Return the effective file download directory: configured value or
+    /// the legacy `<temp>/librefang_uploads` default. Use this everywhere
+    /// instead of re-deriving the fallback inline (see issue #4435).
+    fn effective_channels_download_dir(&self) -> std::path::PathBuf {
+        self.channels_download_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"))
+    }
+
     /// Return the configured max file download size in bytes, if set.
     fn channels_download_max_bytes(&self) -> Option<u64> {
         None
@@ -1137,10 +1145,7 @@ impl BridgeManager {
         // redundant cleanup sweeps.
         {
             static CLEANUP_ONCE: std::sync::Once = std::sync::Once::new();
-            let dir = self
-                .handle
-                .channels_download_dir()
-                .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+            let dir = self.handle.effective_channels_download_dir();
             CLEANUP_ONCE.call_once(|| {
                 tokio::spawn(async move { cleanup_old_uploads(&dir).await });
             });
@@ -1189,6 +1194,7 @@ impl BridgeManager {
             .unwrap_or(64);
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
+        let upload_dir = handle.effective_channels_download_dir();
 
         if debounce_ms == 0 {
             // Fast path: no debouncing (current behavior)
@@ -1264,7 +1270,7 @@ impl BridgeManager {
                                     let image_blocks = if let ChannelContent::Image {
                                         ref url, ref caption, ref mime_type
                                     } = message.content {
-                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir).await {
                                             blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::ImageFile { .. })) => Some(blocks),
                                             _ => None,
                                         }
@@ -2721,7 +2727,10 @@ async fn dispatch_message(
         ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
+        let upload_dir = handle.effective_channels_download_dir();
+        let blocks =
+            download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref(), &upload_dir)
+                .await;
         if blocks.iter().any(|b| {
             matches!(
                 b,
@@ -2754,9 +2763,7 @@ async fn dispatch_message(
         ref filename,
     } = message.content
     {
-        let download_dir = handle
-            .channels_download_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let download_dir = handle.effective_channels_download_dir();
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
@@ -2789,9 +2796,7 @@ async fn dispatch_message(
         duration_seconds,
     } = message.content
     {
-        let download_dir = handle
-            .channels_download_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let download_dir = handle.effective_channels_download_dir();
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
@@ -2844,9 +2849,7 @@ async fn dispatch_message(
         ref performer,
     } = message.content
     {
-        let download_dir = handle
-            .channels_download_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let download_dir = handle.effective_channels_download_dir();
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
@@ -2904,9 +2907,7 @@ async fn dispatch_message(
         ref filename,
     } = message.content
     {
-        let download_dir = handle
-            .channels_download_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"));
+        let download_dir = handle.effective_channels_download_dir();
         let max_bytes = handle
             .channels_download_max_bytes()
             .unwrap_or(CHANNEL_FILE_DOWNLOAD_MAX_BYTES);
@@ -4208,6 +4209,7 @@ async fn download_image_to_blocks(
     url: &str,
     caption: Option<&str>,
     mime_type_hint: Option<&str>,
+    upload_dir: &std::path::Path,
 ) -> Vec<ContentBlock> {
     use base64::Engine;
 
@@ -4369,8 +4371,6 @@ async fn download_image_to_blocks(
 
     // Save image to disk instead of base64-encoding into the session.
     // A 3 MB photo becomes ~100 KB on disk with only a short path in the session.
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
-
     let ext = match final_media_type.as_str() {
         "image/jpeg" => "jpg",
         "image/png" => "png",

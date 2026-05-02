@@ -1289,11 +1289,16 @@ fn is_text_like_attachment(content_type: &str, filename: &str) -> bool {
 ///     truncated at 200K chars.
 ///   - everything else → skipped with a warn log.
 pub fn resolve_attachments(
+    state: &AppState,
     attachments: &[AttachmentRef],
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
     let mut blocks = Vec::new();
 
     for att in attachments {
@@ -1720,7 +1725,7 @@ pub async fn send_message(
 
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments);
+        let image_blocks = resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
             inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -2020,7 +2025,11 @@ pub async fn get_agent_session(
                                     // Persist image to upload dir so it can be
                                     // served back when loading session history.
                                     let file_id = uuid::Uuid::new_v4().to_string();
-                                    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+                                    let upload_dir = state
+                                        .kernel
+                                        .config_ref()
+                                        .channels
+                                        .effective_file_download_dir();
                                     if let Err(e) = std::fs::create_dir_all(&upload_dir) {
                                         tracing::warn!("Failed to create upload directory: {e}");
                                     }
@@ -2505,7 +2514,7 @@ pub async fn send_message_stream(
 
     // Resolve file attachments into image content blocks (same as non-streaming)
     if !req.attachments.is_empty() {
-        let image_blocks = resolve_attachments(&req.attachments);
+        let image_blocks = resolve_attachments(&state, &req.attachments);
         if !image_blocks.is_empty() {
             inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
         }
@@ -5702,7 +5711,11 @@ pub async fn upload_file(
 
     // Generate file ID and save
     let file_id = uuid::Uuid::new_v4().to_string();
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
     if let Err(e) = std::fs::create_dir_all(&upload_dir) {
         tracing::warn!("Failed to create upload dir: {e}");
         return (
@@ -5778,6 +5791,7 @@ pub async fn upload_file(
     )
 )]
 pub async fn serve_upload(
+    State(state): State<Arc<AppState>>,
     Path(file_id): Path<String>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
@@ -5793,8 +5807,11 @@ pub async fn serve_upload(
         );
     }
 
-    let file_path = std::env::temp_dir()
-        .join("librefang_uploads")
+    let file_path = state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir()
         .join(&file_id);
 
     // Look up metadata from registry; fall back to disk probe for generated images

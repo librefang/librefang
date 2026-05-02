@@ -77,9 +77,18 @@ fn resolve_driver(
 ///
 /// The file is registered in the shared `UPLOAD_REGISTRY` so the existing
 /// `serve_upload` handler returns the correct `Content-Type`.
-fn save_upload(data: &[u8], filename: &str, content_type: &str) -> Result<String, String> {
+fn save_upload(
+    state: &AppState,
+    data: &[u8],
+    filename: &str,
+    content_type: &str,
+) -> Result<String, String> {
     let file_id = uuid::Uuid::new_v4().to_string();
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
     std::fs::create_dir_all(&upload_dir)
         .map_err(|e| format!("Failed to create upload directory: {e}"))?;
     std::fs::write(upload_dir.join(&file_id), data)
@@ -145,7 +154,7 @@ pub async fn generate_image(
         };
 
         let filename = format!("image_{i}.png");
-        match save_upload(&bytes, &filename, "image/png") {
+        match save_upload(&state, &bytes, &filename, "image/png") {
             Ok(url) => {
                 image_urls.push(serde_json::json!({
                     "url": url,
@@ -207,7 +216,7 @@ pub async fn synthesize_speech(
     };
     let filename = format!("speech.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&state, &result.audio_data, &filename, content_type) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -350,7 +359,7 @@ pub async fn generate_music(
     };
     let filename = format!("music.{}", result.format);
 
-    match save_upload(&result.audio_data, &filename, content_type) {
+    match save_upload(&state, &result.audio_data, &filename, content_type) {
         Ok(url) => Json(serde_json::json!({
             "url": url,
             "format": result.format,
@@ -405,7 +414,11 @@ pub async fn transcribe_audio(
     }
 
     // Save to temp file so MediaEngine can read it
-    let upload_dir = std::env::temp_dir().join("librefang_uploads");
+    let upload_dir = state
+        .kernel
+        .config_ref()
+        .channels
+        .effective_file_download_dir();
     if let Err(e) = std::fs::create_dir_all(&upload_dir) {
         return ApiErrorResponse::internal(format!("Failed to create upload dir: {e}"))
             .into_response();
