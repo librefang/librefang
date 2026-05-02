@@ -2172,8 +2172,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
-fn parse_trigger_pattern(s: &str) -> Option<librefang_kernel::triggers::TriggerPattern> {
-    use librefang_kernel::triggers::TriggerPattern;
+fn parse_trigger_pattern(s: &str) -> Option<crate::triggers::TriggerPattern> {
+    use crate::triggers::TriggerPattern;
     if let Some(rest) = s.strip_prefix("spawned:") {
         return Some(TriggerPattern::AgentSpawned {
             name_pattern: rest.to_string(),
