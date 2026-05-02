@@ -5116,6 +5116,7 @@ system_prompt = "You are a helpful assistant."
                 max_iterations: self.config.load().agent_max_iterations,
                 max_history_messages: self.config.load().max_history_messages,
                 aux_client: Some(self.aux_client.load_full()),
+                parent_session_id: None,
             },
         )
         .await
@@ -5955,6 +5956,17 @@ system_prompt = "You are a helpful assistant."
         let interrupt = self
             .any_session_interrupt_for_agent(agent_id)
             .unwrap_or_default();
+        // Snapshot the parent's session id ONCE here, before any await /
+        // dispatch boundary, and thread it through `LoopOptions` so the
+        // fork-resolution branch in
+        // `send_message_streaming_with_sender_and_opts` does not re-read
+        // `entry.session_id` from the registry. Without this snapshot, a
+        // concurrent `switch_agent_session` (any dashboard tab can fire it
+        // via `POST /api/agents/{id}/sessions/{session_id}/switch`) could
+        // flip the registry pointer between parent-loop start and fork
+        // spawn, landing the fork on the wrong session and breaking
+        // prompt-cache alignment with the parent turn (#4291).
+        let parent_session_id = entry.session_id;
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,
@@ -5962,6 +5974,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: Some(parent_session_id),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -6033,6 +6046,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -6205,7 +6219,19 @@ system_prompt = "You are a helpful assistant."
                 // caller, prompt-cache alignment WILL break. The current
                 // `run_forked_agent_streaming` deliberately passes `None` to
                 // preserve this invariant.
-                _ if loop_opts.is_fork => entry.session_id,
+                //
+                // We use `loop_opts.parent_session_id` (snapshotted at fork
+                // spawn) rather than re-reading `entry.session_id` from the
+                // registry: the registry pointer can be flipped concurrently
+                // by `switch_agent_session` (#4291), which would land the
+                // fork on a different session than the parent turn and break
+                // prompt-cache alignment. The snapshot is taken in
+                // `run_forked_agent_streaming` before any dispatch boundary.
+                // If a fork was constructed without a parent session id
+                // (would be a kernel bug — every fork path goes through
+                // `run_forked_agent_streaming`), fall back to the registry
+                // pointer to preserve old behaviour rather than erroring.
+                _ if loop_opts.is_fork => loop_opts.parent_session_id.unwrap_or(entry.session_id),
                 _ => match entry.manifest.session_mode {
                     librefang_types::agent::SessionMode::Persistent => entry.session_id,
                     librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -8351,6 +8377,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: None,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

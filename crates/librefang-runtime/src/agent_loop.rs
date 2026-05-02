@@ -1761,6 +1761,21 @@ pub struct LoopOptions {
     /// Kernel populates this from the boot-time-built [`AuxClient`].
     /// Tests typically leave it as `None`.
     pub aux_client: Option<std::sync::Arc<crate::aux_client::AuxClient>>,
+    /// Snapshot of the *parent loop's* session id, taken at fork-spawn time.
+    ///
+    /// Only meaningful when [`Self::is_fork`] is `true`. The kernel uses this
+    /// in its session resolver to route the fork onto the parent's session
+    /// instead of re-reading `registry.entry.session_id`, which is a mutable
+    /// pointer that any caller of `switch_agent_session`
+    /// (`POST /api/agents/{id}/sessions/{session_id}/switch`) can flip
+    /// concurrently with an in-flight parent turn (#4291). Reading the
+    /// registry at fork resolution time is a TOCTOU race that lands the fork
+    /// on the wrong session and breaks prompt-cache alignment.
+    ///
+    /// Forks are constructed by the kernel from `entry.session_id` captured
+    /// once at `run_forked_agent_streaming` entry; non-fork callers leave
+    /// this `None`.
+    pub parent_session_id: Option<librefang_types::agent::SessionId>,
 }
 
 /// Result of an agent loop execution.
