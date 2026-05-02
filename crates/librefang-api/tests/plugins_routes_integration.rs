@@ -291,17 +291,18 @@ async fn context_engine_get_trace_by_id_rejects_malformed_id() {
 // /api/plugins read endpoints — 404 for unknown plugin names
 // ---------------------------------------------------------------------------
 
-/// `/api/plugins` always responds with a JSON envelope (`plugins`, `total`,
-/// `plugins_dir`). Even if the developer happens to have plugins on disk,
-/// the shape must match.
+/// `/api/plugins` always responds with the canonical
+/// `PaginatedResponse{items,total,offset,limit}` envelope (#3842). Even if
+/// the developer happens to have plugins on disk, the shape must match.
 #[tokio::test(flavor = "multi_thread")]
 async fn list_plugins_returns_envelope_shape() {
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/plugins", None).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
-    assert!(body["plugins"].is_array(), "{body:?}");
+    assert!(body["items"].is_array(), "{body:?}");
     assert!(body["total"].is_number(), "{body:?}");
-    assert!(body["plugins_dir"].is_string(), "{body:?}");
+    assert_eq!(body["offset"], 0, "{body:?}");
+    assert!(body.get("limit").is_some(), "{body:?}");
 }
 
 /// `/api/plugins/{name}` returns 404 for an unknown plugin.

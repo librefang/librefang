@@ -462,10 +462,6 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/traces", id), None, &[]).await
     }
 
-    pub async fn update_agent(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/update", id), Some(data), &[]).await
-    }
-
     pub async fn upload_file(&self, id: &str, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/upload", id), Some(data), &[]).await
     }
