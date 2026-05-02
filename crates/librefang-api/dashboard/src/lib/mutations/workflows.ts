@@ -86,20 +86,7 @@ export function useUpdateWorkflow() {
       payload: Parameters<typeof updateWorkflow>[1];
     }) => updateWorkflow(workflowId, payload),
     onSuccess: (data, variables) => {
-      // Patch the cached workflow detail in place using the post-mutation
-      // entity returned by the handler (#3832). Falls through to invalidate
-      // as a belt-and-suspenders guard, and to cover the narrow race where
-      // the handler returned a stale fallback body. List rows can preserve
-      // shared fields (name, description, last_run, success_rate); we still
-      // invalidate the lists for safety since they may include aggregates.
-      const hasEntity =
-        data && typeof data === "object" && "id" in data && (data as WorkflowItem).id;
-      if (hasEntity) {
-        qc.setQueryData<WorkflowItem>(
-          workflowKeys.detail(variables.workflowId),
-          data as WorkflowItem,
-        );
-      }
+      qc.setQueryData<WorkflowItem>(workflowKeys.detail(variables.workflowId), data);
       return Promise.all([
         invalidateWorkflowLists(qc),
         invalidateWorkflowRecord(qc, variables.workflowId),

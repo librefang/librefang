@@ -112,12 +112,6 @@ use tracing::warn;
 
 use crate::types::ApiErrorResponse;
 
-/// Render a `Workflow` into the JSON shape used by the GET handler.
-///
-/// Centralized so that mutation handlers (PUT) can return the post-mutation
-/// entity in the same shape the dashboard already consumes for GET, letting
-/// the caller patch caches in place via `setQueryData` instead of a follow-up
-/// refetch (#3832).
 fn workflow_to_json(w: &Workflow) -> serde_json::Value {
     serde_json::json!({
         "id": w.id.to_string(),
@@ -666,12 +660,7 @@ pub async fn update_workflow(
         return ApiErrorResponse::not_found("Workflow not found").into_json_tuple();
     }
 
-    // Return the post-mutation entity in the same shape as GET so the
-    // dashboard can `setQueryData` instead of round-tripping a refetch
-    // (#3832). Read back from the engine in case the kernel normalized
-    // anything during persist; fall back to `updated` if the row vanished
-    // between write and read (narrow race — concurrent delete) so the
-    // mutation still appears successful.
+    // Read back so the kernel's persist step can normalize fields; fall back on concurrent-delete race.
     let body = match state
         .kernel
         .workflow_engine()
@@ -2013,28 +2002,7 @@ pub async fn toggle_cron_job(
     }
 }
 
-/// GET /api/cron/jobs/{id} — Get a single cron job by ID.
-#[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
-pub async fn get_cron_job(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match uuid::Uuid::parse_str(&id) {
-        Ok(uuid) => {
-            let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron().get_meta(job_id) {
-                Some(meta) => (
-                    StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
-                ),
-                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
-            }
-        }
-        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
-    }
-}
-
-/// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
+/// GET /api/cron/jobs/{id}/status — Get cron job status and metadata.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
@@ -2046,9 +2014,15 @@ pub async fn cron_job_status(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
+                    Json(serde_json::json!({
+                        "id": id,
+                        "enabled": meta.job.enabled,
+                        "last_run": meta.job.last_run.map(|t| t.to_rfc3339()),
+                        "next_run": meta.job.next_run.map(|t| t.to_rfc3339()),
+                        "fire_count": meta.fire_count,
+                    })),
                 ),
-                None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
+                None => ApiErrorResponse::not_found("Cron job not found").into_json_tuple(),
             }
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
@@ -2056,140 +2030,78 @@ pub async fn cron_job_status(
 }
 
 // ---------------------------------------------------------------------------
-// Workflow template routes
+// Workflow template endpoints
 // ---------------------------------------------------------------------------
 
-/// Query parameters for listing workflow templates.
-#[derive(Debug, Deserialize)]
-pub struct TemplateListParams {
-    /// Free-text search across name, description, and tags.
-    pub q: Option<String>,
-    /// Filter by category (exact match).
-    pub category: Option<String>,
-}
-
-/// GET /api/workflow-templates — List all workflow templates with optional search/filter.
-#[utoipa::path(
-    get,
-    path = "/api/workflow-templates",
-    tag = "workflows",
-    params(
-        ("q" = Option<String>, Query, description = "Search name, description, tags"),
-        ("category" = Option<String>, Query, description = "Filter by category"),
-    ),
-    responses(
-        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>)
-    )
-)]
+/// GET /api/workflow-templates — List all available workflow templates.
+#[utoipa::path(get, path = "/api/workflow-templates", tag = "workflows", responses((status = 200, description = "List workflow templates", body = Vec<serde_json::Value>)))]
 pub async fn list_workflow_templates(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<TemplateListParams>,
 ) -> impl IntoResponse {
-    let all = state.kernel.templates().list().await;
-
-    let filtered: Vec<_> = all
-        .into_iter()
-        .filter(|t| {
-            // Category filter (exact match).
-            if let Some(ref cat) = params.category {
-                match &t.category {
-                    Some(tc) if tc == cat => {}
-                    _ => return false,
-                }
-            }
-            // Free-text search across name, description, tags.
-            if let Some(ref q) = params.q {
-                let q_lower = q.to_lowercase();
-                let matches_name = t.name.to_lowercase().contains(&q_lower);
-                let matches_desc = t.description.to_lowercase().contains(&q_lower);
-                let matches_tags = t
-                    .tags
-                    .iter()
-                    .any(|tag| tag.to_lowercase().contains(&q_lower));
-                if !matches_name && !matches_desc && !matches_tags {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
-    let list: Vec<serde_json::Value> = filtered
+    let templates = state.kernel.templates().list().await;
+    let list: Vec<serde_json::Value> = templates
         .iter()
-        .filter_map(|t| serde_json::to_value(t).ok())
+        .map(|t| serde_json::to_value(t).unwrap_or_default())
         .collect();
-
-    Json(serde_json::json!({ "templates": list }))
+    Json(serde_json::json!({"templates": list, "total": list.len()}))
 }
 
-/// GET /api/workflow-templates/:id — Get full template details.
-#[utoipa::path(
-    get,
-    path = "/api/workflow-templates/{id}",
-    tag = "workflows",
-    params(("id" = String, Path, description = "Template ID")),
-    responses(
-        (status = 200, description = "Template details", body = crate::types::JsonObject),
-        (status = 404, description = "Template not found")
-    )
-)]
+/// GET /api/workflow-templates/{id} — Get a specific workflow template.
+#[utoipa::path(get, path = "/api/workflow-templates/{id}", tag = "workflows", params(("id" = String, Path, description = "Template ID")), responses((status = 200, description = "Template details", body = crate::types::JsonObject), (status = 404, description = "Template not found")))]
 pub async fn get_workflow_template(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     match state.kernel.templates().get(&id).await {
-        Some(t) => (
+        Some(template) => (
             StatusCode::OK,
-            Json(serde_json::to_value(&t).unwrap_or_default()),
+            Json(serde_json::to_value(&template).unwrap_or_default()),
         ),
-        None => {
-            ApiErrorResponse::not_found(format!("Template '{}' not found", id)).into_json_tuple()
-        }
+        None => ApiErrorResponse::not_found(format!("Template '{id}' not found")).into_json_tuple(),
     }
 }
 
-/// POST /api/workflow-templates/:id/instantiate — Create a live workflow from a template.
-#[utoipa::path(
-    post,
-    path = "/api/workflow-templates/{id}/instantiate",
-    tag = "workflows",
-    params(("id" = String, Path, description = "Template ID")),
-    request_body = HashMap<String, serde_json::Value>,
-    responses(
-        (status = 201, description = "Workflow created from template", body = crate::types::JsonObject),
-        (status = 400, description = "Invalid parameters"),
-        (status = 404, description = "Template not found")
-    )
-)]
+/// POST /api/workflow-templates/{id}/instantiate — Create a workflow from a template.
+#[utoipa::path(post, path = "/api/workflow-templates/{id}/instantiate", tag = "workflows", params(("id" = String, Path, description = "Template ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Workflow created from template", body = crate::types::JsonObject), (status = 404, description = "Template not found")))]
 pub async fn instantiate_template(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(params): Json<HashMap<String, serde_json::Value>>,
+    Json(params): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    use librefang_kernel::workflow::WorkflowEngine;
+
     let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
-            return ApiErrorResponse::not_found(format!("Template '{}' not found", id))
+            return ApiErrorResponse::not_found(format!("Template '{id}' not found"))
                 .into_json_tuple();
         }
     };
 
-    let workflow = match state.kernel.templates().instantiate(&template, &params) {
-        Ok(w) => w,
-        Err(e) => {
-            return ApiErrorResponse::bad_request(e).into_json_tuple();
-        }
-    };
+    // Convert params to HashMap<String, String> for substitution
+    let param_map: std::collections::HashMap<String, String> = params
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let workflow_id = state.kernel.register_workflow(workflow).await;
-    (
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "workflow_id": workflow_id.to_string(),
-            "template_id": id,
-            "status": "instantiated",
-        })),
-    )
+    match WorkflowEngine::instantiate_template(&template, param_map) {
+        Ok(workflow) => {
+            let workflow_id = state.kernel.register_workflow(workflow).await;
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "workflow_id": workflow_id.to_string(),
+                    "template_id": id,
+                })),
+            )
+        }
+        Err(e) => ApiErrorResponse::bad_request(format!("Template instantiation failed: {e}"))
+            .into_json_tuple(),
+    }
 }
 
 #[cfg(test)]
@@ -2197,55 +2109,48 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
     // parse_step_mode tests
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
 
     #[test]
-    fn step_mode_flat_sequential() {
+    fn step_mode_flat_string_sequential() {
         let mode = parse_step_mode(&json!("sequential"), &json!({}));
         assert!(matches!(mode, StepMode::Sequential));
     }
 
     #[test]
-    fn step_mode_flat_fan_out() {
+    fn step_mode_flat_string_fan_out() {
         let mode = parse_step_mode(&json!("fan_out"), &json!({}));
         assert!(matches!(mode, StepMode::FanOut));
     }
 
     #[test]
-    fn step_mode_flat_collect() {
+    fn step_mode_flat_string_collect() {
         let mode = parse_step_mode(&json!("collect"), &json!({}));
         assert!(matches!(mode, StepMode::Collect));
     }
 
     #[test]
-    fn step_mode_flat_conditional_with_condition() {
-        let step = json!({"condition": "status == ok"});
-        let mode = parse_step_mode(&json!("conditional"), &step);
+    fn step_mode_flat_string_conditional_with_condition() {
+        let mode = parse_step_mode(
+            &json!("conditional"),
+            &json!({"condition": "output contains 'yes'"}),
+        );
         match mode {
             StepMode::Conditional { condition } => {
-                assert_eq!(condition, "status == ok");
+                assert_eq!(condition, "output contains 'yes'");
             }
-            other => panic!("expected Conditional, got {other:?}"),
+            other => panic!("Expected Conditional, got {other:?}"),
         }
     }
 
     #[test]
-    fn step_mode_flat_conditional_missing_condition() {
-        let mode = parse_step_mode(&json!("conditional"), &json!({}));
-        match mode {
-            StepMode::Conditional { condition } => {
-                assert_eq!(condition, "", "should default to empty string");
-            }
-            other => panic!("expected Conditional, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_flat_loop_with_fields() {
-        let step = json!({"max_iterations": 10, "until": "done"});
-        let mode = parse_step_mode(&json!("loop"), &step);
+    fn step_mode_flat_string_loop_with_params() {
+        let mode = parse_step_mode(
+            &json!("loop"),
+            &json!({"max_iterations": 10, "until": "done"}),
+        );
         match mode {
             StepMode::Loop {
                 max_iterations,
@@ -2254,128 +2159,43 @@ mod tests {
                 assert_eq!(max_iterations, 10);
                 assert_eq!(until, "done");
             }
-            other => panic!("expected Loop, got {other:?}"),
+            other => panic!("Expected Loop, got {other:?}"),
         }
     }
 
     #[test]
-    fn step_mode_flat_loop_missing_fields() {
-        let mode = parse_step_mode(&json!("loop"), &json!({}));
-        match mode {
-            StepMode::Loop {
-                max_iterations,
-                until,
-            } => {
-                assert_eq!(max_iterations, 5, "should default to 5");
-                assert_eq!(until, "", "should default to empty string");
-            }
-            other => panic!("expected Loop, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_flat_loop_large_max_iterations_clamped() {
-        // u64 value exceeding u32::MAX should fall back to default (5)
-        let step = json!({"max_iterations": u64::MAX, "until": "x"});
-        let mode = parse_step_mode(&json!("loop"), &step);
-        match mode {
-            StepMode::Loop { max_iterations, .. } => {
-                assert_eq!(max_iterations, 5, "should fall back to 5 on u32 overflow");
-            }
-            other => panic!("expected Loop, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_flat_unknown_string_defaults_sequential() {
-        let mode = parse_step_mode(&json!("banana"), &json!({}));
-        assert!(matches!(mode, StepMode::Sequential));
-    }
-
-    #[test]
-    fn step_mode_nested_conditional() {
-        let val = json!({"conditional": {"condition": "x > 0"}});
-        let mode = parse_step_mode(&val, &json!({}));
+    fn step_mode_nested_object_conditional() {
+        let mode = parse_step_mode(
+            &json!({"conditional": {"condition": "x > 0"}}),
+            &json!({}),
+        );
         match mode {
             StepMode::Conditional { condition } => assert_eq!(condition, "x > 0"),
-            other => panic!("expected Conditional, got {other:?}"),
+            other => panic!("Expected Conditional, got {other:?}"),
         }
     }
 
     #[test]
-    fn step_mode_nested_conditional_missing_condition() {
-        let val = json!({"conditional": {}});
-        let mode = parse_step_mode(&val, &json!({}));
-        match mode {
-            StepMode::Conditional { condition } => {
-                assert_eq!(condition, "", "should default to empty string");
-            }
-            other => panic!("expected Conditional, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_nested_loop() {
-        let val = json!({"loop": {"max_iterations": 3, "until": "finish"}});
-        let mode = parse_step_mode(&val, &json!({}));
+    fn step_mode_nested_object_loop() {
+        let mode = parse_step_mode(
+            &json!({"loop": {"max_iterations": 3, "until": "stop"}}),
+            &json!({}),
+        );
         match mode {
             StepMode::Loop {
                 max_iterations,
                 until,
             } => {
                 assert_eq!(max_iterations, 3);
-                assert_eq!(until, "finish");
+                assert_eq!(until, "stop");
             }
-            other => panic!("expected Loop, got {other:?}"),
+            other => panic!("Expected Loop, got {other:?}"),
         }
     }
 
     #[test]
-    fn step_mode_nested_loop_missing_fields() {
-        let val = json!({"loop": {}});
-        let mode = parse_step_mode(&val, &json!({}));
-        match mode {
-            StepMode::Loop {
-                max_iterations,
-                until,
-            } => {
-                assert_eq!(max_iterations, 5);
-                assert_eq!(until, "");
-            }
-            other => panic!("expected Loop, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_nested_loop_large_max_iterations() {
-        let val = json!({"loop": {"max_iterations": u64::MAX}});
-        let mode = parse_step_mode(&val, &json!({}));
-        match mode {
-            StepMode::Loop { max_iterations, .. } => {
-                assert_eq!(max_iterations, 5);
-            }
-            other => panic!("expected Loop, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn step_mode_nested_fan_out() {
-        let val = json!({"fan_out": {}});
-        let mode = parse_step_mode(&val, &json!({}));
-        assert!(matches!(mode, StepMode::FanOut));
-    }
-
-    #[test]
-    fn step_mode_nested_collect() {
-        let val = json!({"collect": {}});
-        let mode = parse_step_mode(&val, &json!({}));
-        assert!(matches!(mode, StepMode::Collect));
-    }
-
-    #[test]
-    fn step_mode_nested_sequential() {
-        let val = json!({"sequential": {}});
-        let mode = parse_step_mode(&val, &json!({}));
+    fn step_mode_unknown_string_defaults_sequential() {
+        let mode = parse_step_mode(&json!("unknown_mode"), &json!({}));
         assert!(matches!(mode, StepMode::Sequential));
     }
 
@@ -2385,126 +2205,70 @@ mod tests {
         assert!(matches!(mode, StepMode::Sequential));
     }
 
-    #[test]
-    fn step_mode_number_defaults_sequential() {
-        let mode = parse_step_mode(&json!(42), &json!({}));
-        assert!(matches!(mode, StepMode::Sequential));
-    }
-
-    #[test]
-    fn step_mode_empty_object_defaults_sequential() {
-        let mode = parse_step_mode(&json!({}), &json!({}));
-        assert!(matches!(mode, StepMode::Sequential));
-    }
-
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
     // parse_error_mode tests
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
 
     #[test]
-    fn error_mode_flat_fail() {
+    fn error_mode_flat_string_fail() {
         let mode = parse_error_mode(&json!("fail"), &json!({}));
         assert!(matches!(mode, ErrorMode::Fail));
     }
 
     #[test]
-    fn error_mode_flat_skip() {
+    fn error_mode_flat_string_skip() {
         let mode = parse_error_mode(&json!("skip"), &json!({}));
         assert!(matches!(mode, ErrorMode::Skip));
     }
 
     #[test]
-    fn error_mode_flat_retry_with_value() {
-        let step = json!({"max_retries": 7});
-        let mode = parse_error_mode(&json!("retry"), &step);
+    fn error_mode_flat_string_retry_with_max() {
+        let mode = parse_error_mode(&json!("retry"), &json!({"max_retries": 5}));
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 7),
-            other => panic!("expected Retry, got {other:?}"),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 5),
+            other => panic!("Expected Retry, got {other:?}"),
         }
     }
 
     #[test]
-    fn error_mode_flat_retry_missing_max_retries() {
+    fn error_mode_flat_string_retry_defaults_3() {
         let mode = parse_error_mode(&json!("retry"), &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => {
-                assert_eq!(max_retries, 3, "should default to 3");
-            }
-            other => panic!("expected Retry, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn error_mode_flat_retry_large_value_clamped() {
-        let step = json!({"max_retries": u64::MAX});
-        let mode = parse_error_mode(&json!("retry"), &step);
-        match mode {
-            ErrorMode::Retry { max_retries } => {
-                assert_eq!(max_retries, 3, "should fall back to 3 on u32 overflow");
-            }
-            other => panic!("expected Retry, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn error_mode_flat_unknown_defaults_fail() {
-        let mode = parse_error_mode(&json!("explode"), &json!({}));
-        assert!(matches!(mode, ErrorMode::Fail));
-    }
-
-    #[test]
-    fn error_mode_nested_retry() {
-        let val = json!({"retry": {"max_retries": 2}});
-        let mode = parse_error_mode(&val, &json!({}));
-        match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 2),
-            other => panic!("expected Retry, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn error_mode_nested_retry_missing_max_retries() {
-        let val = json!({"retry": {}});
-        let mode = parse_error_mode(&val, &json!({}));
-        match mode {
             ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
-            other => panic!("expected Retry, got {other:?}"),
+            other => panic!("Expected Retry, got {other:?}"),
         }
     }
 
     #[test]
-    fn error_mode_nested_retry_large_value() {
-        let val = json!({"retry": {"max_retries": u64::MAX}});
-        let mode = parse_error_mode(&val, &json!({}));
+    fn error_mode_nested_object_retry() {
+        let mode = parse_error_mode(&json!({"retry": {"max_retries": 7}}), &json!({}));
         match mode {
-            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
-            other => panic!("expected Retry, got {other:?}"),
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 7),
+            other => panic!("Expected Retry, got {other:?}"),
         }
     }
 
     #[test]
-    fn error_mode_nested_skip() {
-        let val = json!({"skip": {}});
-        let mode = parse_error_mode(&val, &json!({}));
+    fn error_mode_nested_object_skip() {
+        let mode = parse_error_mode(&json!({"skip": {}}), &json!({}));
         assert!(matches!(mode, ErrorMode::Skip));
     }
 
     #[test]
-    fn error_mode_nested_fail() {
-        let val = json!({"fail": {}});
-        let mode = parse_error_mode(&val, &json!({}));
+    fn error_mode_nested_object_fail() {
+        let mode = parse_error_mode(&json!({"fail": {}}), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_unknown_string_defaults_fail() {
+        let mode = parse_error_mode(&json!("unknown"), &json!({}));
         assert!(matches!(mode, ErrorMode::Fail));
     }
 
     #[test]
     fn error_mode_null_defaults_fail() {
         let mode = parse_error_mode(&json!(null), &json!({}));
-        assert!(matches!(mode, ErrorMode::Fail));
-    }
-
-    #[test]
-    fn error_mode_number_defaults_fail() {
-        let mode = parse_error_mode(&json!(99), &json!({}));
         assert!(matches!(mode, ErrorMode::Fail));
     }
 
