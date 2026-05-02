@@ -227,7 +227,22 @@ use librefang_types::agent::AgentId;
 use librefang_types::agent::AgentManifest;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Resolve the LibreFang home directory without depending on the kernel crate.
+///
+/// Mirrors `librefang_kernel::config::librefang_home`:
+/// `LIBREFANG_HOME` env var takes priority, otherwise `~/.librefang`
+/// (falling back to the system temp dir if no home directory is available).
+fn librefang_home() -> PathBuf {
+    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
+        return PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".librefang")
+}
 
 // ---------------------------------------------------------------------------
 // Profile + Mode endpoints
@@ -369,9 +384,7 @@ mod template_name_validation_tests {
 /// GET /api/templates — List available agent templates.
 #[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
 pub async fn list_agent_templates() -> impl IntoResponse {
-    let agents_dir = librefang_kernel::config::librefang_home()
-        .join("workspaces")
-        .join("agents");
+    let agents_dir = librefang_home().join("workspaces").join("agents");
     let mut templates = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -417,9 +430,7 @@ pub async fn get_agent_template(
     if validate_template_name(&name).is_err() {
         return ApiErrorResponse::not_found(t.t("api-error-template-not-found")).into_json_tuple();
     }
-    let agents_dir = librefang_kernel::config::librefang_home()
-        .join("workspaces")
-        .join("agents");
+    let agents_dir = librefang_home().join("workspaces").join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
@@ -477,9 +488,7 @@ pub async fn get_agent_template_toml(
         )
             .into_response();
     }
-    let agents_dir = librefang_kernel::config::librefang_home()
-        .join("workspaces")
-        .join("agents");
+    let agents_dir = librefang_home().join("workspaces").join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
