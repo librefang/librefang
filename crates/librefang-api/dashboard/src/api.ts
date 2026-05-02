@@ -645,6 +645,12 @@ export interface AuditVerifyResponse {
   tip_hash?: string;
   warning?: string;
   error?: string;
+  // External tip-anchor (#3339): "ok" — anchor matches DB tip;
+  // "diverged" — anchor disagrees with DB tip (forgery suspected);
+  // "none" — no anchor configured (chain is self-consistent only).
+  anchor_status?: "ok" | "diverged" | "none";
+  anchor_enabled?: boolean;
+  anchor_path?: string | null;
 }
 
 export interface ApprovalItem {

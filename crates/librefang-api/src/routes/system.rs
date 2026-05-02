@@ -854,30 +854,51 @@ pub async fn audit_recent(
 /// GET /api/audit/verify — Verify the audit chain integrity.
 #[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = crate::types::JsonObject)))]
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entry_count = state.kernel.audit().len();
-    match state.kernel.audit().verify_integrity() {
+    let audit = state.kernel.audit();
+    let entry_count = audit.len();
+    // External tip-anchor surfacing (see SECURITY.md "Audit"). When
+    // anchor_path() is None the chain is self-consistent only — the UI
+    // shows "anchor: none" rather than misleading "anchor: ok".
+    let anchor_path = audit
+        .anchor_path()
+        .map(|p| p.to_string_lossy().into_owned());
+    let anchor_enabled = anchor_path.is_some();
+    match audit.verify_integrity() {
         Ok(()) => {
+            let mut body = serde_json::json!({
+                "valid": true,
+                "entries": entry_count,
+                "tip_hash": audit.tip_hash(),
+                "anchor_enabled": anchor_enabled,
+                "anchor_path": anchor_path,
+                // verify_integrity() already reconciles the anchor file
+                // against the in-DB tip; reaching this branch means
+                // either no anchor is configured or it matched.
+                "anchor_status": if anchor_enabled { "ok" } else { "none" },
+            });
             if entry_count == 0 {
                 // SECURITY: Warn that an empty audit log has no forensic value
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": 0,
-                    "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit().tip_hash(),
-                }))
-            } else {
-                Json(serde_json::json!({
-                    "valid": true,
-                    "entries": entry_count,
-                    "tip_hash": state.kernel.audit().tip_hash(),
-                }))
+                body["warning"] = serde_json::Value::String(
+                    "Audit log is empty — no events have been recorded yet".to_string(),
+                );
             }
+            Json(body)
         }
-        Err(msg) => Json(serde_json::json!({
-            "valid": false,
-            "error": msg,
-            "entries": entry_count,
-        })),
+        Err(msg) => {
+            // verify_integrity() returns Err when the chain is broken
+            // OR when the anchor file diverges from the in-DB tip.
+            // Surface "diverged" so the UI can distinguish anchor
+            // failure from chain failure even though both are fatal.
+            let anchor_status = if anchor_enabled { "diverged" } else { "none" };
+            Json(serde_json::json!({
+                "valid": false,
+                "error": msg,
+                "entries": entry_count,
+                "anchor_enabled": anchor_enabled,
+                "anchor_path": anchor_path,
+                "anchor_status": anchor_status,
+            }))
+        }
     }
 }
 
@@ -2733,20 +2754,20 @@ pub async fn totp_setup(
         );
     }
 
-    let (secret_base32, otpauth_uri, qr_base64) =
-        match librefang_kernel::approval::ApprovalManager::generate_totp_secret(
-            &totp_issuer,
-            "admin",
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                return ApiErrorResponse::internal(e).into_json_tuple();
-            }
-        };
+    let (secret_base32, otpauth_uri, qr_base64) = match state
+        .kernel
+        .approvals()
+        .new_totp_secret(&totp_issuer, "admin")
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return ApiErrorResponse::internal(e).into_json_tuple();
+        }
+    };
     let qr_data_uri = format!("data:image/png;base64,{qr_base64}");
 
     // Generate recovery codes
-    let recovery_codes = librefang_kernel::approval::ApprovalManager::generate_recovery_codes();
+    let recovery_codes = state.kernel.approvals().new_recovery_codes();
     let recovery_json = serde_json::to_string(&recovery_codes).unwrap_or_default();
 
     // Store secret and recovery codes in vault (not yet active — totp_confirmed = false)

@@ -774,6 +774,16 @@ impl AuditLog {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
+    /// Returns the configured external tip-anchor path, if any.
+    ///
+    /// When `Some`, every audit append mirrors the new tip hash to this
+    /// file (see [`Self::with_db_anchored`]) and `verify_integrity()`
+    /// fails closed when the on-disk tip diverges from the in-DB tip.
+    /// When `None`, the chain is self-consistent only — see SECURITY.md.
+    pub fn anchor_path(&self) -> Option<&std::path::Path> {
+        self.anchor_path.as_deref()
+    }
+
     /// Returns whether the log is empty.
     pub fn is_empty(&self) -> bool {
         self.entries
@@ -1350,6 +1360,21 @@ mod tests {
         std::mem::forget(dir);
         let log = AuditLog::with_db_anchored(Arc::clone(&db), anchor_path.clone());
         (log, db, anchor_path)
+    }
+
+    #[test]
+    fn test_anchor_path_accessor_reflects_construction() {
+        // The API layer surfaces `anchor_path()` to the dashboard so the
+        // UI can show "anchor: ok" vs "anchor: none". Regress that the
+        // accessor matches what was passed to `with_db_anchored` and is
+        // None for the in-memory constructor.
+        let in_memory = AuditLog::new();
+        assert!(
+            in_memory.anchor_path().is_none(),
+            "AuditLog::new() must not advertise an anchor"
+        );
+        let (log, _db, path) = setup_anchored_log();
+        assert_eq!(log.anchor_path(), Some(path.as_path()));
     }
 
     #[test]

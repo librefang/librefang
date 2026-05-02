@@ -1060,6 +1060,15 @@ impl LibreFangKernel {
         &self.home_dir_boot
     }
 
+    /// Snapshot the inbox subsystem's status (config + on-disk file counts).
+    ///
+    /// Provided as a kernel-surface method so API callers do not need to reach
+    /// into the `librefang_kernel::inbox` module directly. See issue #3744.
+    pub fn inbox_status(&self) -> crate::inbox::InboxStatus {
+        let cfg = self.config_ref();
+        crate::inbox::inbox_status(&cfg.inbox, self.home_dir())
+    }
+
     /// Build the roots list for a specific MCP server config.
     ///
     /// Starts with the default roots (workspaces directory) and, for stdio
@@ -7158,11 +7167,14 @@ system_prompt = "You are a helpful assistant."
             &config,
         )
         .await
-        .map_err(|e| {
-            KernelError::LibreFang(LibreFangError::Internal(format!(
-                "Python execution failed: {e}"
-            )))
-        })?;
+        // #3711 (4-of-21): propagate the typed `PythonError` instead of
+        // collapsing it to `LibreFangError::Internal(String)`. Display
+        // output ("Python execution failed: …") is preserved byte-for-byte
+        // by the format on `KernelError::Python`, so existing log/UI
+        // strings remain identical while upstream callers gain the ability
+        // to match on typed variants (e.g., `Timeout` → 408, `ScriptError`
+        // → 422).
+        .map_err(KernelError::from)?;
 
         info!(agent = %entry.name, "Python agent execution complete");
 

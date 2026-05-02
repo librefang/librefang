@@ -994,6 +994,21 @@ impl ApprovalManager {
         Self::verify_totp_code_with_issuer(secret_base32, code, "LibreFang")
     }
 
+    /// Instance-method wrapper around `verify_totp_code_with_issuer`.
+    ///
+    /// Lets API-layer callers verify a TOTP code via
+    /// `kernel.approvals().verify_totp(...)` without reaching into the
+    /// `librefang_kernel::approval` module path directly (see #3744 — the
+    /// API crate should not import kernel-internal types).
+    pub fn verify_totp(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        Self::verify_totp_code_with_issuer(secret_base32, code, issuer)
+    }
+
     /// Like `verify_totp_code` but uses the provided issuer label.
     pub fn verify_totp_code_with_issuer(
         secret_base32: &str,
@@ -1015,6 +1030,28 @@ impl ApprovalManager {
         )
         .map_err(|e| format!("TOTP init error: {e}"))?;
         Ok(totp.check_current(code).unwrap_or(false))
+    }
+
+    /// Instance-method wrapper around the static `generate_totp_secret`.
+    ///
+    /// Lets API-layer callers go through `kernel.approvals().new_totp_secret(...)`
+    /// without importing `librefang_kernel::approval::ApprovalManager` directly
+    /// (see #3744 — the API crate should not reach into kernel-internal types).
+    /// The static method is retained for callers that already have it imported
+    /// and for symmetry with `verify_totp_code_with_issuer`.
+    pub fn new_totp_secret(
+        &self,
+        issuer: &str,
+        account: &str,
+    ) -> Result<(String, String, String), String> {
+        Self::generate_totp_secret(issuer, account)
+    }
+
+    /// Instance-method wrapper around the static `generate_recovery_codes`.
+    ///
+    /// See `new_totp_secret` for the rationale (#3744).
+    pub fn new_recovery_codes(&self) -> Vec<String> {
+        Self::generate_recovery_codes()
     }
 
     /// Generate a new TOTP secret and return (base32_secret, otpauth_uri, qr_base64_png).
@@ -2658,6 +2695,29 @@ mod tests {
     }
 
     #[test]
+    fn test_instance_totp_wrappers_match_static_helpers() {
+        // The instance-method wrappers added for #3744 must produce shapes
+        // equivalent to the static helpers so the API layer can switch over
+        // without behavior changes. Secrets are random so we compare shape,
+        // not bytes.
+        let mgr = make_manager_with_db();
+        let (secret, uri, qr) = mgr.new_totp_secret("LibreFang", "admin").unwrap();
+        assert!(!secret.is_empty());
+        assert!(uri.starts_with("otpauth://totp/"));
+        assert!(uri.contains("LibreFang"));
+        assert!(!qr.is_empty());
+
+        let codes = mgr.new_recovery_codes();
+        let static_codes = ApprovalManager::generate_recovery_codes();
+        assert_eq!(codes.len(), static_codes.len());
+        for c in &codes {
+            // Same XXXX-XXXX-XXXX-XXXX hex shape as the static helper.
+            assert_eq!(c.len(), 19);
+            assert_eq!(c.matches('-').count(), 3);
+        }
+    }
+
+    #[test]
     fn test_generate_totp_secret() {
         let (secret, uri, qr) =
             ApprovalManager::generate_totp_secret("LibreFang", "admin").unwrap();
@@ -2842,6 +2902,21 @@ mod tests {
         let mgr = make_manager_with_db();
         // A fresh code should not be marked as used.
         assert!(!mgr.is_totp_code_used("123456"));
+    }
+
+    #[test]
+    fn test_verify_totp_instance_matches_static_helper() {
+        // The instance-method wrapper added for #3744 must agree with the
+        // existing static helper for the same inputs. Use a deliberately
+        // bogus code so both paths return Ok(false) without time dependency.
+        let mgr = make_manager_with_db();
+        let (secret, _uri, _qr) =
+            ApprovalManager::generate_totp_secret("LibreFang", "test").expect("totp secret");
+        let via_instance = mgr.verify_totp(&secret, "000000", "LibreFang");
+        let via_static =
+            ApprovalManager::verify_totp_code_with_issuer(&secret, "000000", "LibreFang");
+        assert_eq!(via_instance.is_ok(), via_static.is_ok());
+        assert_eq!(via_instance.unwrap_or(true), via_static.unwrap_or(false));
     }
 
     #[test]
