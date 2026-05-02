@@ -1078,8 +1078,10 @@ async fn test_workflow_crud() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let workflows = body["workflows"].as_array().unwrap();
+    // #3842: canonical PaginatedResponse envelope.
+    let workflows = body["items"].as_array().unwrap();
     assert_eq!(workflows.len(), 1);
+    assert_eq!(body["total"].as_u64().unwrap(), 1);
     assert_eq!(workflows[0]["name"], "test-workflow");
     assert_eq!(workflows[0]["steps"], 1);
 

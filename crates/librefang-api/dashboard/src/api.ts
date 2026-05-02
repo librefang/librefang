@@ -1864,8 +1864,15 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
-  return data.workflows ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{workflows}` shape during the transition so older daemons keep
+  // working.
+  const data = await get<{
+    items?: WorkflowItem[];
+    workflows?: WorkflowItem[];
+    total?: number;
+  }>("/api/workflows");
+  return data.items ?? data.workflows ?? [];
 }
 
 export async function createWorkflow(payload: {
