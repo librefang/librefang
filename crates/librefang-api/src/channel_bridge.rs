@@ -1863,7 +1863,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
 
         let (mut overrides, default_agent_name) = match channel_type {
-            "telegram" => find_channel_info!(telegram),
+            // Telegram has the `message_coalesce_window_ms` alias (#4145)
+            // that feeds into `overrides.message_debounce_ms`; resolve via
+            // `effective_overrides()` rather than cloning `overrides` raw.
+            "telegram" => {
+                let entry = if let Some(aid) = account_id {
+                    channels
+                        .telegram
+                        .iter()
+                        .find(|c| c.account_id.as_deref() == Some(aid))
+                } else {
+                    channels.telegram.first()
+                };
+                (
+                    entry.map(|c| c.effective_overrides()),
+                    entry.and_then(|c| c.default_agent.clone()),
+                )
+            }
             "discord" => find_channel_info!(discord),
             "slack" => find_channel_info!(slack),
             "whatsapp" => find_channel_info!(whatsapp),

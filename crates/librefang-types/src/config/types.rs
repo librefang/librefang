@@ -5415,6 +5415,19 @@ pub struct TelegramConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Message coalescing window in milliseconds for Telegram-specific
+    /// ergonomics (#4145). When set, messages from the same sender arriving
+    /// within this window are buffered and dispatched to the agent as a
+    /// single batched context. This prevents out-of-order processing in the
+    /// common pattern where a user forwards a message and immediately follows
+    /// up with a comment.
+    ///
+    /// This is a thin alias for [`ChannelOverrides::message_debounce_ms`]:
+    /// if `overrides.message_debounce_ms` is non-zero it wins; otherwise the
+    /// value here is applied. `Some(0)` explicitly disables coalescing.
+    /// `None` (default) leaves behavior unchanged.
+    #[serde(default)]
+    pub message_coalesce_window_ms: Option<u64>,
     /// Thread-based agent routing for forum topics.
     ///
     /// Maps Telegram `message_thread_id` (as string) to an agent name.
@@ -5443,8 +5456,31 @@ impl Default for TelegramConfig {
             max_backoff_secs: default_channel_max_backoff_secs(),
             long_poll_timeout_secs: default_telegram_long_poll_timeout_secs(),
             overrides: ChannelOverrides::default(),
+            message_coalesce_window_ms: None,
             thread_routes: std::collections::HashMap::new(),
         }
+    }
+}
+
+impl TelegramConfig {
+    /// Returns a [`ChannelOverrides`] with the Telegram-specific
+    /// `message_coalesce_window_ms` alias applied to
+    /// [`ChannelOverrides::message_debounce_ms`].
+    ///
+    /// Resolution rules (#4145):
+    /// 1. If `overrides.message_debounce_ms` is non-zero, it wins.
+    /// 2. Otherwise, if `message_coalesce_window_ms` is `Some`, that value
+    ///    is copied into `message_debounce_ms` (including `Some(0)`, which
+    ///    is a no-op since the existing field is already 0).
+    /// 3. Otherwise the unmodified clone of `overrides` is returned.
+    pub fn effective_overrides(&self) -> ChannelOverrides {
+        let mut ov = self.overrides.clone();
+        if ov.message_debounce_ms == 0 {
+            if let Some(window) = self.message_coalesce_window_ms {
+                ov.message_debounce_ms = window;
+            }
+        }
+        ov
     }
 }
 
@@ -7384,6 +7420,58 @@ impl Default for ParallelToolsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telegram_message_coalesce_window_default_is_none() {
+        let tg = TelegramConfig::default();
+        assert!(tg.message_coalesce_window_ms.is_none());
+        // Backward compat: effective overrides leaves debounce disabled.
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_alias_fills_debounce() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(2000),
+            ..Default::default()
+        };
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 2000);
+    }
+
+    #[test]
+    fn telegram_explicit_overrides_debounce_wins_over_alias() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(2000),
+            overrides: ChannelOverrides {
+                message_debounce_ms: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // The explicit `overrides.message_debounce_ms` is non-zero, so the
+        // alias must NOT clobber it.
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 500);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_zero_keeps_disabled() {
+        let tg = TelegramConfig {
+            message_coalesce_window_ms: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 0);
+    }
+
+    #[test]
+    fn telegram_message_coalesce_window_parses_from_toml() {
+        let toml_str = r#"
+            bot_token_env = "TG"
+            message_coalesce_window_ms = 1500
+        "#;
+        let tg: TelegramConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(tg.message_coalesce_window_ms, Some(1500));
+        assert_eq!(tg.effective_overrides().message_debounce_ms, 1500);
+    }
 
     #[test]
     fn test_session_config_defaults_backward_compatible() {
