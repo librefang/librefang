@@ -5,12 +5,11 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { AnimatePresence, motion } from "motion/react";
 import { tabContent } from "../lib/motion";
-import { createRegistryContent } from "../api";
 import type { ApiActionResponse, ProviderItem } from "../api";
 import { isProviderAvailable } from "../lib/status";
 import { useProviders, useProviderStatus } from "../lib/queries/providers";
 import { useModels } from "../lib/queries/models";
-import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider } from "../lib/mutations/providers";
+import { useTestProvider, useSetProviderKey, useDeleteProviderKey, useSetProviderUrl, useSetDefaultProvider, useCreateRegistryContent } from "../lib/mutations/providers";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -1074,6 +1073,7 @@ export function ProvidersPage() {
   const deleteKeyMutation = useDeleteProviderKey();
   const setUrlMutation = useSetProviderUrl();
   const defaultProviderMutation = useSetDefaultProvider();
+  const createRegistryContentMutation = useCreateRegistryContent();
 
   const config = useProviderConfig(
     testMutation,
@@ -1477,10 +1477,15 @@ export function ProvidersPage() {
       <DrawerPanel isOpen={showCreateForm} onClose={() => setShowCreateForm(false)} title={t("providers.add")} size="xl" hideCloseButton>
         <CreateProviderWizard
           onSubmit={async (values) => {
-            await createRegistryContent("provider", values);
+            // Hook invalidates providerKeys.all + modelKeys.lists() on
+            // success, so the configured tab refetches without an explicit
+            // refetch() call here.
+            await createRegistryContentMutation.mutateAsync({
+              contentType: "provider",
+              values,
+            });
             setShowCreateForm(false);
             setActiveTab("configured");
-            void providersQuery.refetch();
           }}
           onCancel={() => setShowCreateForm(false)}
         />

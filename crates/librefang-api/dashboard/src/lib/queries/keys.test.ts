@@ -58,6 +58,18 @@ describe("query key factories", () => {
         "sessions",
         "abc",
       ]);
+      expect(agentKeys.session("abc")).toEqual([
+        "agents",
+        "session",
+        "abc",
+        null,
+      ]);
+      expect(agentKeys.session("abc", "sess-1")).toEqual([
+        "agents",
+        "session",
+        "abc",
+        "sess-1",
+      ]);
     });
 
     it("detail is nested under details", () => {
@@ -237,6 +249,10 @@ describe("query key factories", () => {
       expect(agentKeys.details().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.templates().slice(0, prefix.length)).toEqual(prefix);
       expect(agentKeys.sessions("x").slice(0, prefix.length)).toEqual(
+        prefix,
+      );
+      expect(agentKeys.session("x").slice(0, prefix.length)).toEqual(prefix);
+      expect(agentKeys.session("x", "s1").slice(0, prefix.length)).toEqual(
         prefix,
       );
     });

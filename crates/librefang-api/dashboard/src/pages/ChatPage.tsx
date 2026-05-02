@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { buildAuthenticatedWebSocket, sendAgentMessage, loadAgentSession } from "../api";
+import { buildAuthenticatedWebSocket } from "../api";
 import { useQueryClient } from "@tanstack/react-query";
 import type { ApprovalItem, SessionListItem, ModelItem, AgentTool, AgentItem } from "../api";
 import { clearAgentHistory } from "../lib/http/client";
@@ -14,7 +14,7 @@ import { useFullConfig } from "../lib/queries/config";
 import { useMediaProviders } from "../lib/queries/media";
 import { useModels } from "../lib/queries/models";
 import { usePendingApprovals } from "../lib/queries/approvals";
-import { useAgents, useAgentSessions } from "../lib/queries/agents";
+import { agentQueries, useAgents, useAgentSessions } from "../lib/queries/agents";
 import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
@@ -36,6 +36,7 @@ import {
   usePatchAgentConfig,
   usePatchHandAgentRuntimeConfig,
   useResolveApproval,
+  useSendAgentMessage,
   useStopAgent,
   useUploadAgentFile,
 } from "../lib/mutations/agents";
@@ -331,6 +332,12 @@ const sessionCache = new Map<string, ChatMessage[]>();
 function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessionVersion = 0, onModelSwitch?: () => void, onClearError?: (message: string) => void, sessionId: string | null = null, onNewSession?: (sessionId: string) => void) {
   const { t } = useTranslation();
   const stopAgentMutation = useStopAgent();
+  const sendAgentMessageMutation = useSendAgentMessage();
+  // Used to fetch the agent's session snapshot through the queries layer so
+  // hits get TanStack Query caching, dedup, and back/forward instant-load
+  // (see agentQueries.session). Imperative fetchQuery rather than useQuery
+  // because the load is gated on `sessionVersion` and `sessionCache`.
+  const queryClient = useQueryClient();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Per-agent loading state. A single shared `isLoading` would freeze the
   // ChatInput on every agent while one of them is streaming (#2322). Keyed
@@ -482,7 +489,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     setMessages([]);
     const loadId = agentId;
     setAgentLoading(loadId, true);
-    loadAgentSession(loadId, sessionId)
+    queryClient
+      .fetchQuery(agentQueries.session(loadId, sessionId))
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
@@ -677,11 +685,15 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     // Helper: send via HTTP (used as primary fallback and WS drop recovery)
     const sendViaHttp = async () => {
       try {
-        const response = await sendAgentMessage(sendAgentId, trimmed, {
-          thinking: deepThinking,
-          show_thinking: showThinkingProcess,
-          session_id: sessionId,
-          attachments: hasAttachments ? attachments : undefined,
+        const response = await sendAgentMessageMutation.mutateAsync({
+          agentId: sendAgentId,
+          message: trimmed,
+          options: {
+            thinking: deepThinking,
+            show_thinking: showThinkingProcess,
+            session_id: sessionId,
+            attachments: hasAttachments ? attachments : undefined,
+          },
         });
         const fullContent = response.response || "";
         updateAgentMessages(sendAgentId, prev => prev.map(m =>

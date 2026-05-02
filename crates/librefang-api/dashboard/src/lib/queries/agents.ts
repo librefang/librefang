@@ -9,6 +9,7 @@ import {
   listPromptVersions,
   listExperiments,
   getExperimentMetrics,
+  loadAgentSession,
 } from "../http/client";
 import { agentKeys } from "./keys";
 import { withOverrides, type QueryOverrides } from "./options";
@@ -76,6 +77,19 @@ export const agentQueries = {
       queryKey: agentKeys.experimentMetrics(experimentId),
       queryFn: () => getExperimentMetrics(experimentId),
       enabled: !!experimentId,
+    }),
+  // Snapshot of the (agent, session) chat history. ChatPage hydrates from
+  // this on first navigation and on session switch; subsequent turns are
+  // applied locally rather than refetched. Cache survives back/forward
+  // navigation so returning to a previously viewed agent is instant — the
+  // long staleTime keeps that cached payload from being refetched on focus.
+  session: (agentId: string, sessionId?: string | null) =>
+    queryOptions({
+      queryKey: agentKeys.session(agentId, sessionId ?? null),
+      queryFn: () => loadAgentSession(agentId, sessionId ?? null),
+      enabled: !!agentId,
+      staleTime: 5 * 60_000,
+      refetchOnWindowFocus: false,
     }),
 };
 

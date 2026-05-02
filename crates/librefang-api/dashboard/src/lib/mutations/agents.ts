@@ -22,7 +22,9 @@ import {
   completeExperiment,
   resolveApproval,
   uploadAgentFile,
+  sendAgentMessage,
 } from "../http/client";
+import type { SendAgentMessageOptions } from "../../api";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -392,6 +394,43 @@ export function useUploadAgentFile() {
   return useMutation({
     mutationFn: ({ agentId, file }: { agentId: string; file: File }) =>
       uploadAgentFile(agentId, file),
+  });
+}
+
+/**
+ * POST /agents/{id}/message — imperative HTTP send used by ChatPage as the
+ * fallback when WebSocket streaming is unavailable. Invalidates the cached
+ * session snapshot so a re-mount/re-load reads the persisted history that
+ * now includes the just-completed turn; also invalidates per-agent stats
+ * (token counts / costs are surfaced there) and the global usage budget so
+ * the topbar reflects spend without waiting for the next poll.
+ *
+ * The agent list itself is intentionally NOT invalidated — sending a chat
+ * message doesn't change list-row projections, and refetching the list on
+ * every send would be noisy.
+ */
+export function useSendAgentMessage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      message,
+      options,
+    }: {
+      agentId: string;
+      message: string;
+      options?: SendAgentMessageOptions;
+    }) => sendAgentMessage(agentId, message, options),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({
+        queryKey: agentKeys.session(
+          variables.agentId,
+          variables.options?.session_id ?? null,
+        ),
+      });
+      qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.stats(variables.agentId) });
+    },
   });
 }
 
