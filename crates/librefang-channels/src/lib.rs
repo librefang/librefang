@@ -7,6 +7,7 @@
 //! The `default` feature enables popular channels; use `all-channels` for everything.
 
 // Core infrastructure — always compiled
+pub mod attachment_enrich;
 pub mod bridge;
 pub mod commands;
 pub mod formatter;

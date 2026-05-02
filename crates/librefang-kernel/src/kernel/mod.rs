@@ -4254,6 +4254,21 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Validate kernel-wide default_routing (issue #4466) so the init
+        // wizard's Smart Router selection surfaces alias / unknown-model
+        // warnings at boot, not silently at first dispatch.
+        if let Some(ref routing_config) = kernel.config.load().default_routing {
+            let router = ModelRouter::new(routing_config.clone());
+            for warning in router.validate_models(
+                &kernel
+                    .model_catalog
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ) {
+                warn!(target: "librefang_kernel::default_routing", "{warning}");
+            }
+        }
+
         info!("LibreFang kernel booted successfully");
         Ok(kernel)
     }
@@ -8172,7 +8187,9 @@ system_prompt = "You are a helpful assistant."
                 );
                 manifest.model.model = pinned.clone();
             }
-        } else if let Some(ref routing_config) = manifest.routing {
+        } else if let Some(routing_config) =
+            manifest.routing.as_ref().or(cfg.default_routing.as_ref())
+        {
             let mut router = ModelRouter::new(routing_config.clone());
             // Resolve aliases (e.g. "sonnet" -> "claude-sonnet-4-20250514") before scoring
             router.resolve_aliases(&self.model_catalog.read().unwrap_or_else(|e| e.into_inner()));
