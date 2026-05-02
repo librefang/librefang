@@ -498,9 +498,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
-    // Workflows are loaded from the engine in a single page, so offset=0 /
-    // limit=None.
+    // Workflows load from the engine in a single page (in-memory), so offset=0 / limit=None.
     let total = items.len();
     Json(crate::types::PaginatedResponse {
         items,

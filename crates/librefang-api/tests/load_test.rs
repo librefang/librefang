@@ -479,7 +479,6 @@ async fn load_workflow_operations() {
         .json()
         .await
         .unwrap();
-    // #3842: canonical PaginatedResponse envelope (`items`).
     let wf_count = workflows["items"].as_array().map(|a| a.len()).unwrap_or(0);
     eprintln!(
         "  [LOAD] Listed {wf_count} workflows in {:.1}ms",

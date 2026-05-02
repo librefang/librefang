@@ -92,10 +92,8 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     // request — caching at boot would return a stale (or empty) snapshot if the
     // OFP node initialized after AppState was constructed (#3644).
     //
-    // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-    // shape used by `/api/agents` (#3842). All peers are returned in a single
-    // page — the registry is in-memory and small — so `offset=0` and
-    // `limit=None` always.
+    // All peers are returned in a single page — the registry is in-memory
+    // and small — so `offset=0` and `limit=None` always.
     let items: Vec<serde_json::Value> =
         if let Some(peer_registry) = state.kernel.peer_registry_ref() {
             peer_registry

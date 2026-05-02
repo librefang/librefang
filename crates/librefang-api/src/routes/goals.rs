@@ -44,10 +44,8 @@ fn goals_shared_agent_id() -> AgentId {
 
 /// GET /api/goals — List all goals.
 ///
-/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-/// shape used by `/api/agents` and `/api/peers` (#3842). Goals are stored as
-/// a single JSON array in shared KV memory and returned in one page —
-/// `offset=0` and `limit=None` always.
+/// Goals are stored as a single JSON array in shared KV memory and returned
+/// in one page — `offset=0` and `limit=None` always.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
     let items: Vec<serde_json::Value> = match state
