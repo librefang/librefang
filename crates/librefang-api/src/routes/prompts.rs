@@ -62,9 +62,6 @@ async fn list_prompt_versions(
                 .into_response()
         }
     };
-    // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-    // shape (#3842). Versions are returned in a single page — `offset=0` and
-    // `limit=None` always.
     match state.kernel.list_prompt_versions(agent_id) {
         Ok(versions) => {
             let total = versions.len();
@@ -167,8 +164,6 @@ async fn list_experiments(
                 .into_response()
         }
     };
-    // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-    // shape (#3842). Experiments are returned in a single page.
     match state.kernel.list_experiments(agent_id) {
         Ok(experiments) => {
             let total = experiments.len();
