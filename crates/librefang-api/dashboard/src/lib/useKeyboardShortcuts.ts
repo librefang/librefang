@@ -9,26 +9,30 @@ import { useNavigate } from "@tanstack/react-router";
 /// focus is NOT in a text input, textarea, or contenteditable element —
 /// otherwise typing the letter "g" while writing a message would
 /// hijack the cursor.
-export const G_NAV_SHORTCUTS: Record<string, { to: string; label: string }> = {
-  o: { to: "/overview", label: "Overview" },
-  c: { to: "/chat", label: "Chat" },
-  a: { to: "/agents", label: "Agents" },
-  h: { to: "/hands", label: "Hands" },
-  s: { to: "/skills", label: "Skills" },
-  w: { to: "/workflows", label: "Workflows" },
-  m: { to: "/models", label: "Models" },
-  p: { to: "/providers", label: "Providers" },
-  n: { to: "/channels", label: "Channels (Network)" },
-  g: { to: "/goals", label: "Goals" },
-  l: { to: "/logs", label: "Logs" },
-  r: { to: "/runtime", label: "Runtime" },
-  e: { to: "/memory", label: "Memory" },
-  y: { to: "/analytics", label: "Analytics" },
-  t: { to: "/settings", label: "Settings" },
-  u: { to: "/plugins", label: "Plugins" },
-  k: { to: "/scheduler", label: "Scheduler" },
-  v: { to: "/approvals", label: "Approvals (reView)" },
-  i: { to: "/sessions", label: "Sessions" },
+/// Each entry's `labelKey` resolves under the `shortcuts_help.nav.*`
+/// namespace at render time — see `ShortcutsHelp.tsx`. The constant lives
+/// outside React context so it can also drive the actual key-handler
+/// below, where labels are not needed.
+export const G_NAV_SHORTCUTS: Record<string, { to: string; labelKey: string }> = {
+  o: { to: "/overview", labelKey: "overview" },
+  c: { to: "/chat", labelKey: "chat" },
+  a: { to: "/agents", labelKey: "agents" },
+  h: { to: "/hands", labelKey: "hands" },
+  s: { to: "/skills", labelKey: "skills" },
+  w: { to: "/workflows", labelKey: "workflows" },
+  m: { to: "/models", labelKey: "models" },
+  p: { to: "/providers", labelKey: "providers" },
+  n: { to: "/channels", labelKey: "channels" },
+  g: { to: "/goals", labelKey: "goals" },
+  l: { to: "/logs", labelKey: "logs" },
+  r: { to: "/runtime", labelKey: "runtime" },
+  e: { to: "/memory", labelKey: "memory" },
+  y: { to: "/analytics", labelKey: "analytics" },
+  t: { to: "/settings", labelKey: "settings" },
+  u: { to: "/plugins", labelKey: "plugins" },
+  k: { to: "/scheduler", labelKey: "scheduler" },
+  v: { to: "/approvals", labelKey: "approvals" },
+  i: { to: "/sessions", labelKey: "sessions" },
 };
 
 /// Returns true if keyboard input should be ignored because the user is

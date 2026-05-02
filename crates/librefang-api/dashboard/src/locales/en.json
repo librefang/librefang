@@ -3223,5 +3223,39 @@
     "error_disabled_body": "Enable pairing in <link>Config → Security</link> (<code>pairing.enabled = true</code>).",
     "error_generic_title": "Failed to generate pairing code",
     "btn_try_again": "Try again"
+  },
+  "shortcuts_help": {
+    "title": "Keyboard shortcuts",
+    "general_heading": "General",
+    "nav_heading_prefix": "Navigate (press",
+    "nav_heading_suffix": "then…)",
+    "general": {
+      "cmd_k": "Open command palette",
+      "focus_search": "Focus search on current page",
+      "create_new": "Create new (agent / workflow / plugin, page-aware)",
+      "show_help": "Show this cheat sheet",
+      "close_dialog": "Close dialog / modal"
+    },
+    "nav": {
+      "overview": "Overview",
+      "chat": "Chat",
+      "agents": "Agents",
+      "hands": "Hands",
+      "skills": "Skills",
+      "workflows": "Workflows",
+      "models": "Models",
+      "providers": "Providers",
+      "channels": "Channels (Network)",
+      "goals": "Goals",
+      "logs": "Logs",
+      "runtime": "Runtime",
+      "memory": "Memory",
+      "analytics": "Analytics",
+      "settings": "Settings",
+      "plugins": "Plugins",
+      "scheduler": "Scheduler",
+      "approvals": "Approvals (reView)",
+      "sessions": "Sessions"
+    }
   }
 }
