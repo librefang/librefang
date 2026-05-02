@@ -1,107 +1,173 @@
 //! Configuration validation logic: unknown field detection, structural validation, and safety boundary constraints.
+//!
+//! ## Allowlist source-of-truth (#4298)
+//!
+//! [`KernelConfig::known_top_level_fields`] and [`KernelConfig::detect_unknown_nested_fields`]
+//! used to be hand-maintained string lists. Every time a new field landed
+//! on `KernelConfig` (or any nested config struct), the lists silently
+//! drifted and `strict_config = true` rejected the new field as unknown.
+//!
+//! Both lists are now **derived at runtime from the JSON Schema that
+//! `schemars` emits for `KernelConfig`** (which sees every struct field,
+//! independent of `#[serde(skip_serializing_if = …)]`). Adding a field to
+//! any config struct automatically updates the allowlist on the next
+//! process start. A small static supplement (`MANUAL_TOP_LEVEL_ALIASES`)
+//! adds `#[serde(alias = …)]` aliases that JSON Schema does not surface,
+//! such as `listen_addr` → `api_listen` and `approval_policy` → `approval`.
 
 use super::types::*;
+use schemars::schema::{RootSchema, Schema, SchemaObject};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::OnceLock;
+
+/// Aliases honoured by `#[serde(alias = …)]` on `KernelConfig` fields.
+/// JSON Schema does not surface serde aliases, so the allowlist must add
+/// them by hand. Keep this list in sync with the alias attributes on the
+/// `KernelConfig` struct in `types.rs`.
+const MANUAL_TOP_LEVEL_ALIASES: &[&str] = &[
+    "listen_addr",     // alias for api_listen
+    "approval_policy", // alias for approval
+];
+
+/// Cached allowlists derived once from the schemars-emitted JSON Schema
+/// for `KernelConfig`. Built on first use and reused for the rest of the
+/// process.
+static ALLOWLISTS: OnceLock<DerivedAllowlists> = OnceLock::new();
+
+struct DerivedAllowlists {
+    /// Top-level field names (struct fields plus serde aliases),
+    /// sorted, deduplicated, and `'static`-leaked so the public API can
+    /// keep returning `&'static [&'static str]`.
+    top_level: Vec<&'static str>,
+    /// `field_path` → set of accepted child field names, for every
+    /// nested object schema reachable from `KernelConfig`. Keys are
+    /// dotted paths like `"memory"`, `"queue.concurrency"`. Values are
+    /// `'static`-leaked strings.
+    nested: BTreeMap<String, BTreeSet<&'static str>>,
+}
+
+fn allowlists() -> &'static DerivedAllowlists {
+    ALLOWLISTS.get_or_init(build_allowlists)
+}
+
+fn build_allowlists() -> DerivedAllowlists {
+    let root: RootSchema = schemars::schema_for!(KernelConfig);
+    let definitions = root.definitions.clone();
+
+    // --- Top level -------------------------------------------------
+    let mut top: BTreeSet<String> = root
+        .schema
+        .object
+        .as_ref()
+        .map(|obj| obj.properties.keys().cloned().collect())
+        .unwrap_or_default();
+    for alias in MANUAL_TOP_LEVEL_ALIASES {
+        top.insert((*alias).to_string());
+    }
+    let top_level: Vec<&'static str> = top
+        .into_iter()
+        .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
+        .collect();
+
+    // --- Nested paths ----------------------------------------------
+    // Walk every property of the root schema. For each property that
+    // resolves to an object schema (directly or via $ref), record its
+    // child field names under the dotted path, and recurse.
+    let mut nested: BTreeMap<String, BTreeSet<&'static str>> = BTreeMap::new();
+    if let Some(root_obj) = root.schema.object.as_ref() {
+        for (name, sub) in &root_obj.properties {
+            walk_nested(
+                name.clone(),
+                sub,
+                &definitions,
+                &mut nested,
+                &mut HashSet::new(),
+            );
+        }
+    }
+
+    DerivedAllowlists { top_level, nested }
+}
+
+/// Resolve a `Schema` to its underlying `SchemaObject`, following a
+/// single level of `$ref` into `definitions` and unwrapping the common
+/// `Option<T>` shape that schemars emits as `{ "anyOf": [T, null] }` or
+/// `{ "type": ["object","null"] }`.
+fn resolve<'a>(
+    schema: &'a Schema,
+    defs: &'a schemars::Map<String, Schema>,
+) -> Option<&'a SchemaObject> {
+    let obj = match schema {
+        Schema::Object(o) => o,
+        Schema::Bool(_) => return None,
+    };
+    if let Some(reference) = obj.reference.as_ref() {
+        let def_name = reference.strip_prefix("#/definitions/")?;
+        let def = defs.get(def_name)?;
+        return resolve(def, defs);
+    }
+    // Option<T> → anyOf: [T, null] — drill into the non-null branch.
+    if let Some(sub) = obj.subschemas.as_ref() {
+        for branch in sub
+            .any_of
+            .iter()
+            .chain(sub.one_of.iter())
+            .chain(sub.all_of.iter())
+            .flatten()
+        {
+            if let Some(resolved) = resolve(branch, defs) {
+                if resolved.object.is_some() {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+    Some(obj)
+}
+
+fn walk_nested(
+    path: String,
+    schema: &Schema,
+    defs: &schemars::Map<String, Schema>,
+    out: &mut BTreeMap<String, BTreeSet<&'static str>>,
+    visiting: &mut HashSet<String>,
+) {
+    // Prevent unbounded recursion through self-referential definitions.
+    if !visiting.insert(path.clone()) {
+        return;
+    }
+    let Some(resolved) = resolve(schema, defs) else {
+        visiting.remove(&path);
+        return;
+    };
+    let Some(obj) = resolved.object.as_ref() else {
+        visiting.remove(&path);
+        return;
+    };
+    // Skip map-shaped objects (`additional_properties` set, no concrete
+    // `properties`): those are user-supplied keys, not struct fields.
+    if obj.properties.is_empty() {
+        visiting.remove(&path);
+        return;
+    }
+    let entry = out.entry(path.clone()).or_default();
+    for child in obj.properties.keys() {
+        let leaked: &'static str = Box::leak(child.clone().into_boxed_str());
+        entry.insert(leaked);
+    }
+    for (child_name, child_schema) in &obj.properties {
+        let child_path = format!("{path}.{child_name}");
+        walk_nested(child_path, child_schema, defs, out, visiting);
+    }
+    visiting.remove(&path);
+}
 
 impl KernelConfig {
+    /// Top-level field names accepted by `KernelConfig` (including serde
+    /// aliases). Derived from the schemars-emitted JSON Schema; see the
+    /// module-level docs for the drift-prevention contract.
     pub fn known_top_level_fields() -> &'static [&'static str] {
-        &[
-            "config_version",
-            "home_dir",
-            "data_dir",
-            "log_level",
-            "api_listen",
-            "listen_addr", // alias for api_listen
-            "cors_origin",
-            "network_enabled",
-            "default_model",
-            "memory",
-            "network",
-            "channels",
-            "api_key",
-            "mode",
-            "language",
-            "users",
-            "mcp_servers",
-            "a2a",
-            "usage_footer",
-            "stable_prefix_mode",
-            "web",
-            "fallback_providers",
-            "browser",
-            "extensions",
-            "vault",
-            "workspaces_dir",
-            "media",
-            "links",
-            "reload",
-            "webhook_triggers",
-            "triggers",
-            "approval",
-            "approval_policy", // alias for approval
-            "notification",
-            "max_cron_jobs",
-            "include",
-            "exec_policy",
-            "bindings",
-            "broadcast",
-            "auto_reply",
-            "canvas",
-            "tts",
-            "docker",
-            "pairing",
-            "auth_profiles",
-            "thinking",
-            "budget",
-            "provider_urls",
-            "provider_proxy_urls",
-            "provider_regions",
-            "provider_api_keys",
-            "vertex_ai",
-            "oauth",
-            "sidecar_channels",
-            "proxy",
-            "prompt_caching",
-            "session",
-            "queue",
-            "external_auth",
-            "tool_policy",
-            "proactive_memory",
-            "context_engine",
-            "audit",
-            "health_check",
-            "plugins",
-            "strict_config",
-            "dashboard_user",
-            "dashboard_pass",
-            "dashboard_pass_hash",
-            "log_dir",
-            "inbox",
-            "azure_openai",
-            "heartbeat",
-            "privacy",
-            "prompt_intelligence",
-            "qwen_code_path",
-            "sanitize",
-            "telemetry",
-            "update_channel",
-            "skills",
-            "compaction",
-            "registry",
-            "rate_limit",
-            "tool_timeout_secs",
-            "tool_timeouts",
-            "cron_session_max_tokens",
-            "cron_session_max_messages",
-            "max_upload_size_bytes",
-            "max_concurrent_bg_llm",
-            "max_agent_call_depth",
-            "max_request_body_bytes",
-            "terminal",
-            "task_board",
-            "auto_dream",
-            "max_history_messages",
-            "default_routing",
-        ]
+        &allowlists().top_level
     }
 
     /// Detect unknown top-level keys in a raw TOML value.
@@ -109,8 +175,7 @@ impl KernelConfig {
     /// Returns a list of field names that appear at the top level of the
     /// config file but are not recognised by `KernelConfig`.
     pub fn detect_unknown_fields(raw: &toml::Value) -> Vec<String> {
-        let known: std::collections::HashSet<&str> =
-            Self::known_top_level_fields().iter().copied().collect();
+        let known: HashSet<&str> = Self::known_top_level_fields().iter().copied().collect();
         let mut unknown = Vec::new();
         if let toml::Value::Table(tbl) = raw {
             for key in tbl.keys() {
@@ -123,91 +188,25 @@ impl KernelConfig {
         unknown
     }
 
-    /// Detect unknown keys in selected nested config sections (#3460).
+    /// Detect unknown keys in nested config sections (#3460, #4298).
     ///
-    /// Top-level [`detect_unknown_fields`] only catches typos at the root
-    /// of `config.toml`. Sub-sections like `[memory]`, `[queue.concurrency]`
-    /// or `[budget]` were silently accepted with `#[serde(default)]`, so a
-    /// typo such as `decay_ratee = 0.1` was deserialised into the
-    /// section's `Default` and the operator's intent never reached the
-    /// runtime.
+    /// Top-level [`detect_unknown_fields`] only catches typos at the
+    /// root of `config.toml`. Sub-sections like `[memory]`,
+    /// `[queue.concurrency]` or `[budget]` are silently accepted with
+    /// `#[serde(default)]`, so a typo such as `decay_ratee = 0.1`
+    /// deserialises into the section's `Default` and the operator's
+    /// intent never reaches the runtime.
     ///
-    /// Each entry returns a dotted path (e.g. `"memory.decay_ratee"`) so
-    /// the warning is actionable. Returned in deterministic sorted order.
+    /// The per-section allowlist is **derived from the schemars-emitted
+    /// JSON Schema**, so adding a field to any nested config struct
+    /// automatically updates this check on the next process start.
+    /// Each entry returns a dotted path (e.g. `"memory.decay_ratee"`)
+    /// so the warning is actionable. Returned in deterministic sorted
+    /// order.
     pub fn detect_unknown_nested_fields(raw: &toml::Value) -> Vec<String> {
-        // (section path, list of recognised keys)
-        let sections: &[(&str, &[&str])] = &[
-            (
-                "memory",
-                &[
-                    "sqlite_path",
-                    "embedding_model",
-                    "consolidation_threshold",
-                    "decay_rate",
-                    "embedding_provider",
-                    "embedding_api_key_env",
-                    "embedding_dimensions",
-                    "consolidation_interval_hours",
-                    "fts_only",
-                    "decay",
-                    "chunking",
-                    "vector_backend",
-                    "vector_store_url",
-                    "soft_delete_retention_days",
-                ],
-            ),
-            (
-                "proactive_memory",
-                &[
-                    "enabled",
-                    "auto_memorize",
-                    "auto_retrieve",
-                    "max_retrieve",
-                    "extraction_threshold",
-                    "extraction_model",
-                    "extract_categories",
-                    "session_ttl_hours",
-                    "duplicate_threshold",
-                    "confidence_decay_rate",
-                    "max_memories_per_agent",
-                ],
-            ),
-            (
-                "budget",
-                &[
-                    "max_hourly_usd",
-                    "max_daily_usd",
-                    "max_monthly_usd",
-                    "alert_threshold",
-                    "default_max_llm_tokens_per_hour",
-                    "providers",
-                ],
-            ),
-            (
-                "queue.concurrency",
-                &[
-                    "main_lane",
-                    "cron_lane",
-                    "subagent_lane",
-                    "trigger_lane",
-                    "default_per_agent",
-                    "trigger_fire_timeout_secs",
-                ],
-            ),
-            (
-                "triggers",
-                &[
-                    "cooldown_secs",
-                    "max_per_event",
-                    "max_depth",
-                    "max_workflow_secs",
-                    "session_mode",
-                ],
-            ),
-        ];
-
+        let nested = &allowlists().nested;
         let mut unknown = Vec::new();
-        for (path, known) in sections {
+        for (path, known) in nested {
             // Walk the dotted path through the toml tree.
             let mut node: Option<&toml::Value> = Some(raw);
             for segment in path.split('.') {
@@ -216,9 +215,8 @@ impl KernelConfig {
             let Some(toml::Value::Table(tbl)) = node else {
                 continue;
             };
-            let known_set: std::collections::HashSet<&str> = known.iter().copied().collect();
             for key in tbl.keys() {
-                if !known_set.contains(key.as_str()) {
+                if !known.contains(key.as_str()) {
                     unknown.push(format!("{path}.{key}"));
                 }
             }
