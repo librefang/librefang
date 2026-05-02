@@ -4227,6 +4227,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots",
+ "wiremock",
  "zeroize",
 ]
 

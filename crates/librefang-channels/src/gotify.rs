@@ -433,4 +433,185 @@ mod tests {
     fn test_gotify_parse_invalid_json() {
         assert!(GotifyAdapter::parse_ws_message("not json").is_none());
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // These tests use `wiremock` to stand up a local HTTP server in place of
+    // a real Gotify instance, then assert the exact request shape produced by
+    // `GotifyAdapter::send` / `api_send_message`. Because `server_url` is a
+    // plain field (no hardcoded const), pointing the adapter at the mock is
+    // a one-liner.
+    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn dummy_user() -> ChannelUser {
+        ChannelUser {
+            platform_id: "app-1".to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn send_posts_to_message_endpoint_with_app_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .and(query_param("token", "app-tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GotifyAdapter::new(server.uri(), "app-tok".into(), "client-tok".into());
+        adapter
+            .send(&dummy_user(), ChannelContent::Text("hello".into()))
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn send_body_has_title_message_priority() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "title": "LibreFang",
+                "message": "ping",
+                "priority": 5,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 2})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GotifyAdapter::new(server.uri(), "tok".into(), "ctok".into());
+        adapter
+            .send(&dummy_user(), ChannelContent::Text("ping".into()))
+            .await
+            .expect("send must succeed");
+    }
+
+    #[tokio::test]
+    async fn send_strips_trailing_slash_in_server_url() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Append a slash to the mock URI; adapter should normalize it so we
+        // do not POST to `//message`.
+        let url_with_slash = format!("{}/", server.uri());
+        let adapter = GotifyAdapter::new(url_with_slash, "tok".into(), "ctok".into());
+        adapter
+            .send(&dummy_user(), ChannelContent::Text("hi".into()))
+            .await
+            .expect("send must succeed");
+    }
+
+    #[tokio::test]
+    async fn send_non_text_content_uses_placeholder_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .and(body_json(serde_json::json!({
+                "title": "LibreFang",
+                "message": "(Unsupported content type)",
+                "priority": 5,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 3})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GotifyAdapter::new(server.uri(), "tok".into(), "ctok".into());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed");
+    }
+
+    #[tokio::test]
+    async fn send_returns_error_on_http_500() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GotifyAdapter::new(server.uri(), "tok".into(), "ctok".into());
+        let err = adapter
+            .send(&dummy_user(), ChannelContent::Text("nope".into()))
+            .await
+            .expect_err("send must propagate server error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("500"),
+            "error should mention status, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_returns_error_on_http_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad token"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = GotifyAdapter::new(server.uri(), "wrong".into(), "ctok".into());
+        let err = adapter
+            .send(&dummy_user(), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("401 must surface as Err");
+        assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn send_typing_is_noop_and_makes_no_http_call() {
+        let server = MockServer::start().await;
+        // No mocks mounted — any HTTP call would 404 the wiremock default and
+        // we'd see it in `received_requests`.
+        let adapter = GotifyAdapter::new(server.uri(), "tok".into(), "ctok".into());
+        adapter
+            .send_typing(&dummy_user())
+            .await
+            .expect("send_typing is infallible for gotify");
+        let recv = server.received_requests().await.unwrap_or_default();
+        assert!(recv.is_empty(), "send_typing must not hit the network");
+    }
+
+    #[tokio::test]
+    async fn send_uses_app_token_not_client_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/message"))
+            .and(query_param("token", "APP"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // If the adapter accidentally swapped tokens we'd see token=CLIENT
+        // and wiremock would reject the request.
+        let adapter = GotifyAdapter::new(server.uri(), "APP".into(), "CLIENT".into());
+        adapter
+            .send(&dummy_user(), ChannelContent::Text("auth-check".into()))
+            .await
+            .expect("must use app token in send URL");
+    }
 }
