@@ -2603,8 +2603,14 @@ export async function decayMemories(): Promise<ApiActionResponse> {
 }
 
 export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<{ agents?: UsageByAgentItem[] }>("/api/usage");
-  return data.agents ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{agents}` shape during the transition so older daemons keep working.
+  const data = await get<{
+    items?: UsageByAgentItem[];
+    agents?: UsageByAgentItem[];
+    total?: number;
+  }>("/api/usage");
+  return data.items ?? data.agents ?? [];
 }
 
 export async function getUsageSummary(): Promise<UsageSummaryResponse> {

@@ -128,6 +128,11 @@ fn fmt_global_budget_diff(
 // ---------------------------------------------------------------------------
 
 /// GET /api/usage — Get per-agent usage statistics.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The
+/// per-agent rollup is materialized from the in-memory agent registry and
+/// returned in one page — `offset=0` and `limit=None` always.
 #[utoipa::path(
     get,
     path = "/api/usage",
@@ -136,7 +141,7 @@ fn fmt_global_budget_diff(
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
-    let agents: Vec<serde_json::Value> = state
+    let items: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
         .list()
@@ -158,8 +163,13 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
             })
         })
         .collect();
-
-    Json(serde_json::json!({"agents": agents}))
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
