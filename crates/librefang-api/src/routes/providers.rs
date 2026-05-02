@@ -1310,13 +1310,12 @@ pub async fn test_provider(
     // in-memory cache — users could start Ollama after LibreFang booted and
     // the dashboard would stay stuck on `local_offline` forever.
     if librefang_runtime::provider_health::is_local_provider(&name) {
-        let result = librefang_kernel::kernel::probe_and_update_local_provider(
-            &state.kernel,
-            &name,
-            &base_url,
-            false, // user-triggered test — don't escalate to warn!
-        )
-        .await;
+        let result = state
+            .kernel
+            .probe_local_provider(
+                &name, &base_url, false, // user-triggered test — don't escalate to warn!
+            )
+            .await;
         let latency = result.latency_ms as u128;
         state.provider_test_cache.insert(
             name.clone(),

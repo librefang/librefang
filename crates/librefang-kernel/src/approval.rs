@@ -994,6 +994,21 @@ impl ApprovalManager {
         Self::verify_totp_code_with_issuer(secret_base32, code, "LibreFang")
     }
 
+    /// Instance-method wrapper around `verify_totp_code_with_issuer`.
+    ///
+    /// Lets API-layer callers verify a TOTP code via
+    /// `kernel.approvals().verify_totp(...)` without reaching into the
+    /// `librefang_kernel::approval` module path directly (see #3744 — the
+    /// API crate should not import kernel-internal types).
+    pub fn verify_totp(
+        &self,
+        secret_base32: &str,
+        code: &str,
+        issuer: &str,
+    ) -> Result<bool, String> {
+        Self::verify_totp_code_with_issuer(secret_base32, code, issuer)
+    }
+
     /// Like `verify_totp_code` but uses the provided issuer label.
     pub fn verify_totp_code_with_issuer(
         secret_base32: &str,
@@ -1086,6 +1101,16 @@ impl ApprovalManager {
                 format!("{}-{}-{}-{}", &h[0..4], &h[4..8], &h[8..12], &h[12..16])
             })
             .collect()
+    }
+
+    /// Instance wrapper around [`Self::is_recovery_code_format`].
+    ///
+    /// Lets callers go through `state.kernel.approvals().recovery_code_format_matches(code)`
+    /// instead of importing `librefang_kernel::approval::ApprovalManager` directly,
+    /// preserving the `KernelHandle`-style boundary tracked in #3744. The static
+    /// helper is retained for back-compat with existing in-kernel callers.
+    pub fn recovery_code_format_matches(&self, code: &str) -> bool {
+        Self::is_recovery_code_format(code)
     }
 
     /// Check if a string matches any supported recovery code format.
@@ -2890,6 +2915,21 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_totp_instance_matches_static_helper() {
+        // The instance-method wrapper added for #3744 must agree with the
+        // existing static helper for the same inputs. Use a deliberately
+        // bogus code so both paths return Ok(false) without time dependency.
+        let mgr = make_manager_with_db();
+        let (secret, _uri, _qr) =
+            ApprovalManager::generate_totp_secret("LibreFang", "test").expect("totp secret");
+        let via_instance = mgr.verify_totp(&secret, "000000", "LibreFang");
+        let via_static =
+            ApprovalManager::verify_totp_code_with_issuer(&secret, "000000", "LibreFang");
+        assert_eq!(via_instance.is_ok(), via_static.is_ok());
+        assert_eq!(via_instance.unwrap_or(true), via_static.unwrap_or(false));
+    }
+
+    #[test]
     fn test_totp_replay_prevention_code_rejected_after_use() {
         let mgr = make_manager_with_db();
         mgr.record_totp_code_used("123456");
@@ -3483,5 +3523,31 @@ mod tests {
             s, TOTP_MAX_FAILURES,
             "exactly {TOTP_MAX_FAILURES} calls should succeed before lockout, got {s}"
         );
+    }
+
+    /// `recovery_code_format_matches` instance wrapper must agree with the
+    /// static `is_recovery_code_format` helper across new + old + invalid
+    /// formats. Lets `librefang-api` route handlers go through
+    /// `state.kernel.approvals()` instead of importing
+    /// `librefang_kernel::approval::ApprovalManager` directly (#3744).
+    #[test]
+    fn recovery_code_format_matches_agrees_with_static_helper() {
+        let m = ApprovalManager::new(ApprovalPolicy::default());
+        let cases = [
+            "abcd-ef01-2345-6789", // new format, valid hex
+            "ABCD-EF01-2345-6789", // new format, uppercase hex
+            "1234-5678",           // old format, valid digits
+            "abcd-efgh-2345-6789", // new format, invalid (g/h not hex)
+            "12345-6789",          // wrong dash position
+            "",                    // empty
+            "not-a-code",          // garbage
+        ];
+        for c in cases {
+            assert_eq!(
+                m.recovery_code_format_matches(c),
+                ApprovalManager::is_recovery_code_format(c),
+                "instance wrapper must mirror static helper for input {c:?}",
+            );
+        }
     }
 }

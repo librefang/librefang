@@ -129,10 +129,8 @@ fn fmt_global_budget_diff(
 
 /// GET /api/usage — Get per-agent usage statistics.
 ///
-/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-/// shape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The
-/// per-agent rollup is materialized from the in-memory agent registry and
-/// returned in one page — `offset=0` and `limit=None` always.
+/// The per-agent rollup is materialized from the in-memory agent registry
+/// and returned in one page — `offset=0` and `limit=None` always.
 #[utoipa::path(
     get,
     path = "/api/usage",

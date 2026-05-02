@@ -1886,9 +1886,7 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{workflows}` shape during the transition so older daemons keep
-  // working.
+  // Daemons may return legacy `{workflows}` — fall back for version skew.
   const data = await get<{
     items?: WorkflowItem[];
     workflows?: WorkflowItem[];
@@ -2658,8 +2656,7 @@ export async function decayMemories(): Promise<ApiActionResponse> {
 }
 
 export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{agents}` shape during the transition so older daemons keep working.
+  // Daemons may return legacy `{agents}` — fall back for version skew.
   const data = await get<{
     items?: UsageByAgentItem[];
     agents?: UsageByAgentItem[];
@@ -2911,8 +2908,7 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 }
 
 export async function listGoals(): Promise<GoalItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{goals}` shape during the transition so older daemons keep working.
+  // Daemons may return legacy `{goals}` — fall back for version skew.
   const data = await get<{
     items?: GoalItem[];
     goals?: GoalItem[];
@@ -3003,8 +2999,7 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 }
 
 export async function listPeers(): Promise<PeerItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{peers}` shape during the transition so older daemons keep working.
+  // Daemons may return legacy `{peers}` — fall back for version skew.
   const data = await get<{ items?: PeerItem[]; peers?: PeerItem[] }>(
     "/api/peers",
   );
