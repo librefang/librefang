@@ -63,7 +63,7 @@ impl std::str::FromStr for UserId {
 }
 
 /// Model routing configuration — auto-selects cheap/mid/expensive models by complexity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ModelRoutingConfig {
     /// Model to use for simple queries.
