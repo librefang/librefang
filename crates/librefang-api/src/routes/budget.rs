@@ -136,7 +136,7 @@ fn fmt_global_budget_diff(
 )]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = state.kernel.memory_substrate().usage();
-    let agents: Vec<serde_json::Value> = state
+    let items: Vec<serde_json::Value> = state
         .kernel
         .agent_registry()
         .list()
@@ -159,7 +159,16 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         })
         .collect();
 
-    Json(serde_json::json!({"agents": agents}))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // Per-agent usage is materialized from the in-memory agent registry in a
+    // single page, so offset=0 / limit=None.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
