@@ -338,11 +338,6 @@ export function useCreateExperiment() {
   });
 }
 
-// After #3832, the start/pause/complete endpoints return the post-mutation
-// `PromptExperiment`, so we patch the experiments-list cache for `agentId`
-// directly via `setQueryData` (eliminates a stale-read window before the
-// invalidate-driven refetch lands). The `invalidateQueries` calls remain as
-// a belt-and-suspenders guard for any concurrent server-side mutation.
 function patchExperimentInCache(
   qc: ReturnType<typeof useQueryClient>,
   agentId: string,

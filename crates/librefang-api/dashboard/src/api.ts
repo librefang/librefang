@@ -3225,8 +3225,6 @@ export async function createExperiment(agentId: string, experiment: Omit<PromptE
   return post<PromptExperiment>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`, experiment);
 }
 
-// Status-transition endpoints now return the post-mutation `PromptExperiment`
-// so callers can `setQueryData` directly without a follow-up GET. See #3832.
 export async function startExperiment(experimentId: string): Promise<PromptExperiment> {
   return post<PromptExperiment>(`/api/prompts/experiments/${encodeURIComponent(experimentId)}/start`, {});
 }

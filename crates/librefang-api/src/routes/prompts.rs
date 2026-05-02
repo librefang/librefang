@@ -203,12 +203,7 @@ async fn get_experiment(
     }
 }
 
-// Apply a status transition and return the post-mutation `PromptExperiment` so
-// callers (dashboard React Query hooks, SDK consumers) can `setQueryData`
-// directly instead of doing a follow-up GET. If the experiment vanished
-// between the status write and the snapshot read (narrow race — e.g. a
-// concurrent delete), fall back to the legacy `{"success": true}` ack so the
-// call still appears successful. Refs #3832.
+// Falls back to legacy ack if experiment was concurrently deleted between the status write and the read.
 async fn transition_experiment(
     state: &AppState,
     id: &str,
