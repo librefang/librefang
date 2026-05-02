@@ -9,7 +9,21 @@ import {
   updateHandSettings,
   sendHandMessage,
 } from "../http/client";
+import type { HandInstanceItem } from "../../api";
 import { agentKeys, handKeys, overviewKeys } from "../queries/keys";
+
+// #3832: pause/resume return the live HandInstanceItem. Patch the cached
+// active-hands list in place so consumers see the new status immediately,
+// then run the broad invalidation (covers agentKeys / overviewKeys derived
+// state).
+function patchActiveHandsCache(qc: QueryClient, updated: HandInstanceItem) {
+  qc.setQueryData<HandInstanceItem[]>(handKeys.active(), (prev) => {
+    if (!prev) return prev;
+    return prev.map((item) =>
+      item.instance_id === updated.instance_id ? { ...item, ...updated } : item,
+    );
+  });
+}
 
 // Schedule toggle/delete hooks that used to live here have been consolidated
 // into mutations/schedules.ts (useUpdateSchedule / useDeleteSchedule) so both
@@ -44,7 +58,10 @@ export function usePauseHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => pauseHand(id),
-    onSuccess: () => invalidateHandAndAgentCaches(qc),
+    onSuccess: (instance) => {
+      patchActiveHandsCache(qc, instance);
+      invalidateHandAndAgentCaches(qc);
+    },
   });
 }
 
@@ -52,7 +69,10 @@ export function useResumeHand() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => resumeHand(id),
-    onSuccess: () => invalidateHandAndAgentCaches(qc),
+    onSuccess: (instance) => {
+      patchActiveHandsCache(qc, instance);
+      invalidateHandAndAgentCaches(qc);
+    },
   });
 }
 
