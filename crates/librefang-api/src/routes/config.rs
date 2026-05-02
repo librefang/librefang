@@ -479,6 +479,44 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
+    // Budget consumption — surfaces existing metering counters so monitoring
+    // systems can alert when daily / hourly / monthly spend approaches the cap.
+    // Note: percentages are 0.0..1.0 fractions; multiply by 100 for %.
+    let budget = state
+        .kernel
+        .metering_ref()
+        .budget_status(&state.kernel.budget_config());
+
+    // LLM call latency aggregated across all models from the existing
+    // `usage_events.latency_ms` column. We expose total call count plus the
+    // worst-case (max) latency observed alongside the spend-weighted average,
+    // since per-call quantile data is not currently retained.
+    // Errors (4xx/5xx) are NOT surfaced — there is no error counter on
+    // usage_events today, so a partial subset is reported (see #3776).
+    let (llm_calls_total, llm_avg_latency_ms, llm_max_latency_ms) = match state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_model_performance()
+    {
+        Ok(rows) => {
+            let calls: u64 = rows.iter().map(|r| r.call_count).sum();
+            let max_latency: u64 = rows.iter().map(|r| r.max_latency_ms).max().unwrap_or(0);
+            // Call-weighted average across all models.
+            let weighted_sum: f64 = rows
+                .iter()
+                .map(|r| r.avg_latency_ms * r.call_count as f64)
+                .sum();
+            let avg = if calls > 0 {
+                weighted_sum / calls as f64
+            } else {
+                0.0
+            };
+            (calls, avg, max_latency)
+        }
+        Err(_) => (0, 0.0, 0),
+    };
+
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
@@ -497,6 +535,23 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "config_warnings": config_warnings,
         "event_bus": {
             "dropped_events": state.kernel.event_bus_ref().dropped_count(),
+        },
+        "budget": {
+            "hourly_spend_usd": budget.hourly_spend,
+            "hourly_limit_usd": budget.hourly_limit,
+            "hourly_percent": budget.hourly_pct,
+            "daily_spend_usd": budget.daily_spend,
+            "daily_limit_usd": budget.daily_limit,
+            "daily_percent": budget.daily_pct,
+            "monthly_spend_usd": budget.monthly_spend,
+            "monthly_limit_usd": budget.monthly_limit,
+            "monthly_percent": budget.monthly_pct,
+            "alert_threshold": budget.alert_threshold,
+        },
+        "llm": {
+            "calls_total": llm_calls_total,
+            "avg_latency_ms": llm_avg_latency_ms,
+            "max_latency_ms": llm_max_latency_ms,
         },
     }))
 }

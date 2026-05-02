@@ -282,6 +282,66 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_health_detail_exposes_budget_and_llm_metrics() {
+    // Build a minimal router with the authenticated `/api/health/detail`
+    // handler mounted directly so we can assert the JSON shape without
+    // navigating the auth middleware. Surfaces the new fields added for
+    // issue #3776: budget consumption + LLM call latency aggregates.
+    let test = TestAppState::with_builder(MockKernelBuilder::new());
+    let (state, _tmp, _) = test.into_parts();
+    state.kernel.set_self_handle();
+
+    let app = Router::new()
+        .route(
+            "/api/health/detail",
+            axum::routing::get(routes::health_detail),
+        )
+        .with_state(state.clone());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/health/detail")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Pre-existing fields must still be present.
+    assert!(body["uptime_seconds"].is_number());
+    assert!(body["event_bus"]["dropped_events"].is_number());
+
+    // New: budget consumption block (see #3776). Limits come from
+    // KernelConfig defaults; spend is 0 in a fresh test kernel.
+    let budget = &body["budget"];
+    assert!(budget["hourly_spend_usd"].is_number());
+    assert!(budget["hourly_limit_usd"].is_number());
+    assert!(budget["hourly_percent"].is_number());
+    assert!(budget["daily_spend_usd"].is_number());
+    assert!(budget["daily_limit_usd"].is_number());
+    assert!(budget["daily_percent"].is_number());
+    assert!(budget["monthly_spend_usd"].is_number());
+    assert!(budget["monthly_limit_usd"].is_number());
+    assert!(budget["monthly_percent"].is_number());
+    assert!(budget["alert_threshold"].is_number());
+    assert_eq!(budget["daily_spend_usd"].as_f64().unwrap(), 0.0);
+
+    // New: LLM latency aggregates from usage_events. No calls have been
+    // recorded against this kernel, so the aggregates are zero.
+    let llm = &body["llm"];
+    assert_eq!(llm["calls_total"].as_u64().unwrap(), 0);
+    assert_eq!(llm["avg_latency_ms"].as_f64().unwrap(), 0.0);
+    assert_eq!(llm["max_latency_ms"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_status_endpoint() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
