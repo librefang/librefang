@@ -982,14 +982,15 @@ pub async fn build_router(
         channel_bridge::start_channel_bridge(kernel.clone()).await;
 
     // Initialize Prometheus metrics recorder if telemetry feature is enabled
-    // and the config has prometheus_enabled = true.
+    // and the config has prometheus_enabled = true. The handle is parked in a
+    // module-local `OnceLock` inside `crate::telemetry`; the `/api/metrics`
+    // route fetches it via `crate::telemetry::prometheus_handle()` rather than
+    // carrying a redundant copy on `AppState`.
     #[cfg(feature = "telemetry")]
-    let prom_handle = if kernel.config_ref().telemetry.prometheus_enabled {
+    if kernel.config_ref().telemetry.prometheus_enabled {
         info!("Initializing Prometheus metrics recorder");
-        Some(crate::telemetry::init_prometheus())
-    } else {
-        None
-    };
+        let _ = crate::telemetry::init_prometheus();
+    }
 
     let channels_config = kernel.config_ref().channels.clone();
     let persisted_sessions = load_sessions(kernel.home_dir());
@@ -1042,8 +1043,6 @@ pub async fn build_router(
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
         gcra_limiter: gcra_limiter_arc.clone(),
-        #[cfg(feature = "telemetry")]
-        prometheus_handle: prom_handle,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.

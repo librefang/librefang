@@ -157,7 +157,4 @@ pub struct AppState {
     /// task can call `retain_recent()` to evict stale per-IP entries and prevent
     /// the DashMap from growing unbounded over a long-running daemon. See #3668.
     pub gcra_limiter: Arc<KeyedRateLimiter>,
-    /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
-    #[cfg(feature = "telemetry")]
-    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
