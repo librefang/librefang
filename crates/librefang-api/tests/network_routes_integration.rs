@@ -242,10 +242,14 @@ async fn network_status_disabled_when_secret_empty() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn network_trusted_peers_empty_when_no_peer_node() {
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/network/trusted-peers", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["peers"], serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["offset"], 0);
+    assert!(body["limit"].is_null());
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +278,19 @@ async fn comms_topology_returns_nodes_and_edges_arrays() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn comms_events_returns_array_with_default_limit() {
+async fn comms_events_returns_paginated_envelope_with_default_limit() {
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/comms/events", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.is_array(), "events response must be an array: {body}");
+    // #3842 canonical envelope: PaginatedResponse{items,total,offset,limit}.
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("events response must have items array: {body}"));
+    let total = body.get("total").and_then(|v| v.as_u64()).expect("total");
+    assert_eq!(total as usize, items.len(), "total must match items length");
+    assert_eq!(body.get("offset").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(body.get("limit").and_then(|v| v.as_u64()), Some(100));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -286,13 +298,17 @@ async fn comms_events_honours_explicit_limit_query() {
     let h = boot();
     let (status, body) = json_request(&h, Method::GET, "/api/comms/events?limit=5", None).await;
     assert_eq!(status, StatusCode::OK);
-    let arr = body.as_array().expect("array");
+    let items = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("events response must have items array: {body}"));
     // Empty kernel has no events; the limit cap simply must not over-yield.
     assert!(
-        arr.len() <= 5,
+        items.len() <= 5,
         "limit=5 must not be exceeded, got {} entries: {body}",
-        arr.len()
+        items.len()
     );
+    assert_eq!(body.get("limit").and_then(|v| v.as_u64()), Some(5));
 }
 
 // ---------------------------------------------------------------------------

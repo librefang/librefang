@@ -2561,15 +2561,19 @@ pub async fn install_hand(
     ) {
         Ok(def) => {
             librefang_kernel::router::invalidate_hand_route_cache();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
-                    "category": format!("{:?}", def.category),
-                })),
-            )
+            // Return the full canonical `HandDefinition` so dashboard /
+            // SDK callers can `setQueryData` on the hands list directly
+            // instead of doing a follow-up GET. The previous {id, name,
+            // description, category} subset forced a refetch round-trip
+            // and was inconsistent with how list_hands serializes hand
+            // metadata. Refs #3832.
+            //
+            // We materialise as `serde_json::Value` so the OK arm and the
+            // Err arm (`ApiErrorResponse::into_json_tuple()`) line up on
+            // `Json<serde_json::Value>` — the tuple's match arms must
+            // share a body type.
+            let body = serde_json::to_value(&def).unwrap_or(serde_json::Value::Null);
+            (StatusCode::OK, Json(body))
         }
         Err(e) => ApiErrorResponse::bad_request(format!("{e}")).into_json_tuple(),
     }

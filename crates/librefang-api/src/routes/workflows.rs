@@ -1422,19 +1422,29 @@ fn cron_job_to_schedule_json(job: &librefang_types::scheduler::CronJob) -> serde
 }
 
 /// GET /api/schedules — List all scheduled jobs.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// (#3842) so the generated SDK can share one list-response type across all
+/// list endpoints. The legacy `schedules` key was renamed to `items`; offset
+/// is always 0 and limit is null because this endpoint returns the full set.
 #[utoipa::path(
     get,
     path = "/api/schedules",
     tag = "workflows",
     responses(
-        (status = 200, description = "List schedules", body = Vec<serde_json::Value>)
+        (status = 200, description = "List schedules", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let jobs = state.kernel.cron().list_all_jobs();
     let schedules: Vec<serde_json::Value> = jobs.iter().map(cron_job_to_schedule_json).collect();
     let total = schedules.len();
-    Json(serde_json::json!({"schedules": schedules, "total": total}))
+    Json(crate::types::PaginatedResponse {
+        items: schedules,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/schedules/{id} — Get a specific schedule by ID.

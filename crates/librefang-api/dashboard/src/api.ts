@@ -2007,8 +2007,12 @@ export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiAct
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {
-  const data = await get<{ schedules?: ScheduleItem[]; total?: number }>("/api/schedules");
-  return data.schedules ?? [];
+  // #3842 canonical envelope: `items`. `schedules` retained as a transitional
+  // fallback for any older daemon a dashboard pin might be talking to.
+  const data = await get<{ items?: ScheduleItem[]; schedules?: ScheduleItem[]; total?: number }>(
+    "/api/schedules",
+  );
+  return data.items ?? data.schedules ?? [];
 }
 
 export async function createSchedule(payload: {
@@ -2715,7 +2719,13 @@ export async function getCommsTopology(): Promise<CommsTopology> {
 
 export async function listCommsEvents(limit = 200): Promise<CommsEventItem[]> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200;
-  return get<CommsEventItem[]>(`/api/comms/events?limit=${encodeURIComponent(String(n))}`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<CommsEventItem[] | { items?: CommsEventItem[] }>(
+    `/api/comms/events?limit=${encodeURIComponent(String(n))}`,
+  );
+  if (Array.isArray(data)) return data;
+  return data.items ?? [];
 }
 
 export async function sendCommsMessage(payload: {
@@ -2996,10 +3006,12 @@ export async function listPeers(): Promise<PeerItem[]> {
 }
 
 export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
-  const data = await get<{ peers?: TrustedPeerItem[] }>(
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{peers}` shape during the transition so older daemons keep working.
+  const data = await get<{ items?: TrustedPeerItem[]; peers?: TrustedPeerItem[] }>(
     "/api/network/trusted-peers",
   );
-  return data.peers ?? [];
+  return data.items ?? data.peers ?? [];
 }
 
 export async function getPeerDetail(peerId: string): Promise<PeerItem> {
