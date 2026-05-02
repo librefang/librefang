@@ -207,4 +207,50 @@ describe("OverviewPage", () => {
       screen.getByRole("heading", { name: "overview.setup_title" }),
     ).toBeInTheDocument();
   });
+
+  // Bug #3849: health-status pill flips silently on every snapshot poll.
+  // Wrap text node in aria-live=polite so SR users hear ok ↔ degraded.
+  it("wraps the health-status pill text in an aria-live=polite region", () => {
+    useDashboardSnapshotMock.mockReturnValue({
+      data: {
+        status: {
+          active_agent_count: 1,
+          agent_count: 1,
+          uptime_seconds: 60,
+          session_count: 1,
+          config_exists: true,
+          hostname: "node-test",
+          version: "2026.4.27",
+        },
+        providers: [{ id: "openai", auth_status: "ok" }],
+        channels: [],
+        agents: [
+          { id: "a1", name: "alpha", state: "running", model_name: "gpt-4.1" },
+        ],
+        skillCount: 0,
+        workflowCount: 0,
+        health: { status: "degraded", checks: [] },
+      },
+      isLoading: false,
+      isFetching: false,
+      isError: false,
+      dataUpdatedAt: 0,
+      refetch: vi.fn(),
+    });
+    useVersionInfoMock.mockReturnValue({ data: undefined, isLoading: false });
+
+    renderPage();
+
+    // Both pills (hero + Health column) should render their text inside an
+    // aria-live=polite region so background snapshot polling announces flips.
+    const heroDegraded = screen.getByText("degraded");
+    const live1 = heroDegraded.closest('[aria-live="polite"]');
+    expect(live1).not.toBeNull();
+    expect(live1?.getAttribute("aria-atomic")).toBe("true");
+
+    const columnDegraded = screen.getByText("DEGRADED");
+    const live2 = columnDegraded.closest('[aria-live="polite"]');
+    expect(live2).not.toBeNull();
+    expect(live2?.getAttribute("aria-atomic")).toBe("true");
+  });
 });
