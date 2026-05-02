@@ -369,7 +369,17 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a randomly generated session token with expiration metadata.
-async fn dashboard_login(
+#[utoipa::path(
+    post,
+    path = "/api/auth/dashboard-login",
+    tag = "auth",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = serde_json::Value),
+        (status = 401, description = "Invalid username, password, or TOTP code")
+    )
+)]
+pub(crate) async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -540,7 +550,15 @@ async fn dashboard_login(
 }
 
 /// Check what auth mode the dashboard needs.
-async fn dashboard_auth_check(
+#[utoipa::path(
+    get,
+    path = "/api/auth/dashboard-check",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = serde_json::Value)
+    )
+)]
+pub(crate) async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
     let cfg = state.kernel.config_ref();
@@ -589,7 +607,15 @@ async fn dashboard_auth_check(
 /// Accepts the token via the `librefang_session` cookie, `Authorization:
 /// Bearer ...`, or `X-API-Key`. Always clears the cookie client-side so a
 /// caller who already lost their token can still wipe it locally.
-async fn dashboard_logout(
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Session invalidated and cookie cleared", body = serde_json::Value)
+    )
+)]
+pub(crate) async fn dashboard_logout(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
@@ -645,13 +671,13 @@ async fn dashboard_logout(
 }
 
 /// Request body for POST /api/auth/change-password.
-#[derive(serde::Deserialize)]
-struct ChangePasswordRequest {
-    current_password: String,
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub(crate) struct ChangePasswordRequest {
+    pub current_password: String,
     /// New password — optional, omit to keep the current password.
-    new_password: Option<String>,
+    pub new_password: Option<String>,
     /// New username — optional, omit to keep the current username.
-    new_username: Option<String>,
+    pub new_username: Option<String>,
 }
 
 /// Change the dashboard password and/or username.
@@ -659,7 +685,18 @@ struct ChangePasswordRequest {
 /// Verifies the current password, then updates whichever credentials are
 /// provided in the request body. At least one of `new_password` or
 /// `new_username` must be non-empty. All existing sessions are invalidated on success.
-async fn change_password(
+#[utoipa::path(
+    post,
+    path = "/api/auth/change-password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Credentials updated and existing sessions invalidated", body = serde_json::Value),
+        (status = 400, description = "Missing required fields or password too short"),
+        (status = 401, description = "Current password is incorrect")
+    )
+)]
+pub(crate) async fn change_password(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<ChangePasswordRequest>,
 ) -> axum::response::Response {

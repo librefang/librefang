@@ -450,7 +450,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     // Load cron jobs to find workflow-bound schedules
     let all_cron_jobs = state.kernel.cron().list_all_jobs();
 
-    let list: Vec<serde_json::Value> = workflows
+    let items: Vec<serde_json::Value> = workflows
         .iter()
         .map(|w| {
             let wid = w.id.to_string();
@@ -498,7 +498,16 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    Json(serde_json::json!({ "workflows": list }))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // Workflows are loaded from the engine in a single page, so offset=0 /
+    // limit=None.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.
