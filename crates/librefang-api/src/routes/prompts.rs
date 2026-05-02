@@ -135,11 +135,18 @@ async fn activate_prompt_version(
                 .into_response()
         }
     };
-    match state.kernel.set_active_prompt_version(&id, agent_id) {
-        Ok(_) => Json(serde_json::json!({"success": true})).into_response(),
-        Err(e) => ApiErrorResponse::internal(e)
+    if let Err(e) = state.kernel.set_active_prompt_version(&id, agent_id) {
+        return ApiErrorResponse::internal(e)
             .into_json_tuple()
-            .into_response(),
+            .into_response();
+    }
+    // Read back the activated version so the caller can patch caches in place
+    // without an extra round-trip. If the version vanished between write and
+    // read (narrow race — concurrent delete), fall back to the legacy ack
+    // envelope so the activation still appears successful.
+    match state.kernel.get_prompt_version(&id) {
+        Ok(version) => Json(version).into_response(),
+        Err(_) => Json(serde_json::json!({"success": true})).into_response(),
     }
 }
 

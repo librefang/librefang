@@ -3265,8 +3265,8 @@ export async function deletePromptVersion(versionId: string): Promise<ApiActionR
   return del<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}`);
 }
 
-export async function activatePromptVersion(versionId: string, agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
+export async function activatePromptVersion(versionId: string, agentId: string): Promise<PromptVersion> {
+  return post<PromptVersion>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
 }
 
 export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
