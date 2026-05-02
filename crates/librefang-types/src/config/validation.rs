@@ -100,6 +100,7 @@ impl KernelConfig {
             "task_board",
             "auto_dream",
             "max_history_messages",
+            "default_routing",
         ]
     }
 

@@ -2560,6 +2560,13 @@ pub struct KernelConfig {
     /// at runtime with a warning log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_history_messages: Option<usize>,
+    /// Kernel-wide Smart Model Router defaults applied to any agent whose
+    /// `agent.toml` does not set its own `[routing]` block. The `init` wizard
+    /// writes user-selected tier models here under `[default_routing]` so the
+    /// chosen routing actually reaches the kernel — see issue #4466. Per-agent
+    /// `routing` always wins when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_routing: Option<crate::agent::ModelRoutingConfig>,
     /// Default LLM provider configuration.
     pub default_model: DefaultModelConfig,
     /// Memory substrate configuration.
@@ -4745,6 +4752,7 @@ impl Default for KernelConfig {
             network_enabled: false,
             agent_max_iterations: None,
             max_history_messages: None,
+            default_routing: None,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
             network: NetworkConfig::default(),
