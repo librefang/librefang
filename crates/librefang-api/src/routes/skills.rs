@@ -3460,7 +3460,7 @@ fn serialize_mcp_transport(
     path = "/api/mcp/taint-rules",
     tag = "mcp",
     responses(
-        (status = 200, description = "List configured named taint rule sets", body = crate::types::JsonObject)
+        (status = 200, description = "List configured named taint rule sets", body = crate::types::JsonArray)
     )
 )]
 pub async fn list_mcp_taint_rules(State(state): State<Arc<AppState>>) -> impl IntoResponse {

@@ -3471,7 +3471,7 @@ pub async fn stop_agent(
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "List of in-flight sessions for the agent", body = crate::types::JsonObject)
+        (status = 200, description = "List of in-flight sessions for the agent", body = crate::types::JsonArray)
     )
 )]
 pub async fn list_agent_runtime(
