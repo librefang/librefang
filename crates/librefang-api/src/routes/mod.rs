@@ -14,6 +14,7 @@
 #![allow(ambiguous_glob_reexports)]
 
 pub mod agents;
+pub mod approvals;
 pub mod audit;
 pub mod authz;
 pub mod auto_dream;
@@ -46,6 +47,7 @@ pub mod workflows;
 // warning, but `router()` is only accessed via qualified paths (e.g.
 // `routes::agents::router()`), so there is no actual conflict.
 pub use agents::*;
+pub use approvals::*;
 pub use audit::*;
 pub use authz::*;
 pub use auto_dream::*;
