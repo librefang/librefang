@@ -23,7 +23,9 @@ import {
   completeExperiment,
   resolveApproval,
   uploadAgentFile,
+  sendAgentMessage,
 } from "../http/client";
+import type { PromptExperiment, SendAgentMessageOptions } from "../../api";
 import { agentKeys, approvalKeys, handKeys, overviewKeys, sessionKeys } from "../queries/keys";
 
 /**
@@ -349,14 +351,29 @@ export function useCreateExperiment() {
   });
 }
 
+// After #3832, the start/pause/complete endpoints return the post-mutation
+// `PromptExperiment`, so we patch the experiments-list cache for `agentId`
+// directly via `setQueryData` (eliminates a stale-read window before the
+// invalidate-driven refetch lands). The `invalidateQueries` calls remain as
+// a belt-and-suspenders guard for any concurrent server-side mutation.
+function patchExperimentInCache(
+  qc: ReturnType<typeof useQueryClient>,
+  agentId: string,
+  updated: PromptExperiment,
+) {
+  qc.setQueryData<PromptExperiment[] | undefined>(
+    agentKeys.experiments(agentId),
+    (prev) => prev?.map((e) => (e.id === updated.id ? updated : e)),
+  );
+}
+
 export function useStartExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       startExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
@@ -366,11 +383,10 @@ export function useStartExperiment() {
 export function usePauseExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       pauseExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
@@ -380,11 +396,10 @@ export function usePauseExperiment() {
 export function useCompleteExperiment() {
   const qc = useQueryClient();
   return useMutation({
-    // agentId aliased to _agentId so it's available as variables.agentId in
-    // onSuccess for targeted invalidation, but not passed to the API call.
     mutationFn: ({ experimentId, agentId: _agentId }: { experimentId: string; agentId: string }) =>
       completeExperiment(experimentId),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      patchExperimentInCache(qc, variables.agentId, data);
       qc.invalidateQueries({ queryKey: agentKeys.experiments(variables.agentId) });
       qc.invalidateQueries({ queryKey: agentKeys.experimentMetrics(variables.experimentId) });
     },
@@ -405,6 +420,43 @@ export function useUploadAgentFile() {
   return useMutation({
     mutationFn: ({ agentId, file }: { agentId: string; file: File }) =>
       uploadAgentFile(agentId, file),
+  });
+}
+
+/**
+ * POST /agents/{id}/message — imperative HTTP send used by ChatPage as the
+ * fallback when WebSocket streaming is unavailable. Invalidates the cached
+ * session snapshot so a re-mount/re-load reads the persisted history that
+ * now includes the just-completed turn; also invalidates per-agent stats
+ * (token counts / costs are surfaced there) and the global usage budget so
+ * the topbar reflects spend without waiting for the next poll.
+ *
+ * The agent list itself is intentionally NOT invalidated — sending a chat
+ * message doesn't change list-row projections, and refetching the list on
+ * every send would be noisy.
+ */
+export function useSendAgentMessage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentId,
+      message,
+      options,
+    }: {
+      agentId: string;
+      message: string;
+      options?: SendAgentMessageOptions;
+    }) => sendAgentMessage(agentId, message, options),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({
+        queryKey: agentKeys.session(
+          variables.agentId,
+          variables.options?.session_id ?? null,
+        ),
+      });
+      qc.invalidateQueries({ queryKey: agentKeys.sessions(variables.agentId) });
+      qc.invalidateQueries({ queryKey: agentKeys.stats(variables.agentId) });
+    },
   });
 }
 

@@ -32,7 +32,6 @@ net, not your plan.
 - Daemon launches: `librefang start`, `target/{debug,release}/librefang start|daemon`
   (port 4545 contention with the user's session — Live Integration Testing is human-only)
 - `cargo add` / `cargo remove` / `cargo upgrade` (deps need explicit user OK)
-- `gh pr merge` and `gh pr merge --admin` (publish-level + branch-protection bypass)
 
 `session-start-worktree-check.sh` (SessionStart) emits a banner telling
 the model whether the session started in the main tree or a linked worktree,
@@ -43,8 +42,12 @@ and warns if `core.hooksPath` hasn't been pointed at `.githooks/`.
 These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
-- `pre-commit` — runs `cargo fmt --check` on staged Rust files; conditionally
-  regenerates `openapi.json` and SDKs when route signatures change.
+- `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
+  duplicate-`[Unreleased]` guard; `detect-secrets` scan against
+  `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
+- `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
+  OpenAPI / SDK drift detection — fails the push if `openapi.json` or
+  generated SDKs are stale. Expected 30-90s on a warm cache.
 - `commit-msg` — rejects commit messages containing Claude / Anthropic
   attribution (catches heredocs and `git commit -F file` that the PreToolUse
   Bash hook cannot see).

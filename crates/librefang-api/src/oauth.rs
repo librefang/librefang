@@ -412,7 +412,7 @@ impl TokenStore {
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
 
 /// GET /api/auth/providers — List available authentication providers.
-#[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = crate::types::JsonObject)))]
 pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_snapshot();
     let ext_auth = &cfg.external_auth;
@@ -601,7 +601,7 @@ struct CallbackUser {
 }
 
 /// GET /api/auth/callback — Handle the OAuth2 authorization code callback (browser redirect).
-#[utoipa::path(get, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback — completes login flow", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback — completes login flow", body = crate::types::JsonObject)))]
 pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CallbackQuery>,
@@ -672,7 +672,7 @@ pub async fn auth_callback(
 }
 
 /// POST /api/auth/callback — Handle the OAuth2 callback (programmatic clients).
-#[utoipa::path(post, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback (POST) — completes login flow", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback (POST) — completes login flow", body = crate::types::JsonObject)))]
 pub async fn auth_callback_post(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CallbackBody>,
@@ -1080,7 +1080,7 @@ async fn handle_code_exchange(
 ///
 /// If a valid JWT is in the Authorization header and JWKS validation succeeds,
 /// returns the decoded claims. Otherwise falls back to provider userinfo endpoint.
-#[utoipa::path(get, path = "/api/auth/userinfo", tag = "auth", responses((status = 200, description = "Get authenticated user info", body = serde_json::Value), (status = 401, description = "Not authenticated")))]
+#[utoipa::path(get, path = "/api/auth/userinfo", tag = "auth", responses((status = 200, description = "Get authenticated user info", body = crate::types::JsonObject), (status = 401, description = "Not authenticated")))]
 pub async fn auth_userinfo(
     State(state): State<Arc<AppState>>,
     request: axum::http::Request<axum::body::Body>,
@@ -1172,7 +1172,7 @@ pub struct IntrospectRequest {
 /// POST /api/auth/introspect — Validate a token and return its claims.
 ///
 /// Follows RFC 7662 conventions: returns `{"active": true/false, ...}`.
-#[utoipa::path(post, path = "/api/auth/introspect", tag = "auth", request_body = serde_json::Value, responses((status = 200, description = "Token introspection result", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/auth/introspect", tag = "auth", request_body = crate::types::JsonObject, responses((status = 200, description = "Token introspection result", body = crate::types::JsonObject)))]
 pub async fn auth_introspect(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IntrospectRequest>,
@@ -1260,7 +1260,7 @@ struct RefreshResponse {
 /// refresh token received during login instead of forcing a full re-authorization.
 /// If the request body omits `refresh_token`, the server looks up the token store
 /// for a previously stored refresh token (from the OAuth callback).
-#[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = serde_json::Value), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
+#[utoipa::path(post, path = "/api/auth/refresh", tag = "auth", request_body = RefreshRequest, responses((status = 200, description = "New access token", body = crate::types::JsonObject), (status = 400, description = "Missing or invalid refresh token"), (status = 502, description = "Token refresh failed")))]
 pub async fn auth_refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshRequest>,

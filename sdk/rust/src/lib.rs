@@ -330,6 +330,14 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::PATCH, &format!("/api/agents/{}/identity", id), Some(data), &[]).await
     }
 
+    pub async fn inject_message(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/inject", id), Some(data), &[]).await
+    }
+
+    pub async fn agent_logs(&self, id: &str, n: Option<&str>, level: Option<&str>, offset: Option<&str>) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/logs", id), None, &[("n", n), ("level", level), ("offset", offset)]).await
+    }
+
     pub async fn get_agent_mcp_servers(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/mcp_servers", id), None, &[]).await
     }
@@ -346,12 +354,28 @@ impl AgentsResource {
         do_stream(self.client.clone(), self.base_url.clone(), format!("/api/agents/{}/message/stream", id), reqwest::Method::POST, Some(data), Vec::new())
     }
 
+    pub async fn agent_metrics(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/metrics", id), None, &[]).await
+    }
+
     pub async fn set_agent_mode(&self, id: &str, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/mode", id), Some(data), &[]).await
     }
 
     pub async fn set_model(&self, id: &str, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/model", id), Some(data), &[]).await
+    }
+
+    pub async fn push_message(&self, id: &str, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/push", id), Some(data), &[]).await
+    }
+
+    pub async fn reload_agent_manifest(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/reload", id), None, &[]).await
+    }
+
+    pub async fn resume_agent(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/resume", id), None, &[]).await
     }
 
     pub async fn list_agent_runtime(&self, id: &str) -> Result<Value> {
@@ -422,6 +446,10 @@ impl AgentsResource {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &format!("/api/agents/{}/stop", id), None, &[]).await
     }
 
+    pub async fn suspend_agent(&self, id: &str) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/suspend", id), None, &[]).await
+    }
+
     pub async fn get_agent_tools(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/tools", id), None, &[]).await
     }
@@ -432,10 +460,6 @@ impl AgentsResource {
 
     pub async fn get_agent_traces(&self, id: &str) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/agents/{}/traces", id), None, &[]).await
-    }
-
-    pub async fn update_agent(&self, id: &str, data: Value) -> Result<Value> {
-        do_req(&self.client, &self.base_url, reqwest::Method::PUT, &format!("/api/agents/{}/update", id), Some(data), &[]).await
     }
 
     pub async fn upload_file(&self, id: &str, data: Value) -> Result<Value> {
@@ -502,6 +526,18 @@ impl AuthResource {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/callback".to_string(), Some(data), &[]).await
     }
 
+    pub async fn change_password(&self, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/change-password".to_string(), Some(data), &[]).await
+    }
+
+    pub async fn dashboard_auth_check(&self) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/auth/dashboard-check".to_string(), None, &[]).await
+    }
+
+    pub async fn dashboard_login(&self, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/dashboard-login".to_string(), Some(data), &[]).await
+    }
+
     pub async fn auth_introspect(&self, data: Value) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/introspect".to_string(), Some(data), &[]).await
     }
@@ -514,8 +550,16 @@ impl AuthResource {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &format!("/api/auth/login/{}", provider), None, &[]).await
     }
 
+    pub async fn dashboard_logout(&self) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/logout".to_string(), None, &[]).await
+    }
+
     pub async fn auth_providers(&self) -> Result<Value> {
         do_req(&self.client, &self.base_url, reqwest::Method::GET, &"/api/auth/providers".to_string(), None, &[]).await
+    }
+
+    pub async fn auth_refresh(&self, data: Value) -> Result<Value> {
+        do_req(&self.client, &self.base_url, reqwest::Method::POST, &"/api/auth/refresh".to_string(), Some(data), &[]).await
     }
 
     pub async fn auth_userinfo(&self) -> Result<Value> {

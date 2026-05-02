@@ -126,6 +126,7 @@ impl TokenManager {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: format!("OAuth2 token exchange failed: {body}"),
+                code: None,
             });
         }
 
@@ -810,6 +811,7 @@ impl LlmDriver for VertexAiDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: super::gemini::parse_gemini_error(&resp_body),
+                code: None,
             });
         }
 
@@ -894,6 +896,7 @@ impl LlmDriver for VertexAiDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: super::gemini::parse_gemini_error(&resp_body),
+                code: None,
             });
         }
 

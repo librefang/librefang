@@ -522,6 +522,7 @@ fn detect_cli_error_in_text(text: &str) -> Option<LlmError> {
         return Some(LlmError::Api {
             status: 401,
             message: text.to_string(),
+            code: None,
         });
     }
     // Rate-limit / quota exhaustion
@@ -719,6 +720,7 @@ impl LlmDriver for ClaudeCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -748,6 +750,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 return Err(LlmError::Api {
                     status: 1,
                     message: text,
+                    code: None,
                 });
             }
 
@@ -980,12 +983,22 @@ impl LlmDriver for ClaudeCodeDriver {
                                 "content" | "text" | "assistant" | "content_block_delta" => {
                                     if let Some(ref content) = event.content {
                                         full_text.push_str(content);
-                                        if !should_suppress(content) {
-                                            let _ = tx
+                                        if !should_suppress(content)
+                                            && tx
                                                 .send(StreamEvent::TextDelta {
                                                     text: content.clone(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                        {
+                                            // Receiver dropped — stop streaming events.
+                                            // The CLI subprocess will be killed below
+                                            // when the loop ends (#3769).
+                                            tracing::debug!(
+                                                "streaming receiver dropped; cancelling Claude Code CLI stream"
+                                            );
+                                            let _ = child.kill().await;
+                                            break None;
                                         }
                                     }
                                 }
@@ -1144,6 +1157,7 @@ impl LlmDriver for ClaudeCodeDriver {
                         stderr_text.trim()
                     }
                 ),
+                code: None,
             });
         }
 
@@ -1243,7 +1257,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1288,7 +1302,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1350,7 +1364,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1428,7 +1442,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,

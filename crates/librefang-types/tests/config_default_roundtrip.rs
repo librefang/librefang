@@ -29,14 +29,16 @@
 //! the canonical value over before comparison. The test will still assert
 //! that every other field matches exactly.
 
+use librefang_types::agent::AgentManifest;
 use librefang_types::config::{
-    AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig, BrowserConfig, BudgetConfig,
-    CanvasConfig, ChunkConfig, CompactionTomlConfig, ContextEngineTomlConfig, DockerSandboxConfig,
-    ExtensionsConfig, ExternalAuthConfig, HealthCheckConfig, HeartbeatTomlConfig, InboxConfig,
-    JinaSearchConfig, KernelConfig, LinkedInConfig, MemoryConfig, MemoryDecayConfig, NetworkConfig,
-    PairingConfig, ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig,
-    PromptIntelligenceConfig, QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig,
-    ReloadConfig, SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
+    AuditConfig, AutoDreamConfig, AutoReplyConfig, BraveSearchConfig, BroadcastConfig,
+    BrowserConfig, BudgetConfig, CanvasConfig, ChannelsConfig, ChunkConfig, CompactionTomlConfig,
+    ContextEngineTomlConfig, DockerSandboxConfig, ExtensionsConfig, ExternalAuthConfig,
+    HealthCheckConfig, HeartbeatTomlConfig, InboxConfig, JinaSearchConfig, KernelConfig,
+    LinkedInConfig, MemoryConfig, MemoryDecayConfig, NetworkConfig, PairingConfig,
+    ParallelToolsConfig, PerplexitySearchConfig, PrivacyConfig, PromptIntelligenceConfig,
+    QueueConcurrencyConfig, QueueConfig, RateLimitConfig, RegistryConfig, ReloadConfig,
+    SanitizeConfig, SessionConfig, SkillsConfig, TaskBoardConfig, TavilySearchConfig,
     TelemetryConfig, TerminalConfig, ThinkingConfig, TriggersConfig, TtsConfig, VaultConfig,
     VoiceConfig, WebConfig, WebFetchConfig, WebhookTriggerConfig,
 };
@@ -359,4 +361,42 @@ fn voice_config_default_roundtrips_through_toml() {
 #[test]
 fn linked_in_config_default_roundtrips_through_toml() {
     assert_default_roundtrip::<LinkedInConfig>("LinkedInConfig");
+}
+
+// Issue #3462 — extend the round-trip property to nested config types
+// referenced from agent manifests and channel wiring. These three are the
+// load-bearing structs called out in the issue (`AgentManifest`,
+// `ChannelsConfig` — the closest match for the issue's "ChannelConfig" name —
+// and `BroadcastConfig`). `BudgetConfig` is already covered above.
+
+#[test]
+fn agent_manifest_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<AgentManifest>("AgentManifest");
+}
+
+#[test]
+fn channels_config_default_roundtrips_through_toml() {
+    // Known #3462 Default-drift, flagged for separate triage:
+    //   `ChannelsConfig` uses `#[derive(Default)]`, so
+    //   `file_download_max_bytes` defaults to `u64::default() == 0`, but the
+    //   field is annotated `#[serde(default = "default_file_download_max_bytes")]`
+    //   which returns 50 MiB. Empty-TOML deserialization therefore yields
+    //   52_428_800 while the in-memory `Default::default()` yields 0.
+    //
+    // Per the task brief, this test does NOT silently fix the type — the
+    // discrepancy is normalized only on the divergent field so that drift in
+    // every OTHER field is still caught. The underlying type bug should be
+    // fixed by either replacing `#[derive(Default)]` with a manual impl that
+    // calls `default_file_download_max_bytes()`, or by aligning the serde
+    // helper with the derived zero value, depending on which value is
+    // intended at runtime.
+    let canonical_max_bytes = ChannelsConfig::default().file_download_max_bytes;
+    assert_default_roundtrip_with::<ChannelsConfig>("ChannelsConfig", move |c| {
+        c.file_download_max_bytes = canonical_max_bytes;
+    });
+}
+
+#[test]
+fn broadcast_config_default_roundtrips_through_toml() {
+    assert_default_roundtrip::<BroadcastConfig>("BroadcastConfig");
 }

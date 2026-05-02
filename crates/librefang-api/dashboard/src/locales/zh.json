@@ -100,6 +100,8 @@
     "resume": "恢复",
     "close": "关闭",
     "clear_search": "清除搜索",
+    "select": "选择",
+    "deselect": "取消选择",
     "yes": "是",
     "no": "否",
     "details": "详情",
@@ -774,7 +776,14 @@
     "qr_failed": "获取二维码失败",
     "login_success": "登录成功！正在保存配置...",
     "config_failed": "配置失败",
-    "config_success": "配置已保存"
+    "config_success": "配置已保存",
+    "add": "添加",
+    "all_configured": "已配置全部 channel",
+    "msgs_24h": "条/24h",
+    "empty_title": "尚未配置 channel",
+    "empty_body": "接入 Slack、Discord、邮件、短信或其他自带桥接，让 agent 可以收发消息。",
+    "connect_first": "添加一个 channel",
+    "picker_title": "添加 channel"
   },
   "skills": {
     "title": "技能",
@@ -3180,5 +3189,39 @@
     "error_disabled_body": "请在 <link>配置 → 安全</link> 中启用配对（<code>pairing.enabled = true</code>）。",
     "error_generic_title": "无法生成配对码",
     "btn_try_again": "重试"
+  },
+  "shortcuts_help": {
+    "title": "键盘快捷键",
+    "general_heading": "通用",
+    "nav_heading_prefix": "导航（按",
+    "nav_heading_suffix": "后再按…）",
+    "general": {
+      "cmd_k": "打开命令面板",
+      "focus_search": "聚焦当前页面搜索框",
+      "create_new": "新建（智能体 / 工作流 / 插件，按页面区分）",
+      "show_help": "显示本快捷键速查表",
+      "close_dialog": "关闭对话框 / 模态窗"
+    },
+    "nav": {
+      "overview": "总览",
+      "chat": "聊天",
+      "agents": "智能体",
+      "hands": "工具手",
+      "skills": "技能",
+      "workflows": "工作流",
+      "models": "模型",
+      "providers": "提供商",
+      "channels": "频道（网络）",
+      "goals": "目标",
+      "logs": "日志",
+      "runtime": "运行时",
+      "memory": "记忆",
+      "analytics": "分析",
+      "settings": "设置",
+      "plugins": "插件",
+      "scheduler": "调度器",
+      "approvals": "审批",
+      "sessions": "会话"
+    }
   }
 }

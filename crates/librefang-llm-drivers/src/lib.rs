@@ -12,6 +12,7 @@ pub mod drivers;
 pub mod rate_limit_tracker;
 pub mod retry_after;
 pub mod shared_rate_guard;
+pub mod stream_backpressure;
 pub mod think_filter;
 pub mod utf8_stream;
 

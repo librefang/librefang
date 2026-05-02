@@ -208,7 +208,7 @@ pub async fn list_models(
     )
 }
 
-#[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = crate::types::JsonObject)))]
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let aliases = state
         .kernel
@@ -239,7 +239,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// POST /api/models/aliases — Create a new alias mapping.
 ///
 /// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
-#[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Alias created", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = crate::types::JsonObject, responses((status = 200, description = "Alias created", body = crate::types::JsonObject)))]
 pub async fn create_alias(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -303,7 +303,7 @@ pub async fn delete_alias(
     (StatusCode::NO_CONTENT, Json(serde_json::json!(null)))
 }
 
-#[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = crate::types::JsonObject)))]
 pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -705,7 +705,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
     tag = "models",
     params(("name" = String, Path, description = "Provider identifier")),
     responses(
-        (status = 200, description = "Provider details", body = serde_json::Value),
+        (status = 200, description = "Provider details", body = crate::types::JsonObject),
         (status = 404, description = "Provider not found")
     )
 )]
@@ -806,7 +806,7 @@ pub async fn get_provider(
 ///
 /// Persists to `~/.librefang/custom_models.json` and makes the model immediately
 /// available in the catalog.
-#[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Custom model added", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = crate::types::JsonObject, responses((status = 200, description = "Custom model added", body = crate::types::JsonObject)))]
 pub async fn add_custom_model(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -973,7 +973,7 @@ pub async fn remove_custom_model(
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
-#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = crate::types::JsonObject, responses((status = 200, description = "API key set", body = crate::types::JsonObject)))]
 pub async fn set_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1245,7 +1245,7 @@ pub async fn delete_provider_key(
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
-#[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = crate::types::JsonObject)))]
 pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1503,7 +1503,7 @@ pub async fn test_provider(
 }
 
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
-#[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
+#[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = crate::types::JsonObject, responses((status = 200, description = "Provider URL set", body = crate::types::JsonObject)))]
 pub async fn set_provider_url(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1652,7 +1652,7 @@ pub async fn set_provider_url(
     tag = "models",
     params(("name" = String, Path, description = "Provider identifier")),
     responses(
-        (status = 200, description = "Default provider updated", body = serde_json::Value),
+        (status = 200, description = "Default provider updated", body = crate::types::JsonObject),
         (status = 400, description = "No model found for provider"),
         (status = 404, description = "Provider not found")
     )
@@ -1990,7 +1990,7 @@ static COPILOT_FLOWS: LazyLock<DashMap<String, CopilotFlowState>> = LazyLock::ne
 ///
 /// Initiates a GitHub device flow for Copilot authentication.
 /// Returns a user code and verification URI that the user visits in their browser.
-#[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = crate::types::JsonObject)))]
 pub async fn copilot_oauth_start() -> impl IntoResponse {
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
@@ -2031,7 +2031,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
 /// Poll the status of a GitHub device flow.
 /// Returns `pending`, `complete`, `expired`, `denied`, or `error`.
 /// On `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.
-#[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = crate::types::JsonObject)))]
 pub async fn copilot_oauth_poll(
     State(state): State<Arc<AppState>>,
     Path(poll_id): Path<String>,
@@ -2142,7 +2142,7 @@ pub async fn copilot_oauth_poll(
 ///
 /// Downloads the latest catalog TOML files from GitHub and caches them locally.
 /// After syncing, the kernel's in-memory catalog is refreshed.
-#[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
+#[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = crate::types::JsonObject)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
@@ -2191,7 +2191,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/catalog/status — Check last catalog sync time.
-#[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
+#[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = crate::types::JsonObject)))]
 pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({

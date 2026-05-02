@@ -337,6 +337,7 @@ impl ChatGptDriver {
                     return Err(LlmError::Api {
                         status: reqwest::StatusCode::FORBIDDEN.as_u16(),
                         message: body,
+                        code: None,
                     });
                 }
             }
@@ -435,8 +436,15 @@ impl ChatGptDriver {
         let mut completed_response: Option<serde_json::Value> = None;
         // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
         let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
+        // Set when a `tx.send(...)` fails — abort upstream stream on next
+        // iteration instead of fetching the rest for nobody (#3769).
+        let mut receiver_dropped = false;
 
         while let Some(chunk) = byte_stream.next().await {
+            if receiver_dropped {
+                tracing::debug!("streaming receiver dropped; cancelling ChatGPT LLM stream");
+                break;
+            }
             let bytes = chunk.map_err(|e| LlmError::Http(format!("SSE stream error: {e}")))?;
             line_buf.push_str(&utf8.decode(&bytes));
 
@@ -472,11 +480,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             full_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::TextDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -486,11 +498,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             thinking_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -500,11 +516,15 @@ impl ChatGptDriver {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
                             thinking_text.push_str(delta);
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ThinkingDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -545,9 +565,13 @@ impl ChatGptDriver {
                                     (call_id.clone(), name.clone(), String::new(), false);
 
                                 if let Some(tx) = tx {
-                                    let _ = tx
+                                    if tx
                                         .send(StreamEvent::ToolUseStart { id: call_id, name })
-                                        .await;
+                                        .await
+                                        .is_err()
+                                    {
+                                        receiver_dropped = true;
+                                    }
                                 }
                             }
                         }
@@ -564,11 +588,15 @@ impl ChatGptDriver {
                                 tool_accum[output_index].2.push_str(delta);
                             }
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ToolInputDelta {
                                         text: delta.to_string(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -589,13 +617,17 @@ impl ChatGptDriver {
                                 }
                             };
                             if let Some(tx) = tx {
-                                let _ = tx
+                                if tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
                                         name: name.clone(),
                                         input: input.clone(),
                                     })
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    receiver_dropped = true;
+                                }
                             }
                         }
                     }
@@ -624,13 +656,17 @@ impl ChatGptDriver {
                                             }
                                         };
                                         if let Some(tx) = tx {
-                                            let _ = tx
+                                            if tx
                                                 .send(StreamEvent::ToolUseEnd {
                                                     id: id.clone(),
                                                     name: name.clone(),
                                                     input,
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                            {
+                                                receiver_dropped = true;
+                                            }
                                         }
                                     }
                                 }
@@ -684,6 +720,7 @@ impl ChatGptDriver {
                         return Err(LlmError::Api {
                             status: 500,
                             message: msg.to_string(),
+                            code: None,
                         });
                     }
 
@@ -955,6 +992,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: body,
+                code: None,
             });
         }
 
@@ -987,6 +1025,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             return Err(LlmError::Api {
                 status: status.as_u16(),
                 message: body,
+                code: None,
             });
         }
 
@@ -1134,7 +1173,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: Vec::new(),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1172,7 +1211,7 @@ mod tests {
                     timestamp: None,
                 },
             ]),
-            tools: Vec::new(),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: None,
@@ -1201,7 +1240,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: Vec::new(),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: Some("System prompt.".to_string()),
@@ -1229,7 +1268,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: Vec::new(),
+            tools: std::sync::Arc::new(Vec::new()),
             max_tokens: 0,
             temperature: 1.0,
             system: None,

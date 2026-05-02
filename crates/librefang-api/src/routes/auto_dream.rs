@@ -42,7 +42,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
     get,
     path = "/api/auto-dream/status",
     tag = "auto_dream",
-    responses((status = 200, description = "Auto-dream status", body = serde_json::Value))
+    responses((status = 200, description = "Auto-dream status", body = crate::types::JsonObject))
 )]
 pub async fn auto_dream_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = librefang_kernel::auto_dream::current_status(&state.kernel).await;
@@ -55,7 +55,7 @@ pub async fn auto_dream_status(State(state): State<Arc<AppState>>) -> impl IntoR
     tag = "auto_dream",
     params(("id" = String, Path, description = "Agent UUID")),
     responses(
-        (status = 200, description = "Trigger outcome", body = serde_json::Value),
+        (status = 200, description = "Trigger outcome", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id"),
     )
 )]
@@ -84,7 +84,7 @@ pub async fn auto_dream_trigger(
     tag = "auto_dream",
     params(("id" = String, Path, description = "Agent UUID")),
     responses(
-        (status = 200, description = "Abort outcome", body = serde_json::Value),
+        (status = 200, description = "Abort outcome", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id"),
     )
 )]
@@ -117,7 +117,7 @@ pub struct SetEnabledRequest {
     tag = "auto_dream",
     params(("id" = String, Path, description = "Agent UUID")),
     responses(
-        (status = 200, description = "Opt-in toggled", body = serde_json::Value),
+        (status = 200, description = "Opt-in toggled", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent id"),
         (status = 404, description = "Agent not found"),
     )

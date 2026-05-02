@@ -5649,6 +5649,85 @@ async fn injection_teardown_only_removes_target_session() {
     kernel.shutdown();
 }
 
+/// Regression test for #3575: when the bounded mpsc(8) injection channel is
+/// full, `inject_message_for_session` must surface a `KernelError::Backpressure`
+/// instead of silently returning `Ok(false)`. The API layer relies on this
+/// distinction to map the situation to HTTP 503 instead of HTTP 200.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_message_returns_backpressure_when_channel_full() {
+    use crate::error::KernelError;
+
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_full");
+    let session = SessionId::new();
+
+    // Set up the channel but do NOT drain the receiver — this lets us fill
+    // the bounded mpsc(8) buffer deterministically.
+    let _rx = kernel.setup_injection_channel(agent_id, session);
+
+    // The channel capacity is 8 (see `setup_injection_channel`). Fill it.
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session), &format!("msg {i}"))
+            .await
+            .unwrap_or_else(|e| panic!("inject {i} should succeed before saturation: {e}"));
+    }
+
+    // The 9th inject targets the only live session, whose channel is full.
+    // Pre-fix this returned Ok(false) (silently dropped). Post-fix it must
+    // return KernelError::Backpressure.
+    let result = kernel
+        .inject_message_for_session(agent_id, Some(session), "overflow")
+        .await;
+    match result {
+        Err(KernelError::Backpressure(_)) => { /* expected */ }
+        other => panic!("expected Backpressure when injection channel is full, got {other:?}"),
+    }
+
+    kernel.teardown_injection_channel(agent_id, session);
+    kernel.shutdown();
+}
+
+/// Mixed-target case for #3575: when broadcasting across multiple live
+/// sessions and at least one accepts, the call must still report success
+/// (`Ok(true)`) — backpressure only fires when *every* live target was full.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_broadcast_succeeds_when_one_target_accepts() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "twin_mixed");
+
+    let session_full = SessionId::new();
+    let session_open = SessionId::new();
+
+    let _rx_full = kernel.setup_injection_channel(agent_id, session_full);
+    let rx_open = kernel.setup_injection_channel(agent_id, session_open);
+
+    // Saturate session_full's buffer (capacity 8).
+    for i in 0..8 {
+        kernel
+            .inject_message_for_session(agent_id, Some(session_full), &format!("fill {i}"))
+            .await
+            .expect("targeted fill should succeed");
+    }
+
+    // Broadcast (None): session_full will reject as Full, session_open accepts.
+    let injected = kernel
+        .inject_message_for_session(agent_id, None, "broadcast-mixed")
+        .await
+        .expect("broadcast must succeed when at least one session accepts");
+    assert!(
+        injected,
+        "delivered flag should be true when one target accepts"
+    );
+
+    // session_open actually received it.
+    assert!(rx_open.lock().await.try_recv().is_ok());
+
+    kernel.teardown_injection_channel(agent_id, session_full);
+    kernel.teardown_injection_channel(agent_id, session_open);
+    kernel.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Session label generation — pure-function helpers
 // ---------------------------------------------------------------------------
@@ -5876,5 +5955,80 @@ fn test_spawn_agent_rejects_parent_traversal_module_path() {
         "error should mention invalid module path, got: {err}"
     );
 
+    kernel.shutdown();
+}
+
+/// Regression test for #3564 — `config_reload_lock` must NOT be held across
+/// long-running awaits in `send_message_full_with_upstream`.
+///
+/// Before the fix, the read guard scoped the entire LLM call. Combined with
+/// `tokio::sync::RwLock`'s write-preferring policy, any single reload (or
+/// file-watcher fire) would queue a writer and freeze every subsequent
+/// incoming agent message until the slowest in-flight stream completed.
+///
+/// This test simulates the pattern the production code uses and asserts
+/// that a queued writer and a *second* reader can both make progress while
+/// a "long-running" reader (the LLM call analogue) is still in flight.
+/// With the buggy code (guard held to function end), the second reader
+/// would deadlock behind the queued writer until the long reader finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_reload_lock_not_held_across_long_await_3564() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let kernel = cascade_test_kernel();
+
+    // "Long-running LLM call" reader. Mirrors the post-fix pattern in
+    // `send_message_full_with_upstream`: acquire the read guard briefly
+    // (to serialize with reload's write side), drop it, then proceed
+    // with the multi-second async work that used to hold the guard.
+    let kernel_a = Arc::clone(&kernel);
+    let long_reader = tokio::spawn(async move {
+        {
+            let _g = kernel_a.config_reload_lock.read().await;
+            // immediately dropped — this is the fix
+        }
+        // simulate the LLM call that used to be guarded
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    });
+
+    // Give the long reader a moment to enter (and exit) its guard scope.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Queue a writer (mimics `reload_config`'s write side). Under the
+    // write-preferring `tokio::sync::RwLock`, any subsequent reader will
+    // queue behind this writer.
+    let kernel_w = Arc::clone(&kernel);
+    let writer = tokio::spawn(async move {
+        let _wg = kernel_w.config_reload_lock.write().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+
+    // Give the writer a moment to register its intent.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // A *new* incoming request arrives. With the bug, this would block
+    // behind the writer, which would in turn block behind the long
+    // reader's guard — total wait ~ entire LLM call duration. With the
+    // fix, the long reader has already released, so writer + this reader
+    // both finish well within a fraction of the simulated call time.
+    let kernel_b = Arc::clone(&kernel);
+    let second_reader = tokio::spawn(async move {
+        let _g = kernel_b.config_reload_lock.read().await;
+    });
+
+    // Cap the wait well below the long reader's sleep. If the bug were
+    // present, this would time out (second_reader would still be queued
+    // behind the writer, which would still be queued behind the long
+    // reader's guard).
+    timeout(Duration::from_millis(400), async {
+        writer.await.unwrap();
+        second_reader.await.unwrap();
+    })
+    .await
+    .expect("writer + second reader must not be blocked by the long reader's release-immediately guard (#3564)");
+
+    long_reader.await.unwrap();
     kernel.shutdown();
 }

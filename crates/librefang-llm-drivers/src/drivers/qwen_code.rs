@@ -691,6 +691,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -807,8 +808,16 @@ impl QwenCodeDriver {
             output_tokens: 0,
             ..Default::default()
         };
+        // Set when a `tx.send(...)` fails — kill the child and stop reading
+        // stdout so the CLI doesn't keep producing tokens for nobody (#3769).
+        let mut receiver_dropped = false;
 
         while let Ok(Some(line)) = lines.next_line().await {
+            if receiver_dropped {
+                tracing::debug!("streaming receiver dropped; cancelling Qwen CLI stream");
+                let _ = child.kill().await;
+                break;
+            }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -836,22 +845,26 @@ impl QwenCodeDriver {
                     "content" | "text" | "assistant" | "content_block_delta" => {
                         if let Some(ref content) = event.content {
                             full_text.push_str(content);
-                            let _ = tx
-                                .send(StreamEvent::TextDelta {
+                            crate::send_or_mark_dropped!(
+                                receiver_dropped,
+                                tx,
+                                StreamEvent::TextDelta {
                                     text: content.clone(),
-                                })
-                                .await;
+                                }
+                            );
                         }
                     }
                     "result" | "done" | "complete" => {
                         if let Some(ref result) = event.result {
                             if full_text.is_empty() {
                                 full_text = result.clone();
-                                let _ = tx
-                                    .send(StreamEvent::TextDelta {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::TextDelta {
                                         text: result.clone(),
-                                    })
-                                    .await;
+                                    }
+                                );
                             }
                         }
                         if let Some(usage) = event.usage {
@@ -865,11 +878,13 @@ impl QwenCodeDriver {
                     _ => {
                         if let Some(ref content) = event.content {
                             full_text.push_str(content);
-                            let _ = tx
-                                .send(StreamEvent::TextDelta {
+                            crate::send_or_mark_dropped!(
+                                receiver_dropped,
+                                tx,
+                                StreamEvent::TextDelta {
                                     text: content.clone(),
-                                })
-                                .await;
+                                }
+                            );
                         }
                     }
                 }
@@ -906,6 +921,7 @@ impl QwenCodeDriver {
             return Err(LlmError::Api {
                 status: code as u16,
                 message,
+                code: None,
             });
         }
 
@@ -1068,7 +1084,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
@@ -1118,7 +1134,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1195,7 +1211,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1297,7 +1313,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,
@@ -1342,7 +1358,7 @@ mod tests {
                 pinned: false,
                 timestamp: None,
             }]),
-            tools: vec![],
+            tools: std::sync::Arc::new(vec![]),
             max_tokens: 1024,
             temperature: 0.7,
             system: None,

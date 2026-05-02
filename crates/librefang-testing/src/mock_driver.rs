@@ -195,6 +195,7 @@ impl LlmDriver for FailingLlmDriver {
         Err(LlmError::Api {
             status: 500,
             message: self.error_message.clone(),
+            code: None,
         })
     }
 

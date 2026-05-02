@@ -193,7 +193,7 @@ pub struct ListPluginsQuery {
     path = "/api/plugins",
     tag = "plugins",
     responses(
-        (status = 200, description = "List installed plugins", body = serde_json::Value)
+        (status = 200, description = "List installed plugins", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_plugins(
@@ -243,11 +243,19 @@ pub async fn list_plugins(
         })
         .collect();
 
-    Json(serde_json::json!({
-        "plugins": items,
-        "total": items.len(),
-        "plugins_dir": librefang_runtime::plugin_manager::plugins_dir().display().to_string(),
-    }))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // Plugin list is materialized in one shot from the on-disk plugin manager,
+    // so offset=0 / limit=None. The previous shape carried a `plugins_dir`
+    // field — no caller in the dashboard or SDK reads it, and it doesn't
+    // belong on a list envelope. If a UI ever needs the plugins directory
+    // path, expose it via a separate config/info endpoint.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/plugins/:name — Get details of a specific plugin.
@@ -257,7 +265,7 @@ pub async fn list_plugins(
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Plugin details", body = serde_json::Value),
+        (status = 200, description = "Plugin details", body = crate::types::JsonObject),
         (status = 404, description = "Plugin not found")
     )
 )]
@@ -311,9 +319,9 @@ pub async fn get_plugin(
     post,
     path = "/api/plugins/install",
     tag = "plugins",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 201, description = "Plugin installed", body = serde_json::Value),
+        (status = 201, description = "Plugin installed", body = crate::types::JsonObject),
         (status = 400, description = "Invalid request"),
         (status = 409, description = "Plugin already installed")
     )
@@ -395,7 +403,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
     post,
     path = "/api/plugins/uninstall",
     tag = "plugins",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
         (status = 200, description = "Plugin removed"),
         (status = 404, description = "Plugin not found")
@@ -437,7 +445,7 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
     post,
     path = "/api/plugins/scaffold",
     tag = "plugins",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
         (status = 201, description = "Plugin scaffolded"),
         (status = 409, description = "Plugin already exists")
@@ -485,7 +493,7 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
     path = "/api/plugins/doctor",
     tag = "plugins",
     responses(
-        (status = 200, description = "Runtime availability + per-plugin diagnostics", body = serde_json::Value)
+        (status = 200, description = "Runtime availability + per-plugin diagnostics", body = crate::types::JsonObject)
     )
 )]
 pub async fn plugin_doctor() -> impl IntoResponse {
@@ -535,7 +543,7 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Manifest reloaded", body = serde_json::Value),
+        (status = 200, description = "Manifest reloaded", body = crate::types::JsonObject),
         (status = 400, description = "Reload failed (invalid name or bad manifest)")
     )
 )]
@@ -568,7 +576,7 @@ pub async fn reload_plugin(Path(name): Path<String>) -> impl IntoResponse {
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Plugin status", body = serde_json::Value),
+        (status = 200, description = "Plugin status", body = crate::types::JsonObject),
         (status = 400, description = "Plugin not found or invalid name")
     )
 )]
@@ -622,7 +630,7 @@ pub async fn plugin_status(
     path = "/api/context-engine/metrics",
     tag = "plugins",
     responses(
-        (status = 200, description = "Hook metrics snapshot", body = serde_json::Value),
+        (status = 200, description = "Hook metrics snapshot", body = crate::types::JsonObject),
         (status = 204, description = "No metrics available (no plugin engine active)")
     )
 )]
@@ -647,7 +655,7 @@ pub async fn context_engine_metrics(State(state): State<Arc<AppState>>) -> impl 
     path = "/api/plugins/registries",
     tag = "plugins",
     responses(
-        (status = 200, description = "Configured registries with available plugins", body = serde_json::Value)
+        (status = 200, description = "Configured registries with available plugins", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_plugin_registries(
@@ -741,7 +749,7 @@ pub async fn list_plugin_registries(
     path = "/api/context-engine/traces",
     tag = "plugins",
     responses(
-        (status = 200, description = "Hook invocation traces", body = serde_json::Value),
+        (status = 200, description = "Hook invocation traces", body = crate::types::JsonObject),
         (status = 204, description = "No plugin engine active")
     )
 )]
@@ -837,7 +845,7 @@ pub async fn disable_plugin(Path(name): Path<String>) -> impl IntoResponse {
     path = "/api/plugins/{name}/upgrade",
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
         (status = 200, description = "Plugin upgraded"),
         (status = 400, description = "Plugin not installed or upgrade failed")
@@ -935,7 +943,7 @@ pub async fn upgrade_plugin(
     path = "/api/plugins/{name}/test-hook",
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
         (status = 200, description = "Hook output"),
         (status = 400, description = "Hook not declared or invocation failed")
@@ -1066,7 +1074,7 @@ pub async fn test_plugin_hook(
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Hashes written to plugin.toml", body = serde_json::Value),
+        (status = 200, description = "Hashes written to plugin.toml", body = crate::types::JsonObject),
         (status = 400, description = "Plugin not found or no hooks declared")
     )
 )]
@@ -1097,7 +1105,7 @@ pub async fn sign_plugin(Path(name): Path<String>) -> impl IntoResponse {
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Lint report", body = serde_json::Value),
+        (status = 200, description = "Lint report", body = crate::types::JsonObject),
         (status = 400, description = "Plugin not found")
     )
 )]
@@ -1205,7 +1213,7 @@ pub async fn context_engine_health(State(state): State<Arc<AppState>>) -> impl I
     path = "/api/context-engine/chain",
     tag = "plugins",
     responses(
-        (status = 200, description = "Engine chain topology", body = serde_json::Value)
+        (status = 200, description = "Engine chain topology", body = crate::types::JsonObject)
     )
 )]
 pub async fn context_engine_chain(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2057,7 +2065,7 @@ pub async fn context_engine_metrics_summary(
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Advanced hook configuration", body = serde_json::Value),
+        (status = 200, description = "Advanced hook configuration", body = crate::types::JsonObject),
         (status = 404, description = "Plugin not found")
     )
 )]
@@ -2108,7 +2116,7 @@ pub async fn plugin_advanced_config(Path(name): Path<String>) -> impl IntoRespon
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Plugin environment configuration", body = serde_json::Value),
+        (status = 200, description = "Plugin environment configuration", body = crate::types::JsonObject),
         (status = 404, description = "Plugin not found")
     )
 )]
@@ -2185,7 +2193,7 @@ pub async fn plugin_env(Path(name): Path<String>) -> impl IntoResponse {
     path = "/api/context-engine/config",
     tag = "plugins",
     responses(
-        (status = 200, description = "Context engine configuration", body = serde_json::Value)
+        (status = 200, description = "Context engine configuration", body = crate::types::JsonObject)
     )
 )]
 pub async fn context_engine_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2258,7 +2266,7 @@ pub async fn context_engine_config(State(state): State<Arc<AppState>>) -> impl I
     tag = "plugins",
     params(("name" = String, Path, description = "Plugin name")),
     responses(
-        (status = 200, description = "Prewarm result", body = serde_json::Value),
+        (status = 200, description = "Prewarm result", body = crate::types::JsonObject),
         (status = 404, description = "Plugin not found")
     )
 )]
@@ -2302,7 +2310,7 @@ pub async fn prewarm_plugin(Path(name): Path<String>) -> impl IntoResponse {
     path = "/api/context-engine/sandbox-policy",
     tag = "plugins",
     responses(
-        (status = 200, description = "Sandbox policy for active plugins", body = serde_json::Value),
+        (status = 200, description = "Sandbox policy for active plugins", body = crate::types::JsonObject),
         (status = 204, description = "No plugin engine configured")
     )
 )]

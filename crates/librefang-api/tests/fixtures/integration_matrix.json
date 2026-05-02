@@ -110,6 +110,12 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/events",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/files",
       "reason": "deferred-product-surface",
       "status": "exempt"
@@ -122,6 +128,12 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/hand-runtime-config",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/history",
       "reason": "deferred-product-surface",
       "status": "exempt"
@@ -130,6 +142,18 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/identity",
       "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/inject",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/logs",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -164,6 +188,12 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/metrics",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/mode",
       "reason": "deferred-product-surface",
       "status": "exempt"
@@ -172,6 +202,30 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/model",
       "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/push",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/reload",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/resume",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/runtime",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -224,8 +278,26 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/stop",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/stream",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/sessions/{session_id}/switch",
       "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/sessions/{session_id}/trajectory",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -236,8 +308,20 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/stats",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/stop",
       "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/agents/{id}/suspend",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -249,12 +333,6 @@
     {
       "owner": "integration-coverage-matrix",
       "path": "/api/agents/{id}/traces",
-      "reason": "deferred-product-surface",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/update",
       "reason": "deferred-product-surface",
       "status": "exempt"
     },
@@ -289,6 +367,18 @@
       "status": "exempt"
     },
     {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/audit/export",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/audit/query",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
       "path": "/api/audit/recent",
       "proof": "docs/integration-test-matrix.md",
       "scenario": "audit_integrity_http",
@@ -304,6 +394,24 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/auth/callback",
       "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/change-password",
+      "reason": "auth endpoint now in OpenAPI spec (#4310), integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/dashboard-check",
+      "reason": "auth endpoint now in OpenAPI spec (#4310), integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/dashboard-login",
+      "reason": "auth endpoint now in OpenAPI spec (#4310), integration test pending",
       "status": "exempt"
     },
     {
@@ -326,8 +434,20 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/auth/logout",
+      "reason": "auth endpoint now in OpenAPI spec (#4310), integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/auth/providers",
       "reason": "requires external provider, credential, browser, or long-running scheduler fixture",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/auth/refresh",
+      "reason": "auth endpoint now in OpenAPI spec (#4310), integration test pending",
       "status": "exempt"
     },
     {
@@ -406,6 +526,18 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/budget/agents/{id}",
       "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/budget/users",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/budget/users/{user_id}",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -778,6 +910,12 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/mcp/servers/{name}/reconnect",
       "reason": "deferred-product-surface",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/mcp/taint-rules",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -1172,6 +1310,12 @@
     },
     {
       "owner": "integration-coverage-matrix",
+      "path": "/api/tools/{name}/invoke",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
       "path": "/api/triggers",
       "reason": "deferred-product-surface",
       "status": "exempt"
@@ -1210,6 +1354,30 @@
       "owner": "integration-coverage-matrix",
       "path": "/api/usage/summary",
       "reason": "covered by domain smoke today; full lifecycle tracked as follow-up matrix item",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/import",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/{name}",
+      "reason": "new upstream endpoint, integration test pending",
+      "status": "exempt"
+    },
+    {
+      "owner": "integration-coverage-matrix",
+      "path": "/api/users/{name}/rotate-key",
+      "reason": "new upstream endpoint, integration test pending",
       "status": "exempt"
     },
     {
@@ -1271,108 +1439,6 @@
       "proof": "docs/integration-test-matrix.md",
       "scenario": "openai_compat_contract_http",
       "status": "covered"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/hand-runtime-config",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/runtime",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/sessions/{session_id}/stop",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/sessions/{session_id}/stream",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/sessions/{session_id}/trajectory",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/audit/export",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/audit/query",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/budget/users",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/budget/users/{user_id}",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/mcp/taint-rules",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/tools/{name}/invoke",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/users",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/users/import",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/users/{name}",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/users/{name}/rotate-key",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/events",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
-    },
-    {
-      "owner": "integration-coverage-matrix",
-      "path": "/api/agents/{id}/stats",
-      "reason": "new upstream endpoint, integration test pending",
-      "status": "exempt"
     }
   ],
   "policy": "Every OpenAPI path must be marked covered or explicitly exempted. Covered paths must reference a scenario in docs/integration-test-matrix.md. Exemptions are temporary and reviewed with the matrix.",

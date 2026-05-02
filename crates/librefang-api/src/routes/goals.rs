@@ -43,23 +43,32 @@ fn goals_shared_agent_id() -> AgentId {
 }
 
 /// GET /api/goals — List all goals.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents` and `/api/peers` (#3842). Goals are stored as
+/// a single JSON array in shared KV memory and returned in one page —
+/// `offset=0` and `limit=None` always.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
-    match state
+    let items: Vec<serde_json::Value> = match state
         .kernel
         .memory_substrate()
         .structured_get(agent_id, GOALS_KEY)
     {
-        Ok(Some(serde_json::Value::Array(arr))) => {
-            let total = arr.len();
-            Json(serde_json::json!({"goals": arr, "total": total}))
-        }
-        Ok(_) => Json(serde_json::json!({"goals": [], "total": 0})),
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        Ok(_) => Vec::new(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
-            Json(serde_json::json!({"goals": [], "total": 0, "error": format!("{e}")}))
+            Vec::new()
         }
-    }
+    };
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/goals/{id} — Get a specific goal by ID.
@@ -300,10 +309,9 @@ pub async fn update_goal_by_id(
 
     // --- Apply mutations ---
 
-    let mut found = false;
+    let mut updated: Option<serde_json::Value> = None;
     for g in goals.iter_mut() {
         if g["id"].as_str() == Some(&id) {
-            found = true;
             if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
                 g["title"] = serde_json::Value::String(title.to_string());
             }
@@ -331,13 +339,14 @@ pub async fn update_goal_by_id(
                 }
             }
             g["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+            updated = Some(g.clone());
             break;
         }
     }
 
-    if !found {
+    let Some(entity) = updated else {
         return ApiErrorResponse::not_found("Goal not found").into_json_tuple();
-    }
+    };
 
     if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
@@ -347,10 +356,9 @@ pub async fn update_goal_by_id(
         return ApiErrorResponse::internal(format!("Failed to update goal: {e}")).into_json_tuple();
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "updated", "goal_id": id})),
-    )
+    // Issue #3832: return the mutated entity so the dashboard can `setQueryData`
+    // without an extra round-trip GET. Aligns with `create_goal`'s response shape.
+    (StatusCode::OK, Json(entity))
 }
 
 /// DELETE /api/goals/{id} — Delete a goal and all its descendants.
@@ -414,7 +422,7 @@ pub async fn delete_goal(
     path = "/api/goals/templates",
     tag = "goals",
     responses(
-        (status = 200, description = "Goal templates", body = serde_json::Value)
+        (status = 200, description = "Goal templates", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_goal_templates() -> impl IntoResponse {

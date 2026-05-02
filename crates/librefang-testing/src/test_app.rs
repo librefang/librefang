@@ -202,7 +202,6 @@ impl TestAppState {
         Arc::new(AppState {
             kernel,
             started_at: Instant::now(),
-            peer_registry: None,
             bridge_manager: tokio::sync::Mutex::new(None),
             channels_config: tokio::sync::RwLock::new(channels_config),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -216,7 +215,6 @@ impl TestAppState {
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-            prometheus_handle: None,
             media_drivers: librefang_runtime::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             config_write_lock: tokio::sync::Mutex::new(()),
