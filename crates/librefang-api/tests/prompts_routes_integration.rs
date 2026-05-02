@@ -74,7 +74,10 @@ async fn list_prompt_versions_empty_for_unknown_agent() {
     let path = format!("/api/agents/{AGENT_UUID}/prompts/versions");
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    assert_eq!(body, serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["offset"], 0);
+    assert!(body.get("limit").is_some(), "limit field present: {body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -121,11 +124,12 @@ async fn create_prompt_version_round_trips_through_get_and_list() {
     // List should now contain it.
     let (status, listed) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK);
-    let arr = listed.as_array().expect("list is array");
+    let arr = listed["items"].as_array().expect("items is array");
     assert!(
         arr.iter().any(|v| v["id"] == new_id),
         "expected new version in list: {listed:?}"
     );
+    assert_eq!(listed["total"], arr.len());
 
     // GET single should return the same record.
     let (status, fetched) = json_request(
@@ -221,7 +225,10 @@ async fn list_experiments_empty_for_unknown_agent() {
     let path = format!("/api/agents/{AGENT_UUID}/prompts/experiments");
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    assert_eq!(body, serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["offset"], 0);
+    assert!(body.get("limit").is_some(), "limit field present: {body:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

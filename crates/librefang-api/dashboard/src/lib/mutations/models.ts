@@ -34,9 +34,11 @@ export function useUpdateModelOverrides() {
       modelKey: string;
       overrides: ModelOverrides;
     }) => updateModelOverrides(modelKey, overrides),
-    onSuccess: (_data, variables) => {
+    onSuccess: (data, variables) => {
+      // Server now returns the persisted ModelOverrides — seed the detail
+      // cache directly so consumers don't need a follow-up GET. (Refs #3832.)
+      qc.setQueryData(modelKeys.overrides(variables.modelKey), data);
       qc.invalidateQueries({ queryKey: modelKeys.lists() });
-      qc.invalidateQueries({ queryKey: modelKeys.overrides(variables.modelKey) });
     },
   });
 }

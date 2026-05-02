@@ -1321,20 +1321,18 @@ pub async fn list_sessions(
     let substrate = state.kernel.memory_substrate();
     // Push pagination into SQLite so we don't deserialize every session blob (#3485).
     let total = substrate.count_sessions().unwrap_or(0);
-    match substrate.list_sessions_paginated(Some(limit), offset) {
-        Ok(items) => Json(serde_json::json!({
-            "sessions": items,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-        })),
-        Err(_) => Json(serde_json::json!({
-            "sessions": [],
-            "total": 0,
-            "offset": 0,
-            "limit": PaginationParams::DEFAULT_LIMIT,
-        })),
-    }
+    // Canonical paginated envelope (#3842): {items,total,offset,limit}.
+    let (items, total, offset_out, limit_out) =
+        match substrate.list_sessions_paginated(Some(limit), offset) {
+            Ok(items) => (items, total, offset, limit),
+            Err(_) => (Vec::new(), 0, 0, PaginationParams::DEFAULT_LIMIT),
+        };
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: offset_out,
+        limit: Some(limit_out),
+    })
 }
 
 /// GET /api/sessions/:id — Get a single session by ID.
@@ -1610,21 +1608,29 @@ pub async fn search_sessions(
         offset,
     ) {
         Ok(results) => {
-            // `next_offset` is `None` when this page wasn't full — the
-            // client knows it has reached the end without re-querying.
-            let next_offset = if results.len() < limit {
-                None
+            // Canonical paginated envelope (#3842): {items,total,offset,limit}.
+            // The substrate has no count() for FTS5 search, so `total` is a
+            // best-effort lower bound: when the page isn't full it is exact
+            // (`offset + results.len()` == EOF), and when it is full it is at
+            // least one greater than `offset + limit`. Clients MUST treat a
+            // full page as "more may follow" and keep paginating until a
+            // short page comes back.
+            let total = if results.len() < limit {
+                offset + results.len()
             } else {
-                Some(offset + results.len())
+                offset + results.len() + 1
             };
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "results": results,
-                    "limit": limit,
-                    "offset": offset,
-                    "next_offset": next_offset,
-                })),
+                Json(
+                    serde_json::to_value(crate::types::PaginatedResponse {
+                        items: results,
+                        total,
+                        offset,
+                        limit: Some(limit),
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+                ),
             )
         }
         Err(e) => ApiErrorResponse::internal(e.to_string()).into_json_tuple(),

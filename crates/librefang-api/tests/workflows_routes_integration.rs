@@ -403,7 +403,10 @@ async fn schedules_list_starts_empty() {
     let (status, body) = get(&h, "/api/schedules").await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body["total"], 0);
-    assert!(body["schedules"].as_array().unwrap().is_empty());
+    // #3842: canonical envelope renamed `schedules` → `items`.
+    assert!(body["items"].as_array().unwrap().is_empty());
+    assert_eq!(body["offset"], 0);
+    assert!(body["limit"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread")]

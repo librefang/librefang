@@ -351,6 +351,60 @@ async fn install_hand_garbage_toml_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// Happy-path: `POST /api/hands/install` returns the canonical
+/// `HandDefinition` body — not the legacy `{id, name, description, category}`
+/// subset — so dashboard / SDK callers can `setQueryData` on the hands
+/// list directly without a follow-up GET. Refs #3832.
+#[tokio::test(flavor = "multi_thread")]
+async fn install_hand_returns_canonical_hand_definition() {
+    let h = boot_router_open().await;
+    let toml = r#"
+id = "uptime-watcher-test"
+name = "Uptime Watcher"
+description = "Watches uptime."
+category = "data"
+
+[routing]
+aliases = ["uptime watcher"]
+
+[agent]
+name = "uptime-watcher-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+    let (status, body) = json_request(
+        &h.app,
+        Method::POST,
+        "/api/hands/install",
+        Some(serde_json::json!({
+            "toml_content": toml,
+            "skill_content": "# Test skill\n",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install_hand body: {body}");
+    assert_eq!(body["id"].as_str(), Some("uptime-watcher-test"), "{body}");
+    assert_eq!(body["name"].as_str(), Some("Uptime Watcher"), "{body}");
+    // Canonical fields beyond the legacy subset — these must be present so
+    // a single round-trip is enough for the dashboard.
+    assert!(
+        body.get("agents").map(|v| v.is_object()).unwrap_or(false),
+        "canonical HandDefinition must include `agents` map: {body}"
+    );
+    assert!(
+        body.get("requires").map(|v| v.is_array()).unwrap_or(false),
+        "canonical HandDefinition must include `requires` array: {body}"
+    );
+    assert!(
+        body.get("settings").map(|v| v.is_array()).unwrap_or(false),
+        "canonical HandDefinition must include `settings` array: {body}"
+    );
+    assert!(
+        body.get("routing").map(|v| v.is_object()).unwrap_or(false),
+        "canonical HandDefinition must include `routing` object: {body}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/hands/{hand_id}/secret — input validation
 // ---------------------------------------------------------------------------
