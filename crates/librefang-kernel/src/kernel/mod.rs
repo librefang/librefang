@@ -1924,6 +1924,18 @@ impl LibreFangKernel {
         self.peer_registry.get()
     }
 
+    /// Test-only: install a `PeerRegistry` without booting the OFP node.
+    /// Used by route-handler regression tests for #3644 — never call from
+    /// production code; the OFP startup path owns this initialization
+    /// (see `start_peer_node` -> `self.peer_registry.set(...)`).
+    #[doc(hidden)]
+    pub fn install_peer_registry_for_test(
+        &self,
+        registry: librefang_wire::PeerRegistry,
+    ) -> Result<(), librefang_wire::PeerRegistry> {
+        self.peer_registry.set(registry)
+    }
+
     /// Hook registry.
     #[inline]
     pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
