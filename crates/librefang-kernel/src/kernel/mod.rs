@@ -19586,6 +19586,21 @@ impl LibreFangKernel {
 /// `log_offline_as_warn = true` for providers in the default-or-fallback set
 /// (a real misconfiguration), `false` for incidentally-defined local
 /// providers (not configured — expected to be offline).
+impl LibreFangKernel {
+    /// Method-style facade over [`probe_and_update_local_provider`] so callers
+    /// outside this crate (e.g. `librefang-api`) do not need to import the
+    /// free function from `librefang_kernel::kernel`. Tracks the
+    /// KernelHandle boundary cleanup in #3744.
+    pub async fn probe_local_provider(
+        self: &Arc<Self>,
+        provider_id: &str,
+        base_url: &str,
+        log_offline_as_warn: bool,
+    ) -> librefang_runtime::provider_health::ProbeResult {
+        probe_and_update_local_provider(self, provider_id, base_url, log_offline_as_warn).await
+    }
+}
+
 pub async fn probe_and_update_local_provider(
     kernel: &Arc<LibreFangKernel>,
     provider_id: &str,
