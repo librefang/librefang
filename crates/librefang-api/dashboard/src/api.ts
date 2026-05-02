@@ -2185,6 +2185,13 @@ export interface MemoryConfigResponse {
     extraction_model?: string;
     max_retrieve?: number;
   };
+  /**
+   * Set on the response of `PATCH /api/memory/config` to flag that the
+   * persisted values won't take effect until the daemon restarts. Absent on
+   * GET responses (where the live `KernelConfig` is authoritative).
+   * See issue #3832.
+   */
+  restart_required?: boolean;
 }
 
 export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
@@ -2203,8 +2210,10 @@ export async function updateMemoryConfig(payload: {
     extraction_model?: string;
     max_retrieve?: number;
   };
-}): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>("/api/memory/config", payload);
+}): Promise<MemoryConfigResponse> {
+  // Returns the canonical post-mutation entity (issue #3832) so the mutation
+  // hook can `setQueryData` instead of forcing a refetch round-trip.
+  return patch<MemoryConfigResponse>("/api/memory/config", payload);
 }
 
 export async function getSecurityStatus(): Promise<SecurityStatusResponse> {

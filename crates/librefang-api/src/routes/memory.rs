@@ -1465,10 +1465,59 @@ pub async fn memory_config_patch(
 
     tracing::info!("Memory config updated via API");
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "updated", "note": "Restart required for full effect"})),
-    )
+    // Return the canonical entity (matches GET /api/memory/config shape) sourced
+    // from the freshly-written TOML table so callers can `setQueryData` without a
+    // follow-up GET. The in-memory `KernelConfig` is not hot-reloaded for this
+    // endpoint, so values reflect what is now persisted on disk; `restart_required`
+    // surfaces that the running kernel still uses the previous values until reboot.
+    // See issue #3832.
+    let memory_section = table.get("memory").and_then(|v| v.as_table());
+    let proactive_section = table.get("proactive_memory").and_then(|v| v.as_table());
+
+    let toml_str = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<String> {
+        t.and_then(|m| m.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    let toml_bool = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<bool> {
+        t.and_then(|m| m.get(k)).and_then(|v| v.as_bool())
+    };
+    let toml_f64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<f64> {
+        t.and_then(|m| m.get(k)).and_then(|v| v.as_float())
+    };
+    let toml_u64 = |t: Option<&toml::map::Map<String, toml::Value>>, k: &str| -> Option<u64> {
+        t.and_then(|m| m.get(k))
+            .and_then(|v| v.as_integer())
+            .and_then(|n| u64::try_from(n).ok())
+    };
+
+    let live = state.kernel.config_ref();
+    let body = serde_json::json!({
+        "embedding_provider": toml_str(memory_section, "embedding_provider")
+            .or_else(|| live.memory.embedding_provider.clone()),
+        "embedding_model": toml_str(memory_section, "embedding_model")
+            .unwrap_or_else(|| live.memory.embedding_model.clone()),
+        "embedding_api_key_env": toml_str(memory_section, "embedding_api_key_env")
+            .or_else(|| live.memory.embedding_api_key_env.clone()),
+        "decay_rate": toml_f64(memory_section, "decay_rate")
+            .unwrap_or(live.memory.decay_rate),
+        "proactive_memory": {
+            "enabled": toml_bool(proactive_section, "enabled")
+                .unwrap_or(live.proactive_memory.enabled),
+            "auto_memorize": toml_bool(proactive_section, "auto_memorize")
+                .unwrap_or(live.proactive_memory.auto_memorize),
+            "auto_retrieve": toml_bool(proactive_section, "auto_retrieve")
+                .unwrap_or(live.proactive_memory.auto_retrieve),
+            "extraction_model": toml_str(proactive_section, "extraction_model")
+                .or_else(|| live.proactive_memory.extraction_model.clone()),
+            "max_retrieve": toml_u64(proactive_section, "max_retrieve")
+                .unwrap_or(live.proactive_memory.max_retrieve as u64),
+        },
+        "restart_required": true,
+    });
+    drop(live);
+
+    (StatusCode::OK, Json(body))
 }
 
 #[cfg(test)]
