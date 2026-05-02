@@ -31,7 +31,6 @@ export function LogsPage() {
     refetchInterval: REFRESH_MS, // Logs page polls faster so the live tail stays responsive.
   });
 
-  // #3842: prefer canonical `items`; fall back to legacy `entries` for older daemons.
   const logs = auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
   const modules = useMemo(
     () => Array.from(new Set(logs.map(logModule).filter(Boolean))) as string[],

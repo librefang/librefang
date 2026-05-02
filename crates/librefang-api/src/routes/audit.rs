@@ -270,10 +270,6 @@ pub async fn audit_query(
         })
         .collect();
 
-    // Canonical `PaginatedResponse{items,total,offset,limit}` envelope (#3842).
-    // The handler returns at most `limit` rows starting at the head of the
-    // filtered (newest-first) view, so `offset = 0`. `total = items.len()`
-    // mirrors the post-filter count exposed by the previous `count` field.
     let total = items.len();
     Json(serde_json::json!({
         "items": items,

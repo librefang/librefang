@@ -621,9 +621,6 @@ export interface AuditEntry {
 }
 
 export interface AuditRecentResponse {
-  // Canonical `PaginatedResponse` field (#3842). Legacy daemons returned
-  // the same payload under `entries`; both are exposed here so the
-  // dashboard can read either during the transition.
   items?: AuditEntry[];
   /** @deprecated #3842 — use `items`. Populated by older daemons only. */
   entries?: AuditEntry[];

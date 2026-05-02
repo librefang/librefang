@@ -2815,9 +2815,6 @@ async fn test_audit_query_rejects_viewer_admin_returns_200() {
         .unwrap();
     assert_eq!(admin.status(), 200, "Admin must be allowed");
     let body: serde_json::Value = admin.json().await.unwrap();
-    // #3842: canonical `PaginatedResponse{items,total,offset,limit}`
-    // envelope. All four fields are always present, even on an empty
-    // audit log.
     assert!(body["items"].is_array(), "response must carry items[]");
     assert!(body["total"].is_number(), "response must carry total");
     assert!(body["offset"].is_number(), "response must carry offset");
@@ -3687,7 +3684,6 @@ async fn test_user_budget_put_audit_records_old_new_diff_and_caller() {
         .json()
         .await
         .unwrap();
-    // #3842: canonical envelope is `items`.
     let entries = q["items"].as_array().expect("items[] present");
     assert!(
         !entries.is_empty(),

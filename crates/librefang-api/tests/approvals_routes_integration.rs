@@ -428,7 +428,7 @@ async fn batch_oversize_is_bad_request() {
 // ---------------------------------------------------------------------------
 
 /// Audit endpoint returns the canonical `PaginatedResponse{items,total,offset,limit}`
-/// envelope (#3842) even when nothing has been resolved yet.
+/// envelope even when nothing has been resolved yet.
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_empty_returns_envelope() {
     let h = boot();

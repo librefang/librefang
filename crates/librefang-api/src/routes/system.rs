@@ -841,10 +841,6 @@ pub async fn audit_recent(
         })
         .collect();
 
-    // Canonical `PaginatedResponse{items,total,offset,limit}` envelope (#3842).
-    // The audit log is in-memory and `recent(n)` always returns the tail,
-    // so `offset = 0` and `limit = Some(n)`. `tip_hash` is preserved as an
-    // extra field so the dashboard's chain-integrity badge keeps working.
     let total = state.kernel.audit().len();
     Json(serde_json::json!({
         "items": items,
@@ -2571,7 +2567,6 @@ pub async fn audit_log(
         .approvals()
         .audit_count(params.agent_id.as_deref(), params.tool_name.as_deref());
 
-    // Canonical `PaginatedResponse{items,total,offset,limit}` envelope (#3842).
     Json(serde_json::json!({
         "items": entries,
         "total": total,

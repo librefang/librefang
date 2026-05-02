@@ -456,11 +456,7 @@ async fn audit_export_rejects_viewer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_recent_returns_documented_shape() {
-    // `/audit/recent` is gated by the dashboard-reads middleware tier and
-    // returns the canonical `PaginatedResponse{items,total,offset,limit}`
-    // envelope (#3842) plus a `tip_hash` extra field for the dashboard's
-    // chain-integrity badge. Pin the shape so a rename doesn't silently
-    // break the dashboard download flow.
+    // `/audit/recent` returns `PaginatedResponse{items,total,offset,limit}` plus `tip_hash`.
     let h = build_audit_harness("", vec![]);
     seed_audit_entries(&h.state);
 
