@@ -2194,6 +2194,7 @@ mod tests {
     ///   - skip exactly OFFSET rows,
     ///   - produce a contiguous, non-overlapping window across pages, and
     ///   - return all rows (>50) when limit = None.
+    ///
     /// These guarantees are what makes #3691's network-side cap meaningful;
     /// without them the SQL bind indices could silently drift and the
     /// paginated route would still pass the existing FTS smoke test.
@@ -2209,7 +2210,7 @@ mod tests {
             let mut session = store.create_session(agent_id).unwrap();
             session
                 .messages
-                .push(Message::user(&format!("needle session number {i}")));
+                .push(Message::user(format!("needle session number {i}")));
             store.save_session(&session).unwrap();
         }
 
