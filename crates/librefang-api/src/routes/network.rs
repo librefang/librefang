@@ -2082,7 +2082,7 @@ mod tests {
             json["total"], 1,
             "expected post-boot peer to appear, got {json}"
         );
-        assert_eq!(json["peers"][0]["node_id"], "node-abc");
+        assert_eq!(json["items"][0]["node_id"], "node-abc");
     }
 
     #[test]
