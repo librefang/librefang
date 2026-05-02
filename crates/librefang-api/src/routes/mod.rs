@@ -31,6 +31,7 @@ pub mod network;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub mod registry;
 pub mod skills;
 pub mod system;
 pub mod terminal;

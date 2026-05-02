@@ -57,6 +57,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::network::router())
         .merge(routes::plugins::router())
         .merge(routes::providers::router())
+        .merge(routes::registry::router())
         .merge(routes::budget::router())
         .merge(routes::auto_dream::router())
         .merge(routes::goals::router())
