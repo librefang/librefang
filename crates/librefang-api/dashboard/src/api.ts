@@ -1864,8 +1864,13 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
-  return data.workflows ?? [];
+  // Canonical envelope is `PaginatedResponse{items,...}` (#3842). Older
+  // daemons returned `{workflows: [...]}` — fall back so a stale dashboard
+  // bundle keeps working against either shape during rollout.
+  const data = await get<{ items?: WorkflowItem[]; workflows?: WorkflowItem[] }>(
+    "/api/workflows",
+  );
+  return data.items ?? data.workflows ?? [];
 }
 
 export async function createWorkflow(payload: {

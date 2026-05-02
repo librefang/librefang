@@ -365,7 +365,7 @@ pub async fn create_workflow(
     path = "/api/workflows",
     tag = "workflows",
     responses(
-        (status = 200, description = "List workflows", body = Vec<serde_json::Value>)
+        (status = 200, description = "List workflows (PaginatedResponse envelope)", body = crate::types::JsonObject)
     )
 )]
 pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -466,7 +466,16 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
             })
         })
         .collect();
-    Json(serde_json::json!({ "workflows": list }))
+    // Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+    // shape (#3842). All workflows are returned in a single page — the engine
+    // holds them in memory — so `offset=0` and `limit=None` always.
+    let total = list.len();
+    Json(serde_json::json!({
+        "items": list,
+        "total": total,
+        "offset": 0,
+        "limit": serde_json::Value::Null,
+    }))
 }
 
 /// GET /api/workflows/:id — Get a single workflow by ID.
