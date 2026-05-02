@@ -3254,7 +3254,12 @@ export interface ExperimentVariantMetrics {
 }
 
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
-  return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<PaginatedResponse<PromptVersion> | PromptVersion[]>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/versions`,
+  );
+  return Array.isArray(data) ? data : (data.items ?? []);
 }
 
 export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
@@ -3270,7 +3275,12 @@ export async function activatePromptVersion(versionId: string, agentId: string):
 }
 
 export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
-  return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<PaginatedResponse<PromptExperiment> | PromptExperiment[]>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`,
+  );
+  return Array.isArray(data) ? data : (data.items ?? []);
 }
 
 export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {
