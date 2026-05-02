@@ -74,7 +74,6 @@ async fn list_prompt_versions_empty_for_unknown_agent() {
     let path = format!("/api/agents/{AGENT_UUID}/prompts/versions");
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // #3842 canonical envelope.
     assert_eq!(body["items"], serde_json::json!([]));
     assert_eq!(body["total"], 0);
     assert_eq!(body["offset"], 0);
@@ -122,7 +121,7 @@ async fn create_prompt_version_round_trips_through_get_and_list() {
     let new_id = body["id"].as_str().expect("id string").to_string();
     assert_ne!(new_id, "00000000-0000-0000-0000-000000000000");
 
-    // List should now contain it. #3842 canonical envelope.
+    // List should now contain it.
     let (status, listed) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK);
     let arr = listed["items"].as_array().expect("items is array");
@@ -226,7 +225,6 @@ async fn list_experiments_empty_for_unknown_agent() {
     let path = format!("/api/agents/{AGENT_UUID}/prompts/experiments");
     let (status, body) = json_request(&h, Method::GET, &path, None).await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // #3842 canonical envelope.
     assert_eq!(body["items"], serde_json::json!([]));
     assert_eq!(body["total"], 0);
     assert_eq!(body["offset"], 0);
