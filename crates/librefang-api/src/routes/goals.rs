@@ -43,23 +43,32 @@ fn goals_shared_agent_id() -> AgentId {
 }
 
 /// GET /api/goals — List all goals.
+///
+/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
+/// shape used by `/api/agents` and `/api/peers` (#3842). Goals are stored as
+/// a single JSON array in shared KV memory and returned in one page —
+/// `offset=0` and `limit=None` always.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
-    match state
+    let items: Vec<serde_json::Value> = match state
         .kernel
         .memory_substrate()
         .structured_get(agent_id, GOALS_KEY)
     {
-        Ok(Some(serde_json::Value::Array(arr))) => {
-            let total = arr.len();
-            Json(serde_json::json!({"goals": arr, "total": total}))
-        }
-        Ok(_) => Json(serde_json::json!({"goals": [], "total": 0})),
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        Ok(_) => Vec::new(),
         Err(e) => {
             tracing::warn!("Failed to load goals: {e}");
-            Json(serde_json::json!({"goals": [], "total": 0, "error": format!("{e}")}))
+            Vec::new()
         }
-    }
+    };
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/goals/{id} — Get a specific goal by ID.

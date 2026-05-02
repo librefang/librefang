@@ -1864,8 +1864,15 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  const data = await get<{ workflows?: WorkflowItem[] }>("/api/workflows");
-  return data.workflows ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{workflows}` shape during the transition so older daemons keep
+  // working.
+  const data = await get<{
+    items?: WorkflowItem[];
+    workflows?: WorkflowItem[];
+    total?: number;
+  }>("/api/workflows");
+  return data.items ?? data.workflows ?? [];
 }
 
 export async function createWorkflow(payload: {
@@ -2603,8 +2610,14 @@ export async function decayMemories(): Promise<ApiActionResponse> {
 }
 
 export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  const data = await get<{ agents?: UsageByAgentItem[] }>("/api/usage");
-  return data.agents ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{agents}` shape during the transition so older daemons keep working.
+  const data = await get<{
+    items?: UsageByAgentItem[];
+    agents?: UsageByAgentItem[];
+    total?: number;
+  }>("/api/usage");
+  return data.items ?? data.agents ?? [];
 }
 
 export async function getUsageSummary(): Promise<UsageSummaryResponse> {
@@ -2832,8 +2845,14 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 }
 
 export async function listGoals(): Promise<GoalItem[]> {
-  const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
-  return data.goals ?? [];
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{goals}` shape during the transition so older daemons keep working.
+  const data = await get<{
+    items?: GoalItem[];
+    goals?: GoalItem[];
+    total?: number;
+  }>("/api/goals");
+  return data.items ?? data.goals ?? [];
 }
 
 export interface GoalTemplate {

@@ -80,7 +80,8 @@ async fn goals_list_starts_empty() {
     let (status, body) = json_request(&h, Method::GET, "/api/goals", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 0);
-    assert_eq!(body["goals"], serde_json::json!([]));
+    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(body["offset"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -92,7 +93,7 @@ async fn goals_list_reflects_created_goals() {
     let (status, body) = json_request(&h, Method::GET, "/api/goals", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["total"], 2);
-    assert_eq!(body["goals"].as_array().unwrap().len(), 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 2);
 }
 
 // ---------------------------------------------------------------------------

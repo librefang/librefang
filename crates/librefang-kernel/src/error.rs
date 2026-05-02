@@ -70,4 +70,29 @@ mod tests {
         let kerr: KernelError = HandError::NotFound("missing".to_string()).into();
         assert_eq!(format!("{kerr}"), "Hand not found: missing");
     }
+
+    /// Regression for #3711 (slice 1 follow-up): the additional collapse
+    /// sites migrated in `deactivate_hand`, `pause_hand`, `resume_hand`,
+    /// `set_agents`, `merge_agent_runtime_override`,
+    /// `clear_agent_runtime_override`, and `persist_hand_state_result`
+    /// most commonly surface `HandError::InstanceNotFound(Uuid)` when the
+    /// caller passes a stale id. Before the migration the boundary
+    /// rendered this as `LibreFangError::Internal("Hand instance not
+    /// found: <uuid>")` via `e.to_string()`. With `KernelError::Hand`
+    /// `#[error(transparent)]` the rendering must be byte-identical, and
+    /// the typed variant must survive so upstream can map it to 404.
+    #[test]
+    fn hand_error_instance_not_found_survives_and_displays_unchanged() {
+        let id = uuid::Uuid::nil();
+        let inner = HandError::InstanceNotFound(id);
+        let prev_collapsed_display = inner.to_string();
+        let kerr: KernelError = inner.into();
+        // Display preserved (matches the pre-refactor `e.to_string()`).
+        assert_eq!(format!("{kerr}"), prev_collapsed_display);
+        // Typed variant preserved across the boundary.
+        match kerr {
+            KernelError::Hand(HandError::InstanceNotFound(got)) => assert_eq!(got, id),
+            other => panic!("expected KernelError::Hand(InstanceNotFound), got {other:?}"),
+        }
+    }
 }
