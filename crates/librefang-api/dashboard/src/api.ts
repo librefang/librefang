@@ -170,8 +170,6 @@ export interface SkillsResponse {
   offset?: number;
   limit?: number | null;
   categories?: string[];
-  // Legacy fallback — remove once all callers adopt the #3842 envelope.
-  skills?: SkillItem[];
 }
 
 // Skill evolution types
@@ -248,8 +246,6 @@ export interface ChannelsResponse {
   offset?: number;
   limit?: number | null;
   configured_count?: number;
-  // Legacy field kept for transition window — pre-#3842 daemons.
-  channels?: ChannelItem[];
 }
 
 export interface DashboardSnapshot {
@@ -1580,8 +1576,7 @@ export async function generateMusic(req: { prompt?: string; lyrics?: string; pro
 
 export async function listChannels(): Promise<ChannelItem[]> {
   const data = await get<ChannelsResponse>("/api/channels");
-  // Prefer canonical `items` (#3842); fall back to legacy `channels` field.
-  return data.items ?? data.channels ?? [];
+  return data.items ?? [];
 }
 
 export async function testChannel(channelName: string): Promise<ApiActionResponse> {
@@ -1628,9 +1623,7 @@ export async function whatsappQrStatus(qrCode: string): Promise<QrStatusResponse
 
 export async function listSkills(): Promise<SkillItem[]> {
   const data = await get<SkillsResponse>("/api/skills");
-  // Canonical envelope (#3842) ships `items`; fall back to legacy `skills`
-  // during the transition window.
-  return data.items ?? data.skills ?? [];
+  return data.items ?? [];
 }
 
 export async function listTools(): Promise<ToolDefinition[]> {
@@ -1886,13 +1879,8 @@ export async function instantiateTemplate(id: string, params: Record<string, unk
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
-  // Daemons may return legacy `{workflows}` — fall back for version skew.
-  const data = await get<{
-    items?: WorkflowItem[];
-    workflows?: WorkflowItem[];
-    total?: number;
-  }>("/api/workflows");
-  return data.items ?? data.workflows ?? [];
+  const data = await get<PaginatedResponse<WorkflowItem>>("/api/workflows");
+  return data.items ?? [];
 }
 
 export async function createWorkflow(payload: {
@@ -2011,12 +1999,8 @@ export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiAct
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {
-  // #3842 canonical envelope: `items`. `schedules` retained as a transitional
-  // fallback for any older daemon a dashboard pin might be talking to.
-  const data = await get<{ items?: ScheduleItem[]; schedules?: ScheduleItem[]; total?: number }>(
-    "/api/schedules",
-  );
-  return data.items ?? data.schedules ?? [];
+  const data = await get<PaginatedResponse<ScheduleItem>>("/api/schedules");
+  return data.items ?? [];
 }
 
 export async function createSchedule(payload: {
@@ -2539,23 +2523,13 @@ export async function createAgentSession(
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {
-  // Bumped past the server's default page size (50) so list-row aggregates
-  // (sessions/cost in the agent row) don't silently clip when an agent's
-  // sessions aren't in the latest 50 globally. Modern backends embed
-  // `sessions_24h` / `cost_24h` directly on each AgentItem (see
-  // `enrich_agent_json`), so this scan is now only the *fallback* path
-  // for older daemons; the detail-panel KPI tile reads from
-  // `GET /api/agents/{id}/stats` and never touches this list.
-  // TODO: drop the fallback (and this whole call from AgentsPage) once
-  // the minimum supported daemon version is past the embed change.
-  // Canonical paginated envelope (#3842): {items,total,offset,limit}.
-  // Tolerate the legacy `sessions` field for daemons that predate the
-  // migration so a mid-rollout client doesn't suddenly render an empty list.
-  const data = await get<{
-    items?: SessionListItem[];
-    sessions?: SessionListItem[];
-  }>("/api/sessions?limit=500");
-  return data.items ?? data.sessions ?? [];
+  // Bumped past the server's default page size (50) so SessionsPage doesn't
+  // silently clip the global list. Per-agent KPI rollups read from
+  // `GET /api/agents/{id}/stats`; AgentsPage row aggregates read the
+  // `sessions_24h` / `cost_24h` fields embedded on each AgentItem by
+  // `enrich_agent_json`, so this endpoint is no longer used for that path.
+  const data = await get<PaginatedResponse<SessionListItem>>("/api/sessions?limit=500");
+  return data.items ?? [];
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
@@ -2656,13 +2630,8 @@ export async function decayMemories(): Promise<ApiActionResponse> {
 }
 
 export async function listUsageByAgent(): Promise<UsageByAgentItem[]> {
-  // Daemons may return legacy `{agents}` — fall back for version skew.
-  const data = await get<{
-    items?: UsageByAgentItem[];
-    agents?: UsageByAgentItem[];
-    total?: number;
-  }>("/api/usage");
-  return data.items ?? data.agents ?? [];
+  const data = await get<PaginatedResponse<UsageByAgentItem>>("/api/usage");
+  return data.items ?? [];
 }
 
 export async function getUsageSummary(): Promise<UsageSummaryResponse> {
@@ -2722,12 +2691,9 @@ export async function getCommsTopology(): Promise<CommsTopology> {
 
 export async function listCommsEvents(limit = 200): Promise<CommsEventItem[]> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200;
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy bare-array shape during the transition so older daemons keep working.
-  const data = await get<CommsEventItem[] | { items?: CommsEventItem[] }>(
+  const data = await get<PaginatedResponse<CommsEventItem>>(
     `/api/comms/events?limit=${encodeURIComponent(String(n))}`,
   );
-  if (Array.isArray(data)) return data;
   return data.items ?? [];
 }
 
@@ -2748,13 +2714,8 @@ export async function postCommsTask(payload: {
 }
 
 export async function listHands(): Promise<HandDefinitionItem[]> {
-  const data = await get<{
-    items?: HandDefinitionItem[];
-    hands?: HandDefinitionItem[];
-    total?: number;
-  }>("/api/hands");
-  // Canonical envelope (#3842) ships `items`; fall back to legacy `hands`.
-  return data.items ?? data.hands ?? [];
+  const data = await get<PaginatedResponse<HandDefinitionItem>>("/api/hands");
+  return data.items ?? [];
 }
 
 export async function getHandManifestToml(handId: string): Promise<string> {
@@ -2766,13 +2727,8 @@ export async function getRawConfigToml(): Promise<string> {
 }
 
 export async function listActiveHands(): Promise<HandInstanceItem[]> {
-  const data = await get<{
-    items?: HandInstanceItem[];
-    instances?: HandInstanceItem[];
-    total?: number;
-  }>("/api/hands/active");
-  // Canonical envelope (#3842) ships `items`; fall back to legacy `instances`.
-  return data.items ?? data.instances ?? [];
+  const data = await get<PaginatedResponse<HandInstanceItem>>("/api/hands/active");
+  return data.items ?? [];
 }
 
 export async function activateHand(
@@ -2908,13 +2864,8 @@ export async function getHandInstanceStatus(instanceId: string): Promise<HandIns
 }
 
 export async function listGoals(): Promise<GoalItem[]> {
-  // Daemons may return legacy `{goals}` — fall back for version skew.
-  const data = await get<{
-    items?: GoalItem[];
-    goals?: GoalItem[];
-    total?: number;
-  }>("/api/goals");
-  return data.items ?? data.goals ?? [];
+  const data = await get<PaginatedResponse<GoalItem>>("/api/goals");
+  return data.items ?? [];
 }
 
 export interface GoalTemplate {
@@ -2999,20 +2950,15 @@ export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
 }
 
 export async function listPeers(): Promise<PeerItem[]> {
-  // Daemons may return legacy `{peers}` — fall back for version skew.
-  const data = await get<{ items?: PeerItem[]; peers?: PeerItem[] }>(
-    "/api/peers",
-  );
-  return data.items ?? data.peers ?? [];
+  const data = await get<PaginatedResponse<PeerItem>>("/api/peers");
+  return data.items ?? [];
 }
 
 export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{peers}` shape during the transition so older daemons keep working.
-  const data = await get<{ items?: TrustedPeerItem[]; peers?: TrustedPeerItem[] }>(
+  const data = await get<PaginatedResponse<TrustedPeerItem>>(
     "/api/network/trusted-peers",
   );
-  return data.items ?? data.peers ?? [];
+  return data.items ?? [];
 }
 
 export async function getPeerDetail(peerId: string): Promise<PeerItem> {
@@ -3197,15 +3143,8 @@ export interface RegistryEntry {
 }
 
 export async function listPlugins(): Promise<PluginItem[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy `{plugins,total,plugins_dir}` shape during the transition so older
-  // daemons keep working.
-  const data = await get<{
-    items?: PluginItem[];
-    plugins?: PluginItem[];
-    total?: number;
-  }>("/api/plugins");
-  return data.items ?? data.plugins ?? [];
+  const data = await get<PaginatedResponse<PluginItem>>("/api/plugins");
+  return data.items ?? [];
 }
 
 export async function getPlugin(name: string): Promise<PluginItem> {
@@ -3292,12 +3231,10 @@ export interface ExperimentVariantMetrics {
 }
 
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy bare-array shape during the transition so older daemons keep working.
-  const data = await get<PaginatedResponse<PromptVersion> | PromptVersion[]>(
+  const data = await get<PaginatedResponse<PromptVersion>>(
     `/api/agents/${encodeURIComponent(agentId)}/prompts/versions`,
   );
-  return Array.isArray(data) ? data : (data.items ?? []);
+  return data.items ?? [];
 }
 
 export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
@@ -3313,12 +3250,10 @@ export async function activatePromptVersion(versionId: string, agentId: string):
 }
 
 export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
-  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
-  // legacy bare-array shape during the transition so older daemons keep working.
-  const data = await get<PaginatedResponse<PromptExperiment> | PromptExperiment[]>(
+  const data = await get<PaginatedResponse<PromptExperiment>>(
     `/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`,
   );
-  return Array.isArray(data) ? data : (data.items ?? []);
+  return data.items ?? [];
 }
 
 export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {
