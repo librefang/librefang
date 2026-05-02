@@ -7632,6 +7632,7 @@
           "workflows"
         ],
         "summary": "GET /api/schedules — List all scheduled jobs.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\n(#3842) so the generated SDK can share one list-response type across all\nlist endpoints. The legacy `schedules` key was renamed to `items`; offset\nis always 0 and limit is null because this endpoint returns the full set.",
         "operationId": "list_schedules",
         "responses": {
           "200": {
@@ -7639,8 +7640,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
