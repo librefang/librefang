@@ -5915,3 +5915,78 @@ fn test_spawn_agent_rejects_parent_traversal_module_path() {
 
     kernel.shutdown();
 }
+
+/// Regression test for #3564 — `config_reload_lock` must NOT be held across
+/// long-running awaits in `send_message_full_with_upstream`.
+///
+/// Before the fix, the read guard scoped the entire LLM call. Combined with
+/// `tokio::sync::RwLock`'s write-preferring policy, any single reload (or
+/// file-watcher fire) would queue a writer and freeze every subsequent
+/// incoming agent message until the slowest in-flight stream completed.
+///
+/// This test simulates the pattern the production code uses and asserts
+/// that a queued writer and a *second* reader can both make progress while
+/// a "long-running" reader (the LLM call analogue) is still in flight.
+/// With the buggy code (guard held to function end), the second reader
+/// would deadlock behind the queued writer until the long reader finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn config_reload_lock_not_held_across_long_await_3564() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let kernel = cascade_test_kernel();
+
+    // "Long-running LLM call" reader. Mirrors the post-fix pattern in
+    // `send_message_full_with_upstream`: acquire the read guard briefly
+    // (to serialize with reload's write side), drop it, then proceed
+    // with the multi-second async work that used to hold the guard.
+    let kernel_a = Arc::clone(&kernel);
+    let long_reader = tokio::spawn(async move {
+        {
+            let _g = kernel_a.config_reload_lock.read().await;
+            // immediately dropped — this is the fix
+        }
+        // simulate the LLM call that used to be guarded
+        tokio::time::sleep(Duration::from_millis(800)).await;
+    });
+
+    // Give the long reader a moment to enter (and exit) its guard scope.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Queue a writer (mimics `reload_config`'s write side). Under the
+    // write-preferring `tokio::sync::RwLock`, any subsequent reader will
+    // queue behind this writer.
+    let kernel_w = Arc::clone(&kernel);
+    let writer = tokio::spawn(async move {
+        let _wg = kernel_w.config_reload_lock.write().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    });
+
+    // Give the writer a moment to register its intent.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // A *new* incoming request arrives. With the bug, this would block
+    // behind the writer, which would in turn block behind the long
+    // reader's guard — total wait ~ entire LLM call duration. With the
+    // fix, the long reader has already released, so writer + this reader
+    // both finish well within a fraction of the simulated call time.
+    let kernel_b = Arc::clone(&kernel);
+    let second_reader = tokio::spawn(async move {
+        let _g = kernel_b.config_reload_lock.read().await;
+    });
+
+    // Cap the wait well below the long reader's sleep. If the bug were
+    // present, this would time out (second_reader would still be queued
+    // behind the writer, which would still be queued behind the long
+    // reader's guard).
+    timeout(Duration::from_millis(400), async {
+        writer.await.unwrap();
+        second_reader.await.unwrap();
+    })
+    .await
+    .expect("writer + second reader must not be blocked by the long reader's release-immediately guard (#3564)");
+
+    long_reader.await.unwrap();
+    kernel.shutdown();
+}

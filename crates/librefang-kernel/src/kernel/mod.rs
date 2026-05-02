@@ -766,7 +766,7 @@ pub struct LibreFangKernel {
     /// URLs but old default model). Read-locked in message hot paths so multiple
     /// requests proceed in parallel but block briefly during a reload.
     /// Uses `tokio::sync::RwLock` so guards are `Send` and can be held across `.await`.
-    config_reload_lock: tokio::sync::RwLock<()>,
+    pub(crate) config_reload_lock: tokio::sync::RwLock<()>,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -5156,11 +5156,18 @@ system_prompt = "You are a helpful assistant."
         session_id_override: Option<SessionId>,
         upstream_interrupt: Option<librefang_runtime::interrupt::SessionInterrupt>,
     ) -> KernelResult<AgentLoopResult> {
-        // Acquire a shared read lock on the config reload barrier.
-        // This is non-blocking under normal operation (many readers proceed in
-        // parallel) but will briefly wait if a config hot-reload is in progress,
-        // ensuring this request sees a fully-consistent configuration snapshot.
-        let _config_guard = self.config_reload_lock.read().await;
+        // Briefly acquire the config reload barrier to ensure we observe a
+        // fully-applied hot-reload (config swap + side effects are atomic
+        // under the writer's guard). We drop the guard immediately after —
+        // `self.config` is an `ArcSwap`, so any subsequent `.load()` already
+        // returns a consistent snapshot. Holding the read guard across the
+        // entire LLM call (multi-minute streams) was a bug (#3564):
+        // `tokio::sync::RwLock` is write-preferring, so a single
+        // `/api/config/reload` froze every new request behind the queued
+        // writer until the slowest in-flight stream completed.
+        {
+            let _config_guard = self.config_reload_lock.read().await;
+        }
 
         let agent_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
