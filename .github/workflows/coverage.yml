@@ -1,0 +1,99 @@
+name: Coverage
+
+# Report-only code coverage measurement using cargo-llvm-cov + nextest.
+# This job mirrors the CI test runner but instruments the build with
+# source-based coverage, then publishes an LCOV artifact and a summary
+# in the GitHub Actions job summary. It does NOT gate merges — once a
+# baseline is established, a follow-up PR can add a regression threshold.
+#
+# See issue #3819 for context.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Coverage instrumentation generates many warnings inside generated
+  # code; don't promote them to errors here (CI's main lane already
+  # enforces -D warnings on the non-instrumented build).
+  RUSTFLAGS: ""
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  coverage:
+    name: Workspace coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: coverage-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # cargo-llvm-cov
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install nextest
+        uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
+
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            libsecret-1-dev \
+            pkg-config \
+            patchelf
+
+      - name: Ensure dashboard build dir exists
+        run: mkdir -p crates/librefang-api/static/react
+
+      - name: Generate coverage (LCOV)
+        env:
+          RUST_TEST_THREADS: "1"
+        run: |
+          cargo llvm-cov nextest \
+            --workspace \
+            --no-fail-fast \
+            --lcov \
+            --output-path lcov.info
+
+      - name: Generate coverage summary
+        run: |
+          cargo llvm-cov report --summary-only | tee coverage-summary.txt
+          {
+            echo "## Code coverage"
+            echo ""
+            echo '```'
+            cat coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload LCOV artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 14
