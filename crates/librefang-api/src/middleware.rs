@@ -11,6 +11,12 @@ use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
 use librefang_kernel::auth::UserRole;
+
+// Re-export `UserRole` through the API auth-boundary module so route
+// handlers do not need to reach into `librefang_kernel::auth` directly.
+// Centralising the re-export here keeps the kernel→api coupling at a
+// single, reviewable site (issue #3744).
+pub use librefang_kernel::auth::UserRole as ApiUserRole;
 use librefang_types::agent::UserId;
 use librefang_types::i18n;
 use std::collections::HashMap;
