@@ -243,11 +243,19 @@ pub async fn list_plugins(
         })
         .collect();
 
-    Json(serde_json::json!({
-        "plugins": items,
-        "total": items.len(),
-        "plugins_dir": librefang_runtime::plugin_manager::plugins_dir().display().to_string(),
-    }))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    // Plugin list is materialized in one shot from the on-disk plugin manager,
+    // so offset=0 / limit=None. The previous shape carried a `plugins_dir`
+    // field — no caller in the dashboard or SDK reads it, and it doesn't
+    // belong on a list envelope. If a UI ever needs the plugins directory
+    // path, expose it via a separate config/info endpoint.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// GET /api/plugins/:name — Get details of a specific plugin.

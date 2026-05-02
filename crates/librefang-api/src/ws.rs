@@ -1682,7 +1682,10 @@ fn sanitize_text(s: &str) -> String {
 ///
 /// Uses the proper LLM error classifier from `librefang_runtime::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
-fn classify_streaming_error(err: &librefang_kernel::error::KernelError) -> String {
+// Accepts any `Display` error so this module does not have to depend on
+// `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel
+// boundary thin (see #3744) — the function only ever formats the error.
+fn classify_streaming_error(err: &dyn std::fmt::Display) -> String {
     let inner = format!("{err}");
 
     // Check for agent-specific errors first (not LLM errors)
@@ -1905,6 +1908,25 @@ mod tests {
         assert_eq!(VerboseLevel::Off.label(), "off");
         assert_eq!(VerboseLevel::On.label(), "on");
         assert_eq!(VerboseLevel::Full.label(), "full");
+    }
+
+    // Regression for #3744: classify_streaming_error must accept any Display
+    // type, so this module no longer needs to import KernelError.
+    #[test]
+    fn test_classify_streaming_error_accepts_any_display() {
+        // A plain &str (not a KernelError) is sufficient.
+        let msg = classify_streaming_error(&"Agent not found");
+        assert!(msg.contains("Agent not found"));
+
+        // A custom Display impl also works.
+        struct E;
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("quota exceeded")
+            }
+        }
+        let msg = classify_streaming_error(&E);
+        assert!(msg.to_lowercase().contains("quota"));
     }
 
     #[test]

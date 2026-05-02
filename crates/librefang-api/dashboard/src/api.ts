@@ -1313,8 +1313,8 @@ export async function getAgentTools(agentId: string): Promise<AgentToolsResponse
   return get<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`);
 }
 
-export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
+export async function updateAgentTools(agentId: string, payload: { capabilities_tools?: string[]; tool_allowlist?: string[]; tool_blocklist?: string[] }): Promise<AgentToolsResponse> {
+  return put<AgentToolsResponse>(`/api/agents/${encodeURIComponent(agentId)}/tools`, payload);
 }
 
 export async function listAgents(
@@ -1466,8 +1466,8 @@ export async function getModelOverrides(modelKey: string): Promise<ModelOverride
   return get<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`);
 }
 
-export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
+export async function updateModelOverrides(modelKey: string, overrides: ModelOverrides): Promise<ModelOverrides> {
+  return put<ModelOverrides>(`/api/models/overrides/${encodeURIComponent(modelKey)}`, overrides);
 }
 
 export async function deleteModelOverrides(modelKey: string): Promise<ApiActionResponse> {
@@ -2007,8 +2007,12 @@ export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiAct
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {
-  const data = await get<{ schedules?: ScheduleItem[]; total?: number }>("/api/schedules");
-  return data.schedules ?? [];
+  // #3842 canonical envelope: `items`. `schedules` retained as a transitional
+  // fallback for any older daemon a dashboard pin might be talking to.
+  const data = await get<{ items?: ScheduleItem[]; schedules?: ScheduleItem[]; total?: number }>(
+    "/api/schedules",
+  );
+  return data.items ?? data.schedules ?? [];
 }
 
 export async function createSchedule(payload: {
@@ -2185,6 +2189,13 @@ export interface MemoryConfigResponse {
     extraction_model?: string;
     max_retrieve?: number;
   };
+  /**
+   * Set on the response of `PATCH /api/memory/config` to flag that the
+   * persisted values won't take effect until the daemon restarts. Absent on
+   * GET responses (where the live `KernelConfig` is authoritative).
+   * See issue #3832.
+   */
+  restart_required?: boolean;
 }
 
 export async function getMemoryConfig(): Promise<MemoryConfigResponse> {
@@ -2203,8 +2214,10 @@ export async function updateMemoryConfig(payload: {
     extraction_model?: string;
     max_retrieve?: number;
   };
-}): Promise<ApiActionResponse> {
-  return patch<ApiActionResponse>("/api/memory/config", payload);
+}): Promise<MemoryConfigResponse> {
+  // Returns the canonical post-mutation entity (issue #3832) so the mutation
+  // hook can `setQueryData` instead of forcing a refetch round-trip.
+  return patch<MemoryConfigResponse>("/api/memory/config", payload);
 }
 
 export async function getSecurityStatus(): Promise<SecurityStatusResponse> {
@@ -2531,8 +2544,14 @@ export async function listSessions(): Promise<SessionListItem[]> {
   // `GET /api/agents/{id}/stats` and never touches this list.
   // TODO: drop the fallback (and this whole call from AgentsPage) once
   // the minimum supported daemon version is past the embed change.
-  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions?limit=500");
-  return data.sessions ?? [];
+  // Canonical paginated envelope (#3842): {items,total,offset,limit}.
+  // Tolerate the legacy `sessions` field for daemons that predate the
+  // migration so a mid-rollout client doesn't suddenly render an empty list.
+  const data = await get<{
+    items?: SessionListItem[];
+    sessions?: SessionListItem[];
+  }>("/api/sessions?limit=500");
+  return data.items ?? data.sessions ?? [];
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
@@ -2700,7 +2719,13 @@ export async function getCommsTopology(): Promise<CommsTopology> {
 
 export async function listCommsEvents(limit = 200): Promise<CommsEventItem[]> {
   const n = Number.isFinite(limit) ? Math.max(1, Math.min(500, Math.floor(limit))) : 200;
-  return get<CommsEventItem[]>(`/api/comms/events?limit=${encodeURIComponent(String(n))}`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<CommsEventItem[] | { items?: CommsEventItem[] }>(
+    `/api/comms/events?limit=${encodeURIComponent(String(n))}`,
+  );
+  if (Array.isArray(data)) return data;
+  return data.items ?? [];
 }
 
 export async function sendCommsMessage(payload: {
@@ -2756,12 +2781,14 @@ export async function activateHand(
   });
 }
 
-export async function pauseHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
+// #3832: pause/resume return the post-mutation HandInstanceItem so the
+// dashboard can setQueryData on the live instance without a follow-up GET.
+export async function pauseHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/pause`, {});
 }
 
-export async function resumeHand(instanceId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
+export async function resumeHand(instanceId: string): Promise<HandInstanceItem> {
+  return post<HandInstanceItem>(`/api/hands/instances/${encodeURIComponent(instanceId)}/resume`, {});
 }
 
 export async function deactivateHand(instanceId: string): Promise<ApiActionResponse> {
@@ -2979,10 +3006,12 @@ export async function listPeers(): Promise<PeerItem[]> {
 }
 
 export async function listTrustedPeers(): Promise<TrustedPeerItem[]> {
-  const data = await get<{ peers?: TrustedPeerItem[] }>(
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{peers}` shape during the transition so older daemons keep working.
+  const data = await get<{ items?: TrustedPeerItem[]; peers?: TrustedPeerItem[] }>(
     "/api/network/trusted-peers",
   );
-  return data.peers ?? [];
+  return data.items ?? data.peers ?? [];
 }
 
 export async function getPeerDetail(peerId: string): Promise<PeerItem> {
@@ -3166,8 +3195,16 @@ export interface RegistryEntry {
   plugins: RegistryPluginListing[];
 }
 
-export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {
-  return get<{ plugins: PluginItem[]; total: number; plugins_dir: string }>("/api/plugins");
+export async function listPlugins(): Promise<PluginItem[]> {
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{plugins,total,plugins_dir}` shape during the transition so older
+  // daemons keep working.
+  const data = await get<{
+    items?: PluginItem[];
+    plugins?: PluginItem[];
+    total?: number;
+  }>("/api/plugins");
+  return data.items ?? data.plugins ?? [];
 }
 
 export async function getPlugin(name: string): Promise<PluginItem> {
@@ -3254,7 +3291,12 @@ export interface ExperimentVariantMetrics {
 }
 
 export async function listPromptVersions(agentId: string): Promise<PromptVersion[]> {
-  return get<PromptVersion[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/versions`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<PaginatedResponse<PromptVersion> | PromptVersion[]>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/versions`,
+  );
+  return Array.isArray(data) ? data : (data.items ?? []);
 }
 
 export async function createPromptVersion(agentId: string, version: Omit<PromptVersion, "id" | "agent_id" | "created_at" | "is_active">): Promise<PromptVersion> {
@@ -3265,12 +3307,17 @@ export async function deletePromptVersion(versionId: string): Promise<ApiActionR
   return del<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}`);
 }
 
-export async function activatePromptVersion(versionId: string, agentId: string): Promise<ApiActionResponse> {
-  return post<ApiActionResponse>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
+export async function activatePromptVersion(versionId: string, agentId: string): Promise<PromptVersion> {
+  return post<PromptVersion>(`/api/prompts/versions/${encodeURIComponent(versionId)}/activate`, { agent_id: agentId });
 }
 
 export async function listExperiments(agentId: string): Promise<PromptExperiment[]> {
-  return get<PromptExperiment[]>(`/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`);
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy bare-array shape during the transition so older daemons keep working.
+  const data = await get<PaginatedResponse<PromptExperiment> | PromptExperiment[]>(
+    `/api/agents/${encodeURIComponent(agentId)}/prompts/experiments`,
+  );
+  return Array.isArray(data) ? data : (data.items ?? []);
 }
 
 export async function createExperiment(agentId: string, experiment: Omit<PromptExperiment, "id" | "agent_id" | "created_at">): Promise<PromptExperiment> {

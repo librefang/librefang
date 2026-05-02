@@ -2581,49 +2581,6 @@
         }
       }
     },
-    "/api/agents/{id}/update": {
-      "put": {
-        "tags": [
-          "agents"
-        ],
-        "summary": "PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).",
-        "operationId": "update_agent",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Agent ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "New agent manifest TOML",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentUpdateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Update an agent's manifest",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonObject"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/agents/{id}/upload": {
       "post": {
         "tags": [
@@ -4463,7 +4420,7 @@
           "network"
         ],
         "summary": "GET /api/comms/events — Return recent inter-agent communication events.",
-        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).",
+        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).\n\nEnvelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents` (#3842). Events are returned in a single\npage capped by `limit` (default 100, max 500); `offset` is always 0.",
         "operationId": "comms_events",
         "parameters": [
           {
@@ -4482,9 +4439,7 @@
             "description": "Recent inter-agent communication events",
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JsonArray"
-                }
+                "schema": {}
               }
             }
           }
@@ -7677,6 +7632,7 @@
           "workflows"
         ],
         "summary": "GET /api/schedules — List all scheduled jobs.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\n(#3842) so the generated SDK can share one list-response type across all\nlist endpoints. The legacy `schedules` key was renamed to `items`; offset\nis always 0 and limit is null because this endpoint returns the full set.",
         "operationId": "list_schedules",
         "responses": {
           "200": {
@@ -7684,8 +7640,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }
@@ -9360,18 +9315,6 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
-          }
-        }
-      },
-      "AgentUpdateRequest": {
-        "type": "object",
-        "description": "Request to update an agent's manifest.",
-        "required": [
-          "manifest_toml"
-        ],
-        "properties": {
-          "manifest_toml": {
-            "type": "string"
           }
         }
       },
