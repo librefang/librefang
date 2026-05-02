@@ -1779,13 +1779,21 @@ jobs:
 
       - name: Initialise iOS project
         working-directory: crates/librefang-desktop
-        # cargo-mobile2 reads APPLE_DEVELOPMENT_TEAM at init time and bakes
-        # it into the generated xcodeproj's DEVELOPMENT_TEAM build setting.
-        # Without it, xcodebuild later fails with "Signing for ... requires a
-        # development team". Reuses the same secret as the macOS notarize
-        # step — same Apple Developer account.
+        # cargo-mobile2 reads these at init time and bakes them into the
+        # generated xcodeproj:
+        #   APPLE_DEVELOPMENT_TEAM → DEVELOPMENT_TEAM
+        #   APPLE_PROFILE_NAME     → PROVISIONING_PROFILE_SPECIFIER + flips
+        #                            CODE_SIGN_STYLE to Manual
+        # Without them xcodebuild stays in automatic signing mode, looks for
+        # a signed-in Apple ID account it'll never find on the runner, and
+        # fails with "No Accounts" / "No profiles for ai.librefang.app were
+        # found". APPLE_TEAM_ID secret is reused (same Apple Developer
+        # account as macOS notarize). APPLE_PROFILE_NAME must be the
+        # provisioning profile's display Name as shown in the Apple Developer
+        # portal (NOT the bundle id, NOT the UUID).
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         run: cargo tauri ios init
 
       # Mirror of the Android version-derivation logic. Both jobs run in
@@ -1887,6 +1895,7 @@ jobs:
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROFILE_NAME: ${{ secrets.APPLE_PROFILE_NAME }}
         # `-f mobile-no-email -- --no-default-features`: see android build
         # above for why `--no-default-features` goes after `--`. We keep iOS
         # on the same channel flavor as Android so mobile binaries are
