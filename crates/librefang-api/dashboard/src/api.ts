@@ -1911,8 +1911,8 @@ export async function updateWorkflow(workflowId: string, payload: {
     timeout_secs?: number;
   }>;
   layout?: unknown;
-}): Promise<ApiActionResponse> {
-  return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
+}): Promise<WorkflowItem> {
+  return put<WorkflowItem>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
 
 export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunItem[]> {

@@ -8129,6 +8129,7 @@
           "budget"
         ],
         "summary": "GET /api/usage — Get per-agent usage statistics.",
+        "description": "Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`\nshape used by `/api/agents`, `/api/peers`, and `/api/goals` (#3842). The\nper-agent rollup is materialized from the in-memory agent registry and\nreturned in one page — `offset=0` and `limit=None` always.",
         "operationId": "usage_stats",
         "responses": {
           "200": {
