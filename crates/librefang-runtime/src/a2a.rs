@@ -1764,7 +1764,7 @@ mod tests {
     /// rebind window.
     #[tokio::test]
     async fn discover_rejects_redirect_response() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1772,6 +1772,15 @@ mod tests {
 
         let server = tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
+                // Drain the client's request before responding. On Windows,
+                // writing + shutting down without first reading causes the
+                // peer to surface a connection error (RST) instead of the
+                // 302, which masks what we're actually testing here. Linux
+                // and macOS buffer the response across the close so they
+                // don't need this. The other A2A redirect test on line ~1626
+                // already follows this pattern for the same reason.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
                 // Reply with a 302 to a benign-looking external URL. The
                 // target is irrelevant — `Policy::none` plus the explicit
                 // `is_redirection()` check must reject before any second
