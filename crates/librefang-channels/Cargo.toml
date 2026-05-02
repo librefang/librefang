@@ -140,6 +140,7 @@ hex = { workspace = true }
 subtle = { workspace = true }
 html-escape = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+pdf-extract = "0.10"
 regex = { workspace = true }
 regex-lite = { workspace = true }
 smallvec = { workspace = true }

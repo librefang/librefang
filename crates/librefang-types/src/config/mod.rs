@@ -1205,6 +1205,53 @@ admin_role = "admin"
     }
 
     #[test]
+    fn default_routing_section_parses_and_is_known_top_level() {
+        // Regression for issue #4466: the init wizard writes Smart Router
+        // selections under `[default_routing]`. The field must
+        // (a) deserialise into KernelConfig and (b) be on the strict-mode
+        // allowlist so users running `strict_config = true` don't see a
+        // bogus unknown-field warning for their own wizard output.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [default_routing]
+            simple_model = "haiku"
+            medium_model = "sonnet"
+            complex_model = "opus"
+            simple_threshold = 100
+            complex_threshold = 500
+        "#,
+        )
+        .unwrap();
+
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(
+            unknown.is_empty(),
+            "default_routing must be allowlisted: {unknown:?}"
+        );
+
+        let cfg: KernelConfig = toml::from_str(
+            r#"
+            [default_routing]
+            simple_model = "haiku"
+            medium_model = "sonnet"
+            complex_model = "opus"
+            simple_threshold = 100
+            complex_threshold = 500
+        "#,
+        )
+        .unwrap();
+        let r = cfg
+            .default_routing
+            .as_ref()
+            .expect("default_routing must deserialise");
+        assert_eq!(r.simple_model, "haiku");
+        assert_eq!(r.medium_model, "sonnet");
+        assert_eq!(r.complex_model, "opus");
+        assert_eq!(r.simple_threshold, 100);
+        assert_eq!(r.complex_threshold, 500);
+    }
+
+    #[test]
     fn test_known_fields_cover_real_kernelconfig_fields() {
         // Regression test for strict_config rejecting valid fields whose names
         // were never added to the hand-maintained allowlists.

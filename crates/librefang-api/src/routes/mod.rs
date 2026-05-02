@@ -13,6 +13,7 @@
 // `routes::agents::router()`), so there is no actual conflict.
 #![allow(ambiguous_glob_reexports)]
 
+pub mod agent_templates;
 pub mod agents;
 pub mod audit;
 pub mod authz;
@@ -35,6 +36,7 @@ pub mod system;
 pub mod terminal;
 pub mod tools_sessions;
 pub mod users;
+pub mod webhooks;
 pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
@@ -47,6 +49,7 @@ pub mod workflows;
 // All modules export a `router()` function; glob re-export produces an ambiguity
 // warning, but `router()` is only accessed via qualified paths (e.g.
 // `routes::agents::router()`), so there is no actual conflict.
+pub use agent_templates::*;
 pub use agents::*;
 pub use audit::*;
 pub use authz::*;
@@ -68,6 +71,7 @@ pub use system::*;
 pub use terminal::*;
 pub use tools_sessions::*;
 pub use users::*;
+pub use webhooks::*;
 pub use workflows::*;
 
 use crate::middleware::RequestLanguage;

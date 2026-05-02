@@ -376,24 +376,30 @@ fn agent_manifest_default_roundtrips_through_toml() {
 
 #[test]
 fn channels_config_default_roundtrips_through_toml() {
-    // Known #3462 Default-drift, flagged for separate triage:
-    //   `ChannelsConfig` uses `#[derive(Default)]`, so
-    //   `file_download_max_bytes` defaults to `u64::default() == 0`, but the
-    //   field is annotated `#[serde(default = "default_file_download_max_bytes")]`
-    //   which returns 50 MiB. Empty-TOML deserialization therefore yields
-    //   52_428_800 while the in-memory `Default::default()` yields 0.
-    //
-    // Per the task brief, this test does NOT silently fix the type — the
-    // discrepancy is normalized only on the divergent field so that drift in
-    // every OTHER field is still caught. The underlying type bug should be
-    // fixed by either replacing `#[derive(Default)]` with a manual impl that
-    // calls `default_file_download_max_bytes()`, or by aligning the serde
-    // helper with the derived zero value, depending on which value is
-    // intended at runtime.
-    let canonical_max_bytes = ChannelsConfig::default().file_download_max_bytes;
-    assert_default_roundtrip_with::<ChannelsConfig>("ChannelsConfig", move |c| {
-        c.file_download_max_bytes = canonical_max_bytes;
-    });
+    // Regression test for #4436: `ChannelsConfig` previously used
+    // `#[derive(Default)]`, so `file_download_max_bytes` defaulted to
+    // `u64::default() == 0` while `#[serde(default = "...")]` returned
+    // 50 MiB. The bridge then silently rejected every attachment as
+    // oversized whenever `ChannelsConfig` was constructed programmatically
+    // (e.g. `KernelConfig::default()`, tests, configs without a
+    // `[channels]` section). The fix is a manual `Default` impl that
+    // calls `default_file_download_max_bytes()`; this test now exercises
+    // the full roundtrip with no field-specific normalization.
+    assert_default_roundtrip::<ChannelsConfig>("ChannelsConfig");
+}
+
+/// Pinned-value regression test for #4436. Independent of the roundtrip
+/// test so a future change that silently zeroes `Default` AND the serde
+/// helper (keeping them consistent) still trips CI.
+#[test]
+fn channels_config_default_has_50mb_max() {
+    assert_eq!(
+        ChannelsConfig::default().file_download_max_bytes,
+        50 * 1024 * 1024,
+        "ChannelsConfig::default().file_download_max_bytes must be 50 MiB; \
+         see issue #4436 — anything less means the channel bridge will \
+         reject attachments whenever the config is built programmatically."
+    );
 }
 
 #[test]
