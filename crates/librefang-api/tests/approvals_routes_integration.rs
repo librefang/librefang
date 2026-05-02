@@ -427,15 +427,17 @@ async fn batch_oversize_is_bad_request() {
 // GET /api/approvals/audit
 // ---------------------------------------------------------------------------
 
-/// Audit endpoint returns the canonical `{entries, total}` envelope even when
-/// nothing has been resolved yet.
+/// Audit endpoint returns the canonical `PaginatedResponse{items,total,offset,limit}`
+/// envelope (#3842) even when nothing has been resolved yet.
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_empty_returns_envelope() {
     let h = boot();
     let (status, body) = get(&h, "/api/approvals/audit").await;
     assert_eq!(status, StatusCode::OK, "got: {body}");
-    assert!(body["entries"].is_array());
+    assert!(body["items"].is_array());
     assert!(body["total"].is_number());
+    assert!(body["offset"].is_number());
+    assert!(body["limit"].is_number());
 }
 
 // ---------------------------------------------------------------------------

@@ -22,8 +22,9 @@
 //!   - `/audit/export?format=json` content shape (chunked array w/ `prev_hash`)
 //!   - `/audit/export?format=bogus` → 400
 //!   - `/audit/export` admin-gated (anon → 401, viewer → 403)
-//!   - `/audit/recent` returns `entries` / `total` / `tip_hash` shape and the
-//!     `?n=` cap (capped at 1000 by handler)
+//!   - `/audit/recent` returns the canonical `PaginatedResponse` shape
+//!     (`items`/`total`/`offset`/`limit`) plus `tip_hash`, and the `?n=` cap
+//!     (capped at 1000 by handler)
 //!   - `/audit/verify` returns `valid: true` on a fresh chain; `warning` field
 //!     surfaces when the chain is empty
 
@@ -202,7 +203,7 @@ async fn audit_query_filters_by_action_case_insensitive() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
-    let entries = body["entries"].as_array().expect("entries[]");
+    let entries = body["items"].as_array().expect("items[]");
     assert!(
         !entries.is_empty(),
         "PermissionDenied filter must surface the seeded denial; got {body}"
@@ -228,7 +229,7 @@ async fn audit_query_filters_by_agent_and_channel() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
-    let entries = body["entries"].as_array().expect("entries[]");
+    let entries = body["items"].as_array().expect("items[]");
     assert!(
         !entries.is_empty(),
         "agent+channel filter must match seeded beta entry"
@@ -255,7 +256,7 @@ async fn audit_query_filters_by_user_name_resolves_to_uuid() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
-    let entries = body["entries"].as_array().expect("entries[]");
+    let entries = body["items"].as_array().expect("items[]");
     assert!(
         !entries.is_empty(),
         "?user=Bob must match the Bob-attributed entry"
@@ -323,7 +324,7 @@ async fn audit_query_clamps_zero_limit_up_to_one() {
     let body = body_json(&bytes);
     let limit = body["limit"].as_u64().expect("limit number");
     assert!(limit >= 1, "limit must be clamped up to >= 1; got {limit}");
-    let entries = body["entries"].as_array().expect("entries[]");
+    let entries = body["items"].as_array().expect("items[]");
     assert!(
         entries.len() <= limit as usize,
         "entries length ({}) must respect the reported limit ({})",
@@ -456,16 +457,20 @@ async fn audit_export_rejects_viewer() {
 #[tokio::test(flavor = "multi_thread")]
 async fn audit_recent_returns_documented_shape() {
     // `/audit/recent` is gated by the dashboard-reads middleware tier and
-    // returns `{entries, total, tip_hash}`. Pin the shape so the dashboard
-    // download flow doesn't break on a future field rename.
+    // returns the canonical `PaginatedResponse{items,total,offset,limit}`
+    // envelope (#3842) plus a `tip_hash` extra field for the dashboard's
+    // chain-integrity badge. Pin the shape so a rename doesn't silently
+    // break the dashboard download flow.
     let h = build_audit_harness("", vec![]);
     seed_audit_entries(&h.state);
 
     let (status, bytes) = send_get(h.app.clone(), "/api/audit/recent", None).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
-    assert!(body["entries"].is_array(), "must carry entries[]");
+    assert!(body["items"].is_array(), "must carry items[]");
     assert!(body["total"].is_number(), "must carry total");
+    assert!(body["offset"].is_number(), "must carry offset");
+    assert!(body["limit"].is_number(), "must carry limit");
     assert!(
         body["tip_hash"].is_string(),
         "must carry tip_hash (chain-tip SHA-256)"
@@ -485,7 +490,7 @@ async fn audit_recent_caps_n_at_1000() {
     let (status, bytes) = send_get(h.app.clone(), "/api/audit/recent?n=999999", None).await;
     assert_eq!(status, StatusCode::OK);
     let body = body_json(&bytes);
-    let entries = body["entries"].as_array().expect("entries[]");
+    let entries = body["items"].as_array().expect("items[]");
     assert!(
         entries.len() <= 1000,
         "?n= must be capped at 1000; got {} entries",

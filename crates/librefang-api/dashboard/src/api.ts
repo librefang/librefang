@@ -621,8 +621,15 @@ export interface AuditEntry {
 }
 
 export interface AuditRecentResponse {
+  // Canonical `PaginatedResponse` field (#3842). Legacy daemons returned
+  // the same payload under `entries`; both are exposed here so the
+  // dashboard can read either during the transition.
+  items?: AuditEntry[];
+  /** @deprecated #3842 — use `items`. Populated by older daemons only. */
   entries?: AuditEntry[];
   total?: number;
+  offset?: number;
+  limit?: number;
   tip_hash?: string;
 }
 
@@ -2458,7 +2465,14 @@ export async function queryApprovalAudit(params: {
   offset?: number;
   agent_id?: string;
   tool_name?: string;
-}): Promise<{ entries: ApprovalAuditEntry[]; total: number }> {
+}): Promise<{
+  items?: ApprovalAuditEntry[];
+  /** @deprecated #3842 — older daemons populated this; prefer `items`. */
+  entries?: ApprovalAuditEntry[];
+  total: number;
+  offset?: number;
+  limit?: number;
+}> {
   const query = new URLSearchParams();
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));

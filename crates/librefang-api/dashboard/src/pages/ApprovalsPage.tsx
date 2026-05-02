@@ -283,7 +283,9 @@ function HistoryTab() {
   const { t } = useTranslation();
   const [offset, setOffset] = useState(0);
   const auditQuery = useApprovalAudit({ limit: HISTORY_PAGE_SIZE, offset });
-  const entries: ApprovalAuditEntry[] = auditQuery.data?.entries ?? [];
+  // #3842: prefer canonical `items`; fall back to legacy `entries` for older daemons.
+  const entries: ApprovalAuditEntry[] =
+    auditQuery.data?.items ?? auditQuery.data?.entries ?? [];
   const total = auditQuery.data?.total ?? 0;
   const from = total === 0 ? 0 : offset + 1;
   const to = Math.min(offset + HISTORY_PAGE_SIZE, total);
