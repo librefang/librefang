@@ -939,9 +939,9 @@ fn token_endpoint_host_matches(token_endpoint: &str, expected_host: &str) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::middleware::UserRole;
     use axum::body::to_bytes;
     use axum::http::{HeaderName, HeaderValue};
-    use librefang_kernel::auth::UserRole;
     use librefang_types::agent::UserId;
 
     #[test]

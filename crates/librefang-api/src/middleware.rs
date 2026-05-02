@@ -10,7 +10,12 @@
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use librefang_kernel::auth::UserRole;
+// Re-export `UserRole` through the api-layer auth boundary so that route
+// modules (and tests) don't need to reach into `librefang_kernel::auth`
+// directly. This keeps the `librefang-api` <-> `librefang-kernel` import
+// surface narrow per issue #3744 — the underlying type still lives in the
+// kernel; only the import path is centralized here.
+pub use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::i18n;
 use std::collections::HashMap;

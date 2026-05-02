@@ -865,7 +865,7 @@ pub async fn list_agents(
     // username automatically.
     if params.owner.is_none() {
         if let Some(ref user) = api_user {
-            use librefang_kernel::auth::UserRole;
+            use crate::middleware::UserRole;
             if user.0.role < UserRole::Admin {
                 params.owner = Some(user.0.name.clone());
             }
@@ -1068,7 +1068,7 @@ pub async fn get_agent_stats(
     // detail-panel rollup can't leak per-agent cost / latency to other
     // users on the same instance.
     if let Some(ref user) = api_user {
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin
             && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
         {
@@ -1175,7 +1175,7 @@ pub async fn list_agent_events(
     // Mirror the owner-scoping on /stats and /sessions — turn-level
     // event data carries token counts and cost, so it shouldn't leak.
     if let Some(ref user) = api_user {
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin
             && !entry.manifest.author.eq_ignore_ascii_case(&user.0.name)
         {
@@ -2834,7 +2834,7 @@ pub async fn list_agent_sessions(
     // authored. Mirrors the filter on `list_agents` so per-agent
     // session metadata (cost, message count) doesn't leak.
     if let Some(ref user) = api_user {
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin {
             let entry = state.kernel.agent_registry().get(agent_id);
             let owned = entry
@@ -5867,7 +5867,7 @@ pub async fn serve_upload(
     // only by the uploader or by Admin/Owner callers; un-owned entries (pre-
     // #3361 uploads, generator output) stay readable for compatibility.
     if let Some(owner_id) = owner {
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         let allowed = match api_user.as_ref().map(|u| &u.0) {
             Some(u) => u.user_id == owner_id || u.role >= UserRole::Admin,
             None => false,

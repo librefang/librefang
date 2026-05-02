@@ -537,7 +537,7 @@ pub async fn get_agent_kv(
     // they authored. Without this, anyone authenticated could pull
     // user.preferences / oncall.contact / api.tokens out of any agent.
     if let Some(ref user) = api_user {
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         if user.0.role < UserRole::Admin {
             let entry = state.kernel.agent_registry().get(agent_id);
             let owned = entry
@@ -3468,7 +3468,7 @@ pub async fn pairing_complete(
             let device_user_name = format!("device:{}", device.device_id);
             let auth = crate::middleware::ApiUserAuth {
                 name: device_user_name.clone(),
-                role: librefang_kernel::auth::UserRole::User,
+                role: crate::middleware::UserRole::User,
                 api_key_hash,
                 user_id: librefang_types::agent::UserId::from_name(&device_user_name),
             };

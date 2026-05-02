@@ -209,7 +209,7 @@ pub(crate) fn configured_user_api_keys(kernel: &LibreFangKernel) -> Vec<middlewa
             }
             Some(middleware::ApiUserAuth {
                 name: user.name.clone(),
-                role: librefang_kernel::auth::UserRole::from_str_role(&user.role),
+                role: crate::middleware::UserRole::from_str_role(&user.role),
                 api_key_hash: api_key_hash.to_string(),
                 user_id: librefang_types::agent::UserId::from_name(&user.name),
             })
@@ -231,7 +231,7 @@ pub(crate) fn paired_device_user_keys(kernel: &LibreFangKernel) -> Vec<middlewar
             let name = format!("device:{device_id}");
             middleware::ApiUserAuth {
                 user_id: librefang_types::agent::UserId::from_name(&name),
-                role: librefang_kernel::auth::UserRole::User,
+                role: crate::middleware::UserRole::User,
                 api_key_hash,
                 name,
             }
