@@ -3166,8 +3166,16 @@ export interface RegistryEntry {
   plugins: RegistryPluginListing[];
 }
 
-export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {
-  return get<{ plugins: PluginItem[]; total: number; plugins_dir: string }>("/api/plugins");
+export async function listPlugins(): Promise<PluginItem[]> {
+  // #3842: canonical envelope is `{items,total,offset,limit}`. Tolerate the
+  // legacy `{plugins,total,plugins_dir}` shape during the transition so older
+  // daemons keep working.
+  const data = await get<{
+    items?: PluginItem[];
+    plugins?: PluginItem[];
+    total?: number;
+  }>("/api/plugins");
+  return data.items ?? data.plugins ?? [];
 }
 
 export async function getPlugin(name: string): Promise<PluginItem> {
