@@ -2501,8 +2501,14 @@ export async function listSessions(): Promise<SessionListItem[]> {
   // `GET /api/agents/{id}/stats` and never touches this list.
   // TODO: drop the fallback (and this whole call from AgentsPage) once
   // the minimum supported daemon version is past the embed change.
-  const data = await get<{ sessions?: SessionListItem[] }>("/api/sessions?limit=500");
-  return data.sessions ?? [];
+  // Canonical paginated envelope (#3842): {items,total,offset,limit}.
+  // Tolerate the legacy `sessions` field for daemons that predate the
+  // migration so a mid-rollout client doesn't suddenly render an empty list.
+  const data = await get<{
+    items?: SessionListItem[];
+    sessions?: SessionListItem[];
+  }>("/api/sessions?limit=500");
+  return data.items ?? data.sessions ?? [];
 }
 
 export async function getSessionDetails(sessionId: string): Promise<SessionDetailResponse> {
