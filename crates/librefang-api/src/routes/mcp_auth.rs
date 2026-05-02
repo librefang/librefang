@@ -5,13 +5,13 @@
 //! authorization.
 
 use super::AppState;
+use crate::mcp_oauth::KernelOAuthProvider;
 use crate::middleware::AuthenticatedApiUser;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
 use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

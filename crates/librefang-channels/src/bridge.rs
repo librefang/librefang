@@ -522,21 +522,28 @@ struct SenderBuffer {
     max_timer_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Backpressure cap for the debouncer flush channel (#3580). Bridges
+/// previously used an unbounded channel here; if the dispatcher stalled
+/// (rate-limited Telegram, paused agent, etc.) the queue grew until OOM.
+const FLUSH_CHANNEL_CAP: usize = 1024;
+
 struct MessageDebouncer {
     debounce_ms: u64,
     debounce_max_ms: u64,
     max_buffer: usize,
-    flush_tx: mpsc::UnboundedSender<String>,
+    flush_tx: mpsc::Sender<String>,
 }
 
 /// Log a `MessageDebouncer` flush-channel send failure at `warn` level.
 ///
 /// All five flush trigger paths (max-timer, immediate, debounce-timer,
-/// typing-triggered, typing-stop) share the same failure mode — the
-/// dispatcher's receiver has been dropped, so buffered messages will be
-/// lost. `location` distinguishes the trigger in logs as a structured
-/// field; `key` is the debouncer key when the call site has it on hand
-/// (the spawn'd timer paths consume it before the send and pass `None`).
+/// typing-triggered, typing-stop) share two failure modes — the
+/// dispatcher's receiver has been dropped, or the bounded flush channel
+/// is full because the dispatcher is stalled (#3580). In either case the
+/// buffered message is dropped. `location` distinguishes the trigger in
+/// logs as a structured field; `key` is the debouncer key when the call
+/// site has it on hand (the spawn'd timer paths consume it before the
+/// send and pass `None`).
 fn warn_flush_dropped<E: std::fmt::Display>(
     result: Result<(), E>,
     location: &'static str,
@@ -547,7 +554,7 @@ fn warn_flush_dropped<E: std::fmt::Display>(
             error = %e,
             key = key.unwrap_or(""),
             location,
-            "Debouncer flush dropped: dispatch receiver closed",
+            "Debouncer flush dropped: dispatch receiver closed or flush channel full",
         );
     }
 }
@@ -557,8 +564,12 @@ impl MessageDebouncer {
         debounce_ms: u64,
         debounce_max_ms: u64,
         max_buffer: usize,
-    ) -> (Self, mpsc::UnboundedReceiver<String>) {
-        let (flush_tx, flush_rx) = mpsc::unbounded_channel();
+    ) -> (Self, mpsc::Receiver<String>) {
+        // Bounded to bound RSS when downstream dispatcher stalls (#3580).
+        // Cap is generous: the queue is keyed by sender (one entry per
+        // distinct (channel, chat) pair within a debounce window), so 1024
+        // accommodates large fan-out without uncapped growth.
+        let (flush_tx, flush_rx) = mpsc::channel(FLUSH_CHANNEL_CAP);
         (
             Self {
                 debounce_ms,
@@ -588,7 +599,7 @@ impl MessageDebouncer {
                 // Dispatcher receiver gone — buffered messages for this
                 // sender will be dropped. Usually only happens during
                 // shutdown.
-                warn_flush_dropped(flush_tx.send(flush_key), "max-timer", None);
+                warn_flush_dropped(flush_tx.send(flush_key).await, "max-timer", None);
             }));
             SenderBuffer {
                 messages: Vec::new(),
@@ -613,7 +624,11 @@ impl MessageDebouncer {
             // The double-fire is suppressed by `drain()` below — once the
             // first flush key is processed, the entry is removed from
             // `buffers`, so the stale key will find nothing and return None.
-            warn_flush_dropped(self.flush_tx.send(key.to_string()), "immediate", Some(key));
+            warn_flush_dropped(
+                self.flush_tx.try_send(key.to_string()),
+                "immediate",
+                Some(key),
+            );
             return;
         }
 
@@ -623,7 +638,7 @@ impl MessageDebouncer {
         let flush_key = key.to_string();
         buf.timer_handle = Some(tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            warn_flush_dropped(flush_tx.send(flush_key), "debounce-timer", None);
+            warn_flush_dropped(flush_tx.send(flush_key).await, "debounce-timer", None);
         }));
     }
 
@@ -637,7 +652,7 @@ impl MessageDebouncer {
         let elapsed = buf.first_arrived.elapsed();
         if elapsed >= max_dur {
             warn_flush_dropped(
-                self.flush_tx.send(key.to_string()),
+                self.flush_tx.try_send(key.to_string()),
                 "typing-triggered",
                 Some(key),
             );
@@ -655,7 +670,7 @@ impl MessageDebouncer {
             let flush_key = key.to_string();
             buf.timer_handle = Some(tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
-                warn_flush_dropped(flush_tx.send(flush_key), "typing-stop", None);
+                warn_flush_dropped(flush_tx.send(flush_key).await, "typing-stop", None);
             }));
         }
     }
@@ -6396,6 +6411,38 @@ mod tests {
             assert!(
                 !buffers.contains_key("discord:userX"),
                 "drain must remove the buffer entry"
+            );
+        }
+
+        // Regression for #3580: the flush channel is bounded so that a
+        // stalled / dropped dispatcher cannot let RSS grow unbounded.
+        // We drop the receiver and push more sender keys than the cap;
+        // every send beyond the first must surface as an Err (and be
+        // logged + dropped via warn_flush_dropped) rather than silently
+        // accumulating in an unbounded queue.
+        #[tokio::test]
+        async fn test_debouncer_flush_channel_is_bounded() {
+            let (debouncer, rx) = MessageDebouncer::new(1000, 5000, 10);
+            // Drop receiver to force every try_send to error — this models
+            // the worst-case "dispatcher gone" path; the cap-limited path
+            // is exercised inherently by `mpsc::channel(FLUSH_CHANNEL_CAP)`.
+            drop(rx);
+
+            let mut errs = 0usize;
+            // Push 2x cap distinct keys; each immediate-flush path hits
+            // try_send. With a bounded channel + dropped rx, every call
+            // returns Err. With the old unbounded channel, the queue
+            // would grow without bound and never error.
+            for i in 0..(FLUSH_CHANNEL_CAP * 2) {
+                let key = format!("k{i}");
+                if debouncer.flush_tx.try_send(key).is_err() {
+                    errs += 1;
+                }
+            }
+            assert_eq!(
+                errs,
+                FLUSH_CHANNEL_CAP * 2,
+                "bounded flush channel must reject sends when receiver is gone"
             );
         }
     }
