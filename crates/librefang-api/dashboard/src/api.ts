@@ -165,14 +165,12 @@ export interface SkillItem {
 }
 
 export interface SkillsResponse {
-  // Canonical PaginatedResponse envelope (#3842).
   items?: SkillItem[];
   total?: number;
   offset?: number;
   limit?: number | null;
   categories?: string[];
-  // Legacy `skills` field — kept for transition; remove once all callers
-  // upgrade.
+  // Legacy fallback — remove once all callers adopt the #3842 envelope.
   skills?: SkillItem[];
 }
 

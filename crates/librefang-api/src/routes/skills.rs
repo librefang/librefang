@@ -231,13 +231,7 @@ use std::time::Instant;
 
 /// GET /api/skills — List installed skills.
 ///
-/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-/// shape used by `/api/agents` / `/api/peers` / `/api/goals` (#3842). Skills
-/// are loaded from the kernel registry into a single in-memory list, so
-/// `offset=0` and `limit=None` always. The list is not paginated server-side.
-/// The bespoke `categories` sibling is preserved for the dashboard's
-/// sibling-tab UI — it intentionally reflects all skills, not just the
-/// `?category=` filtered subset.
+/// `categories` always reflects all skills regardless of the `?category=` filter.
 #[utoipa::path(
     get,
     path = "/api/skills",
@@ -319,10 +313,7 @@ pub async fn list_skills(
 
     let categories_vec: Vec<String> = categories.into_iter().collect();
     let total = skills.len();
-    // Canonical PaginatedResponse envelope (#3842) with `categories` kept as
-    // a sibling field for the dashboard's category tabs. We hand-build the
-    // JSON so we can flatten the envelope and add the extra without a new
-    // bespoke struct.
+    // Untyped JSON so `categories` can be added alongside PaginatedResponse fields without a new struct.
     Json(serde_json::json!({
         "items": skills,
         "total": total,
@@ -1760,10 +1751,6 @@ fn server_platform() -> &'static str {
 }
 
 /// GET /api/hands — List all hand definitions (marketplace).
-///
-/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-/// shape (#3842). Hand definitions come from the kernel registry as a single
-/// list — `offset=0`, `limit=None`.
 #[utoipa::path(
     get,
     path = "/api/hands",
@@ -1862,9 +1849,6 @@ pub async fn list_hands(
 }
 
 /// GET /api/hands/active — List active hand instances.
-///
-/// Envelope is the canonical `PaginatedResponse{items,total,offset,limit}`
-/// shape (#3842). Active instances are returned in a single page.
 #[utoipa::path(
     get,
     path = "/api/hands/active",
