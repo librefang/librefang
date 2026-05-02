@@ -257,7 +257,17 @@ impl LlmDriver for FallbackChain {
                     if is_content {
                         let _ = content_flag.send(true);
                     }
-                    let _ = tx_relay.send(event).await;
+                    if tx_relay.send(event).await.is_err() {
+                        // Downstream caller dropped the receiver. Close the
+                        // relay's inbound channel so the wrapped driver's next
+                        // `tx.send(...)` fails, triggering its backpressure
+                        // path and aborting the upstream LLM stream (#3769).
+                        tracing::debug!(
+                            "FallbackChain(stream): downstream receiver dropped; cancelling inner driver"
+                        );
+                        intercept_rx.close();
+                        break;
+                    }
                 }
             });
 

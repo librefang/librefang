@@ -980,12 +980,22 @@ impl LlmDriver for ClaudeCodeDriver {
                                 "content" | "text" | "assistant" | "content_block_delta" => {
                                     if let Some(ref content) = event.content {
                                         full_text.push_str(content);
-                                        if !should_suppress(content) {
-                                            let _ = tx
+                                        if !should_suppress(content)
+                                            && tx
                                                 .send(StreamEvent::TextDelta {
                                                     text: content.clone(),
                                                 })
-                                                .await;
+                                                .await
+                                                .is_err()
+                                        {
+                                            // Receiver dropped — stop streaming events.
+                                            // The CLI subprocess will be killed below
+                                            // when the loop ends (#3769).
+                                            tracing::debug!(
+                                                "streaming receiver dropped; cancelling Claude Code CLI stream"
+                                            );
+                                            let _ = child.kill().await;
+                                            break None;
                                         }
                                     }
                                 }

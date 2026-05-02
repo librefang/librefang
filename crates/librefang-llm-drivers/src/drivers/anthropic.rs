@@ -616,9 +616,18 @@ impl LlmDriver for AnthropicDriver {
             let mut usage = TokenUsage::default();
             // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
             let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
+            // Set when a `tx.send(...)` fails — the consumer dropped the
+            // receiver, so we abort the upstream stream on the next loop
+            // iteration instead of fetching the rest of the SSE for nobody
+            // (#3769).
+            let mut receiver_dropped = false;
 
             let mut byte_stream = resp.bytes_stream();
             while let Some(chunk_result) = byte_stream.next().await {
+                if receiver_dropped {
+                    tracing::debug!("streaming receiver dropped; cancelling Anthropic LLM stream");
+                    break;
+                }
                 let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
                 buffer.push_str(&utf8.decode(&chunk));
 
@@ -667,12 +676,14 @@ impl LlmDriver for AnthropicDriver {
                                 "tool_use" => {
                                     let id = block["id"].as_str().unwrap_or("").to_string();
                                     let name = block["name"].as_str().unwrap_or("").to_string();
-                                    let _ = tx
-                                        .send(StreamEvent::ToolUseStart {
+                                    crate::send_or_mark_dropped!(
+                                        receiver_dropped,
+                                        tx,
+                                        StreamEvent::ToolUseStart {
                                             id: id.clone(),
                                             name: name.clone(),
-                                        })
-                                        .await;
+                                        }
+                                    );
                                     blocks.push(ContentBlockAccum::ToolUse {
                                         id,
                                         name,
@@ -696,11 +707,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             t.push_str(text);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::TextDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::TextDelta {
                                                 text: text.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 "input_json_delta" => {
@@ -712,11 +725,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             input_json.push_str(partial);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::ToolInputDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::ToolInputDelta {
                                                 text: partial.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 "thinking_delta" => {
@@ -726,11 +741,13 @@ impl LlmDriver for AnthropicDriver {
                                         {
                                             t.push_str(thinking);
                                         }
-                                        let _ = tx
-                                            .send(StreamEvent::ThinkingDelta {
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::ThinkingDelta {
                                                 text: thinking.to_string(),
-                                            })
-                                            .await;
+                                            }
+                                        );
                                     }
                                 }
                                 _ => {}
@@ -758,13 +775,15 @@ impl LlmDriver for AnthropicDriver {
                                         super::openai::malformed_tool_input(&e, input_json.len())
                                     }
                                 };
-                                let _ = tx
-                                    .send(StreamEvent::ToolUseEnd {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::ToolUseEnd {
                                         id: id.clone(),
                                         name: name.clone(),
                                         input,
-                                    })
-                                    .await;
+                                    }
+                                );
                             }
                         }
                         "message_delta" => {
@@ -839,6 +858,8 @@ impl LlmDriver for AnthropicDriver {
                 }
             }
 
+            // Best-effort final send — byte loop is done, nothing to abort
+            // even if the receiver has dropped (#3769).
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })
                 .await;

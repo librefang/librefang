@@ -621,9 +621,16 @@ pub(crate) async fn stream_gemini_sse(
     let mut usage = TokenUsage::default();
     // Buffers partial UTF-8 codepoints across chunk boundaries (#3448).
     let mut utf8 = crate::utf8_stream::Utf8StreamDecoder::new();
+    // Set when a `tx.send(...)` fails — abort the upstream stream on the
+    // next loop iteration instead of fetching the rest for nobody (#3769).
+    let mut receiver_dropped = false;
 
     let mut byte_stream = resp.bytes_stream();
     while let Some(chunk_result) = byte_stream.next().await {
+        if receiver_dropped {
+            tracing::debug!("streaming receiver dropped; cancelling Gemini LLM stream");
+            break;
+        }
         let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
         buffer.push_str(&utf8.decode(&chunk));
 
@@ -681,9 +688,11 @@ pub(crate) async fn stream_gemini_sse(
                                         // model — emit as ThinkingDelta, not
                                         // regular TextDelta.
                                         thinking_content.push_str(text);
-                                        let _ = tx
-                                            .send(StreamEvent::ThinkingDelta { text: text.clone() })
-                                            .await;
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::ThinkingDelta { text: text.clone() }
+                                        );
                                         // Capture thought_signature for the
                                         // thinking block separately from text.
                                         if thought_signature.is_some() {
@@ -691,9 +700,11 @@ pub(crate) async fn stream_gemini_sse(
                                         }
                                     } else {
                                         text_content.push_str(text);
-                                        let _ = tx
-                                            .send(StreamEvent::TextDelta { text: text.clone() })
-                                            .await;
+                                        crate::send_or_mark_dropped!(
+                                            receiver_dropped,
+                                            tx,
+                                            StreamEvent::TextDelta { text: text.clone() }
+                                        );
                                         // Capture thought_signature for text
                                         // parts (last one wins across chunks).
                                         if thought_signature.is_some() {
@@ -707,24 +718,30 @@ pub(crate) async fn stream_gemini_sse(
                                 thought_signature,
                             } => {
                                 let id = format!("call_{}", uuid::Uuid::new_v4().simple());
-                                let _ = tx
-                                    .send(StreamEvent::ToolUseStart {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::ToolUseStart {
                                         id: id.clone(),
                                         name: function_call.name.clone(),
-                                    })
-                                    .await;
+                                    }
+                                );
                                 let args_str =
                                     serde_json::to_string(&function_call.args).unwrap_or_default();
-                                let _ = tx
-                                    .send(StreamEvent::ToolInputDelta { text: args_str })
-                                    .await;
-                                let _ = tx
-                                    .send(StreamEvent::ToolUseEnd {
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::ToolInputDelta { text: args_str }
+                                );
+                                crate::send_or_mark_dropped!(
+                                    receiver_dropped,
+                                    tx,
+                                    StreamEvent::ToolUseEnd {
                                         id,
                                         name: function_call.name.clone(),
                                         input: function_call.args.clone(),
-                                    })
-                                    .await;
+                                    }
+                                );
                                 fn_calls.push((
                                     function_call.name.clone(),
                                     function_call.args.clone(),
@@ -806,6 +823,8 @@ pub(crate) async fn stream_gemini_sse(
         }
     };
 
+    // Best-effort final send — byte loop is done, nothing to abort even if
+    // the receiver has dropped (#3769).
     let _ = tx
         .send(StreamEvent::ContentComplete { stop_reason, usage })
         .await;
@@ -1280,6 +1299,8 @@ impl LlmDriver for GeminiDriver {
                 }
             };
 
+            // Best-effort final send — byte loop is done, nothing to abort
+            // even if the receiver has dropped (#3769).
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })
                 .await;
