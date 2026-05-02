@@ -307,9 +307,6 @@ class _AgentsResource(_Resource):
     def get_agent_traces(self, id: str):
         return self._c._request("GET", f"/api/agents/{id}/traces")
 
-    def update_agent(self, id: str, **data):
-        return self._c._request("PUT", f"/api/agents/{id}/update", data)
-
     def upload_file(self, id: str, **data):
         return self._c._request("POST", f"/api/agents/{id}/upload", data)
 

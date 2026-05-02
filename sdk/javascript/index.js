@@ -353,10 +353,6 @@ class AgentsResource {
     return this._c._request("GET", `/api/agents/${id}/traces`);
   }
 
-  async updateAgent(id, data) {
-    return this._c._request("PUT", `/api/agents/${id}/update`, data, undefined);
-  }
-
   async uploadFile(id, data) {
     return this._c._request("POST", `/api/agents/${id}/upload`, data, undefined);
   }

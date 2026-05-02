@@ -75,7 +75,7 @@ export function PluginsPage() {
   const scaffoldMutation = useScaffoldPlugin();
   const depsMutation = useInstallPluginDeps();
 
-  const plugins = pluginsQuery.data?.plugins ?? EMPTY_PLUGINS;
+  const plugins = pluginsQuery.data ?? EMPTY_PLUGINS;
 
   // First-time visitors with nothing installed land on the marketplace
   // tab — installing from the registry is the obvious next step. Fires

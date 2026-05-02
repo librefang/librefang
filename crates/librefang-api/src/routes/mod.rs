@@ -101,8 +101,6 @@ pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &
 pub struct AppState {
     pub kernel: Arc<LibreFangKernel>,
     pub started_at: Instant,
-    /// Optional peer registry for OFP mesh networking status.
-    pub peer_registry: Option<Arc<librefang_wire::registry::PeerRegistry>>,
     /// Channel bridge manager — held behind a Mutex so it can be swapped on hot-reload.
     pub bridge_manager: tokio::sync::Mutex<Option<librefang_channels::bridge::BridgeManager>>,
     /// Live channel config — updated on every hot-reload so list_channels() reflects reality.
