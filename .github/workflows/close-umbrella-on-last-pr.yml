@@ -26,14 +26,20 @@ name: Close Umbrella Issue on Last Referencing PR
 #    a strong signal there's still planned work even if no open PR exists yet.
 #  - Idempotent via hidden marker in the bot comment.
 #
-# Known limitation: PRs from forks run with a read-only GITHUB_TOKEN on the
-# `pull_request: closed` event, so close/comment/label calls will silently
-# fail-403 for fork-merged PRs. Switching to `pull_request_target` would
-# fix this but exposes write-token scripts to fork-controlled refs; not
-# worth it for the volume of fork merges we see. Internal PRs work fine.
+# Why `pull_request_target` instead of `pull_request`: the latter runs with a
+# read-only GITHUB_TOKEN when the PR comes from a fork, which would silently
+# fail-403 our close/comment/label calls. `pull_request_target` runs in the
+# base repo context with full perms regardless of fork. Safe here because:
+#  - We never `checkout` PR code or execute anything from the PR.
+#  - The only fork-controlled input we read is `pull_request.body` (passed
+#    through a regex, never to a shell).
+#  - The worst-case abuse is a fork author writing `Refs #N` to try to close
+#    an unrelated issue, but the close still requires N to be in a fully
+#    drained state (no other open PR, never reopened, no task-list items)
+#    AND for the workflow to be flipped to LIVE mode by a maintainer.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
 
 permissions:
@@ -114,16 +120,16 @@ jobs:
                 continue;
               }
 
-              // Find every PR that has cross-referenced this issue, then fetch
-              // each one's CURRENT state. We can't trust `source.issue.state`
-              // from the timeline payload — it can be a snapshot from when the
-              // event fired (always 'open' at first reference time), which would
-              // make this check vacuously fail-safe and never close anything.
-              //
-              // Cross-references include comment / commit-message mentions, not
-              // just PR body. That's conservative on the "other open PR" check
-              // (we may keep an issue open because some unrelated PR commented
-              // on it), which we accept over the alternative of false closes.
+              // Find every PR that has cross-referenced this issue, fetch each
+              // one's CURRENT state and body, and only count PRs whose BODY
+              // actually mentions this issue with a closing or non-closing
+              // keyword. Two reasons:
+              //   (a) `source.issue.state` from the timeline can be a snapshot
+              //       from when the event fired (always 'open' at first
+              //       reference) — we need fresh state.
+              //   (b) Cross-references include comment / commit-message
+              //       mentions, not just PR body. A drive-by "see also #N" in
+              //       a comment shouldn't keep the umbrella open.
               const timeline = await github.paginate(
                 github.rest.issues.listEventsForTimeline,
                 {
@@ -142,6 +148,14 @@ jobs:
                 candidatePrs.add(src.number);
               }
 
+              // Closing + non-closing keyword regex, anchored to issue number `num`.
+              // Same negation guards as the body regex above.
+              const issueRefRe = new RegExp(
+                `(?<!\\bnot )(?<!\\bn't )(?<!\\bnever )(?<!\\bwon't )(?<!\\bwouldn't )(?<!\\bcannot )(?<!\\bcan't )` +
+                `\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|part of|tracking|see)\\s+#${num}\\b`,
+                'i'
+              );
+
               const otherOpenPrs = [];
               for (const n of candidatePrs) {
                 try {
@@ -150,7 +164,9 @@ jobs:
                     repo: context.repo.repo,
                     pull_number: n,
                   });
-                  if (other.state === 'open') otherOpenPrs.push(n);
+                  if (other.state !== 'open') continue;
+                  if (!issueRefRe.test(other.body || '')) continue;
+                  otherOpenPrs.push(n);
                 } catch (e) {
                   if (e.status === 404) continue;
                   throw e;
