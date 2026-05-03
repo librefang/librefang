@@ -1,56 +1,170 @@
 #!/bin/sh
-# Pre-push hook (#3303).
+# Pre-push hook (#3303, scoped/cached in #4543).
 #
-# This is where the heavy stuff lives — anything that takes more than
-# a couple of seconds belongs here, not in pre-commit. Push is rarer
-# than commit, so a 30-90s wait is acceptable; a 30s wait per commit
-# is not.
+# Goals
+# -----
+# Heavier verification belongs here, not pre-commit, so commit stays fast.
+# But "heavier" still must respect the multi-worktree dev loop: a 22-min
+# push because three worktrees are racing for clippy is a regression.
+# Two caches make typical pushes < 30s after the first cold run:
 #
-# Install: git config core.hooksPath scripts/hooks
+#   1. **Scoped clippy** — only check crates whose source actually changed
+#      since `@{push}`. Falls back to `--workspace` when a "foundational"
+#      crate (types, kernel, runtime, http, …) changes, since their reverse
+#      deps span the workspace and a missed warning there would slip past.
 #
-# Checks performed:
-#   1. cargo clippy --workspace --all-targets -- -D warnings
-#   2. openapi.json drift (regen if route signatures changed since @{push})
-#   3. SDK drift (regen if openapi.json changed since @{push})
+#   2. **Codegen fingerprint** — `cargo xtask codegen --openapi` has to
+#      compile `librefang-api` to extract utoipa annotations. We hash the
+#      input files (route handlers + xtask codegen sources + the existing
+#      openapi.json) and skip the regen entirely when the fingerprint
+#      matches the last successful run. Stored under `target/.codegen-cache/`
+#      which is gitignored.
 #
-# Skip with `git push --no-verify` (only when CI is the safety net you
-# want — this hook exists so you don't push red builds to the team).
+# Skip with `git push --no-verify` (or set LIBREFANG_PREPUSH_SKIP=1) only
+# when CI is the safety net you want — this hook exists so you don't push
+# red builds to the team.
 
 set -eu
 
-# 1. Workspace-wide clippy. This is the load-bearing lint gate; it used
-# to live in pre-commit and made every commit wait 10+ seconds.
-echo "[pre-push] cargo clippy --workspace --all-targets ..."
-if ! cargo clippy --workspace --all-targets -- -D warnings; then
-    echo "Error: clippy failed. Fix warnings before pushing, or rerun with --no-verify."
-    exit 1
+if [ "${LIBREFANG_PREPUSH_SKIP:-0}" = "1" ]; then
+    echo "[pre-push] LIBREFANG_PREPUSH_SKIP=1 — skipping all checks (CI is your gate)."
+    exit 0
 fi
 
-# 2. openapi.json drift detection.
-#
-# Heuristic: scan added/removed lines under crates/librefang-api/src/routes/
-# in commits being pushed. utoipa derives the spec from attributes,
-# signatures, and derives only — body-only diffs are safe.
-#
-# Range: `@{upstream}..HEAD` if a tracking branch exists, otherwise
-# fall back to the staged-cache form (covers first-push of new branch
-# by approximating "everything in this branch").
-if git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
+# ---------------------------------------------------------------------------
+# Push range. `@{push}..HEAD` is what we're actually about to upload; falls
+# back to `@{upstream}..HEAD`, then to `origin/main..HEAD` for first-push of
+# a new branch.
+# ---------------------------------------------------------------------------
+if git rev-parse --abbrev-ref --symbolic-full-name '@{push}' >/dev/null 2>&1; then
+    RANGE='@{push}..HEAD'
+elif git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
     RANGE='@{upstream}..HEAD'
 else
-    # New branch — diff against origin/main as a reasonable default.
     RANGE='origin/main..HEAD'
 fi
 
-ROUTES_CHANGED=$(git diff --name-only "$RANGE" 2>/dev/null | grep "crates/librefang-api/src/routes/" || true)
-if [ -n "$ROUTES_CHANGED" ]; then
-    SPEC_RELEVANT=$(git diff -U0 "$RANGE" -- crates/librefang-api/src/routes/ 2>/dev/null \
-        | grep -E '^[+-][^+-]' \
-        | grep -E '^[+-][[:space:]]*(#\[|pub |use |fn |struct |enum |impl |type |trait )' \
-        || true)
+# Files modified in the commits being pushed. Empty → nothing to check.
+CHANGED_FILES=$(git diff --name-only "$RANGE" 2>/dev/null || true)
+if [ -z "$CHANGED_FILES" ]; then
+    echo "[pre-push] no commits to push — skipping checks."
+    exit 0
+fi
 
-    if [ -n "$SPEC_RELEVANT" ]; then
-        echo "[pre-push] regenerating openapi.json (spec-relevant route changes detected)..."
+# ---------------------------------------------------------------------------
+# 1. Clippy — scoped to touched crates, with a workspace fallback when a
+# foundational crate is touched (its reverse-deps span the tree).
+# ---------------------------------------------------------------------------
+
+# Foundational crates: changes here are likely to break callers across the
+# workspace, so a single-package clippy would miss things. Keep this list
+# narrow — every entry costs 5-10 min on a cold cache, so only crates whose
+# API ripples to many consumers should be here.
+FOUNDATIONAL_CRATES='librefang-types librefang-http librefang-wire \
+librefang-telemetry librefang-testing librefang-migrate \
+librefang-kernel librefang-kernel-handle librefang-kernel-router \
+librefang-kernel-metering librefang-runtime librefang-llm-driver \
+librefang-memory'
+
+# Force full workspace if Cargo.toml/Cargo.lock at the workspace root, or any
+# xtask source, was touched — the build graph itself may have shifted.
+TOPLEVEL_TOUCHED=$(echo "$CHANGED_FILES" | grep -E '^(Cargo\.(toml|lock)|rust-toolchain.*|xtask/)' || true)
+
+# All crate dirs touched, in `librefang-foo` form.
+CRATES_TOUCHED=$(echo "$CHANGED_FILES" \
+    | sed -nE 's|^crates/([^/]+)/.*|\1|p' \
+    | sort -u)
+
+USE_WORKSPACE=0
+if [ -n "$TOPLEVEL_TOUCHED" ]; then
+    USE_WORKSPACE=1
+    SCOPE_REASON='workspace files / xtask touched'
+elif [ -z "$CRATES_TOUCHED" ]; then
+    # No crate-level rust changes (e.g. dashboard/SDK/docs only). Skip clippy.
+    USE_WORKSPACE=2
+    SCOPE_REASON='no rust crate changes'
+else
+    for c in $CRATES_TOUCHED; do
+        for f in $FOUNDATIONAL_CRATES; do
+            if [ "$c" = "$f" ]; then
+                USE_WORKSPACE=1
+                SCOPE_REASON="foundational crate $c touched"
+                break 2
+            fi
+        done
+    done
+fi
+
+case "$USE_WORKSPACE" in
+    2)
+        echo "[pre-push] $SCOPE_REASON — skipping clippy."
+        ;;
+    1)
+        echo "[pre-push] $SCOPE_REASON → cargo clippy --workspace ..."
+        if ! cargo clippy --workspace --all-targets -- -D warnings; then
+            echo "Error: clippy failed. Fix warnings before pushing, or set LIBREFANG_PREPUSH_SKIP=1."
+            exit 1
+        fi
+        ;;
+    0)
+        # shellcheck disable=SC2086 # intentional word splitting
+        pkg_args=$(printf -- '-p %s ' $CRATES_TOUCHED)
+        echo "[pre-push] scoped clippy: $CRATES_TOUCHED"
+        # shellcheck disable=SC2086
+        if ! cargo clippy $pkg_args --all-targets -- -D warnings; then
+            echo "Error: clippy failed. Fix warnings before pushing, or set LIBREFANG_PREPUSH_SKIP=1."
+            echo "Note: only the listed crates were checked. CI runs --workspace and may surface issues in reverse-deps."
+            exit 1
+        fi
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 2. openapi.json drift — fingerprinted.
+# ---------------------------------------------------------------------------
+#
+# The spec is derived from utoipa attributes, handler signatures, derives,
+# and the `openapi.rs` aggregator — no other source can change its content.
+# We hash those inputs plus openapi.json itself; if the hash matches the
+# last known-good fingerprint, the current openapi.json is already in sync
+# and `cargo xtask codegen --openapi` would only confirm what we already
+# know. Skip the 1-3 min recompile in that case.
+
+CACHE_DIR="${CARGO_TARGET_DIR:-target}/.codegen-cache"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+OPENAPI_FP_FILE="$CACHE_DIR/openapi.fingerprint"
+
+openapi_fingerprint() {
+    # Gather all inputs that can plausibly affect openapi.json. The list is
+    # intentionally over-broad: false invalidations cost a recompile, false
+    # matches cost correctness, so we err toward over-broad.
+    #
+    # `-exec shasum {} +` avoids the "xargs hangs on empty input" trap that
+    # plain `xargs shasum` hits on BSD/macOS userland — find runs nothing
+    # when there are no matches.
+    {
+        find crates/librefang-api/src \
+             crates/librefang-types/src \
+             xtask/src/codegen \
+             -name '*.rs' -type f -exec shasum {} + 2>/dev/null
+        # Include the output too — manual edits to openapi.json must
+        # invalidate the cache so the next push re-verifies.
+        [ -f openapi.json ] && shasum openapi.json
+    } | sort | shasum | awk '{print $1}'
+}
+
+ROUTES_OR_TYPES_CHANGED=$(echo "$CHANGED_FILES" | grep -E '^crates/librefang-(api|types)/src/' || true)
+XTASK_CODEGEN_CHANGED=$(echo "$CHANGED_FILES" | grep -E '^xtask/src/codegen/' || true)
+
+if [ -n "$ROUTES_OR_TYPES_CHANGED$XTASK_CODEGEN_CHANGED" ]; then
+    fp_now=$(openapi_fingerprint)
+    fp_last=""
+    [ -f "$OPENAPI_FP_FILE" ] && fp_last=$(cat "$OPENAPI_FP_FILE" 2>/dev/null || true)
+
+    if [ "$fp_now" = "$fp_last" ] && [ -n "$fp_now" ]; then
+        echo "[pre-push] openapi.json fingerprint matches last regen — skipping codegen."
+    else
+        echo "[pre-push] regenerating openapi.json (inputs changed since last cached run)..."
         if ! cargo xtask codegen --openapi; then
             echo "Error: openapi.json regeneration failed — fix build/codegen before pushing."
             exit 1
@@ -58,22 +172,51 @@ if [ -n "$ROUTES_CHANGED" ]; then
         if ! git diff --quiet -- openapi.json; then
             echo "Error: openapi.json is stale. Commit the regenerated spec before pushing:"
             echo "  git add openapi.json && git commit --amend --no-edit"
+            # Don't update fingerprint — the regen revealed drift that the
+            # user must commit. Next push retries until the spec is clean.
             exit 1
         fi
+        # Fingerprint the post-regen state so a subsequent identical push
+        # short-circuits.
+        openapi_fingerprint > "$OPENAPI_FP_FILE"
     fi
 fi
 
-# 3. SDK drift — if openapi.json changed in this push, SDKs must be in sync.
-if git diff --name-only "$RANGE" 2>/dev/null | grep -qx "openapi.json"; then
-    echo "[pre-push] regenerating SDKs from openapi.json..."
-    if ! python3 scripts/codegen-sdks.py; then
-        echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before pushing."
-        exit 1
-    fi
-    if ! git diff --quiet -- sdk/python sdk/javascript sdk/go sdk/rust; then
-        echo "Error: SDKs are stale. Commit the regenerated SDKs before pushing:"
-        echo "  git add sdk/python sdk/javascript sdk/go sdk/rust && git commit --amend --no-edit"
-        exit 1
+# ---------------------------------------------------------------------------
+# 3. SDK drift — fingerprinted on openapi.json + sdk codegen script.
+# ---------------------------------------------------------------------------
+
+SDK_FP_FILE="$CACHE_DIR/sdks.fingerprint"
+
+sdk_fingerprint() {
+    {
+        [ -f openapi.json ] && shasum openapi.json
+        [ -f scripts/codegen-sdks.py ] && shasum scripts/codegen-sdks.py
+    } | sort | shasum | awk '{print $1}'
+}
+
+OPENAPI_IN_PUSH=$(echo "$CHANGED_FILES" | grep -qx 'openapi.json' && echo 1 || true)
+SDK_SCRIPT_CHANGED=$(echo "$CHANGED_FILES" | grep -qx 'scripts/codegen-sdks.py' && echo 1 || true)
+
+if [ -n "$OPENAPI_IN_PUSH" ] || [ -n "$SDK_SCRIPT_CHANGED" ]; then
+    fp_now=$(sdk_fingerprint)
+    fp_last=""
+    [ -f "$SDK_FP_FILE" ] && fp_last=$(cat "$SDK_FP_FILE" 2>/dev/null || true)
+
+    if [ "$fp_now" = "$fp_last" ] && [ -n "$fp_now" ]; then
+        echo "[pre-push] SDK fingerprint matches last regen — skipping codegen."
+    else
+        echo "[pre-push] regenerating SDKs from openapi.json..."
+        if ! python3 scripts/codegen-sdks.py; then
+            echo "Error: SDK regeneration failed — fix scripts/codegen-sdks.py before pushing."
+            exit 1
+        fi
+        if ! git diff --quiet -- sdk/python sdk/javascript sdk/go sdk/rust; then
+            echo "Error: SDKs are stale. Commit the regenerated SDKs before pushing:"
+            echo "  git add sdk/python sdk/javascript sdk/go sdk/rust && git commit --amend --no-edit"
+            exit 1
+        fi
+        sdk_fingerprint > "$SDK_FP_FILE"
     fi
 fi
 
