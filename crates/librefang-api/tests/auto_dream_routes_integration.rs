@@ -183,7 +183,10 @@ async fn auto_dream_trigger_invalid_id_is_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert_eq!(body["error"], "invalid agent id");
+    // The shared `AgentIdPath` extractor (#3603) localizes the rejection via
+    // the `api-error-agent-invalid-id` Fluent key; en falls back to the
+    // bundle's value "Invalid agent ID".
+    assert_eq!(body["error"], "Invalid agent ID");
 }
 
 /// Globally disabled auto-dream short-circuits before any LLM dispatch and
@@ -247,7 +250,9 @@ async fn auto_dream_abort_invalid_id_is_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert_eq!(body["error"], "invalid agent id");
+    // See note in `auto_dream_trigger_invalid_id_is_400` about the i18n
+    // rejection text from the shared `AgentIdPath` extractor (#3603).
+    assert_eq!(body["error"], "Invalid agent ID");
 }
 
 /// No dream is ever in-flight in this test binary, so abort must surface
@@ -291,7 +296,9 @@ async fn auto_dream_set_enabled_invalid_id_is_400() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
-    assert_eq!(body["error"], "invalid agent id");
+    // See note in `auto_dream_trigger_invalid_id_is_400` about the i18n
+    // rejection text from the shared `AgentIdPath` extractor (#3603).
+    assert_eq!(body["error"], "Invalid agent ID");
 }
 
 /// Well-formed UUID for an agent that doesn't exist returns 404 from the
