@@ -2137,7 +2137,8 @@
     "help": "Sessions 是每个 agent 的活跃和历史会话上下文。每个 session 是一条绑定到 agent + 来源（channel、cron、A2A peer 或人工）的消息 + 工具调用线程。本页可浏览、贴标签、清理。\n\n使用步骤：\n\n1. 搜索与筛选。输入文本按 agent、标签或最近消息搜索。Active vs. idle 由最近活动自动判定。\n\n2. 贴标签。\"Set label\" 给 session 打标签，方便日后找到——长时运行的线程里特别有用。\n\n3. 删除。删除不再需要的旧 session。该线程下 agent 的完整消息历史会一同删除。\n\n典型场景：\n\n  · 找 agent 跟某用户解决某问题的那条 session。\n  · 修剪繁忙一周后堆积的 channel session。\n  · 调试前先确认某 (channel, chat) 对应的是预期 session。\n\n注意事项：\n\n  · Channel 消息总是用规范 session id —— `(agent, \"<channel>:<chat>\")` ——所以同一用户始终落在同一线程。\n  · Cron 触发共享 per-agent 单一 session；这是有意为之（复用 prompt cache），但 cron 历史会一直增长。\n  · 删 session 不可逆。该 session 创建的 memory 条目仍保留（Memory 页是独立的）。",
     "set_label": "设置标签",
     "no_label": "添加标签",
-    "label_placeholder": "标签..."
+    "label_placeholder": "标签...",
+    "open_in_chat": "在聊天页打开此会话"
   },
   "approvals": {
     "title": "审批",
