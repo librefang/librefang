@@ -300,6 +300,32 @@ pub async fn fetch_verified_index(
         .map_err(|e| format!("Failed to parse registry index JSON: {e}"))
 }
 
+/// Returns the list of hook script paths declared in `[hooks]` that have no
+/// matching entry in `[integrity]`. An empty result means every declared hook
+/// is covered (or there are no hooks at all).
+///
+/// This is the source of truth used by both:
+/// * `install_from_registry` — hard error when missing entries are found, since
+///   registry-distributed plugins must be tamper-evident.
+/// * `lint_plugin` — warning surfaced to plugin authors so they catch the issue
+///   locally before submitting to the registry (issue #4036).
+pub fn manifest_missing_integrity_hooks(manifest: &PluginManifest) -> Vec<String> {
+    [
+        manifest.hooks.ingest.as_deref(),
+        manifest.hooks.after_turn.as_deref(),
+        manifest.hooks.bootstrap.as_deref(),
+        manifest.hooks.assemble.as_deref(),
+        manifest.hooks.compact.as_deref(),
+        manifest.hooks.prepare_subagent.as_deref(),
+        manifest.hooks.merge_subagent.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|hook| !manifest.integrity.contains_key(*hook))
+    .map(|s| s.to_string())
+    .collect()
+}
+
 /// Validate that a plugin name is a safe directory component (no path traversal).
 pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -938,43 +964,22 @@ async fn install_from_registry(
             .and_then(|s| toml::from_str::<PluginManifest>(&s).ok());
         match manifest_opt {
             Some(manifest) => {
-                // Collect every hook script path declared in [hooks].
-                let declared_hooks: Vec<&str> = [
-                    manifest.hooks.ingest.as_deref(),
-                    manifest.hooks.after_turn.as_deref(),
-                    manifest.hooks.bootstrap.as_deref(),
-                    manifest.hooks.assemble.as_deref(),
-                    manifest.hooks.compact.as_deref(),
-                    manifest.hooks.prepare_subagent.as_deref(),
-                    manifest.hooks.merge_subagent.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-
-                if !declared_hooks.is_empty() {
-                    let missing_integrity: Vec<&str> = declared_hooks
-                        .iter()
-                        .copied()
-                        .filter(|hook| !manifest.integrity.contains_key(*hook))
-                        .collect();
-
-                    if !missing_integrity.is_empty() {
-                        // Hard error: registry plugins must declare integrity hashes for
-                        // every hook script.  Without them, the hook content is unverified
-                        // and could have been substituted after the manifest was signed.
-                        let _ = tokio::fs::remove_dir_all(&target_dir).await;
-                        return Err(format!(
-                            "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
-                             Registry-installed plugins must provide SHA-256 checksums for every \
-                             hook script declared in [hooks] so that tampered scripts are detected \
-                             at load time. Add an [integrity] section to plugin.toml with \
-                             \"hooks/<script>\" = \"<sha256hex>\" entries, or install via a local \
-                             path (PluginSource::Local) to bypass this requirement.",
-                            manifest.name,
-                            missing_integrity.join(", ")
-                        ));
-                    }
+                let missing_integrity = manifest_missing_integrity_hooks(&manifest);
+                if !missing_integrity.is_empty() {
+                    // Hard error: registry plugins must declare integrity hashes for
+                    // every hook script.  Without them, the hook content is unverified
+                    // and could have been substituted after the manifest was signed.
+                    let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                    return Err(format!(
+                        "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
+                         Registry-installed plugins must provide SHA-256 checksums for every \
+                         hook script declared in [hooks] so that tampered scripts are detected \
+                         at load time. Add an [integrity] section to plugin.toml with \
+                         \"hooks/<script>\" = \"<sha256hex>\" entries, or install via a local \
+                         path (PluginSource::Local) to bypass this requirement.",
+                        manifest.name,
+                        missing_integrity.join(", ")
+                    ));
                 }
             }
             None => {
@@ -3917,7 +3922,22 @@ pub fn lint_plugin(name: &str) -> Result<PluginLintReport, String> {
         }
     }
 
-    // 8. Warn about missing system binaries declared in [[requires]]
+    // 8. Warn when declared hooks lack [integrity] entries — registry-installed
+    //    plugins are rejected at install time without these hashes (issue #4036).
+    //    Surface it locally so plugin authors fix it before submitting to the
+    //    registry rather than after users hit the install-time hard error.
+    let missing_integrity = manifest_missing_integrity_hooks(&manifest);
+    if !missing_integrity.is_empty() {
+        warnings.push(format!(
+            "Missing [integrity] hashes for hook script(s): {}. \
+             Registry-installed plugins are rejected without SHA-256 checksums for every hook. \
+             Add `\"hooks/<script>\" = \"<sha256hex>\"` entries under `[integrity]` in plugin.toml \
+             before publishing.",
+            missing_integrity.join(", ")
+        ));
+    }
+
+    // 9. Warn about missing system binaries declared in [[requires]]
     let missing_bins = check_system_requires(&manifest.requires);
     for (bin, hint) in &missing_bins {
         let hint_str = hint.as_deref().unwrap_or("(no install hint provided)");
@@ -4575,26 +4595,11 @@ description = "Spanish description"
     }
 
     /// Extracts the list of hook script paths that are declared in a manifest
-    /// but missing from its integrity map.  This mirrors the logic in
-    /// `install_from_registry` so changes there won't silently regress.
+    /// but missing from its integrity map.  Delegates to the production
+    /// `manifest_missing_integrity_hooks` so the install-time check, the
+    /// `lint_plugin` warning, and these regression tests can never drift.
     fn missing_integrity_hooks(manifest: &PluginManifest) -> Vec<String> {
-        let declared: Vec<&str> = [
-            manifest.hooks.ingest.as_deref(),
-            manifest.hooks.after_turn.as_deref(),
-            manifest.hooks.bootstrap.as_deref(),
-            manifest.hooks.assemble.as_deref(),
-            manifest.hooks.compact.as_deref(),
-            manifest.hooks.prepare_subagent.as_deref(),
-            manifest.hooks.merge_subagent.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        declared
-            .into_iter()
-            .filter(|h| !manifest.integrity.contains_key(*h))
-            .map(|s| s.to_string())
-            .collect()
+        super::manifest_missing_integrity_hooks(manifest)
     }
 
     /// A plugin with no hooks declared requires no integrity entries.
