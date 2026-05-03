@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Concrete LLM provider drivers (anthropic, openai, gemini, …) implementing the librefang-llm-driver trait"
+readme = "README.md"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
