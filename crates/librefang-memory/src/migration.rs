@@ -1131,7 +1131,7 @@ fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Version 33: Harden `sessions_fts` (issue #3548).
 ///
-/// Drops and recreates the FTS5 virtual table with an explicit
+/// Recreates the FTS5 virtual table with an explicit
 /// `tokenize='unicode61'` so the at-insert tokenization path is
 /// documented, stable, and matches what query-side normalization
 /// (`SessionStore::search_sessions_paginated`) assumes. The previous
@@ -1139,16 +1139,29 @@ fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// which is `unicode61` today but is a deployment-environment
 /// implicit and must not be left implicit in the schema definition.
 ///
-/// Backfill: every row in `sessions` that has no matching row in
-/// `sessions_fts` gets an empty FTS row inserted so it is at least
-/// visible to the index. The `content` column stays empty until the
-/// next `save_session` writes the real text — that two-phase shape
-/// is required because the searchable text is computed at the
-/// application layer (`SessionStore::extract_text_content` joins all
-/// `Message::text_content()` blocks) from a rmp_serde-encoded BLOB
-/// and SQLite triggers cannot decode it. Pre-v12 sessions and any
-/// drift from the #3451 era are healed in this single pass instead
-/// of relying on the boot-time `reconcile_fts_index` log-only sweep.
+/// **Content preservation.** SQLite has no ALTER for FTS tokenize
+/// options, so a DROP+CREATE is the only path to make the tokenizer
+/// explicit. Naively dropping wipes every existing FTS row, which
+/// silently kills full-text search for any session that isn't saved
+/// again post-upgrade (inactive / archived sessions are the worst
+/// case — users would just observe "search no longer finds my old
+/// chats"). To avoid that we snapshot the existing rows into a temp
+/// table, recreate `sessions_fts` with the explicit tokenizer, and
+/// re-insert the snapshot. FTS5 re-tokenizes on insert, so the
+/// rebuilt index is byte-identical when the old default already was
+/// `unicode61` (true for current SQLite builds) and self-heals
+/// otherwise.
+///
+/// **Backfill.** After the snapshot is restored, any row in `sessions`
+/// that *still* has no matching FTS row (pre-v12 sessions, drift from
+/// #3451-era partial writes) gets an empty placeholder inserted so it
+/// is at least visible to the index. The placeholder is overwritten
+/// with the real text on the next `save_session` for that session;
+/// reflowing it during the migration would require decoding the
+/// rmp_serde-encoded `messages` blob and running
+/// `SessionStore::extract_text_content` here, which we judged not
+/// worth the migration-time cost when the placeholder + lazy reflow
+/// already covers any session a user actually interacts with.
 ///
 /// We keep the `(session_id, agent_id, content)` column shape from v12
 /// — `search_sessions` filters on `agent_id`, `delete_session` /
@@ -1163,24 +1176,40 @@ fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// a later PR can revisit if the cost of app-level sync becomes a
 /// hotspot.
 fn migrate_v33(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // Drop and recreate. SQLite has no ALTER for FTS tokenize options,
-    // and the table is regenerable from `sessions` so the drop is
-    // safe (verified by inspection: every column is sourced from
-    // either `sessions.id`, `sessions.agent_id`, or the application-
-    // layer extract_text_content() — there is no FTS-only payload).
+    // Atomicity comes from the outer `run_step!` transaction (or, in
+    // tests, the caller); SQLite forbids nested transactions, so this
+    // body uses bare statements and relies on that wrapper to roll
+    // back the whole rebuild on failure.
+    //
+    // Snapshot existing FTS rows so the DROP+CREATE doesn't silently
+    // wipe searchable history. The temp table is a regular SQL table
+    // (not FTS5) — we only need the raw column values to re-insert
+    // them under the new tokenizer.
     conn.execute_batch(
-        "DROP TABLE IF EXISTS sessions_fts;
+        "DROP TABLE IF EXISTS _sessions_fts_pre_v33;
+         CREATE TEMP TABLE _sessions_fts_pre_v33 (
+             session_id TEXT,
+             agent_id   TEXT,
+             content    TEXT
+         );
+         INSERT INTO _sessions_fts_pre_v33 (session_id, agent_id, content)
+             SELECT session_id, agent_id, content FROM sessions_fts;
+         DROP TABLE sessions_fts;
          CREATE VIRTUAL TABLE sessions_fts USING fts5(
              session_id UNINDEXED,
              agent_id   UNINDEXED,
              content,
              tokenize = 'unicode61'
-         );",
+         );
+         INSERT INTO sessions_fts (session_id, agent_id, content)
+             SELECT session_id, agent_id, content FROM _sessions_fts_pre_v33;
+         DROP TABLE _sessions_fts_pre_v33;",
     )?;
 
-    // Backfill: surface every existing session as an FTS row with empty
-    // content. The next `save_session` call for that session will
-    // overwrite `content` with the freshly extracted text inside the
+    // Backfill: surface every session that still has no FTS row (pre-v12
+    // entries, partial-write drift) as an empty placeholder so it stays
+    // visible to the index. The next `save_session` call for that session
+    // overwrites `content` with the freshly extracted text inside the
     // same transaction as the parent INSERT.
     conn.execute(
         "INSERT INTO sessions_fts (session_id, agent_id, content) \
@@ -1191,7 +1220,7 @@ fn migrate_v33(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     conn.execute(
         "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
-         VALUES (33, datetime('now'), 'Rebuild sessions_fts with explicit unicode61 tokenizer + backfill (#3548)')",
+         VALUES (33, datetime('now'), 'Rebuild sessions_fts with explicit unicode61 tokenizer + content-preserving backfill (#3548)')",
         [],
     )?;
     Ok(())
@@ -1762,6 +1791,101 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "session {id} must have exactly one FTS row");
         }
+    }
+
+    /// Issue #3548: v33 must NOT lose pre-existing FTS content. The
+    /// previous version of this migration did a naive DROP+CREATE that
+    /// silently wiped the searchable index for every session that
+    /// wasn't re-saved post-upgrade. Test seeds two FTS rows whose
+    /// content contains a distinctive needle, runs `migrate_v33`, and
+    /// asserts the needle is still findable through the rebuilt
+    /// virtual table.
+    #[test]
+    fn test_migrate_v33_preserves_existing_fts_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        // Drop user_version back to 32 so we can re-run v33 against a
+        // pre-populated table (first run_migrations already executed it
+        // against an empty sessions_fts, so we need a clean re-entry).
+        set_schema_version(&conn, 32).unwrap();
+
+        let agent = uuid::Uuid::new_v4().to_string();
+        let session_kept = uuid::Uuid::new_v4().to_string();
+        let session_emptied = uuid::Uuid::new_v4().to_string();
+
+        // Seed sessions table so the WHERE NOT IN backfill clause can
+        // also be exercised in the same pass.
+        for id in [&session_kept, &session_emptied] {
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, x'90', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![id, agent],
+            )
+            .unwrap();
+        }
+
+        // Pre-populate sessions_fts with real content for one session
+        // (snapshot path) and leave the other un-indexed so the
+        // backfill path also runs in the same migration.
+        conn.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                session_kept,
+                agent,
+                "preserved needle distinctivewordbeta42",
+            ],
+        )
+        .unwrap();
+
+        // Re-run v33 directly — exercises snapshot+restore + backfill.
+        migrate_v33(&conn).expect("v33 rerun must succeed");
+
+        // The pre-existing content survived the rebuild.
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts \
+                 WHERE sessions_fts MATCH ?1",
+                ["distinctivewordbeta42"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            hits, 1,
+            "v33 must preserve pre-existing FTS content for inactive sessions"
+        );
+
+        // The previously un-indexed session got an empty placeholder.
+        let backfilled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                [&session_emptied],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled, 1,
+            "sessions without an FTS row must still get a backfilled placeholder"
+        );
+
+        // Tokenizer is still explicit after the rerun.
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("unicode61"));
+
+        // Temp table from the rebuild is cleaned up.
+        let temp_left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = '_sessions_fts_pre_v33'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(temp_left, 0, "v33 must drop its rebuild temp table");
     }
 
     /// v33 is idempotent: re-running it must not duplicate rows or
