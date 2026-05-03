@@ -2,9 +2,15 @@ import { useState, useEffect, useMemo } from 'react';
 import { animate } from 'motion/react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import 'katex/dist/katex.min.css';
+import { useKatexPlugins } from '../lib/markdownMath';
+
+// Issue #3381: KaTeX (`remark-math`, `rehype-katex`, `katex/dist/katex.min.css`,
+// ~280KB) used to be eager top-level imports here, dragging the entire math
+// renderer + its CSS/font payload into the cold-start bundle even though
+// the streaming typewriter is overwhelmingly used for plain-text replies.
+// `useKatexPlugins` returns `undefined` plugin arrays until the streamed
+// `text` first contains math delimiters, then dynamically imports the
+// math chunk and re-renders.
 
 const mdComponents: Components = {
   p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
@@ -28,6 +34,10 @@ const mdComponents: Components = {
   strong: ({ children }) => <strong className="font-bold">{children}</strong>,
   a: ({ href, children }) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
+
+// Stable plugin arrays — never change between renders for the
+// no-math branch, which keeps `react-markdown`'s memoization happy.
+const REMARK_BASE = [remarkGfm];
 
 /// Streams `text` character-by-character into the markdown output to
 /// give an LLM-style "typing" effect. The reveal is driven by motion's
@@ -62,13 +72,23 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, speed]);
 
+  // Probe the FULL streamed text (not the partially-revealed `displayed`)
+  // so we kick off the KaTeX import as soon as we know math is coming,
+  // hiding the chunk-fetch latency behind the typing animation.
+  const mathPlugins = useKatexPlugins(text);
+
+  const remarkPlugins = useMemo(
+    () => mathPlugins.remarkPlugins ? [...REMARK_BASE, ...mathPlugins.remarkPlugins] : REMARK_BASE,
+    [mathPlugins.remarkPlugins],
+  );
+
   return useMemo(() => (
     <Markdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={mathPlugins.rehypePlugins}
       components={mdComponents}
     >
       {displayed}
     </Markdown>
-  ), [displayed]);
+  ), [displayed, remarkPlugins, mathPlugins.rehypePlugins]);
 }

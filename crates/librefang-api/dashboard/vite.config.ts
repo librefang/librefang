@@ -132,6 +132,32 @@ export default defineConfig({
           // a single icon to a route doesn't bloat its first-load bundle.
           // See issue #3768.
           if (id.includes("lucide-react")) return "icons";
+          // Issue #3381: split heavy peripheral libs out of the main bundle
+          // so cold-start only pays for what the landing route actually uses.
+          // KaTeX (~280KB) is loaded lazily — see ChatPage / Typewriter_v2 —
+          // and the chunk groups its CSS+font payload alongside the JS so
+          // the dynamic import is a single network hop.
+          if (id.includes("/katex/") || id.includes("\\katex\\")) return "katex";
+          // Markdown pipeline: react-markdown + the unified plugins
+          // (remark-gfm, remark-math, rehype-katex). Pulled lazily by
+          // ChatPage's Typewriter / MarkdownContent path.
+          if (
+            id.includes("react-markdown") ||
+            id.includes("/remark-") || id.includes("\\remark-") ||
+            id.includes("/rehype-") || id.includes("\\rehype-") ||
+            id.includes("/mdast-util") || id.includes("\\mdast-util") ||
+            id.includes("/micromark") || id.includes("\\micromark") ||
+            id.includes("/hast-util") || id.includes("\\hast-util") ||
+            id.includes("/unified") || id.includes("\\unified")
+          ) return "markdown";
+          // xterm + addons live only on TerminalPage; isolate so other
+          // pages don't pull the ~400KB terminal payload.
+          if (id.includes("@xterm")) return "xterm";
+          // motion/react is used in many places but ships its own animator
+          // graph (~50KB). Its own chunk lets the browser cache it across
+          // route navigations instead of duplicating into per-page bundles.
+          if (id.includes("/motion/") || id.includes("\\motion\\") ||
+              id.includes("/motion-dom/") || id.includes("/motion-utils/")) return "motion";
         },
       },
     },
