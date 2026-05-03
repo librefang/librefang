@@ -259,8 +259,23 @@ jobs:
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Same-repo PRs need write to push the auto-codegen commit back to the
+    # PR branch. Fork PRs run with read-only GITHUB_TOKEN regardless of
+    # what we declare here — they fall through to the fail-with-instructions
+    # path below.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Check out the PR head branch (not the merge commit) so the
+          # auto-codegen step below can `git push` back. For pushes to main
+          # this resolves to empty and `actions/checkout` falls back to its
+          # default — that path never reaches the push branch.
+          ref: ${{ github.head_ref }}
+          # `persist-credentials: true` is the default; we re-state it for
+          # readability. Required for the auto-commit step below.
+          persist-credentials: true
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -280,17 +295,38 @@ jobs:
         run: cargo xtask codegen --openapi
       - name: Regenerate SDKs
         run: python3 scripts/codegen-sdks.py
-      - name: Verify no drift
+      - name: Verify no drift (auto-commit on internal PRs)
+        env:
+          # Same-repo PR: GITHUB_TOKEN has write scope -> we can push the
+          # regenerated artifacts back to the PR branch.
+          # Fork PR or push event: GITHUB_TOKEN is read-only -> fall back
+          # to the original "fail with reproduce instructions" behaviour.
+          IS_INTERNAL_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          if ! git diff --exit-code -- openapi.json sdk/; then
-            echo "::error::openapi.json or generated SDKs are out of sync with the source code."
-            echo "Reproduce locally:"
-            echo "  cargo xtask codegen --openapi"
-            echo "  python3 scripts/codegen-sdks.py"
-            echo "Then commit the regenerated openapi.json and sdk/* files."
-            exit 1
+          if git diff --quiet -- openapi.json sdk/; then
+            echo "openapi.json and SDKs are in sync."
+            exit 0
           fi
-          echo "openapi.json and SDKs are in sync."
+          if [ "$IS_INTERNAL_PR" = "true" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add openapi.json sdk/
+            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk [skip ci]"
+            git push
+            echo "::notice::Auto-committed regenerated openapi.json + sdk/ to the PR branch."
+            echo "::notice::The [skip ci] marker prevents an immediate re-run; if you want full CI"
+            echo "::notice::on the post-codegen tip, push an empty commit or close+reopen the PR."
+            exit 0
+          fi
+          # Fork PR or push to main — fail loudly.
+          echo "::error::openapi.json or generated SDKs are out of sync with the source code."
+          echo "Reproduce locally:"
+          echo "  cargo xtask codegen --openapi"
+          echo "  python3 scripts/codegen-sdks.py"
+          echo "Then commit the regenerated openapi.json and sdk/* files."
+          echo "(Fork PRs cannot use the auto-commit path because GITHUB_TOKEN"
+          echo "is read-only on cross-repository pull requests.)"
+          exit 1
       # Schema drift gate (#3300): verifies the sha256 baselines committed
       # under xtask/baselines/ match the on-disk schema artifacts. Catches
       # forgotten baseline regeneration after intentional schema changes
