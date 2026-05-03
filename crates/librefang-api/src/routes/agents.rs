@@ -2260,11 +2260,13 @@ pub async fn kill_agent(
             // Idempotent DELETE: the agent is already gone (replayed request,
             // double-click, race with another deleter). Treat as success per
             // RFC 9110 §9.2.2 — DELETE is idempotent.
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
-            )
-                .into_response();
+            return crate::extensions::with_agent_id(
+                agent_id,
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
+                ),
+            );
         }
     }
 
@@ -2285,11 +2287,13 @@ pub async fn kill_agent(
                 )
             ) {
                 tracing::debug!("kill_agent: agent {id} vanished mid-flight; treating as already-deleted");
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
-                )
-                    .into_response();
+                return crate::extensions::with_agent_id(
+                    agent_id,
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
+                    ),
+                );
             }
             tracing::warn!("kill_agent failed for {id}: {e}");
             ApiErrorResponse::internal(format!("Failed to kill agent {id}: {e}"))

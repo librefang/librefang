@@ -2152,12 +2152,12 @@ mod test_channel_status_tests {
     use super::*;
     use axum::extract::Path;
     use axum::response::IntoResponse;
-    use std::sync::Mutex;
 
     /// Serializes env-var mutations across the tests in this module so they
     /// don't race each other (or any other test in the binary that pokes at
-    /// the same vars).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// the same vars). Uses `tokio::sync::Mutex` so the guard can be held
+    /// safely across `.await` points without triggering `await_holding_lock`.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Drop guard that restores the previous value of an env var when it falls
     /// out of scope, so a test failure doesn't poison the process for sibling
@@ -2204,7 +2204,7 @@ mod test_channel_status_tests {
 
     #[tokio::test]
     async fn unknown_channel_name_returns_404() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().await;
         let resp = test_channel(
             Path("not-a-real-channel".to_string()),
             axum::body::Bytes::new(),
@@ -2216,7 +2216,7 @@ mod test_channel_status_tests {
 
     #[tokio::test]
     async fn missing_required_env_returns_412() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().await;
         // Telegram requires TELEGRAM_BOT_TOKEN. With it unset we must surface
         // a 412 — NOT a 200 with a "status: error" body, which silently passes
         // dashboard `fetch().ok` checks (#3507).
@@ -2234,7 +2234,7 @@ mod test_channel_status_tests {
 
     #[tokio::test]
     async fn credentials_present_no_target_returns_200() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().await;
         // Credentials set but no `channel_id` / `chat_id` body — handler
         // short-circuits before any network call and returns the
         // "credentials look good" 200 response.
@@ -2248,7 +2248,7 @@ mod test_channel_status_tests {
 
     #[tokio::test]
     async fn downstream_send_failure_returns_502() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().await;
         // Telegram bot token is set (so we get past the 412 gate) but the
         // value is bogus, so Bot API will reject the call. We pass a
         // `chat_id` to force the live-send branch. Result: handler must
