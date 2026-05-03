@@ -2484,7 +2484,9 @@ mod tests {
         );
 
         // The new content matches; the old does not.
-        let stale = store.search_sessions("incarnation", Some(&agent_id)).unwrap();
+        let stale = store
+            .search_sessions("incarnation", Some(&agent_id))
+            .unwrap();
         assert_eq!(stale.len(), 1, "exactly one search hit, not two");
         let snippet = &stale[0].snippet;
         assert!(
@@ -2514,10 +2516,8 @@ mod tests {
         // messages blob shape.
         let agent_id = AgentId::new();
         let session_id = SessionId::new();
-        let messages_blob = rmp_serde::to_vec_named(&vec![Message::user(
-            "backfill needle alphawombat42",
-        )])
-        .unwrap();
+        let messages_blob =
+            rmp_serde::to_vec_named(&vec![Message::user("backfill needle alphawombat42")]).unwrap();
         conn.execute(
             "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
              VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
