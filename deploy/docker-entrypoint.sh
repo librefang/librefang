@@ -6,6 +6,46 @@ set -e
 DATA_DIR="${LIBREFANG_HOME:-/data}"
 CONFIG="$DATA_DIR/config.toml"
 
+# --- Env validation (TOML-injection guard, GH #3556) ------------------------
+# The two `sed` calls below splice $PORT and $LIBREFANG_MODEL directly into
+# config.toml. Without validation, an attacker controlling those env vars
+# (e.g. on a `docker run -e` deployment, or a misconfigured PaaS console)
+# can break out of the TOML string and inject arbitrary keys, e.g.
+#   LIBREFANG_MODEL='gpt-5"\n[provider]\napi_key = "stolen'
+# Reject the offending bytes here, before any rewrite happens, so a bad
+# value crashes the container fast instead of silently exfiltrating config.
+if [ -n "${PORT-}" ] && ! printf '%s' "$PORT" | grep -qE '^[0-9]+$'; then
+  echo "ERROR: PORT must be a positive integer (got: $PORT)" >&2
+  exit 1
+fi
+if [ -n "${LIBREFANG_MODEL-}" ]; then
+  # Forbid TOML-significant characters: " \ [ ] (any one of these can
+  # terminate the string or open a new table).  `case` is used (not
+  # `grep`) because shell glob patterns match the literal characters
+  # without surprises around backslash quoting in regex bracket
+  # expressions.
+  case "$LIBREFANG_MODEL" in
+    *'"'*|*'\'*|*'['*|*']'*)
+      echo "ERROR: LIBREFANG_MODEL contains a forbidden character (one of: \" \\ [ ])" >&2
+      exit 1
+      ;;
+  esac
+  # Embedded newlines / carriage returns can also break out of the
+  # string. `grep -qE` is line-oriented, so we count newlines via
+  # `wc -l` against a string printed without a trailing newline.
+  if [ "$(printf '%s' "$LIBREFANG_MODEL" | wc -l | tr -d ' ')" != "0" ]; then
+    echo "ERROR: LIBREFANG_MODEL must not contain newlines" >&2
+    exit 1
+  fi
+  case "$LIBREFANG_MODEL" in
+    *$(printf '\r')*)
+      echo "ERROR: LIBREFANG_MODEL must not contain carriage returns" >&2
+      exit 1
+      ;;
+  esac
+fi
+# ---------------------------------------------------------------------------
+
 mkdir -p "$DATA_DIR"
 
 if [ "$(stat -c '%U' "$DATA_DIR" 2>/dev/null)" != "librefang" ]; then
