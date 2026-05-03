@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a>
+  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pl.md">Polski</a> | <a href="README.fr.md">Français</a>
 </p>
 
 <p align="center">
@@ -208,6 +208,11 @@ cargo fmt --all -- --check                               # 格式化检查
 ## 对比
 
 查看 [对比](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) 了解 LibreFang 与 OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph 的基准测试和功能对比。
+
+## 中文文档
+
+- [技能开发指南（中文）](skill-development.zh.md) — 技能格式、Python/WASM 运行时、FangHub 发布与 CLI 管理
+- [官方文档](https://docs.librefang.ai)（英文）
 
 ## 链接
 
