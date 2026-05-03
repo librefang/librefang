@@ -384,3 +384,132 @@ async fn config_reload_requires_auth_when_key_set() {
     let (status, _) = send(h.app.clone(), req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/health/detail (#3776)
+//
+// Validates that the new operational metric sections (`budget`, `llm`) are
+// wired into the response and serialize with the documented shape so that
+// monitoring systems (Prometheus blackbox exporter, alerting rules) can rely
+// on the field names.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_detail_includes_budget_and_llm_sections() {
+    let h = boot_router_with_api_key(API_KEY).await;
+    let (status, body) = send(h.app.clone(), auth_get("/api/health/detail")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+
+    // Pre-existing fields must remain (regression guard).
+    for key in [
+        "status",
+        "version",
+        "uptime_seconds",
+        "panic_count",
+        "restart_count",
+        "agent_count",
+        "database",
+        "memory",
+        "config_warnings",
+        "event_bus",
+    ] {
+        assert!(
+            json.get(key).is_some(),
+            "missing pre-existing field '{key}' in /api/health/detail: {json}"
+        );
+    }
+
+    // New `budget` block — exposes already-collected MeteringEngine spend.
+    let budget = json
+        .get("budget")
+        .expect("missing 'budget' section in /api/health/detail");
+    for key in [
+        "hourly_spend_usd",
+        "hourly_limit_usd",
+        "hourly_spend_percent",
+        "daily_spend_usd",
+        "daily_limit_usd",
+        "daily_spend_percent",
+        "monthly_spend_usd",
+        "monthly_limit_usd",
+        "monthly_spend_percent",
+        "alert_threshold",
+    ] {
+        assert!(
+            budget.get(key).is_some(),
+            "missing budget.{key} in /api/health/detail: {budget}"
+        );
+    }
+    // With no budget cap configured in the test kernel, the *_percent fields
+    // must serialize as JSON null (operators distinguish "no cap" from "0%").
+    for key in [
+        "daily_spend_percent",
+        "hourly_spend_percent",
+        "monthly_spend_percent",
+    ] {
+        assert!(
+            budget.get(key).expect("present").is_null(),
+            "{key} must be null when no cap is configured: {budget}"
+        );
+    }
+
+    // New `llm` block — sourced from query_model_performance() snapshot.
+    let llm = json
+        .get("llm")
+        .expect("missing 'llm' section in /api/health/detail");
+    for key in ["total_calls", "avg_latency_ms", "max_latency_ms", "model_count"] {
+        assert!(
+            llm.get(key).is_some(),
+            "missing llm.{key} in /api/health/detail: {llm}"
+        );
+    }
+    // No LLM calls have been recorded in this fresh kernel.
+    assert_eq!(llm["total_calls"].as_u64(), Some(0));
+    assert_eq!(llm["max_latency_ms"].as_u64(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_detail_daily_spend_percent_reflects_configured_cap() {
+    use librefang_types::config::BudgetConfig;
+
+    let h = boot_router_with_api_key(API_KEY).await;
+
+    // Set a non-zero daily cap so the *_percent fields become defined (0.0
+    // for an empty kernel rather than null).
+    h.state
+        .kernel
+        .update_budget_config(|b: &mut BudgetConfig| {
+            b.max_daily_usd = 25.0;
+            b.max_hourly_usd = 5.0;
+        });
+
+    let (status, body) = send(h.app.clone(), auth_get("/api/health/detail")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("response is JSON");
+    let budget = &json["budget"];
+
+    assert_eq!(budget["daily_limit_usd"].as_f64(), Some(25.0));
+    assert_eq!(budget["hourly_limit_usd"].as_f64(), Some(5.0));
+    assert_eq!(
+        budget["daily_spend_percent"].as_f64(),
+        Some(0.0),
+        "daily_spend_percent must be 0.0 (not null) once a cap is set: {budget}"
+    );
+    assert_eq!(
+        budget["hourly_spend_percent"].as_f64(),
+        Some(0.0),
+        "hourly_spend_percent must be 0.0 (not null) once a cap is set: {budget}"
+    );
+    // No monthly cap was set — must remain null.
+    assert!(
+        budget["monthly_spend_percent"].is_null(),
+        "monthly_spend_percent must stay null when no monthly cap is set: {budget}"
+    );
+}

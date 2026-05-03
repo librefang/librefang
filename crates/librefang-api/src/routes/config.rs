@@ -454,6 +454,76 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Health-detail derived-metrics cache (#3776)
+//
+// `query_model_performance()` runs a `GROUP BY model` over `usage_events`,
+// which can grow unbounded. The health endpoint is often probed every few
+// seconds by external monitors (Prometheus blackbox, k8s readiness, etc.) so
+// we memoize the derived snapshot for `HEALTH_METRICS_TTL` to keep the probe
+// cheap. The TTL is short enough that operators still see fresh data.
+// ---------------------------------------------------------------------------
+
+const HEALTH_METRICS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Clone)]
+struct LlmHealthSnapshot {
+    /// Total LLM calls aggregated across every model in `usage_events`.
+    total_calls: u64,
+    /// Call-count-weighted mean latency in milliseconds across all models.
+    avg_latency_ms: f64,
+    /// Highest single-call latency observed across all models.
+    max_latency_ms: u64,
+    /// Number of distinct models seen.
+    model_count: usize,
+}
+
+static LLM_HEALTH_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, LlmHealthSnapshot)>>,
+> = std::sync::OnceLock::new();
+
+fn llm_health_snapshot(state: &AppState) -> LlmHealthSnapshot {
+    let cell = LLM_HEALTH_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cell.lock() {
+        if let Some((ts, snap)) = guard.as_ref() {
+            if ts.elapsed() < HEALTH_METRICS_TTL {
+                return snap.clone();
+            }
+        }
+    }
+
+    let perf = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_model_performance()
+        .unwrap_or_default();
+
+    let total_calls: u64 = perf.iter().map(|m| m.call_count).sum();
+    let weighted_sum: f64 = perf
+        .iter()
+        .map(|m| m.avg_latency_ms * m.call_count as f64)
+        .sum();
+    let avg_latency_ms = if total_calls > 0 {
+        weighted_sum / total_calls as f64
+    } else {
+        0.0
+    };
+    let max_latency_ms = perf.iter().map(|m| m.max_latency_ms).max().unwrap_or(0);
+
+    let snap = LlmHealthSnapshot {
+        total_calls,
+        avg_latency_ms,
+        max_latency_ms,
+        model_count: perf.len(),
+    };
+
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((std::time::Instant::now(), snap.clone()));
+    }
+    snap
+}
+
 /// GET /api/health/detail — Full health diagnostics (requires auth).
 #[utoipa::path(
     get,
@@ -479,6 +549,35 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let config_warnings = hcfg.validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
+    // Budget snapshot — already aggregated by MeteringEngine (single-row SQL
+    // queries, all indexed). `daily_spend_percent` is `None` when no daily
+    // cap is configured so monitors don't false-fire on undefined ratios.
+    let budget_status = state
+        .kernel
+        .metering_ref()
+        .budget_status(&state.kernel.budget_config());
+    let daily_spend_percent = if budget_status.daily_limit > 0.0 {
+        Some(budget_status.daily_pct * 100.0)
+    } else {
+        None
+    };
+    let hourly_spend_percent = if budget_status.hourly_limit > 0.0 {
+        Some(budget_status.hourly_pct * 100.0)
+    } else {
+        None
+    };
+    let monthly_spend_percent = if budget_status.monthly_limit > 0.0 {
+        Some(budget_status.monthly_pct * 100.0)
+    } else {
+        None
+    };
+
+    // LLM call latency snapshot — cached for HEALTH_METRICS_TTL to avoid
+    // re-running the GROUP BY on every probe scrape. Only `count` and
+    // mean / max latency are surfaced; P50/P95 percentiles would require a
+    // histogram which the kernel does not currently maintain (see PR notes).
+    let llm = llm_health_snapshot(&state);
+
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
@@ -497,6 +596,24 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "config_warnings": config_warnings,
         "event_bus": {
             "dropped_events": state.kernel.event_bus_ref().dropped_count(),
+        },
+        "budget": {
+            "hourly_spend_usd": budget_status.hourly_spend,
+            "hourly_limit_usd": budget_status.hourly_limit,
+            "hourly_spend_percent": hourly_spend_percent,
+            "daily_spend_usd": budget_status.daily_spend,
+            "daily_limit_usd": budget_status.daily_limit,
+            "daily_spend_percent": daily_spend_percent,
+            "monthly_spend_usd": budget_status.monthly_spend,
+            "monthly_limit_usd": budget_status.monthly_limit,
+            "monthly_spend_percent": monthly_spend_percent,
+            "alert_threshold": budget_status.alert_threshold,
+        },
+        "llm": {
+            "total_calls": llm.total_calls,
+            "avg_latency_ms": llm.avg_latency_ms,
+            "max_latency_ms": llm.max_latency_ms,
+            "model_count": llm.model_count,
         },
     }))
 }
