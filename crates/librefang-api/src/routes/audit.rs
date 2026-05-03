@@ -13,6 +13,7 @@
 
 use super::AppState;
 use crate::middleware::AuthenticatedApiUser;
+use crate::middleware::UserRole;
 use crate::types::ApiErrorResponse;
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -20,7 +21,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
-use librefang_kernel::auth::UserRole;
 use librefang_runtime::audit::AuditEntry;
 use librefang_types::agent::UserId;
 use serde::Deserialize;
