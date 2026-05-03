@@ -540,7 +540,14 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            const { text, thinking } = extractAssistantHistoryParts(msg.content);
+            const { text, thinking: extractedThinking } = extractAssistantHistoryParts(msg.content);
+            // The agent-scoped session endpoint (which this page uses)
+            // flattens content to a string server-side and surfaces thinking
+            // via a separate `thinking` field — prefer that. The helper's
+            // own thinking extraction stays as a fallback for any future
+            // consumer of the raw-blocks endpoint (`/api/sessions/{id}`)
+            // where content is a `ContentBlock[]` and no flat field exists.
+            const thinking = msg.thinking ?? extractedThinking;
 
             const hasTools = msg.tools && msg.tools.length > 0;
             const hasImages = msg.images && msg.images.length > 0;

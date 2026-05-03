@@ -417,3 +417,145 @@ async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
     assert_eq!(status, StatusCode::OK, "body={body:?}");
     assert_eq!(body["status"], "already-deleted", "body={body:?}");
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/agents/{id}/session — thinking blocks reach the dashboard
+// ---------------------------------------------------------------------------
+
+/// Persisted `ContentBlock::Thinking` blocks must be surfaced on the
+/// agent-scoped session endpoint so the dashboard can render the
+/// collapsible reasoning drawer on history reload — same UX as live
+/// streaming, where `thinking_delta` events accumulate into the message.
+///
+/// Before this fix the endpoint flattened blocks into a string and silently
+/// swallowed Thinking via the catch-all match arm, so reload showed an
+/// assistant turn with no reasoning even though the session JSON had it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_surfaces_thinking_blocks() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "thinking-target");
+
+    // Seed a session with an assistant turn that has interleaved thinking
+    // and text blocks. Two thinking blocks exercise the multi-block join.
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    session.agent_id = id;
+    session.push_message(Message {
+        role: Role::User,
+        content: MessageContent::Text("hi".to_string()),
+        pinned: false,
+        timestamp: None,
+    });
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![
+            ContentBlock::Thinking {
+                thinking: "first reasoning step".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Text {
+                text: "visible answer".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Thinking {
+                thinking: "follow-up reasoning".to_string(),
+                provider_metadata: None,
+            },
+        ]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array").clone();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("assistant message");
+    // Visible text still flattens — same shape the dashboard already
+    // rendered before this change.
+    assert_eq!(assistant["content"], "visible answer");
+    // Thinking now surfaces as a flat string with multi-block join. The
+    // dashboard's history mapper reads this directly into
+    // `ChatMessage.thinking`, mirroring the live-streaming flat-string
+    // accumulation from `thinking_delta` events.
+    assert_eq!(
+        assistant["thinking"], "first reasoning step\n\nfollow-up reasoning",
+        "thinking field missing or wrong join — body={body:?}",
+    );
+}
+
+/// Sessions without thinking blocks must NOT include a `thinking` field
+/// on assistant messages. Omitting (vs. emitting `""`) keeps the response
+/// shape unchanged for non-thinking models and avoids triggering the
+/// dashboard's empty-drawer render gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_omits_thinking_when_none_present() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "no-thinking-target");
+
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    session.agent_id = id;
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Text {
+            text: "plain answer".to_string(),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array");
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("assistant message");
+    assert_eq!(assistant["content"], "plain answer");
+    assert!(
+        assistant.get("thinking").is_none(),
+        "thinking field should be absent — body={body:?}",
+    );
+}
