@@ -81,7 +81,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
