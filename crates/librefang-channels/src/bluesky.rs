@@ -570,6 +570,117 @@ impl ChannelAdapter for BlueskyAdapter {
 mod tests {
     use super::*;
 
+    // ----- send() path tests (issue #3820) -----
+    //
+    // `BlueskyAdapter::with_service_url()` already accepts a custom PDS URL, so no
+    // additional field injection is needed. Tests stand up a wiremock server, stub
+    // `createSession` to return a synthetic access token + DID, then assert that
+    // `send()` issues `POST /xrpc/com.atproto.repo.createRecord` with the correct body.
+
+    use wiremock::matchers::{bearer_token, body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(service_url: String) -> BlueskyAdapter {
+        BlueskyAdapter::with_service_url(
+            "test.bsky.social".to_string(),
+            "test-app-password".to_string(),
+            service_url,
+        )
+    }
+
+    fn dummy_user() -> ChannelUser {
+        ChannelUser {
+            platform_id: "did:plc:testbot".to_string(),
+            display_name: "testbot".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bluesky_send_creates_record_with_bearer_auth_and_text() {
+        let server = MockServer::start().await;
+
+        // Stub the createSession call that get_token() triggers
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.server.createSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accessJwt": "test-access-jwt",
+                "refreshJwt": "test-refresh-jwt",
+                "handle": "test.bsky.social",
+                "did": "did:plc:testbot"
+            })))
+            .mount(&server)
+            .await;
+
+        // Stub the createRecord call that api_create_post() makes
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.createRecord"))
+            .and(bearer_token("test-access-jwt"))
+            .and(body_partial_json(serde_json::json!({
+                "repo": "did:plc:testbot",
+                "collection": "app.bsky.feed.post"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uri": "at://did:plc:testbot/app.bsky.feed.post/abc123",
+                "cid": "bafyreitest"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn bluesky_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.server.createSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accessJwt": "test-access-jwt",
+                "refreshJwt": "test-refresh-jwt",
+                "handle": "test.bsky.social",
+                "did": "did:plc:testbot"
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/xrpc/com.atproto.repo.createRecord"))
+            .and(bearer_token("test-access-jwt"))
+            .and(body_partial_json(serde_json::json!({
+                "repo": "did:plc:testbot",
+                "collection": "app.bsky.feed.post"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uri": "at://did:plc:testbot/app.bsky.feed.post/def456",
+                "cid": "bafyreitest2"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
     #[test]
     fn test_bluesky_adapter_creation() {
         let adapter = BlueskyAdapter::new(
