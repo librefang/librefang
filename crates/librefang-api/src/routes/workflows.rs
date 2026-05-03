@@ -944,7 +944,7 @@ pub async fn save_workflow_as_template(
         }
     };
 
-    let template = state.kernel.workflow_to_template(&workflow);
+    let template = workflow.to_template();
 
     // Persist template to TOML file under the active kernel home directory.
     let templates_dir = state.kernel.home_dir().join("workflows").join("templates");
@@ -1143,7 +1143,7 @@ pub async fn list_triggers(
     //   1. With ?agent_id=... — verify the caller owns that agent.
     //   2. Without — post-filter the trigger list by author.
     let restrict_to: Option<String> = match api_user.as_ref() {
-        Some(u) if u.0.role < librefang_kernel::auth::UserRole::Admin => Some(u.0.name.clone()),
+        Some(u) if u.0.role < crate::middleware::UserRole::Admin => Some(u.0.name.clone()),
         _ => None,
     };
     if let (Some(user_name), Some(aid)) = (restrict_to.as_ref(), agent_filter) {

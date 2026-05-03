@@ -707,4 +707,16 @@ pub trait KernelHandle: Send + Sync {
     ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
         Vec::new()
     }
+
+    /// Return the effective directory channel bridges write downloaded
+    /// attachments to, when configured. The runtime widens the `file_read` /
+    /// `file_list` sandbox accept-list with this prefix so agents can open
+    /// the files the bridge hands them via paths like
+    /// `/tmp/librefang_uploads/<uuid>.<ext>` (issue #4434).
+    ///
+    /// Returns `None` for stub kernels without channels wired; the runtime
+    /// then falls back to workspace-only resolution.
+    fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
