@@ -19,7 +19,7 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { normalizeToolOutput } from "../lib/chat";
+import { extractAssistantHistoryParts, normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
@@ -540,22 +540,16 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            let content: string;
-            if (typeof msg.content === "string") {
-              content = msg.content;
-            } else if (Array.isArray(msg.content)) {
-              // Extract only text blocks — skip tool_use/tool_result
-              content = (msg.content as Array<Record<string, unknown>>)
-                .filter((b) => b.type === "text" && typeof b.text === "string")
-                .map((b) => b.text as string)
-                .join("\n");
-            } else {
-              content = msg.content == null ? "" : String(msg.content);
-            }
+            const { text, thinking } = extractAssistantHistoryParts(msg.content);
 
             const hasTools = msg.tools && msg.tools.length > 0;
             const hasImages = msg.images && msg.images.length > 0;
-            if (!content.trim() && !hasTools && !hasImages) return [];
+            const hasThinking = thinking.trim().length > 0;
+            // Drop messages with no displayable content. Thinking counts:
+            // a turn that produced only reasoning (no visible text or tools)
+            // should still render as an assistant turn with the collapsible
+            // thinking drawer, otherwise reload silently loses it.
+            if (!text.trim() && !hasTools && !hasImages && !hasThinking) return [];
 
             return [{
               id: `hist-${idx}`,
@@ -564,7 +558,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 : msg.role === "System"
                   ? "system"
                   : "assistant",
-              content,
+              content: text,
               // Use the real server-side timestamp when available so
               // resumed sessions render the original send time instead of
               // the page-load time. Fall back to `now` only for messages
@@ -576,6 +570,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 filename: img.filename,
                 content_type: img.content_type,
               })),
+              thinking: hasThinking ? thinking : undefined,
             }];
           });
           // Refresh the cache unconditionally — the data is still correct
