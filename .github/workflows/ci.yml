@@ -250,6 +250,13 @@ jobs:
             exit 1
           fi
           echo "openapi.json and SDKs are in sync."
+      # Schema drift gate (#3300): verifies the sha256 baselines committed
+      # under xtask/baselines/ match the on-disk schema artifacts. Catches
+      # forgotten baseline regeneration after intentional schema changes
+      # (and any unintentional change to librefang.toml.example or the
+      # example agent manifest).
+      - name: Schema baseline check
+        run: cargo xtask schema-check check
 
   # ── Security audit (independent) ───────────────────────────────────────────────
   security:
