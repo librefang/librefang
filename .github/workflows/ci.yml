@@ -295,6 +295,13 @@ jobs:
         run: cargo xtask codegen --openapi
       - name: Regenerate SDKs
         run: python3 scripts/codegen-sdks.py
+      # Schema drift baseline regen (#3300): the schema-check gate compares
+      # sha256 baselines under xtask/baselines/ against the on-disk schema
+      # artifacts. We regenerate those baselines here so the auto-commit
+      # step below also rolls them into the same robot commit — internal
+      # PRs no longer need a manual `cargo xtask schema-check gen` round.
+      - name: Regenerate schema baselines
+        run: cargo xtask schema-check gen
       - name: Verify no drift (auto-commit on internal PRs)
         env:
           # Same-repo PR: GITHUB_TOKEN has write scope -> we can push the
@@ -303,35 +310,34 @@ jobs:
           # to the original "fail with reproduce instructions" behaviour.
           IS_INTERNAL_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          if git diff --quiet -- openapi.json sdk/; then
-            echo "openapi.json and SDKs are in sync."
+          if git diff --quiet -- openapi.json sdk/ xtask/baselines/; then
+            echo "openapi.json, SDKs, and schema baselines are in sync."
             exit 0
           fi
           if [ "$IS_INTERNAL_PR" = "true" ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add openapi.json sdk/
-            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk [skip ci]"
+            git add openapi.json sdk/ xtask/baselines/
+            git commit -m "chore(codegen): auto-regenerate openapi.json + sdk + schema baselines [skip ci]"
             git push
-            echo "::notice::Auto-committed regenerated openapi.json + sdk/ to the PR branch."
+            echo "::notice::Auto-committed regenerated openapi.json + sdk/ + xtask/baselines/ to the PR branch."
             echo "::notice::The [skip ci] marker prevents an immediate re-run; if you want full CI"
             echo "::notice::on the post-codegen tip, push an empty commit or close+reopen the PR."
             exit 0
           fi
           # Fork PR or push to main — fail loudly.
-          echo "::error::openapi.json or generated SDKs are out of sync with the source code."
+          echo "::error::openapi.json, generated SDKs, or schema baselines are out of sync with the source code."
           echo "Reproduce locally:"
           echo "  cargo xtask codegen --openapi"
           echo "  python3 scripts/codegen-sdks.py"
-          echo "Then commit the regenerated openapi.json and sdk/* files."
+          echo "  cargo xtask schema-check gen"
+          echo "Then commit the regenerated openapi.json, sdk/*, and xtask/baselines/* files."
           echo "(Fork PRs cannot use the auto-commit path because GITHUB_TOKEN"
           echo "is read-only on cross-repository pull requests.)"
           exit 1
-      # Schema drift gate (#3300): verifies the sha256 baselines committed
-      # under xtask/baselines/ match the on-disk schema artifacts. Catches
-      # forgotten baseline regeneration after intentional schema changes
-      # (and any unintentional change to librefang.toml.example or the
-      # example agent manifest).
+      # Sanity verify that `schema-check gen` produced baselines that
+      # match the on-disk schema artifacts — catches a bug in `gen`
+      # itself rather than letting drift leak past us.
       - name: Schema baseline check
         run: cargo xtask schema-check check
 
