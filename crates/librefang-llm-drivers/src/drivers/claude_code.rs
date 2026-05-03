@@ -1091,10 +1091,17 @@ impl LlmDriver for ClaudeCodeDriver {
                             "Claude CLI streaming timed out due to inactivity, killing process"
                         );
                         let _ = child.kill().await;
+                        let partial_body: std::sync::Arc<str> =
+                            std::sync::Arc::from(std::mem::take(&mut full_text));
                         break Some(LlmError::TimedOut {
                             inactivity_secs: kill_secs,
                             partial_text_len: partial_len,
-                            partial_text: std::mem::take(&mut full_text),
+                            // #3552: Arc-shared so error clone / stringify is O(1).
+                            partial_text: if partial_body.is_empty() {
+                                None
+                            } else {
+                                Some(partial_body)
+                            },
                             last_activity: last_activity.clone(),
                         });
                     }

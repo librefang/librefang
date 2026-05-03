@@ -3,6 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
@@ -61,10 +62,19 @@ pub enum LlmError {
     #[error("Model not found: {0}")]
     ModelNotFound(String),
     /// Subprocess timed out due to inactivity, but partial output was captured.
+    ///
+    /// `partial_text` is wrapped in `Option<Arc<str>>` so cloning the error
+    /// (e.g. when stringifying through `LibreFangError::LlmDriver(e.to_string())`,
+    /// matching for failover decisions, etc.) is an O(1) refcount bump rather
+    /// than copying potentially-megabyte payloads. Most consumers only ever
+    /// read `partial_text_len` (which is what `Display` references) and never
+    /// touch the body; CLI driver callers that DO want to forward the partial
+    /// to the user can still pattern-match the variant and clone cheaply. See
+    /// #3552.
     #[error("Timed out after {inactivity_secs}s of inactivity (last: {last_activity}, {partial_text_len} chars partial output)")]
     TimedOut {
         inactivity_secs: u64,
-        partial_text: String,
+        partial_text: Option<Arc<str>>,
         partial_text_len: usize,
         /// Last known activity before the process stalled.
         last_activity: String,
@@ -533,6 +543,56 @@ impl std::fmt::Debug for DriverConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #3552: `LlmError::TimedOut.partial_text` is `Option<Arc<str>>` so that
+    // cloning the variant (or the whole error) is an O(1) refcount bump.
+    // Display still interpolates `partial_text_len` only — the body is opaque
+    // to most consumers — and pattern-matching the variant must keep working
+    // for the CLI-driver callers that DO want to forward the partial.
+    #[test]
+    fn test_timed_out_partial_text_is_arc_shared_and_display_unchanged() {
+        let body: Arc<str> = Arc::from("hello world partial output");
+        let err = LlmError::TimedOut {
+            inactivity_secs: 30,
+            partial_text: Some(Arc::clone(&body)),
+            partial_text_len: body.len(),
+            last_activity: "tool_use".to_string(),
+        };
+
+        // Display references only `inactivity_secs`, `last_activity`, and
+        // `partial_text_len` — the body is intentionally not interpolated.
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Timed out after 30s of inactivity (last: tool_use, {} chars partial output)",
+                body.len()
+            )
+        );
+
+        // Pattern-match still exposes the partial for CLI callers that want it.
+        match &err {
+            LlmError::TimedOut { partial_text, .. } => {
+                assert_eq!(partial_text.as_deref(), Some(body.as_ref()));
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+
+        // The `None` shape is also valid for callers that don't have a partial.
+        let empty = LlmError::TimedOut {
+            inactivity_secs: 5,
+            partial_text: None,
+            partial_text_len: 0,
+            last_activity: "init".to_string(),
+        };
+        assert_eq!(
+            empty.to_string(),
+            "Timed out after 5s of inactivity (last: init, 0 chars partial output)"
+        );
+
+        // Failover classification is unaffected by the field-shape change.
+        assert_eq!(err.failover_reason(), FailoverReason::Timeout);
+        assert_eq!(empty.failover_reason(), FailoverReason::Timeout);
+    }
 
     #[test]
     fn test_completion_response_text() {

@@ -4449,8 +4449,20 @@ async fn stream_with_retry(
                     inactivity_secs,
                     partial_text_len, last_activity, "LLM stream timed out with partial output"
                 );
-                if !partial_text.is_empty() {
-                    let _ = tx.send(StreamEvent::TextDelta { text: partial_text }).await;
+                // #3552: `partial_text` is `Option<Arc<str>>` — copy the body
+                // into the owned `String` that `TextDelta` requires only when
+                // we actually have one to forward. Most consumers (failover
+                // classification, log lines, error stringification through
+                // `LibreFangError::LlmDriver(e.to_string())`) only ever read
+                // `partial_text_len` and pay nothing for the body.
+                if let Some(body) = partial_text.as_deref() {
+                    if !body.is_empty() {
+                        let _ = tx
+                            .send(StreamEvent::TextDelta {
+                                text: body.to_string(),
+                            })
+                            .await;
+                    }
                 }
                 return Err(LibreFangError::LlmDriver(format!(
                     "Task timed out after {inactivity_secs}s of inactivity \
