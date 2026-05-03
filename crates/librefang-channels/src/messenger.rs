@@ -45,8 +45,14 @@ fn verify_hub_signature(app_secret: &[u8], body: &[u8], signature_header: &str) 
     crate::http_client::ct_eq(&result, &expected_bytes)
 }
 
-/// Facebook Graph API base URL for sending messages.
+/// Default Facebook Graph API base URL for sending messages.
 const GRAPH_API_BASE: &str = "https://graph.facebook.com/v18.0";
+
+/// Returns the default Graph API base URL. Used to initialise `MessengerAdapter::api_base`.
+#[inline]
+fn default_messenger_api_base() -> String {
+    GRAPH_API_BASE.to_string()
+}
 
 /// Maximum Messenger message text length (characters).
 const MAX_MESSAGE_LEN: usize = 2000;
@@ -71,6 +77,9 @@ pub struct MessengerAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Base URL for the Facebook Graph API. Defaults to `https://graph.facebook.com/v18.0`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
 }
 
 impl MessengerAdapter {
@@ -101,6 +110,7 @@ impl MessengerAdapter {
             app_secret: Zeroizing::new(app_secret),
             client: crate::http_client::new_client(),
             account_id: None,
+            api_base: default_messenger_api_base(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
@@ -109,11 +119,19 @@ impl MessengerAdapter {
         self
     }
 
+    /// Override the Graph API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://graph.facebook.com/v18.0`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
+    }
+
     /// Validate the page token by calling the Graph API to get page info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me?access_token={}",
-            GRAPH_API_BASE,
+            self.api_base,
             self.page_token.as_str()
         );
 
@@ -138,7 +156,7 @@ impl MessengerAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me/messages?access_token={}",
-            GRAPH_API_BASE,
+            self.api_base,
             self.page_token.as_str()
         );
 
@@ -175,7 +193,7 @@ impl MessengerAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me/messages?access_token={}",
-            GRAPH_API_BASE,
+            self.api_base,
             self.page_token.as_str()
         );
 
@@ -458,7 +476,7 @@ impl ChannelAdapter for MessengerAdapter {
                 // Send image attachment via Messenger
                 let api_url = format!(
                     "{}/me/messages?access_token={}",
-                    GRAPH_API_BASE,
+                    self.api_base,
                     self.page_token.as_str()
                 );
 
@@ -515,6 +533,92 @@ impl ChannelAdapter for MessengerAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `MessengerAdapter`
+    // at it via `with_api_base()`. This exercises the `POST /me/messages` call made
+    // by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> MessengerAdapter {
+        MessengerAdapter::new(
+            "test-page-token".to_string(),
+            "test-verify-token".to_string(),
+            "test-app-secret".to_string(),
+            8080,
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(user_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn messenger_send_posts_messages_with_page_token_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/me/messages"))
+            .and(body_json(serde_json::json!({
+                "recipient": { "id": "user-psid-123" },
+                "message": { "text": "hello from librefang" },
+                "messaging_type": "RESPONSE"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recipient_id": "user-psid-123",
+                "message_id": "mid.test123"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("user-psid-123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn messenger_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/me/messages"))
+            .and(body_json(serde_json::json!({
+                "recipient": { "id": "user-psid-456" },
+                "message": { "text": "(Unsupported content type)" },
+                "messaging_type": "RESPONSE"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recipient_id": "user-psid-456",
+                "message_id": "mid.test456"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("user-psid-456"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_messenger_adapter_creation() {
