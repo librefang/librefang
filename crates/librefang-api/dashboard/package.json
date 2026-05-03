@@ -19,6 +19,7 @@
     "openapi:types": "openapi-typescript http://127.0.0.1:4545/api/openapi.json -o openapi/generated.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:i18n-parity": "node scripts/i18n-parity.mjs",
     "e2e": "playwright test"
   },
   "dependencies": {
