@@ -1,9 +1,10 @@
 import { formatRelativeTime } from "../lib/datetime";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "@tanstack/react-router";
 import { useAgents } from "../lib/queries/agents";
 import { useSessions } from "../lib/queries/sessions";
-import { useSwitchAgentSession, useDeleteAgentSession } from "../lib/mutations/agents";
+import { useDeleteAgentSession } from "../lib/mutations/agents";
 import { useSetSessionLabel } from "../lib/mutations/sessions";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -13,7 +14,7 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { useUIStore } from "../lib/store";
 import { toastErr } from "../lib/errors";
-import { Clock, Search, MessageCircle, Trash2, Play, Users, Tag, Check, X } from "lucide-react";
+import { Clock, Search, MessageCircle, Trash2, Users, Tag, Check, X } from "lucide-react";
 import { truncateId } from "../lib/string";
 import { StaggerList } from "../components/ui/StaggerList";
 
@@ -29,8 +30,8 @@ export function SessionsPage() {
   const sessionsQuery = useSessions();
   const agentsQuery = useAgents();
 
-  const switchMutation = useSwitchAgentSession();
   const deleteMutation = useDeleteAgentSession();
+  const navigate = useNavigate();
   const labelMutation = useSetSessionLabel();
 
   const agents = agentsQuery.data ?? [];
@@ -58,14 +59,15 @@ export function SessionsPage() {
     labelMutation.mutate({ sessionId, label, agentId }, { onSuccess: () => setEditingLabelId(null) });
   }
 
-  async function handleSwitch(agentId: string, sessionId: string) {
-    setPendingId(sessionId);
-    try {
-      await switchMutation.mutateAsync({ agentId, sessionId });
-      addToast(t("common.success"), "success");
-    } catch (e) {
-      addToast(toastErr(e, t("common.error")), "error");
-    } finally { setPendingId(null); }
+  // Open this session in the chat page, pinning `?sessionId=` so the chat
+  // tab routes its WS + send traffic to that exact session (#2959). This is
+  // what users expect when they click ▶ on a session row — the previous
+  // behavior (registry-pointer swap via `switch_agent_session`) did not
+  // affect any chat tab pinned to its own session id, and was misleading
+  // (#4292). The "make this the agent's default session" action is left to
+  // a future explicit affordance instead of overloading Play.
+  function handleOpenInChat(agentId: string, sessionId: string) {
+    navigate({ to: "/chat", search: { agentId, sessionId } });
   }
 
   async function handleDelete(sessionId: string, agentId?: string) {
@@ -185,9 +187,16 @@ export function SessionsPage() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                  {!s.active && s.agent_id && (
-                    <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>
-                      <Play className="w-3.5 h-3.5" />
+                  {s.agent_id && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => handleOpenInChat(s.agent_id!, s.session_id)}
+                      disabled={pendingId === s.session_id}
+                      title={t("sessions.open_in_chat", { defaultValue: "Open this session in the chat page" })}
+                      aria-label={t("sessions.open_in_chat", { defaultValue: "Open this session in the chat page" })}
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" />
                     </Button>
                   )}
                   {confirmDeleteId === s.session_id ? (
