@@ -5450,6 +5450,22 @@ impl Default for ChannelsConfig {
     }
 }
 
+impl ChannelsConfig {
+    /// Resolve the effective directory channel bridges write downloaded
+    /// attachments to. Returns the operator-configured `file_download_dir`
+    /// when set, or `std::env::temp_dir()/librefang_uploads` otherwise.
+    ///
+    /// Centralizing the fallback here lets the kernel hand the same path
+    /// to the file-read sandbox so agents can actually open the files the
+    /// bridge tells them about (issue #4434).
+    pub fn effective_file_download_dir(&self) -> std::path::PathBuf {
+        self.file_download_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("librefang_uploads"))
+    }
+}
+
 /// Telegram channel adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
