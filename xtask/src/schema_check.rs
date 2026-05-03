@@ -49,6 +49,11 @@ const SURFACES: &[Surface] = &[
         source: "librefang.toml.example",
         baseline: "xtask/baselines/config.sha256",
     },
+    Surface {
+        label: "agent",
+        source: "examples/custom-agent/agent.toml",
+        baseline: "xtask/baselines/agent.sha256",
+    },
 ];
 
 fn hash_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
