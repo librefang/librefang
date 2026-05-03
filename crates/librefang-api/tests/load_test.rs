@@ -229,7 +229,11 @@ async fn load_concurrent_agent_spawns() {
             .await
             .ok()?;
         let c = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
-        if c >= success { Some(c) } else { None }
+        if c >= success {
+            Some(c)
+        } else {
+            None
+        }
     })
     .await;
     eprintln!("  [LOAD] Total agents after spawn: {count}");
@@ -604,7 +608,11 @@ async fn load_spawn_kill_cycle() {
             .await
             .ok()?;
         let r = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
-        if r == 1 { Some(r) } else { None }
+        if r == 1 {
+            Some(r)
+        } else {
+            None
+        }
     })
     .await;
     assert_eq!(remaining, 1, "Only default assistant should remain");

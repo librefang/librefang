@@ -953,10 +953,7 @@ mod tests {
         for menu in [MENU_FIRST_RUN, MENU_RETURNING] {
             assert!(menu.iter().any(|m| m.choice == LauncherChoice::Chat));
             assert!(menu.iter().any(|m| m.choice == LauncherChoice::Dashboard));
-            assert!(
-                menu.iter()
-                    .any(|m| m.choice == LauncherChoice::TerminalUI)
-            );
+            assert!(menu.iter().any(|m| m.choice == LauncherChoice::TerminalUI));
         }
     }
 

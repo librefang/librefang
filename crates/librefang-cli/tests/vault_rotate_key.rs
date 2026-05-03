@@ -165,9 +165,7 @@ fn sentinel_round_trips_through_rotation() {
     vault2.unlock_with_key(key_new).unwrap();
     // Use iter_all_entries (which includes reserved keys) to inspect the
     // sentinel directly; verify_or_install_sentinel is also exercised.
-    let sentinel_pair = vault2
-        .iter_all_entries()
-        .find(|(k, _)| *k == SENTINEL_KEY);
+    let sentinel_pair = vault2.iter_all_entries().find(|(k, _)| *k == SENTINEL_KEY);
     let (_, sv) = sentinel_pair.expect("sentinel must survive rotation");
     assert_eq!(sv, SENTINEL_VALUE, "sentinel value must round-trip exactly");
     vault2.verify_or_install_sentinel().unwrap();

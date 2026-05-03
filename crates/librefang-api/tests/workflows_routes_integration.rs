@@ -581,8 +581,7 @@ async fn trigger_delete_invalid_uuid_returns_400() {
     // Refs #3509: 400 stays reserved for malformed-id rejection. Only the
     // `not-found` case relaxed to 200.
     let h = boot().await;
-    let (status, _body) =
-        json_request(&h, Method::DELETE, "/api/triggers/not-a-uuid", None).await;
+    let (status, _body) = json_request(&h, Method::DELETE, "/api/triggers/not-a-uuid", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 

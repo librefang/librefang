@@ -1990,9 +1990,7 @@ pub async fn delete_cron_job(
     match state.kernel.cron().remove_job(job_id) {
         Ok(_) => {
             if let Err(e) = state.kernel.cron().persist() {
-                tracing::error!(
-                    "Failed to persist cron scheduler state after delete: {e}"
-                );
+                tracing::error!("Failed to persist cron scheduler state after delete: {e}");
                 return cron_persist_failed_response("delete", &e.to_string());
             }
             (
@@ -2029,9 +2027,7 @@ pub async fn update_cron_job(
             match state.kernel.cron().update_job(job_id, &body) {
                 Ok(job) => {
                     if let Err(e) = state.kernel.cron().persist() {
-                        tracing::error!(
-                            "Failed to persist cron scheduler state after update: {e}"
-                        );
+                        tracing::error!("Failed to persist cron scheduler state after update: {e}");
                         return cron_persist_failed_response("update", &e.to_string());
                     }
                     (
@@ -2064,9 +2060,7 @@ pub async fn toggle_cron_job(
             match state.kernel.cron().set_enabled(job_id, enabled) {
                 Ok(()) => {
                     if let Err(e) = state.kernel.cron().persist() {
-                        tracing::error!(
-                            "Failed to persist cron scheduler state after toggle: {e}"
-                        );
+                        tracing::error!("Failed to persist cron scheduler state after toggle: {e}");
                         return cron_persist_failed_response("toggle", &e.to_string());
                     }
                     (

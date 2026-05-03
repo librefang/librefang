@@ -66,10 +66,7 @@ mod tests {
     #[test]
     fn with_agent_id_attaches_marker_to_response_extensions() {
         let agent_id = AgentId::new();
-        let resp = with_agent_id(
-            agent_id,
-            (StatusCode::OK, Json(json!({"status": "ok"}))),
-        );
+        let resp = with_agent_id(agent_id, (StatusCode::OK, Json(json!({"status": "ok"}))));
 
         let field = resp
             .extensions()
