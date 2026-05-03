@@ -30,6 +30,8 @@ import {
   Search,
   Lock,
   Edit3,
+  Eye,
+  EyeOff,
   History as HistoryIcon,
   Zap,
 } from "lucide-react";
@@ -156,6 +158,7 @@ function TotpModal({
 }) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
+  const [reveal, setReveal] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -171,6 +174,7 @@ function TotpModal({
   const digits = isRecovery ? null : value.padEnd(6, " ").slice(0, 6).split("");
   const cursorIdx = Math.min(value.length, 5);
   const valid = isValidTotpOrRecovery(value);
+  const maskedRecovery = reveal ? value : value.replace(/[^-]/g, "•");
 
   return (
     <div
@@ -206,10 +210,11 @@ function TotpModal({
         </p>
 
         {digits ? (
-          <div className="flex gap-1.5 mb-3">
+          <div className="flex gap-1.5 mb-2">
             {digits.map((d, i) => {
               const filled = d.trim().length > 0;
               const isCursor = i === cursorIdx && value.length < 6;
+              const display = filled ? (reveal ? d : "•") : isCursor ? "|" : "";
               return (
                 <div
                   key={i}
@@ -219,20 +224,46 @@ function TotpModal({
                       : "border-border-subtle bg-main/60 text-text-dim"
                   } ${isCursor ? "ring-2 ring-accent/40" : ""}`}
                 >
-                  {filled ? d : isCursor ? "|" : ""}
+                  {display}
                 </div>
               );
             })}
           </div>
         ) : (
-          <div className="mb-3 px-3 py-2 rounded-lg border border-accent/30 bg-accent/5 font-mono text-sm tracking-widest text-accent text-center">
-            {value}
+          <div className="mb-2 px-3 py-2 rounded-lg border border-accent/30 bg-accent/5 font-mono text-sm tracking-widest text-accent text-center">
+            {maskedRecovery}
           </div>
         )}
 
-        {/* hidden actual input — captures keystrokes including paste */}
+        <div className="flex justify-end mb-3">
+          <button
+            type="button"
+            onClick={() => setReveal((v) => !v)}
+            className="inline-flex items-center gap-1 text-[11px] text-text-dim hover:text-text transition-colors"
+            aria-label={reveal ? t("common.hide", "Hide") : t("common.show", "Show")}
+            aria-pressed={reveal}
+          >
+            {reveal ? (
+              <>
+                <EyeOff className="w-3 h-3" />
+                {t("common.hide", "Hide")}
+              </>
+            ) : (
+              <>
+                <Eye className="w-3 h-3" />
+                {t("common.show", "Show")}
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* hidden actual input — captures keystrokes including paste.
+            Uses type="password" so OS-level UI (mobile keyboard previews,
+            screen readers) treats it as a secret; visual masking is
+            handled by the boxes above. */}
         <input
           ref={inputRef}
+          type="password"
           value={value}
           onChange={(e) =>
             setValue(e.target.value.replace(/[^0-9-]/g, "").slice(0, 9))

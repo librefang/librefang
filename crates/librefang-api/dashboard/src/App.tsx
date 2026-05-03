@@ -182,9 +182,10 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
               <>
                 <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
                 <input
-                  type="text"
+                  type="password"
                   inputMode="numeric"
                   autoComplete="one-time-code"
+                  pattern="[0-9]{6}"
                   maxLength={6}
                   value={totpCode}
                   onChange={(e) => { setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setErrorKey(null); }}

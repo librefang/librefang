@@ -5,7 +5,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import {
   Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Languages, LayoutDashboard,
-  Shield, CheckCircle, XCircle, Download, Play, Square,
+  Shield, CheckCircle, XCircle, Download, Play, Square, Eye, EyeOff,
 } from "lucide-react";
 import { useUIStore } from "../lib/store";
 import { useAutoDreamStatus } from "../lib/queries/autoDream";
@@ -184,6 +184,10 @@ function TotpSection() {
   const [revokeCode, setRevokeCode] = useState("");
   const [showResetPrompt, setShowResetPrompt] = useState(false);
   const [showRevokePrompt, setShowRevokePrompt] = useState(false);
+  const [showResetCode, setShowResetCode] = useState(false);
+  const [showRevokeCode, setShowRevokeCode] = useState(false);
+  const [showConfirmCode, setShowConfirmCode] = useState(false);
+  const [revealRecovery, setRevealRecovery] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -205,6 +209,7 @@ function TotpSection() {
       setSetupData({ otpauth_uri: data.otpauth_uri, secret: data.secret, qr_code: data.qr_code, recovery_codes: data.recovery_codes });
       setShowResetPrompt(false);
       setResetCode("");
+      setRevealRecovery(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : t("settings.totp_setup_failed", "Setup failed"));
     }
@@ -300,35 +305,61 @@ function TotpSection() {
         <div className="py-4">
           {showResetPrompt && !setupData ? (
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-              <input
-                type="text"
-                value={resetCode}
-                onChange={(e) => setResetCode(e.target.value)}
-                placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
-                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                onKeyDown={(e) => e.key === "Enter" && resetCode && !loading && handleSetup(resetCode)}
-              />
+              <div className="relative w-full sm:w-48">
+                <input
+                  type={showResetCode ? "text" : "password"}
+                  value={resetCode}
+                  onChange={(e) => setResetCode(e.target.value)}
+                  placeholder={t("settings.totp_reset_placeholder", "Current TOTP or recovery code")}
+                  autoComplete="one-time-code"
+                  inputMode="text"
+                  className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 pr-9 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                  onKeyDown={(e) => e.key === "Enter" && resetCode && !loading && handleSetup(resetCode)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowResetCode((v) => !v)}
+                  aria-label={showResetCode ? t("common.hide", "Hide") : t("common.show", "Show")}
+                  aria-pressed={showResetCode}
+                  className="absolute inset-y-0 right-0 flex items-center px-2 text-text-dim hover:text-text transition-colors"
+                >
+                  {showResetCode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
               <Button variant="primary" size="sm" onClick={() => handleSetup(resetCode)} disabled={!resetCode || loading} isLoading={loading}>
                 {t("settings.totp_verify_reset", "Verify & Reset")}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => { setShowResetPrompt(false); setResetCode(""); }}>
+              <Button variant="ghost" size="sm" onClick={() => { setShowResetPrompt(false); setResetCode(""); setShowResetCode(false); }}>
                 {t("common.cancel", "Cancel")}
               </Button>
             </div>
           ) : showRevokePrompt && !setupData ? (
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-              <input
-                type="text"
-                value={revokeCode}
-                onChange={(e) => setRevokeCode(e.target.value)}
-                placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
-                className="w-full sm:w-48 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                onKeyDown={(e) => e.key === "Enter" && revokeCode && !loading && handleRevoke()}
-              />
+              <div className="relative w-full sm:w-48">
+                <input
+                  type={showRevokeCode ? "text" : "password"}
+                  value={revokeCode}
+                  onChange={(e) => setRevokeCode(e.target.value)}
+                  placeholder={t("settings.totp_revoke_placeholder", "TOTP or recovery code")}
+                  autoComplete="one-time-code"
+                  inputMode="text"
+                  className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 pr-9 text-sm font-mono focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                  onKeyDown={(e) => e.key === "Enter" && revokeCode && !loading && handleRevoke()}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowRevokeCode((v) => !v)}
+                  aria-label={showRevokeCode ? t("common.hide", "Hide") : t("common.show", "Show")}
+                  aria-pressed={showRevokeCode}
+                  className="absolute inset-y-0 right-0 flex items-center px-2 text-text-dim hover:text-text transition-colors"
+                >
+                  {showRevokeCode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
               <Button variant="danger" size="sm" onClick={handleRevoke} disabled={!revokeCode || loading} isLoading={loading}>
                 {t("settings.totp_confirm_revoke", "Confirm Revoke")}
               </Button>
-              <Button variant="ghost" size="sm" onClick={() => { setShowRevokePrompt(false); setRevokeCode(""); }}>
+              <Button variant="ghost" size="sm" onClick={() => { setShowRevokePrompt(false); setRevokeCode(""); setShowRevokeCode(false); }}>
                 {t("common.cancel", "Cancel")}
               </Button>
             </div>
@@ -364,32 +395,79 @@ function TotpSection() {
               </code>
               {setupData.recovery_codes.length > 0 && (
                 <div className="mt-2">
-                  <p className="text-xs font-bold text-text-dim mb-1">
-                    {t("settings.totp_recovery_title", "Recovery Codes (save these somewhere safe):")}
-                  </p>
-                  <div className="grid grid-cols-2 gap-1 bg-main border border-border-subtle rounded-lg p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <p className="text-xs font-bold text-text-dim">
+                      {t("settings.totp_recovery_title", "Recovery Codes (save these somewhere safe):")}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setRevealRecovery((v) => !v)}
+                      aria-label={
+                        revealRecovery
+                          ? t("settings.totp_recovery_hide", "Hide codes")
+                          : t("settings.totp_recovery_reveal", "Reveal codes")
+                      }
+                      aria-pressed={revealRecovery}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-text-dim hover:text-text transition-colors"
+                    >
+                      {revealRecovery ? (
+                        <>
+                          <EyeOff className="w-3 h-3" />
+                          {t("settings.totp_recovery_hide", "Hide codes")}
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="w-3 h-3" />
+                          {t("settings.totp_recovery_reveal", "Reveal codes")}
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <div
+                    className={`relative grid grid-cols-2 gap-1 bg-main border border-border-subtle rounded-lg p-3 transition-[filter] duration-150 ${
+                      revealRecovery ? "" : "blur-sm"
+                    }`}
+                    aria-hidden={!revealRecovery}
+                  >
                     {setupData.recovery_codes.map((code) => (
-                      <code key={code} className="text-sm font-mono text-center select-all">{code}</code>
+                      <code
+                        key={code}
+                        className={`text-sm font-mono text-center ${revealRecovery ? "select-all" : "select-none"}`}
+                      >
+                        {code}
+                      </code>
                     ))}
                   </div>
                 </div>
               )}
               <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  maxLength={6}
-                  pattern="[0-9]*"
-                  value={confirmCode}
-                  onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                  placeholder="000000"
-                  className="w-28 rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
-                  onKeyDown={(e) => e.key === "Enter" && !loading && handleConfirm()}
-                />
+                <div className="relative w-28">
+                  <input
+                    type={showConfirmCode ? "text" : "password"}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
+                    value={confirmCode}
+                    onChange={(e) => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    placeholder="000000"
+                    className="w-full rounded-xl border border-border-subtle bg-main px-3 py-2 pr-8 text-sm font-mono tracking-widest text-center focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none transition-colors"
+                    onKeyDown={(e) => e.key === "Enter" && !loading && handleConfirm()}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmCode((v) => !v)}
+                    aria-label={showConfirmCode ? t("common.hide", "Hide") : t("common.show", "Show")}
+                    aria-pressed={showConfirmCode}
+                    className="absolute inset-y-0 right-0 flex items-center px-1.5 text-text-dim hover:text-text transition-colors"
+                  >
+                    {showConfirmCode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
                 <Button variant="primary" size="sm" onClick={handleConfirm} disabled={confirmCode.length !== 6 || loading} isLoading={loading}>
                   {t("settings.totp_confirm", "Confirm")}
                 </Button>
-                <Button variant="ghost" size="sm" onClick={() => { setSetupData(null); setConfirmCode(""); setError(null); }}>
+                <Button variant="ghost" size="sm" onClick={() => { setSetupData(null); setConfirmCode(""); setError(null); setShowConfirmCode(false); setRevealRecovery(false); }}>
                   {t("common.cancel", "Cancel")}
                 </Button>
               </div>

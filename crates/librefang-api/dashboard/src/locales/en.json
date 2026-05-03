@@ -55,6 +55,8 @@
   "common": {
     "copied": "Copied",
     "copy_failed": "Copy failed",
+    "show": "Show",
+    "hide": "Hide",
     "refresh": "Refresh",
     "status": "Status",
     "daemon_online": "Daemon Online",
@@ -1661,6 +1663,8 @@
     "totp_scan": "Scan the QR code or enter the secret in your authenticator app:",
     "totp_confirm": "Confirm",
     "totp_recovery_title": "Recovery Codes (save these somewhere safe):",
+    "totp_recovery_reveal": "Reveal codes",
+    "totp_recovery_hide": "Hide codes",
     "totp_reset_placeholder": "Current TOTP or recovery code",
     "totp_verify_reset": "Verify & Reset",
     "totp_revoke_placeholder": "TOTP or recovery code",

@@ -54,6 +54,8 @@
   },
   "common": {
     "copied": "已复制",
+    "show": "显示",
+    "hide": "隐藏",
     "copy_failed": "复制失败",
     "refresh": "刷新",
     "status": "状态",
@@ -1598,6 +1600,8 @@
     "totp_scan": "扫描二维码或在验证器应用中手动输入密钥：",
     "totp_confirm": "确认",
     "totp_recovery_title": "恢复码（请保存到安全的地方）：",
+    "totp_recovery_reveal": "显示恢复码",
+    "totp_recovery_hide": "隐藏恢复码",
     "totp_reset_placeholder": "当前 TOTP 或恢复码",
     "totp_verify_reset": "验证并重置",
     "totp_revoke_placeholder": "TOTP 或恢复码",
