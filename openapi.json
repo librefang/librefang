@@ -573,6 +573,7 @@
           "agents"
         ],
         "summary": "DELETE /api/agents/:id — Kill an agent.",
+        "description": "Idempotent (RFC 9110 §9.2.2 / §9.3.5): deleting an agent that is already\ngone returns `200 OK` with `{\"status\": \"already-deleted\"}` instead of\n`404`. `404` is reserved for the malformed-UUID case alone, so retried\nor replayed DELETEs by clients (network blips, dashboard double-clicks)\nno longer surface a phantom error. Refs #3509.",
         "operationId": "kill_agent",
         "parameters": [
           {
@@ -587,10 +588,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Agent killed"
+            "description": "Agent killed (or was already absent — idempotent)"
           },
-          "404": {
-            "description": "Agent not found"
+          "400": {
+            "description": "Malformed agent ID"
+          },
+          "409": {
+            "description": "Agent is hand-owned and cannot be deleted directly"
           }
         }
       },
@@ -4154,7 +4158,7 @@
           "channels"
         ],
         "summary": "POST /api/channels/{name}/test — Connectivity check + optional live test message.",
-        "description": "Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`\n(for Telegram). When provided, sends a real test message to verify the bot can\npost to that channel.",
+        "description": "Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`\n(for Telegram). When provided, sends a real test message to verify the bot can\npost to that channel.\n\nStatus code semantics (#3507):\n- `200 OK` — credentials present (and, when a target was given, message sent)\n- `404 Not Found` — unknown channel name\n- `412 Precondition Failed` — required env vars / credentials are missing\n- `502 Bad Gateway` — credentials valid but downstream send failed\n\nThe JSON body shape (`{\"status\": \"ok\"|\"error\", \"message\": …}`) is preserved so\ncallers that branch on the body still work, but the HTTP status now matches the\nreal outcome — `fetch().ok` is the source of truth.",
         "operationId": "test_channel",
         "parameters": [
           {
@@ -4176,7 +4180,7 @@
         },
         "responses": {
           "200": {
-            "description": "Channel test result",
+            "description": "Channel test succeeded",
             "content": {
               "application/json": {
                 "schema": {
@@ -4187,6 +4191,26 @@
           },
           "404": {
             "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Required channel credentials missing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Downstream send failure",
             "content": {
               "application/json": {
                 "schema": {
@@ -4702,6 +4726,7 @@
           "workflows"
         ],
         "summary": "PUT /api/cron/jobs/{id} — Update a cron job's configuration.",
+        "description": "Returns 500 if the in-memory update succeeds but persistence to disk\nfails — without persistence, the new schedule runs in-memory until the\nnext restart, then silently reverts to the old schedule (issue #3515).",
         "operationId": "update_cron_job",
         "parameters": [
           {
@@ -4734,6 +4759,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Persist failed; change will not survive restart"
           }
         }
       },
@@ -4742,6 +4770,7 @@
           "workflows"
         ],
         "summary": "DELETE /api/cron/jobs/{id} — Delete a cron job.",
+        "description": "Idempotent (RFC 9110 §9.2.2): deleting a cron job that is already gone\nreturns `200 OK` with `{\"status\": \"already-deleted\"}` instead of `404`.\n`400` is reserved for the malformed-UUID case alone (Refs #3509). Returns\n`500` if the in-memory removal succeeds but persistence to disk fails —\nwithout persistence, the deletion would silently revert on daemon restart\n(issue #3515).",
         "operationId": "delete_cron_job",
         "parameters": [
           {
@@ -4756,7 +4785,13 @@
         ],
         "responses": {
           "200": {
-            "description": "Cron job deleted"
+            "description": "Cron job deleted (or was already absent — idempotent)"
+          },
+          "400": {
+            "description": "Malformed cron job ID"
+          },
+          "500": {
+            "description": "Persist failed; change will not survive restart"
           }
         }
       }
@@ -4767,6 +4802,7 @@
           "workflows"
         ],
         "summary": "PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.",
+        "description": "Returns 500 if the in-memory toggle succeeds but persistence to disk\nfails — without persistence, the new enabled state would silently\nrevert on daemon restart (issue #3515).",
         "operationId": "toggle_cron_job",
         "parameters": [
           {
@@ -4799,6 +4835,9 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Persist failed; change will not survive restart"
           }
         }
       }
@@ -5462,7 +5501,7 @@
           "webhooks"
         ],
         "summary": "POST /hooks/agent — Run an isolated agent turn via webhook.",
-        "description": "Sends a message directly to the specified agent and returns the response.\nThis enables external systems (CI/CD, Slack, etc.) to trigger agent work.",
+        "description": "Sends a message directly to the specified agent and returns the response.\nThis enables external systems (CI/CD, Slack, etc.) to trigger agent work.\n\nAuth (#3509): missing or invalid bearer token returns `401 Unauthorized`\nwith a `WWW-Authenticate: Bearer realm=\"librefang-webhook\"` header per\nRFC 9110 §11.6.1, mirroring the `/hooks/wake` fix.",
         "operationId": "webhook_agent",
         "requestBody": {
           "content": {
@@ -5484,6 +5523,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "description": "Webhook triggers not enabled or agent not found"
           }
         }
       }
@@ -5494,7 +5539,7 @@
           "webhooks"
         ],
         "summary": "POST /hooks/wake — Inject a system event via webhook trigger.",
-        "description": "Publishes a custom event through the kernel's event system, which can\ntrigger proactive agents that subscribe to the event type.",
+        "description": "Publishes a custom event through the kernel's event system, which can\ntrigger proactive agents that subscribe to the event type.\n\nAuth (#3509): missing or invalid bearer token returns `401 Unauthorized`\nwith a `WWW-Authenticate: Bearer realm=\"librefang-webhook\"` header per\nRFC 9110 §11.6.1. The previous behaviour (400 Bad Request) confused\nclients that tried to retry with a fixed body instead of fixing the\ntoken.",
         "operationId": "webhook_wake",
         "requestBody": {
           "content": {
@@ -5516,6 +5561,12 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "description": "Webhook triggers not enabled"
           }
         }
       }
@@ -8419,6 +8470,7 @@
           "workflows"
         ],
         "summary": "DELETE /api/triggers/:id — Remove a trigger.",
+        "description": "Idempotent (RFC 9110 §9.2.2): deleting a trigger that is already gone\nreturns `200 OK` with `{\"status\": \"already-deleted\"}` instead of `404`.\n`400` is reserved for the malformed-UUID case alone. Refs #3509.",
         "operationId": "delete_trigger",
         "parameters": [
           {
@@ -8433,7 +8485,10 @@
         ],
         "responses": {
           "200": {
-            "description": "Trigger deleted"
+            "description": "Trigger deleted (or was already absent — idempotent)"
+          },
+          "400": {
+            "description": "Malformed trigger ID"
           }
         }
       },
