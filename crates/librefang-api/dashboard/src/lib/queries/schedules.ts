@@ -12,6 +12,7 @@ export const scheduleQueries = {
       queryFn: listSchedules,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   triggers: (agentId?: string) =>
     queryOptions({
@@ -19,6 +20,7 @@ export const scheduleQueries = {
       queryFn: () => listTriggers(agentId),
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

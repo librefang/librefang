@@ -20,6 +20,7 @@ export const systemStatusQueryOptions = () =>
     queryFn: getStatus,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useSystemStatus() {
@@ -32,6 +33,7 @@ export const queueStatusQueryOptions = () =>
     queryFn: getQueueStatus,
     staleTime: 15_000,
     refetchInterval: 15_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useQueueStatus() {
@@ -44,6 +46,7 @@ export const healthDetailQueryOptions = () =>
     queryFn: getHealthDetail,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useHealthDetail() {
@@ -56,6 +59,7 @@ export const securityStatusQueryOptions = () =>
     queryFn: getSecurityStatus,
     staleTime: 120_000,
     refetchInterval: 120_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useSecurityStatus(options: QueryOverrides = {}) {
@@ -68,6 +72,7 @@ export const auditRecentQueryOptions = (limit: number) =>
     queryFn: () => listAuditRecent(limit),
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useAuditRecent(limit: number, options: QueryOverrides = {}) {
@@ -92,6 +97,7 @@ export const backupsQueryOptions = () =>
     queryFn: listBackups,
     staleTime: 60_000,
     refetchInterval: 60_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useBackups(options: QueryOverrides = {}) {
@@ -104,6 +110,7 @@ export const taskQueueStatusQueryOptions = () =>
     queryFn: getTaskQueueStatus,
     staleTime: 15_000,
     refetchInterval: 15_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useTaskQueueStatus() {
@@ -116,6 +123,7 @@ export const taskQueueQueryOptions = (status?: string) =>
     queryFn: () => listTaskQueue(status),
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useTaskQueue(status?: string) {
@@ -129,6 +137,7 @@ export const cronJobsQueryOptions = (agentId?: string) =>
     enabled: !!agentId,
     staleTime: 30_000,
     refetchInterval: 30_000,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useCronJobs(agentId?: string, options: QueryOverrides = {}) {

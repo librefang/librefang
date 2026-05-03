@@ -12,6 +12,7 @@ export const pluginQueries = {
       queryFn: listPlugins,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   registries: () =>
     queryOptions({
@@ -19,6 +20,7 @@ export const pluginQueries = {
       queryFn: listPluginRegistries,
       staleTime: 300_000,
       refetchInterval: 300_000,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

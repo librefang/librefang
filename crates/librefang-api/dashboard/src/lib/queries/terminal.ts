@@ -18,6 +18,7 @@ export const terminalQueries = {
       queryFn: listTerminalWindows,
       staleTime: REFRESH_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

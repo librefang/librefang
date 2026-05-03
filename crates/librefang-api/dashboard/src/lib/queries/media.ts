@@ -24,6 +24,7 @@ export const mediaQueries = {
       queryFn: listMediaProviders,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   videoTask: ({ taskId, provider }: VideoTaskParams) =>
     queryOptions({

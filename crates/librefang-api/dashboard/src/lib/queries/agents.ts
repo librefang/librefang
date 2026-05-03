@@ -24,6 +24,7 @@ export const agentQueries = {
       queryFn: () => listAgents(opts),
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   detail: (agentId: string) =>
     queryOptions({
@@ -46,6 +47,7 @@ export const agentQueries = {
       enabled: !!agentId,
       staleTime: 15_000,
       refetchInterval: 30_000,
+      refetchIntervalInBackground: false, // #3393
     }),
   events: (agentId: string, limit = 30) =>
     queryOptions({
@@ -54,6 +56,7 @@ export const agentQueries = {
       enabled: !!agentId,
       staleTime: 10_000,
       refetchInterval: 15_000,
+      refetchIntervalInBackground: false, // #3393
     }),
   templates: () =>
     queryOptions({

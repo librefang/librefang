@@ -18,6 +18,7 @@ export const networkQueries = {
       queryFn: getNetworkStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   peers: () =>
     queryOptions({
@@ -25,6 +26,7 @@ export const networkQueries = {
       queryFn: listPeers,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   trustedPeers: () =>
     queryOptions({
@@ -32,6 +34,7 @@ export const networkQueries = {
       queryFn: listTrustedPeers,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   a2aAgents: () =>
     queryOptions({
@@ -39,6 +42,7 @@ export const networkQueries = {
       queryFn: listA2AAgents,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

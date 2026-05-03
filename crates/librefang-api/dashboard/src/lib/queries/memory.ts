@@ -25,6 +25,7 @@ export const memoryQueries = {
       queryFn: () => getMemoryStats(agentId),
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS * 2,
+      refetchIntervalInBackground: false, // #3393
     }),
   config: () =>
     queryOptions({
@@ -63,6 +64,7 @@ export const memorySearchOrListQueryOptions = (search: string) =>
     },
     staleTime: STALE_MS,
     refetchInterval: REFRESH_MS,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useMemorySearchOrList(search: string) {

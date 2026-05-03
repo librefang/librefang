@@ -24,6 +24,7 @@ export const approvalQueries = {
       queryFn: listApprovals,
       staleTime: STALE_APPROVALS,
       refetchInterval: REFETCH_APPROVALS,
+      refetchIntervalInBackground: false, // #3393
     }),
   count: () =>
     queryOptions({
@@ -31,6 +32,7 @@ export const approvalQueries = {
       queryFn: fetchApprovalCount,
       staleTime: STALE_COUNT,
       refetchInterval: REFETCH_COUNT,
+      refetchIntervalInBackground: false, // #3393
     }),
   pending: (agentId?: string) =>
     queryOptions({
@@ -38,6 +40,7 @@ export const approvalQueries = {
       queryFn: () => listPendingApprovals(agentId),
       staleTime: STALE_PENDING,
       refetchInterval: REFETCH_PENDING,
+      refetchIntervalInBackground: false, // #3393
     }),
   audit: (params: {
     limit?: number;

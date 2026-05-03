@@ -20,6 +20,7 @@ export const usageQueries = {
       queryFn: getUsageSummary,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393: skip polling when tab is hidden
     }),
   byAgent: () =>
     queryOptions({
@@ -27,6 +28,7 @@ export const usageQueries = {
       queryFn: listUsageByAgent,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false,
     }),
   byModel: () =>
     queryOptions({
@@ -34,6 +36,7 @@ export const usageQueries = {
       queryFn: listUsageByModel,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false,
     }),
   daily: () =>
     queryOptions({
@@ -41,6 +44,7 @@ export const usageQueries = {
       queryFn: getUsageDaily,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false,
     }),
   modelPerformance: () =>
     queryOptions({
@@ -48,6 +52,7 @@ export const usageQueries = {
       queryFn: getUsageByModelPerformance,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false,
     }),
 };
 
@@ -58,6 +63,7 @@ export const budgetQueries = {
       queryFn: getBudgetStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

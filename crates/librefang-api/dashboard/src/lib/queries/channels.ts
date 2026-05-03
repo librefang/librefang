@@ -19,6 +19,7 @@ export const channelQueries = {
       queryFn: listChannels,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 
@@ -29,6 +30,7 @@ export const commsQueries = {
       queryFn: getCommsTopology,
       staleTime: STALE_MS,
       refetchInterval: TOPOLOGY_REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   events: (limit = 200) =>
     queryOptions({
@@ -54,5 +56,6 @@ export function useCommsEvents(
     ...commsQueries.events(limit),
     enabled: options.enabled,
     refetchInterval: options.refetchInterval ?? REFRESH_MS,
+    refetchIntervalInBackground: false, // #3393
   });
 }

@@ -13,6 +13,7 @@ export const goalQueries = {
       queryFn: listGoals,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   templates: () =>
     queryOptions({

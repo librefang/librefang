@@ -28,6 +28,7 @@ export const mcpQueries = {
       queryFn: listMcpServers,
       staleTime: SERVERS_STALE_MS,
       refetchInterval: SERVERS_REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   server: (id: string) =>
     queryOptions({

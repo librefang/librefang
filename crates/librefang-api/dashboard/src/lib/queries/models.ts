@@ -17,6 +17,7 @@ export const modelQueries = {
       queryFn: () => listModels(filters),
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   overrides: (modelKey: string) =>
     queryOptions({

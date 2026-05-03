@@ -16,6 +16,7 @@ export const autoDreamQueries = {
       queryFn: getAutoDreamStatus,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
 };
 

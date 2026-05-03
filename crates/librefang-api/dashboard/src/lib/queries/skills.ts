@@ -28,6 +28,7 @@ export const skillQueries = {
       queryFn: listSkills,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   detail: (name: string) =>
     queryOptions({

@@ -9,6 +9,12 @@ export const dashboardSnapshotQueryOptions = () =>
     queryFn: loadDashboardSnapshot,
     staleTime: 5_000,
     refetchInterval: 5_000,
+    // #3393: every mounted page using `useDashboardSnapshot` would otherwise
+    // refetch every 5 s while the tab is backgrounded. The QueryClient
+    // default in `main.tsx` also pins this to false, but we set it
+    // explicitly per-query so the visibility gate sits next to the poll
+    // interval and survives any future change to the global default.
+    refetchIntervalInBackground: false,
   });
 
 export const versionInfoQueryOptions = () =>

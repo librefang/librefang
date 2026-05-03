@@ -13,6 +13,7 @@ export const sessionQueries = {
       queryFn: listSessions,
       staleTime: STALE_MS,
       refetchInterval: STALE_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   detail: (sessionId: string) =>
     queryOptions({

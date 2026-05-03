@@ -29,6 +29,7 @@ export const workflowQueries = {
       queryFn: listWorkflows,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   detail: (workflowId: string) =>
     queryOptions({
@@ -44,6 +45,7 @@ export const workflowQueries = {
       enabled: !!workflowId,
       staleTime: RUN_STALE_MS,
       refetchInterval: RUN_REFETCH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   runDetail: (runId: string) =>
     queryOptions({

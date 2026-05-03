@@ -22,6 +22,7 @@ export const handQueries = {
       queryFn: listHands,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   active: () =>
     queryOptions({
@@ -29,6 +30,7 @@ export const handQueries = {
       queryFn: listActiveHands,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   detail: (handId: string) =>
     queryOptions({
@@ -51,6 +53,7 @@ export const handQueries = {
       enabled: !!instanceId,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   statsBatch: (instanceIds: readonly string[]) =>
     queryOptions({
@@ -71,6 +74,7 @@ export const handQueries = {
       enabled: instanceIds.length > 0,
       staleTime: STALE_MS,
       refetchInterval: REFRESH_MS,
+      refetchIntervalInBackground: false, // #3393
     }),
   session: (instanceId: string) =>
     queryOptions({

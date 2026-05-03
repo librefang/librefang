@@ -12,6 +12,7 @@ export const telemetryQueryOptions = () =>
     queryFn: getMetricsText,
     staleTime: STALE_MS,
     refetchInterval: REFRESH_MS,
+    refetchIntervalInBackground: false, // #3393
   });
 
 export function useTelemetryMetrics(options: QueryOverrides = {}) {
