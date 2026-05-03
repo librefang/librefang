@@ -1203,7 +1203,20 @@ pub async fn get_trigger(
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
-#[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
+///
+/// Idempotent (RFC 9110 §9.2.2): deleting a trigger that is already gone
+/// returns `200 OK` with `{"status": "already-deleted"}` instead of `404`.
+/// `400` is reserved for the malformed-UUID case alone. Refs #3509.
+#[utoipa::path(
+    delete,
+    path = "/api/triggers/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Trigger ID")),
+    responses(
+        (status = 200, description = "Trigger deleted (or was already absent — idempotent)"),
+        (status = 400, description = "Malformed trigger ID")
+    )
+)]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1221,7 +1234,13 @@ pub async fn delete_trigger(
             Json(serde_json::json!({"status": "removed", "trigger_id": id})),
         )
     } else {
-        ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
+        // Idempotent DELETE — replayed request, double-click, or already
+        // removed by another caller. Surface success so clients don't have
+        // to special-case 404 on a successful-state outcome.
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "already-deleted", "trigger_id": id})),
+        )
     }
 }
 
@@ -1942,34 +1961,54 @@ pub async fn create_cron_job(
 
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
 ///
-/// Returns 500 if the in-memory removal succeeds but persistence to disk
-/// fails — without persistence, the deletion would silently revert on
-/// daemon restart (issue #3515).
-#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted"), (status = 500, description = "Persist failed; change will not survive restart")))]
+/// Idempotent (RFC 9110 §9.2.2): deleting a cron job that is already gone
+/// returns `200 OK` with `{"status": "already-deleted"}` instead of `404`.
+/// `400` is reserved for the malformed-UUID case alone (Refs #3509). Returns
+/// `500` if the in-memory removal succeeds but persistence to disk fails —
+/// without persistence, the deletion would silently revert on daemon restart
+/// (issue #3515).
+#[utoipa::path(
+    delete,
+    path = "/api/cron/jobs/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Cron job ID")),
+    responses(
+        (status = 200, description = "Cron job deleted (or was already absent — idempotent)"),
+        (status = 400, description = "Malformed cron job ID"),
+        (status = 500, description = "Persist failed; change will not survive restart")
+    )
+)]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match uuid::Uuid::parse_str(&id) {
-        Ok(uuid) => {
-            let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron().remove_job(job_id) {
-                Ok(_) => {
-                    if let Err(e) = state.kernel.cron().persist() {
-                        tracing::error!(
-                            "Failed to persist cron scheduler state after delete: {e}"
-                        );
-                        return cron_persist_failed_response("delete", &e.to_string());
-                    }
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({"status": "deleted"})),
-                    )
-                }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
+    };
+    let job_id = librefang_types::scheduler::CronJobId(uuid);
+    match state.kernel.cron().remove_job(job_id) {
+        Ok(_) => {
+            if let Err(e) = state.kernel.cron().persist() {
+                tracing::error!(
+                    "Failed to persist cron scheduler state after delete: {e}"
+                );
+                return cron_persist_failed_response("delete", &e.to_string());
             }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "deleted", "job_id": id})),
+            )
         }
-        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
+        Err(_) => {
+            // Idempotent DELETE — the cron job is already gone (replayed
+            // request, double-click, or removed by another deleter). Treat
+            // as success so clients don't have to special-case 404.
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "already-deleted", "job_id": id})),
+            )
+        }
     }
 }
 

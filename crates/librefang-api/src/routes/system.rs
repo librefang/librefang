@@ -1994,13 +1994,29 @@ pub async fn totp_revoke(
 ///
 /// Publishes a custom event through the kernel's event system, which can
 /// trigger proactive agents that subscribe to the event type.
-#[utoipa::path(post, path = "/api/hooks/wake", tag = "webhooks", request_body = crate::types::JsonObject, responses((status = 200, description = "Wake hook triggered", body = crate::types::JsonObject)))]
+///
+/// Auth (#3509): missing or invalid bearer token returns `401 Unauthorized`
+/// with a `WWW-Authenticate: Bearer realm="librefang-webhook"` header per
+/// RFC 9110 §11.6.1. The previous behaviour (400 Bad Request) confused
+/// clients that tried to retry with a fixed body instead of fixing the
+/// token.
+#[utoipa::path(
+    post,
+    path = "/api/hooks/wake",
+    tag = "webhooks",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Wake hook triggered", body = crate::types::JsonObject),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Webhook triggers not enabled")
+    )
+)]
 pub async fn webhook_wake(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::WakePayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let (err_webhook_not_enabled, err_invalid_token) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -2014,18 +2030,21 @@ pub async fn webhook_wake(
     let wh_config = match &cfg.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_response();
         }
     };
 
-    // Validate bearer token (constant-time comparison)
+    // Validate bearer token (constant-time comparison). Invalid token is
+    // an authentication failure, not a malformed request — return 401 with
+    // the standard `WWW-Authenticate` challenge per RFC 9110 §11.6.1
+    // (#3509).
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
+        return webhook_unauthorized_response(err_invalid_token);
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return ApiErrorResponse::bad_request(e).into_json_tuple();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     // Publish through the kernel's publish_event (KernelHandle trait), which
@@ -2046,26 +2065,61 @@ pub async fn webhook_wake(
                 &[("error", &e.to_string())],
             )
         };
-        return ApiErrorResponse::internal(err_msg).into_json_tuple();
+        return ApiErrorResponse::internal(err_msg).into_response();
     }
 
     (
         StatusCode::OK,
         Json(serde_json::json!({"status": "accepted", "mode": body.mode})),
     )
+        .into_response()
+}
+
+/// Build a `401 Unauthorized` response with the standard
+/// `WWW-Authenticate: Bearer realm="librefang-webhook"` challenge header
+/// (RFC 9110 §11.6.1). Used by webhook trigger endpoints whose bearer-token
+/// check failed (#3509).
+fn webhook_unauthorized_response(message: String) -> axum::response::Response {
+    let body = ApiErrorResponse {
+        error: message,
+        code: Some("webhook_invalid_token".to_string()),
+        r#type: Some("webhook_invalid_token".to_string()),
+        details: None,
+        status: StatusCode::UNAUTHORIZED,
+    };
+    let mut resp = body.into_response();
+    resp.headers_mut().insert(
+        axum::http::header::WWW_AUTHENTICATE,
+        axum::http::HeaderValue::from_static("Bearer realm=\"librefang-webhook\""),
+    );
+    resp
 }
 
 /// POST /hooks/agent — Run an isolated agent turn via webhook.
 ///
 /// Sends a message directly to the specified agent and returns the response.
 /// This enables external systems (CI/CD, Slack, etc.) to trigger agent work.
-#[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = crate::types::JsonObject, responses((status = 200, description = "Agent hook triggered", body = crate::types::JsonObject)))]
+///
+/// Auth (#3509): missing or invalid bearer token returns `401 Unauthorized`
+/// with a `WWW-Authenticate: Bearer realm="librefang-webhook"` header per
+/// RFC 9110 §11.6.1, mirroring the `/hooks/wake` fix.
+#[utoipa::path(
+    post,
+    path = "/api/hooks/agent",
+    tag = "webhooks",
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Agent hook triggered", body = crate::types::JsonObject),
+        (status = 401, description = "Missing or invalid bearer token"),
+        (status = 404, description = "Webhook triggers not enabled or agent not found")
+    )
+)]
 pub async fn webhook_agent(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::AgentHookPayload>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
@@ -2080,18 +2134,18 @@ pub async fn webhook_agent(
     let wh_config = match &cfg2.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
-            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_json_tuple();
+            return ApiErrorResponse::not_found(err_webhook_not_enabled).into_response();
         }
     };
 
-    // Validate bearer token
+    // Validate bearer token (#3509: 401 + WWW-Authenticate, not 400).
     if !validate_webhook_token(&headers, &wh_config.token_env) {
-        return ApiErrorResponse::bad_request(err_invalid_token).into_json_tuple();
+        return webhook_unauthorized_response(err_invalid_token);
     }
 
     // Validate payload
     if let Err(e) = body.validate() {
-        return ApiErrorResponse::bad_request(e).into_json_tuple();
+        return ApiErrorResponse::bad_request(e).into_response();
     }
 
     // Resolve the agent by name or ID (if not specified, use the first running agent)
@@ -2107,7 +2161,7 @@ pub async fn webhook_agent(
                             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
                             t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
                         };
-                        return ApiErrorResponse::not_found(err_msg).into_json_tuple();
+                        return ApiErrorResponse::not_found(err_msg).into_response();
                     }
                 }
             }
@@ -2117,7 +2171,7 @@ pub async fn webhook_agent(
             match state.kernel.agent_registry().list().first() {
                 Some(entry) => entry.id,
                 None => {
-                    return ApiErrorResponse::not_found(err_no_agents).into_json_tuple();
+                    return ApiErrorResponse::not_found(err_no_agents).into_response();
                 }
             }
         }
@@ -2136,14 +2190,15 @@ pub async fn webhook_agent(
                     "output_tokens": result.total_usage.output_tokens,
                 },
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => {
             let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
             let msg = t.t_args(
                 "api-error-webhook-agent-exec-failed",
                 &[("error", &e.to_string())],
             );
-            ApiErrorResponse::internal(msg).into_json_tuple()
+            ApiErrorResponse::internal(msg).into_response()
         }
     }
 }

@@ -71,6 +71,19 @@ async fn send(
     body: Option<serde_json::Value>,
     bearer: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
+    let (status, _headers, value) = send_full(h, method, path, body, bearer).await;
+    (status, value)
+}
+
+/// Variant that also returns the response headers so tests can assert on
+/// e.g. `WWW-Authenticate` (#3509).
+async fn send_full(
+    h: &Harness,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    bearer: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(tok) = bearer {
         builder = builder.header("authorization", format!("Bearer {tok}"));
@@ -85,6 +98,7 @@ async fn send(
     let req = builder.body(Body::from(body_bytes)).unwrap();
     let resp = h.app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
+    let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
@@ -93,7 +107,7 @@ async fn send(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
-    (status, value)
+    (status, headers, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +153,10 @@ async fn hooks_wake_returns_404_when_webhook_triggers_disabled_explicitly() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// Missing Authorization header against an enabled hook = 400.
+/// Missing Authorization header against an enabled hook = 401 with the
+/// standard `WWW-Authenticate: Bearer ...` challenge (#3509). Previously
+/// returned 400 (Bad Request), which mis-categorised an auth failure as a
+/// payload bug.
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_wake_rejects_missing_bearer() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_MISSING_3571";
@@ -149,7 +166,7 @@ async fn hooks_wake_rejects_missing_bearer() {
         std::env::set_var(env_name, "x".repeat(40));
     }
     let h = boot_enabled(env_name).await;
-    let (status, body) = send(
+    let (status, headers, body) = send_full(
         &h,
         Method::POST,
         "/api/hooks/wake",
@@ -160,10 +177,21 @@ async fn hooks_wake_rejects_missing_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509 {body:?}");
+    let challenge = headers
+        .get(axum::http::header::WWW_AUTHENTICATE)
+        .expect("#3509: 401 must carry WWW-Authenticate header")
+        .to_str()
+        .expect("WWW-Authenticate must be ASCII");
+    assert!(
+        challenge.starts_with("Bearer"),
+        "#3509: WWW-Authenticate must advertise Bearer scheme; got {challenge:?}"
+    );
 }
 
-/// Wrong bearer token against an enabled hook = 400 (constant-time mismatch).
+/// Wrong bearer token against an enabled hook = 401 + WWW-Authenticate
+/// (#3509). Constant-time mismatch path now correctly signals auth failure
+/// rather than payload failure.
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_wake_rejects_wrong_bearer() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_WRONG_3571";
@@ -172,7 +200,7 @@ async fn hooks_wake_rejects_wrong_bearer() {
         std::env::set_var(env_name, &real);
     }
     let h = boot_enabled(env_name).await;
-    let (status, _) = send(
+    let (status, headers, _body) = send_full(
         &h,
         Method::POST,
         "/api/hooks/wake",
@@ -183,11 +211,18 @@ async fn hooks_wake_rejects_wrong_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509");
+    assert!(
+        headers
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .is_some(),
+        "#3509: 401 must carry WWW-Authenticate"
+    );
 }
 
 /// A token shorter than 32 bytes is treated as "no token configured", so the
 /// auth gate fails closed even when the caller sends a matching string.
+/// #3509: still 401 (auth failure), just like wrong-token case.
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_wake_rejects_short_configured_token() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_SHORT_3571";
@@ -206,7 +241,7 @@ async fn hooks_wake_rejects_short_configured_token() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509");
 }
 
 /// Auth passes, payload validation fails — empty `text` is rejected with
@@ -287,6 +322,8 @@ async fn hooks_agent_returns_404_when_webhook_triggers_not_enabled() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// #3509: same auth-status fix mirrored to `/hooks/agent` for consistency
+/// — missing bearer is 401 + WWW-Authenticate, not 400.
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_agent_rejects_missing_bearer() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_AGENT_MISSING_3571";
@@ -294,7 +331,7 @@ async fn hooks_agent_rejects_missing_bearer() {
         std::env::set_var(env_name, "y".repeat(40));
     }
     let h = boot_enabled(env_name).await;
-    let (status, _) = send(
+    let (status, headers, _) = send_full(
         &h,
         Method::POST,
         "/api/hooks/agent",
@@ -305,7 +342,13 @@ async fn hooks_agent_rejects_missing_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509");
+    assert!(
+        headers
+            .get(axum::http::header::WWW_AUTHENTICATE)
+            .is_some(),
+        "#3509: 401 must carry WWW-Authenticate"
+    );
 }
 
 /// Auth passes, payload validation fails — empty `message`.
