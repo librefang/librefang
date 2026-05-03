@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { asText, formatMeta, normalizeRole, normalizeToolOutput } from "./chat";
+import {
+  asText,
+  extractAssistantHistoryParts,
+  formatMeta,
+  normalizeRole,
+  normalizeToolOutput,
+} from "./chat";
+import type { ContentBlock } from "../api";
 
 describe("chat utilities", () => {
   it("normalizes API message roles", () => {
@@ -50,5 +57,82 @@ describe("chat utilities", () => {
     });
     expect(output?.isError).toBe(true);
     expect(output?.content).toBe("Tool failed without a preview.");
+  });
+});
+
+describe("extractAssistantHistoryParts", () => {
+  it("returns plain string content unchanged as text, with empty thinking", () => {
+    expect(extractAssistantHistoryParts("hello world")).toEqual({
+      text: "hello world",
+      thinking: "",
+    });
+  });
+
+  it("returns empty parts for null/undefined content", () => {
+    expect(extractAssistantHistoryParts(null)).toEqual({ text: "", thinking: "" });
+    expect(extractAssistantHistoryParts(undefined)).toEqual({ text: "", thinking: "" });
+  });
+
+  it("extracts text blocks and concatenates them with newlines", () => {
+    const blocks: ContentBlock[] = [
+      { type: "text", text: "first" },
+      { type: "text", text: "second" },
+    ];
+    expect(extractAssistantHistoryParts(blocks)).toEqual({
+      text: "first\nsecond",
+      thinking: "",
+    });
+  });
+
+  it("extracts thinking blocks and joins them with double newlines", () => {
+    const blocks: ContentBlock[] = [
+      { type: "thinking", thinking: "step 1" },
+      { type: "thinking", thinking: "step 2" },
+    ];
+    expect(extractAssistantHistoryParts(blocks)).toEqual({
+      text: "",
+      thinking: "step 1\n\nstep 2",
+    });
+  });
+
+  it("handles mixed thinking + text + tool_use, ignoring tool blocks", () => {
+    const blocks: ContentBlock[] = [
+      { type: "thinking", thinking: "let me think" },
+      { type: "tool_use", id: "t1", name: "shell", input: { cmd: "ls" } },
+      { type: "text", text: "here is the result" },
+      { type: "thinking", thinking: "more thinking" },
+      { type: "text", text: "final answer" },
+    ];
+    expect(extractAssistantHistoryParts(blocks)).toEqual({
+      text: "here is the result\nfinal answer",
+      thinking: "let me think\n\nmore thinking",
+    });
+  });
+
+  it("silently skips redacted_thinking and unknown block types (forward-compat)", () => {
+    // redacted_thinking handling is deferred — see follow-up.
+    // Treat as unknown so plaintext thinking still surfaces.
+    const blocks = [
+      { type: "redacted_thinking", data: "encrypted" },
+      { type: "thinking", thinking: "visible reasoning" },
+      { type: "future_block", payload: 42 },
+    ] as unknown as ContentBlock[];
+    expect(extractAssistantHistoryParts(blocks)).toEqual({
+      text: "",
+      thinking: "visible reasoning",
+    });
+  });
+
+  it("returns empty parts for an empty block array", () => {
+    expect(extractAssistantHistoryParts([])).toEqual({ text: "", thinking: "" });
+  });
+
+  it("falls back to String(value) for non-string, non-array, non-null content", () => {
+    // Defensive: server should never send a number, but if it does we
+    // should not throw and we should not corrupt the chat transcript.
+    expect(extractAssistantHistoryParts(42 as unknown as string)).toEqual({
+      text: "42",
+      thinking: "",
+    });
   });
 });

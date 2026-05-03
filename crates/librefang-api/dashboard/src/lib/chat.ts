@@ -1,4 +1,5 @@
 import { formatCost } from "./format";
+import type { ContentBlock } from "../api";
 
 export type ChatRole = "user" | "assistant" | "system";
 
@@ -60,5 +61,56 @@ export function normalizeToolOutput(event: {
     content,
     isError,
     timestamp: new Date(),
+  };
+}
+
+/** Result of walking a persisted assistant message's `content` field
+ *  (`string | ContentBlock[]`) and pulling out the two display strings
+ *  the chat UI tracks: visible text and the collapsible reasoning trace.
+ *
+ *  Mirrors the live-streaming model where `ChatMessage.thinking` is a
+ *  flat string accumulated from `thinking_delta` events. Multiple
+ *  thinking blocks in one turn are joined with a blank line so the
+ *  collapsible drawer reads naturally.
+ *
+ *  `tool_use` / `tool_result` blocks are intentionally ignored here —
+ *  the mapper at `ChatPage.tsx:542-579` reads tool data from the
+ *  separate `msg.tools` field instead.
+ *
+ *  `redacted_thinking` blocks (if/when the backend emits them) are
+ *  silently skipped via the unknown-variant fallback. A follow-up will
+ *  add a placeholder UI; until then, the plaintext-thinking path
+ *  matches the live-streaming behavior. */
+export interface AssistantHistoryParts {
+  text: string;
+  thinking: string;
+}
+
+export function extractAssistantHistoryParts(
+  content: string | ContentBlock[] | null | undefined,
+): AssistantHistoryParts {
+  if (content == null) return { text: "", thinking: "" };
+  if (typeof content === "string") return { text: content, thinking: "" };
+  if (!Array.isArray(content)) return { text: String(content), thinking: "" };
+
+  const textParts: string[] = [];
+  const thinkingParts: string[] = [];
+  for (const block of content) {
+    if (block && typeof block === "object" && "type" in block) {
+      if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
+        textParts.push((block as { text: string }).text);
+      } else if (
+        block.type === "thinking" &&
+        typeof (block as { thinking?: unknown }).thinking === "string"
+      ) {
+        thinkingParts.push((block as { thinking: string }).thinking);
+      }
+      // tool_use / tool_result / image / image_file / redacted_thinking /
+      // unknown future variants — skipped intentionally.
+    }
+  }
+  return {
+    text: textParts.join("\n"),
+    thinking: thinkingParts.join("\n\n"),
   };
 }
