@@ -112,14 +112,14 @@ impl KernelHandle for TrackingSendHandle {
 
     async fn knowledge_add_entity(
         &self,
-        _entity: librefang_types::memory::Entity,
+        _entity: &librefang_types::memory::Entity,
     ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
-        _relation: librefang_types::memory::Relation,
+        _relation: &librefang_types::memory::Relation,
     ) -> Result<String, String> {
         Ok("relation".into())
     }
@@ -253,14 +253,14 @@ impl KernelHandle for TrackingSpawnHandle {
 
     async fn knowledge_add_entity(
         &self,
-        _entity: librefang_types::memory::Entity,
+        _entity: &librefang_types::memory::Entity,
     ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
-        _relation: librefang_types::memory::Relation,
+        _relation: &librefang_types::memory::Relation,
     ) -> Result<String, String> {
         Ok("relation".into())
     }
@@ -393,14 +393,14 @@ impl KernelHandle for TrackingApprovalHandle {
 
     async fn knowledge_add_entity(
         &self,
-        _entity: librefang_types::memory::Entity,
+        _entity: &librefang_types::memory::Entity,
     ) -> Result<String, String> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
-        _relation: librefang_types::memory::Relation,
+        _relation: &librefang_types::memory::Relation,
     ) -> Result<String, String> {
         Ok("relation".into())
     }

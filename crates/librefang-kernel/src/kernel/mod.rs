@@ -17921,20 +17921,23 @@ impl KernelHandle for LibreFangKernel {
 
     async fn knowledge_add_entity(
         &self,
-        entity: librefang_types::memory::Entity,
+        entity: &librefang_types::memory::Entity,
     ) -> Result<String, String> {
+        // The substrate owns the value (it moves into spawn_blocking).
+        // Clone here so the trait can take `&Entity` and avoid forcing
+        // every caller to give up ownership. See #3553.
         self.memory
-            .add_entity(entity)
+            .add_entity(entity.clone())
             .await
             .map_err(|e| format!("Knowledge add entity failed: {e}"))
     }
 
     async fn knowledge_add_relation(
         &self,
-        relation: librefang_types::memory::Relation,
+        relation: &librefang_types::memory::Relation,
     ) -> Result<String, String> {
         self.memory
-            .add_relation(relation)
+            .add_relation(relation.clone())
             .await
             .map_err(|e| format!("Knowledge add relation failed: {e}"))
     }
@@ -18762,7 +18765,7 @@ impl KernelHandle for LibreFangKernel {
         &self,
         channel: &str,
         recipient: &str,
-        data: Vec<u8>,
+        data: bytes::Bytes,
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
@@ -18800,8 +18803,14 @@ impl KernelHandle for LibreFangKernel {
             librefang_user: None,
         };
 
+        // `ChannelContent::FileData` still carries `Vec<u8>` (changing it
+        // is out of scope for #3553 — that's a follow-up that touches
+        // every channel adapter). `Vec::from(Bytes)` is O(1) when the
+        // Bytes uniquely owns its allocation, which is the common case
+        // here (caller built it via `Bytes::from(vec)` straight from
+        // `tokio::fs::read`).
         let content = librefang_channels::types::ChannelContent::FileData {
-            data,
+            data: Vec::from(data),
             filename: filename.to_string(),
             mime_type: mime_type.to_string(),
         };
@@ -18971,7 +18980,7 @@ impl KernelHandle for LibreFangKernel {
 
     fn create_prompt_version(
         &self,
-        version: librefang_types::agent::PromptVersion,
+        version: &librefang_types::agent::PromptVersion,
     ) -> Result<(), String> {
         let cfg = self.config.load();
         let store = self
@@ -18979,8 +18988,10 @@ impl KernelHandle for LibreFangKernel {
             .get()
             .ok_or("Prompt store not initialized")?;
         let agent_id = version.agent_id;
+        // Clone here — the store owns the value. Trade-off accepted by
+        // #3553: callers (API handlers) no longer have to clone first.
         store
-            .create_version(version)
+            .create_version(version.clone())
             .map_err(|e| format!("Failed to create version: {e}"))?;
         // Prune old versions if over the configured limit
         let max = cfg.prompt_intelligence.max_versions_per_agent;
@@ -19032,14 +19043,15 @@ impl KernelHandle for LibreFangKernel {
 
     fn create_experiment(
         &self,
-        experiment: librefang_types::agent::PromptExperiment,
+        experiment: &librefang_types::agent::PromptExperiment,
     ) -> Result<(), String> {
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
+        // Clone here — the store owns the value. See #3553.
         store
-            .create_experiment(experiment)
+            .create_experiment(experiment.clone())
             .map_err(|e| format!("Failed to create experiment: {e}"))
     }
 
