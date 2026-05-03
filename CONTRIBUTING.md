@@ -604,7 +604,7 @@ Tests in LibreFang are **inline** — they live alongside the source code in `#[
 ```
 crates/librefang-kernel/src/metering.rs     # contains #[cfg(test)] mod tests { ... }
 crates/librefang-memory/src/substrate.rs    # contains #[cfg(test)] mod tests { ... }
-crates/librefang-runtime/src/retry.rs       # contains #[cfg(test)] mod tests { ... }
+crates/librefang-runtime/src/routing.rs     # contains #[cfg(test)] mod tests { ... }
 ```
 
 This is the standard Rust convention and keeps tests close to the code they verify.
@@ -613,7 +613,7 @@ This is the standard Rust convention and keeps tests close to the code they veri
 
 - Test module: `#[cfg(test)] mod tests { ... }` at the bottom of the file.
 - Test functions: `test_<what_is_being_tested>` in `snake_case`.
-  - Good: `test_record_and_check_quota_under`, `test_substrate_kv`, `test_retry_config_defaults`
+  - Good: `test_record_and_check_quota_under`, `test_substrate_kv`, `test_routing_table_lookup`
   - Avoid: `test1`, `it_works`, `my_test`
 
 ### How to Structure a Test

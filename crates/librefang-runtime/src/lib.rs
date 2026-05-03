@@ -63,7 +63,6 @@ pub mod provider_health;
 pub mod python_runtime;
 pub mod registry_sync;
 pub mod reply_directives;
-pub mod retry;
 pub mod routing;
 pub use librefang_runtime_wasm::sandbox;
 pub mod session_repair;
