@@ -13,6 +13,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Skip coverage on PRs whose entire diff is non-runtime files. The
+    # workflow runs `cargo llvm-cov nextest --workspace` (~20-30 min) and
+    # is report-only, so spending the time on a PR that can't shift the
+    # number is pure waste. `paths-ignore` skips the workflow only when
+    # *every* changed path matches — a PR that touches a real crate plus
+    # one of these still runs.
+    #
+    # Companion to ci.yml's `full_test` gating (#4533): same intent, but
+    # this workflow has no `Detect Changes` step of its own, so we filter
+    # at the trigger layer rather than per-job.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'xtask/**'                    # build tooling, not runtime
+      - '.github/workflows/**'        # pipeline YAML, not runtime
+      - 'sdk/**'                      # generated SDKs (not rust-measured)
+      - 'web/**'                      # web frontend (not rust)
+      - 'crates/librefang-api/dashboard/**'  # react dashboard (not rust)
+      - '**/*.svg'
+      - '**/*.png'
+      - '**/*.jpg'
+      - '**/*.jpeg'
+      - '**/*.gif'
+      - '**/*.ico'
+      - 'CODEOWNERS'
+      - '.gitignore'
+      - '.editorconfig'
+      - '.secrets.baseline'
 
 permissions:
   contents: read
