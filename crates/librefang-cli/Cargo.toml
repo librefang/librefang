@@ -74,3 +74,6 @@ tikv-jemallocator = { version = "0.6", features = ["disable_initial_exec_tls"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

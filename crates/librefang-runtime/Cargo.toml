@@ -62,3 +62,6 @@ serial_test = "3"
 landlock-sandbox = ["dep:landlock"]
 seccomp-sandbox = ["dep:seccompiler"]
 
+
+[lints]
+workspace = true

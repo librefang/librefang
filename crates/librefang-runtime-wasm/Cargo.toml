@@ -19,3 +19,6 @@ anyhow = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

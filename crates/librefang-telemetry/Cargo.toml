@@ -9,3 +9,6 @@ description = "OpenTelemetry + Prometheus metrics instrumentation for LibreFang"
 metrics = { workspace = true }
 librefang-types = { path = "../librefang-types" }
 
+
+[lints]
+workspace = true

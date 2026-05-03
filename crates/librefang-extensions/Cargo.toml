@@ -45,3 +45,6 @@ keyring = { workspace = true }
 tempfile = { workspace = true }
 serial_test = "3"
 librefang-runtime = { path = "../librefang-runtime" }
+
+[lints]
+workspace = true

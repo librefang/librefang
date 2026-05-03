@@ -20,3 +20,6 @@ dashmap = { workspace = true }
 tempfile = { workspace = true }
 librefang-runtime = { path = "../librefang-runtime" }
 serial_test = "3"
+
+[lints]
+workspace = true

@@ -246,3 +246,11 @@ opt-level = "s"
 inherits = "release"
 lto = "thin"
 codegen-units = 4
+
+# Workspace-wide build lint policy. Applies ONLY to first-party crates
+# that opt in via `[lints] workspace = true` in their own Cargo.toml.
+# Replaces the previous workflow-wide `RUSTFLAGS=-D warnings` (#3554)
+# which leaked into dependency compilation and broke CI on transitive
+# lint regressions.
+[workspace.lints.rust]
+warnings = "deny"

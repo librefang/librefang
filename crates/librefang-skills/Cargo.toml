@@ -30,3 +30,6 @@ fs2 = "0.4"
 [dev-dependencies]
 tempfile = { workspace = true }
 serial_test = "3"
+
+[lints]
+workspace = true

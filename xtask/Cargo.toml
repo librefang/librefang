@@ -14,3 +14,6 @@ chrono = "0.4"
 base64 = { workspace = true }
 sha2 = { workspace = true }
 librefang-migrate = { path = "../crates/librefang-migrate" }
+
+[lints]
+workspace = true

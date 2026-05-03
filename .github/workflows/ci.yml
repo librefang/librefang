@@ -17,7 +17,14 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  # NOTE: `RUSTFLAGS: "-D warnings"` is intentionally NOT set here.
+  # Setting it workflow-wide propagates to dependency compilation, which
+  # makes every CI lane break whenever any transitive crate introduces a
+  # new lint warning. First-party warnings are still gated:
+  #   - `cargo clippy ... -- -D warnings` in the `quality` job below
+  #   - `[workspace.lints.rust] warnings = "deny"` in the root Cargo.toml
+  #     (applied to first-party crates via `lints.workspace = true`)
+  # See issue #3554.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:

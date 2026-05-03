@@ -167,3 +167,6 @@ tempfile = { workspace = true }
 [[bench]]
 name = "dispatch"
 harness = false
+
+[lints]
+workspace = true

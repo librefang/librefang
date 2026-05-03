@@ -22,3 +22,6 @@ sha2 = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
 arc-swap = { workspace = true }
+
+[lints]
+workspace = true

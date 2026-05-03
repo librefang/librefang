@@ -12,3 +12,6 @@ rustls = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
 tracing = { workspace = true }
+
+[lints]
+workspace = true

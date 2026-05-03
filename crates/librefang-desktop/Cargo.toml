@@ -100,3 +100,6 @@ path = "src/main.rs"
 # the manifest layer, so we accept the cost.
 [lib]
 crate-type = ["staticlib", "cdylib", "lib"]
+
+[lints]
+workspace = true

@@ -19,3 +19,6 @@ sha2 = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+
+[lints]
+workspace = true
