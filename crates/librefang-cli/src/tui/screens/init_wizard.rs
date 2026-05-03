@@ -511,15 +511,11 @@ impl State {
 
         for m in &models {
             match m.tier {
-                ModelTier::Fast | ModelTier::Local | ModelTier::Custom => {
-                    if fast.is_none() {
-                        fast = Some(&m.id);
-                    }
+                ModelTier::Fast | ModelTier::Local | ModelTier::Custom if fast.is_none() => {
+                    fast = Some(&m.id);
                 }
-                ModelTier::Balanced => {
-                    if balanced.is_none() {
-                        balanced = Some(&m.id);
-                    }
+                ModelTier::Balanced if balanced.is_none() => {
+                    balanced = Some(&m.id);
                 }
                 ModelTier::Smart => {
                     // Smart is a good balanced pick; also good frontier if no frontier exists
@@ -530,10 +526,8 @@ impl State {
                         frontier = Some(&m.id);
                     }
                 }
-                ModelTier::Frontier => {
-                    if frontier.is_none() {
-                        frontier = Some(&m.id);
-                    }
+                ModelTier::Frontier if frontier.is_none() => {
+                    frontier = Some(&m.id);
                 }
                 _ => {}
             }
