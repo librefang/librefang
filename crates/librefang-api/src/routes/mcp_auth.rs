@@ -824,6 +824,20 @@ pub async fn auth_callback(
         tracing::warn!(error = %e, "Failed to store OAuth tokens");
     }
 
+    // Promote `token_endpoint` (and `client_id` if registered via DCR) from
+    // the per-flow staging namespace into the durable per-server namespace
+    // BEFORE the PKCE cleanup loop deletes them. The kernel's `try_refresh`
+    // path reads these from `{server_url}/...`, not the per-flow keys; if
+    // we skip this step the refresh fails on the first access-token expiry
+    // with `No token_endpoint stored for refresh` and the user is bounced
+    // back through a fresh OAuth flow each session.
+    if let Err(e) = trait_provider
+        .store_oauth_metadata(&server_url, &token_endpoint, client_id.as_deref())
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to persist OAuth metadata for refresh");
+    }
+
     // Clean up one-time PKCE values from vault (per-flow key — #3727).
     //
     // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures

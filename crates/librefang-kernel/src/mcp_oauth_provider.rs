@@ -336,6 +336,28 @@ impl McpOAuthProvider for KernelOAuthProvider {
         Ok(())
     }
 
+    async fn store_oauth_metadata(
+        &self,
+        server_url: &str,
+        token_endpoint: &str,
+        client_id: Option<&str>,
+    ) -> Result<(), McpOAuthError> {
+        // Promote discovery output from the per-flow staging namespace into
+        // the durable per-server namespace that `try_refresh` reads from.
+        // Without this, refresh fails with "No token_endpoint stored for
+        // refresh" the first time the access token expires (e.g. ~1h after
+        // a successful Notion sign-in).
+        self.vault_set(
+            &Self::vault_key(server_url, "token_endpoint"),
+            token_endpoint,
+        )?;
+        if let Some(cid) = client_id {
+            self.vault_set(&Self::vault_key(server_url, "client_id"), cid)?;
+        }
+        debug!(server = %server_url, "MCP OAuth metadata persisted to vault");
+        Ok(())
+    }
+
     async fn clear_tokens(&self, server_url: &str) -> Result<(), McpOAuthError> {
         // #3369: aggregate per-field failures and surface them. Returning Ok
         // when vault_remove failed lets the UI display "logged out" while the
@@ -435,6 +457,7 @@ mod tests {
     /// returned Ok(()) and the UI showed "logged out" while the access token
     /// stayed in the vault.
     #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
     async fn clear_tokens_returns_err_when_vault_unlock_fails() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
@@ -533,6 +556,7 @@ mod tests {
     /// helpfully kick off a re-auth flow that can never succeed because
     /// the vault is unreadable.
     #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
     async fn load_token_propagates_vault_failure_as_err() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
@@ -554,6 +578,98 @@ mod tests {
             result.is_err(),
             "corrupt vault must surface as Err, not Ok(None) — got {result:?}"
         );
+    }
+
+    /// Regression for the silent OAuth refresh failure: after a successful
+    /// authorization callback, `token_endpoint` (and `client_id` from RFC 7591
+    /// DCR) MUST live under the durable per-server vault namespace so that
+    /// `try_refresh` can find them when the access token expires.
+    ///
+    /// Pre-fix the callback handler stashed these values under per-flow keys
+    /// (`{server_url}:{flow_id}/...`) and only `store_tokens` ran against the
+    /// bare namespace, so refresh blew up with "No token_endpoint stored for
+    /// refresh" the first time the user's session crossed the access-token
+    /// TTL — symptom seen most often with Notion (~1h tokens).
+    #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
+    async fn store_oauth_metadata_persists_to_bare_namespace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        unsafe {
+            std::env::set_var(
+                "LIBREFANG_VAULT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+        }
+        let provider = KernelOAuthProvider::new(home);
+        let server_url = "https://mcp.notion.com/mcp";
+
+        provider
+            .store_oauth_metadata(
+                server_url,
+                "https://mcp.notion.com/token",
+                Some("client-xyz"),
+            )
+            .await
+            .expect("store_oauth_metadata");
+
+        let token_ep_key = KernelOAuthProvider::vault_key(server_url, "token_endpoint");
+        let client_id_key = KernelOAuthProvider::vault_key(server_url, "client_id");
+
+        assert_eq!(
+            provider
+                .vault_get(&token_ep_key)
+                .expect("vault_get token_endpoint"),
+            Some("https://mcp.notion.com/token".to_string()),
+            "token_endpoint must be readable under the bare per-server key — \
+             this is the key try_refresh reads from"
+        );
+        assert_eq!(
+            provider
+                .vault_get(&client_id_key)
+                .expect("vault_get client_id"),
+            Some("client-xyz".to_string()),
+            "client_id must be readable under the bare per-server key for refresh"
+        );
+
+        unsafe {
+            std::env::remove_var("LIBREFANG_VAULT_KEY");
+        }
+    }
+
+    /// `client_id` is optional (servers with a pre-registered public client
+    /// won't run RFC 7591 DCR). Passing `None` must NOT write a bogus key.
+    #[tokio::test]
+    #[serial_test::serial(librefang_vault_key)]
+    async fn store_oauth_metadata_skips_client_id_when_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().to_path_buf();
+        unsafe {
+            std::env::set_var(
+                "LIBREFANG_VAULT_KEY",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+        }
+        let provider = KernelOAuthProvider::new(home);
+        let server_url = "https://example.com/mcp";
+
+        provider
+            .store_oauth_metadata(server_url, "https://example.com/token", None)
+            .await
+            .expect("store_oauth_metadata");
+
+        let client_id_key = KernelOAuthProvider::vault_key(server_url, "client_id");
+        assert_eq!(
+            provider
+                .vault_get(&client_id_key)
+                .expect("vault_get client_id"),
+            None,
+            "client_id key must remain absent when None is passed"
+        );
+
+        unsafe {
+            std::env::remove_var("LIBREFANG_VAULT_KEY");
+        }
     }
 
     #[test]
