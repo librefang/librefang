@@ -6260,10 +6260,7 @@ system_prompt = "You are a helpful assistant."
                     // manifest is on the default (Persistent) so the
                     // override is observationally a no-op.
                     let requested_mode = entry.manifest.session_mode;
-                    if matches!(
-                        requested_mode,
-                        librefang_types::agent::SessionMode::New
-                    ) {
+                    if matches!(requested_mode, librefang_types::agent::SessionMode::New) {
                         debug!(
                             agent_id = %agent_id,
                             effective_session_id = %derived,
@@ -7897,10 +7894,7 @@ system_prompt = "You are a helpful assistant."
                     // channel-derived id; `trace!` otherwise.
                     let requested_mode =
                         session_mode_override.unwrap_or(entry.manifest.session_mode);
-                    if matches!(
-                        requested_mode,
-                        librefang_types::agent::SessionMode::New
-                    ) {
+                    if matches!(requested_mode, librefang_types::agent::SessionMode::New) {
                         debug!(
                             agent_id = %agent_id,
                             effective_session_id = %derived,
@@ -13683,9 +13677,8 @@ system_prompt = "You are a helpful assistant."
                                     .registry
                                     .get(agent_id)
                                     .map(|entry| entry.manifest.session_mode);
-                                let effective_session_mode = job
-                                    .session_mode
-                                    .or(manifest_session_mode);
+                                let effective_session_mode =
+                                    job.session_mode.or(manifest_session_mode);
                                 let wants_new_session = effective_session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
                                 // #3692: emit a structured event recording how
