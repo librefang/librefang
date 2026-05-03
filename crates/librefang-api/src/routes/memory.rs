@@ -1751,7 +1751,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn auth_denied_emits_audit_row_for_authenticated_user() {
         use crate::middleware::AuthenticatedApiUser;
-        use librefang_kernel::auth::UserRole;
+        use crate::middleware::UserRole;
         use librefang_types::agent::UserId;
 
         let (state, _tmp) = audit_test_app_state();

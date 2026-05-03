@@ -32,11 +32,11 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .delete(delete_user_budget),
         )
 }
+use crate::middleware::UserRole;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_kernel::auth::UserRole;
 use librefang_types::agent::{AgentId, UserId};
 use std::collections::HashMap;
 use std::sync::Arc;
