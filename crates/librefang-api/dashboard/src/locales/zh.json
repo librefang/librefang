@@ -2112,6 +2112,7 @@
     "info_provider": "提供商",
     "info_state": "状态",
     "ws_not_connected": "WebSocket 未连接，请刷新页面。",
+    "command_timeout": "命令超时或连接已断开 — 请重试。",
     "delete_session": "删除会话",
     "export": "导出",
     "export_markdown": "导出为 Markdown",
