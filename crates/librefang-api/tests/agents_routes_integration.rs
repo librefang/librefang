@@ -362,7 +362,11 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
         delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
     )
     .await;
-    assert_eq!(status1, StatusCode::OK, "first DELETE should be 200; body={body1:?}");
+    assert_eq!(
+        status1,
+        StatusCode::OK,
+        "first DELETE should be 200; body={body1:?}"
+    );
     assert_eq!(body1["status"], "killed", "first DELETE body={body1:?}");
 
     // Second call — agent already gone. MUST still be 200, not 404.
@@ -376,7 +380,10 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
         StatusCode::OK,
         "second DELETE on a now-absent agent must be idempotent-200 (#3509); got {status2} body={body2:?}"
     );
-    assert_eq!(body2["status"], "already-deleted", "second DELETE body={body2:?}");
+    assert_eq!(
+        body2["status"], "already-deleted",
+        "second DELETE body={body2:?}"
+    );
 }
 
 /// Refs #3509: 400 stays reserved for malformed-id rejection. Only the
@@ -385,7 +392,11 @@ async fn test_delete_agent_twice_both_succeed_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_agent_invalid_id_still_returns_400() {
     let h = boot(TEST_TOKEN).await;
-    let (status, body) = send(h.app.clone(), delete("/api/agents/not-a-uuid", Some(TEST_TOKEN))).await;
+    let (status, body) = send(
+        h.app.clone(),
+        delete("/api/agents/not-a-uuid", Some(TEST_TOKEN)),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
     assert_eq!(body["code"], "invalid_agent_id");
 }

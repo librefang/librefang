@@ -3850,7 +3850,9 @@ mod tests {
     /// regardless of length (#4028).
     #[test]
     fn test_looks_like_tool_call_long_text_starting_with_tool_calls_json_is_flagged() {
-        let mut text = String::from(r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#);
+        let mut text = String::from(
+            r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#,
+        );
         while text.len() <= 5000 {
             text.push_str(
                 r#",{"id":"call_n","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#,

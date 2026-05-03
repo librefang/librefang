@@ -2520,8 +2520,7 @@ impl LibreFangKernel {
         // sentinel automatically.
         let vault_path = config.home_dir.join("vault.enc");
         if vault_path.exists() {
-            let mut vault =
-                librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+            let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path.clone());
             match vault.unlock() {
                 Ok(()) => {
                     if let Err(e) = vault.verify_or_install_sentinel() {
@@ -6199,15 +6198,14 @@ system_prompt = "You are a helpful assistant."
         // no parent loop is in flight, fall back to the registry pointer
         // — the only signal we have, and the fork will create/resume
         // that session on its own.
-        let (parent_session_id, interrupt) = match self
-            .any_session_interrupt_with_id_for_agent(agent_id)
-        {
-            Some((sid, intr)) => (sid, intr),
-            None => (
-                entry.session_id,
-                librefang_runtime::interrupt::SessionInterrupt::default(),
-            ),
-        };
+        let (parent_session_id, interrupt) =
+            match self.any_session_interrupt_with_id_for_agent(agent_id) {
+                Some((sid, intr)) => (sid, intr),
+                None => (
+                    entry.session_id,
+                    librefang_runtime::interrupt::SessionInterrupt::default(),
+                ),
+            };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,

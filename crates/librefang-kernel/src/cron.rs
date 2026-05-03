@@ -1988,7 +1988,9 @@ mod tests {
 
         // In-memory update still succeeds (it doesn't touch disk).
         let updates = serde_json::json!({ "name": "renamed-after-sabotage" });
-        let updated = sched.update_job(id, &updates).expect("update_job must succeed in-memory");
+        let updated = sched
+            .update_job(id, &updates)
+            .expect("update_job must succeed in-memory");
         assert_eq!(updated.name, "renamed-after-sabotage");
 
         // But persist now fails — and the route handler must see this Err
