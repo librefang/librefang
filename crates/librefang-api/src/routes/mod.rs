@@ -33,6 +33,7 @@ pub mod pairing;
 pub mod plugins;
 pub mod prompts;
 pub mod providers;
+pub mod registry;
 pub mod skills;
 pub mod system;
 pub mod task_queue;
@@ -71,6 +72,10 @@ pub use network::*;
 pub use pairing::*;
 pub use plugins::*;
 pub use providers::*;
+// `registry::*` is intentionally not re-exported: every handler in
+// `routes::registry` is a private `async fn`, so the glob resolves to zero
+// items and would trip `-D unused-imports`. The module is reached via the
+// qualified `crate::routes::registry::router()` call inside `system.rs`.
 pub use skills::*;
 pub use system::*;
 pub use task_queue::*;
