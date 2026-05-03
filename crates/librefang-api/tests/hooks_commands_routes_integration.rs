@@ -213,9 +213,7 @@ async fn hooks_wake_rejects_wrong_bearer() {
     }
     assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509");
     assert!(
-        headers
-            .get(axum::http::header::WWW_AUTHENTICATE)
-            .is_some(),
+        headers.get(axum::http::header::WWW_AUTHENTICATE).is_some(),
         "#3509: 401 must carry WWW-Authenticate"
     );
 }
@@ -344,9 +342,7 @@ async fn hooks_agent_rejects_missing_bearer() {
     }
     assert_eq!(status, StatusCode::UNAUTHORIZED, "#3509");
     assert!(
-        headers
-            .get(axum::http::header::WWW_AUTHENTICATE)
-            .is_some(),
+        headers.get(axum::http::header::WWW_AUTHENTICATE).is_some(),
         "#3509: 401 must carry WWW-Authenticate"
     );
 }

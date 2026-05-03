@@ -342,8 +342,7 @@ pub async fn auth_start(
                     // complete in-memory) but the audit trail now records
                     // every failure so operators can detect a
                     // wrong-`LIBREFANG_VAULT_KEY` boot from the logs.
-                    let vault_key =
-                        KernelOAuthProvider::vault_key(&server_url, "client_id");
+                    let vault_key = KernelOAuthProvider::vault_key(&server_url, "client_id");
                     if let Err(e) = provider.vault_set(&vault_key, &cid) {
                         tracing::error!(
                             target: "audit",

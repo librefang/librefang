@@ -355,7 +355,10 @@ async fn smoke_get_routes_with_2xx_advertise_json() {
         }
         // Streaming endpoints (SSE) and metrics use other content types and are
         // legitimately not JSON.
-        if matches!(*path, "/api/logs/stream" | "/api/comms/events" | "/api/metrics") {
+        if matches!(
+            *path,
+            "/api/logs/stream" | "/api/comms/events" | "/api/metrics"
+        ) {
             continue;
         }
         match ct.as_deref() {

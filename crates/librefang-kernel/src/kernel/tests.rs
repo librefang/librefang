@@ -6258,8 +6258,7 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
     // a key. CLAUDE.md gotcha: `LIBREFANG_VAULT_KEY` must base64-decode to
     // exactly 32 bytes (44 base64 chars). Decoded value is irrelevant; we
     // just need a stable valid key for the duration of this test.
-    const TEST_VAULT_KEY_B64: &str =
-        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    const TEST_VAULT_KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
     // Force the file-based keyring backend off too — we don't want the
     // unlock path probing the keyring during this test.

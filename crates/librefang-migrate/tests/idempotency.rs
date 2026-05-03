@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use librefang_migrate::{MigrateOptions, MigrateSource, openclaw, openfang};
+use librefang_migrate::{openclaw, openfang, MigrateOptions, MigrateSource};
 use tempfile::TempDir;
 
 /// Read every regular file under `root` and return a sorted map from
@@ -147,7 +147,11 @@ fn write_openfang_workspace(dir: &Path) {
     )
     .unwrap();
 
-    std::fs::write(dir.join("secrets.env"), "OPENFANG_API_KEY=keep-me-verbatim\n").unwrap();
+    std::fs::write(
+        dir.join("secrets.env"),
+        "OPENFANG_API_KEY=keep-me-verbatim\n",
+    )
+    .unwrap();
 
     let agent_dir = dir.join("agents").join("coder");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -316,7 +320,8 @@ fn openclaw_partial_write_is_recoverable() {
     );
     let recreated = std::fs::read(&victim_abs).expect("read recreated victim");
     assert_eq!(
-        recreated, original_bytes,
+        recreated,
+        original_bytes,
         "recreated {} differs from the original migration output",
         victim_rel.display()
     );
@@ -381,7 +386,8 @@ fn openfang_partial_write_is_recoverable() {
     );
     let recreated = std::fs::read(&victim_abs).expect("read recreated victim");
     assert_eq!(
-        recreated, original_bytes,
+        recreated,
+        original_bytes,
         "recreated {} differs from the original migration output",
         victim_rel.display()
     );
@@ -453,7 +459,7 @@ fn legacy_v1_config_migrates_forward_to_current_version() {
     // `mod version` is private inside `librefang-types::config`, but its items
     // are re-exported with `pub use version::*;` — so we reach them at the
     // `config` module level rather than `config::version`.
-    use librefang_types::config::{CONFIG_VERSION, run_migrations};
+    use librefang_types::config::{run_migrations, CONFIG_VERSION};
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

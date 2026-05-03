@@ -1717,10 +1717,7 @@ pub async fn send_message(
                         return crate::extensions::with_agent_id(
                             agent_id,
                             ApiErrorResponse {
-                                error: format!(
-                                    "{} (provider: {})",
-                                    err_auth_missing, provider
-                                ),
+                                error: format!("{} (provider: {})", err_auth_missing, provider),
                                 code: Some("provider_auth_missing".to_string()),
                                 r#type: Some("provider_auth_missing".to_string()),
                                 details: None,
@@ -2286,7 +2283,9 @@ pub async fn kill_agent(
                     librefang_types::error::LibreFangError::AgentNotFound(_)
                 )
             ) {
-                tracing::debug!("kill_agent: agent {id} vanished mid-flight; treating as already-deleted");
+                tracing::debug!(
+                    "kill_agent: agent {id} vanished mid-flight; treating as already-deleted"
+                );
                 return crate::extensions::with_agent_id(
                     agent_id,
                     (
