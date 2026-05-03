@@ -350,11 +350,25 @@ pub fn pre_request_check(
     Ok(())
 }
 
+/// Metric name: counter of LLM provider error responses (capped at the
+/// 429-recording boundary plus any direct callers below). Labels:
+///   * `provider` — `"anthropic"`, `"openai"`, `"gemini"`, …
+///   * `status`   — HTTP status code as decimal string (`"429"`, `"402"`, …).
+///
+/// Refs #3495 — operators previously had no Prometheus counter for
+/// rate-limit pressure, even though 429s were already being persisted to
+/// SQLite for cross-restart durability.
+pub const METRIC_LLM_PROVIDER_ERRORS_TOTAL: &str = "librefang_llm_provider_errors_total";
+
 /// Persist a 429 lockout from a `reqwest` response's headers and return
 /// the parsed `Retry-After` so the caller can reuse it for backoff.
 ///
 /// Header parsing precedence (RPH > RPM > Retry-After > 5min default) is
 /// delegated to [`record_from_snapshot`].
+///
+/// Increments [`METRIC_LLM_PROVIDER_ERRORS_TOTAL`] with `status="429"`
+/// every time it's called — this is the single choke-point through which
+/// every Anthropic / OpenAI / Gemini / etc. driver routes 429 responses.
 pub fn record_429_from_headers(
     provider: &str,
     key_id: &str,
@@ -373,7 +387,28 @@ pub fn record_429_from_headers(
         Some(retry_after),
         Some(reason.to_string()),
     );
+    metrics::counter!(
+        METRIC_LLM_PROVIDER_ERRORS_TOTAL,
+        "provider" => provider.to_string(),
+        "status" => "429",
+    )
+    .increment(1);
     retry_after
+}
+
+/// Counter helper for non-429 provider errors that should still surface in
+/// Prometheus (e.g. 402 quota-exhausted, 5xx). Use sparingly — this is
+/// labelled by HTTP status code, so cardinality stays bounded by the
+/// finite provider-status pairs we actually emit.
+///
+/// Refs #3495.
+pub fn record_provider_error(provider: &str, status: u16) {
+    metrics::counter!(
+        METRIC_LLM_PROVIDER_ERRORS_TOTAL,
+        "provider" => provider.to_string(),
+        "status" => status.to_string(),
+    )
+    .increment(1);
 }
 
 #[cfg(test)]
@@ -654,5 +689,139 @@ mod tests {
 
         // SAFETY: guarded by ENV_GUARD mutex.
         unsafe { std::env::remove_var("LIBREFANG_HOME") };
+    }
+
+    // ----- #3495: 429 metric counter -----
+
+    use metrics::{
+        Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[derive(Default, Debug)]
+    struct CapRec {
+        counters: Mutex<BTreeMap<String, u64>>,
+    }
+    impl CapRec {
+        fn key_str(key: &Key) -> String {
+            let mut labels: Vec<(String, String)> = key
+                .labels()
+                .map(|l| (l.key().to_string(), l.value().to_string()))
+                .collect();
+            labels.sort();
+            let body = labels
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}{{{}}}", key.name(), body)
+        }
+        fn val(&self, name: &str, provider: &str, status: &str) -> u64 {
+            // Labels are sorted alphabetically: provider before status.
+            let k = format!("{}{{provider={},status={}}}", name, provider, status);
+            *self.counters.lock().unwrap().get(&k).unwrap_or(&0)
+        }
+    }
+
+    struct CapCounter {
+        rec: Arc<CapRec>,
+        key: String,
+    }
+    impl metrics::CounterFn for CapCounter {
+        fn increment(&self, value: u64) {
+            *self
+                .rec
+                .counters
+                .lock()
+                .unwrap()
+                .entry(self.key.clone())
+                .or_insert(0) += value;
+        }
+        fn absolute(&self, value: u64) {
+            self.rec
+                .counters
+                .lock()
+                .unwrap()
+                .insert(self.key.clone(), value);
+        }
+    }
+
+    struct CapHandle(Arc<CapRec>);
+    impl Recorder for CapHandle {
+        fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
+            Counter::from_arc(Arc::new(CapCounter {
+                rec: Arc::clone(&self.0),
+                key: CapRec::key_str(key),
+            }))
+        }
+        fn register_gauge(&self, _: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    /// `record_429_from_headers` must increment the provider-errors
+    /// counter once per call, with `status="429"`.
+    #[test]
+    fn metrics_record_429_increments_counter() {
+        let _g = ENV_GUARD.lock().unwrap();
+        let home = fresh_home();
+        // SAFETY: serialized via ENV_GUARD.
+        unsafe { std::env::set_var("LIBREFANG_HOME", home.path()) };
+
+        let rec = Arc::new(CapRec::default());
+        let handle = CapHandle(Arc::clone(&rec));
+
+        metrics::with_local_recorder(&handle, || {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "retry-after",
+                reqwest::header::HeaderValue::from_static("30"),
+            );
+            let key_id = key_id_hash("sk-metrics-test");
+            let _ = record_429_from_headers("anthropic", &key_id, &headers, "test");
+            let _ = record_429_from_headers("anthropic", &key_id, &headers, "test");
+            let _ = record_429_from_headers("openai", &key_id, &headers, "test");
+        });
+
+        assert_eq!(
+            rec.val(METRIC_LLM_PROVIDER_ERRORS_TOTAL, "anthropic", "429"),
+            2
+        );
+        assert_eq!(
+            rec.val(METRIC_LLM_PROVIDER_ERRORS_TOTAL, "openai", "429"),
+            1
+        );
+
+        // SAFETY: guarded by ENV_GUARD mutex.
+        unsafe { std::env::remove_var("LIBREFANG_HOME") };
+    }
+
+    /// `record_provider_error` exists for non-429 statuses operators
+    /// still want to track (402 quota-exhausted, 5xx). It should also
+    /// flow into the same counter under a different `status` label.
+    #[test]
+    fn metrics_record_provider_error_uses_status_label() {
+        let rec = Arc::new(CapRec::default());
+        let handle = CapHandle(Arc::clone(&rec));
+        metrics::with_local_recorder(&handle, || {
+            record_provider_error("openai", 402);
+            record_provider_error("openai", 503);
+            record_provider_error("openai", 503);
+        });
+        assert_eq!(
+            rec.val(METRIC_LLM_PROVIDER_ERRORS_TOTAL, "openai", "402"),
+            1
+        );
+        assert_eq!(
+            rec.val(METRIC_LLM_PROVIDER_ERRORS_TOTAL, "openai", "503"),
+            2
+        );
     }
 }

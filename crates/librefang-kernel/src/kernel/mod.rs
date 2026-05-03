@@ -12384,13 +12384,38 @@ system_prompt = "You are a helpful assistant."
                             } = d;
 
                             // (1) Global trigger lane permit.
-                            let _lane_permit = match trigger_sem.acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => return, // lane closed during shutdown
-                            };
-                            // (2) Per-agent permit.
+                            //
+                            // #3495: route through the metrics-aware helper
+                            // so wait time on Lane::Trigger surfaces in the
+                            // librefang_queue_wait_seconds histogram.
+                            let _lane_permit =
+                                match librefang_runtime::command_lane::acquire_owned_with_metrics(
+                                    trigger_sem.clone(),
+                                    librefang_runtime::command_lane::Lane::Trigger,
+                                )
+                                .await
+                                {
+                                    Some(p) => p,
+                                    None => return, // lane closed during shutdown
+                                };
+                            // (2) Per-agent permit. The per-agent semaphore
+                            // is not lane-scoped, so we record it against the
+                            // synthetic "agent" lane label.
+                            let agent_started = std::time::Instant::now();
                             let _agent_permit = match agent_sem.acquire_owned().await {
-                                Ok(p) => p,
+                                Ok(p) => {
+                                    metrics::histogram!(
+                                        librefang_runtime::command_lane::METRIC_QUEUE_WAIT_SECONDS,
+                                        "lane" => "agent",
+                                    )
+                                    .record(agent_started.elapsed().as_secs_f64());
+                                    metrics::counter!(
+                                        librefang_runtime::command_lane::METRIC_QUEUE_ACQUIRED_TOTAL,
+                                        "lane" => "agent",
+                                    )
+                                    .increment(1);
+                                    p
+                                }
                                 Err(_) => continue,
                             };
                             // (3) Inner per-session mutex applies inside
@@ -13651,9 +13676,19 @@ system_prompt = "You are a helpful assistant."
                                 spawn_logged("cron_agent_turn", async move {
                                     // Acquire the lane permit before any work
                                     // so concurrent fires are still capped.
-                                    let _permit = match cron_sem_for_job.acquire_owned().await {
-                                        Ok(p) => p,
-                                        Err(_) => {
+                                    //
+                                    // #3495: route through the metrics-aware
+                                    // helper so cron-lane wait time surfaces
+                                    // in the librefang_queue_wait_seconds
+                                    // histogram.
+                                    let _permit = match librefang_runtime::command_lane::acquire_owned_with_metrics(
+                                        cron_sem_for_job,
+                                        librefang_runtime::command_lane::Lane::Cron,
+                                    )
+                                    .await
+                                    {
+                                        Some(p) => p,
+                                        None => {
                                             tracing::error!(
                                                 job = %job_name,
                                                 "Cron lane semaphore closed; skipping fire"
@@ -15132,11 +15167,25 @@ system_prompt = "You are a helpful assistant."
                     tools = tool_count,
                     "MCP server reconnected"
                 );
+                // #3495: surface reconnect attempts to Prometheus so flapping
+                // MCP servers are visible without RUST_LOG=debug.
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "success",
+                )
+                .increment(1);
                 self.mcp_connections.lock().await.push(conn);
                 Ok(tool_count)
             }
             Err(e) => {
                 self.mcp_health.report_error(id, e.to_string());
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "error",
+                )
+                .increment(1);
                 Err(format!("Reconnect failed for '{id}': {e}"))
             }
         }

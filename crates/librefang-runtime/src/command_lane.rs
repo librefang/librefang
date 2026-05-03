@@ -8,7 +8,74 @@
 //! - Trigger: event-trigger dispatches (8 concurrent)
 
 use std::sync::{Arc, RwLock};
-use tokio::sync::Semaphore;
+use std::time::Instant;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+/// Metric name: histogram of how long callers waited to acquire a lane permit.
+///
+/// Labelled with `lane = "main"|"cron"|"subagent"|"trigger"`. Samples are in
+/// seconds. Recorded by [`CommandQueue::submit`], [`CommandQueue::try_submit`],
+/// and the helper [`acquire_owned_with_metrics`] used by kernel-side call
+/// sites that need an owned permit (e.g. trigger dispatch, cron lane).
+///
+/// Refs #3495 — operators previously had no way to see queue back-pressure
+/// (`Lane::Trigger` saturating at default 8) in Prometheus / Grafana.
+pub const METRIC_QUEUE_WAIT_SECONDS: &str = "librefang_queue_wait_seconds";
+
+/// Metric name: counter of permits acquired per lane.
+///
+/// Labelled with `lane`. Lets operators correlate wait-time spikes with
+/// throughput. Refs #3495.
+pub const METRIC_QUEUE_ACQUIRED_TOTAL: &str = "librefang_queue_acquired_total";
+
+/// Metric name: counter of `try_submit` rejections (lane was at capacity).
+///
+/// Labelled with `lane`. Refs #3495.
+pub const METRIC_QUEUE_REJECTED_TOTAL: &str = "librefang_queue_rejected_total";
+
+fn record_wait(lane: Lane, waited: std::time::Duration) {
+    metrics::histogram!(
+        METRIC_QUEUE_WAIT_SECONDS,
+        "lane" => lane.to_string(),
+    )
+    .record(waited.as_secs_f64());
+    metrics::counter!(
+        METRIC_QUEUE_ACQUIRED_TOTAL,
+        "lane" => lane.to_string(),
+    )
+    .increment(1);
+}
+
+fn record_reject(lane: Lane) {
+    metrics::counter!(
+        METRIC_QUEUE_REJECTED_TOTAL,
+        "lane" => lane.to_string(),
+    )
+    .increment(1);
+}
+
+/// Acquire an owned permit on a lane semaphore and record the wait time
+/// against the [`METRIC_QUEUE_WAIT_SECONDS`] histogram.
+///
+/// Use this from kernel-side call sites (trigger dispatch, cron lane,
+/// per-agent dispatcher) that need to move the permit into a `tokio::spawn`
+/// task — `CommandQueue::submit` only works when the future can be borrowed
+/// in place.
+///
+/// Returns `None` if the semaphore was closed (shutdown). Refs #3495.
+pub async fn acquire_owned_with_metrics(
+    sem: Arc<Semaphore>,
+    lane: Lane,
+) -> Option<OwnedSemaphorePermit> {
+    let started = Instant::now();
+    match sem.acquire_owned().await {
+        Ok(permit) => {
+            record_wait(lane, started.elapsed());
+            Some(permit)
+        }
+        Err(_) => None,
+    }
+}
 
 /// Command lane type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,28 +198,44 @@ impl CommandQueue {
     /// Submit work to a lane. Acquires a permit, executes the future, releases.
     ///
     /// Returns `Err` if the semaphore is closed (shutdown).
+    ///
+    /// Records the permit wait-time against [`METRIC_QUEUE_WAIT_SECONDS`]
+    /// (#3495). The histogram captures back-pressure: a saturated lane
+    /// shows up as a long tail.
     pub async fn submit<F, T>(&self, lane: Lane, work: F) -> Result<T, String>
     where
         F: std::future::Future<Output = T>,
     {
         let sem = self.semaphore_for_lane(lane);
+        let started = Instant::now();
         let _permit = sem
             .acquire()
             .await
             .map_err(|_| format!("Lane {} is closed", lane))?;
+        record_wait(lane, started.elapsed());
 
         Ok(work.await)
     }
 
     /// Try to submit work without waiting (non-blocking).
     ///
-    /// Returns `None` if the lane is at capacity.
+    /// Returns `None` if the lane is at capacity. A rejection is recorded
+    /// against [`METRIC_QUEUE_REJECTED_TOTAL`] (#3495).
     pub async fn try_submit<F, T>(&self, lane: Lane, work: F) -> Option<T>
     where
         F: std::future::Future<Output = T>,
     {
         let sem = self.semaphore_for_lane(lane);
-        let _permit = sem.try_acquire().ok()?;
+        let _permit = match sem.try_acquire() {
+            Ok(p) => p,
+            Err(_) => {
+                record_reject(lane);
+                return None;
+            }
+        };
+        // Wait time for try_acquire is effectively zero, but still emit a
+        // sample so the histogram count tracks the acquired counter.
+        record_wait(lane, std::time::Duration::ZERO);
         Some(work.await)
     }
 
@@ -358,5 +441,224 @@ mod tests {
         // No-op resize doesn't churn the semaphore.
         let again = queue.resize_lane(Lane::Trigger, 5);
         assert!(!again);
+    }
+
+    // ----- #3495: Lane metrics -----
+
+    use metrics::{
+        Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    /// Tiny in-memory recorder used by the metrics tests. Stores increments
+    /// and histogram samples keyed by `metric_name + sorted-labels`. Sorted
+    /// labels keep the test assertions deterministic per CLAUDE.md #3298.
+    #[derive(Default, Debug)]
+    struct CaptureRecorder {
+        // key = "<metric>{label=value,label=value}" with labels sorted.
+        counters: Mutex<BTreeMap<String, u64>>,
+        histograms: Mutex<BTreeMap<String, Vec<f64>>>,
+    }
+
+    impl CaptureRecorder {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn key_str(key: &Key) -> String {
+            let mut labels: Vec<(String, String)> = key
+                .labels()
+                .map(|l| (l.key().to_string(), l.value().to_string()))
+                .collect();
+            labels.sort();
+            let body = labels
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}{{{}}}", key.name(), body)
+        }
+        fn counter_value(&self, name: &str, label: (&str, &str)) -> u64 {
+            let k = format!("{}{{{}={}}}", name, label.0, label.1);
+            *self.counters.lock().unwrap().get(&k).unwrap_or(&0)
+        }
+        fn histogram_count(&self, name: &str, label: (&str, &str)) -> usize {
+            let k = format!("{}{{{}={}}}", name, label.0, label.1);
+            self.histograms
+                .lock()
+                .unwrap()
+                .get(&k)
+                .map(|v| v.len())
+                .unwrap_or(0)
+        }
+    }
+
+    /// Counter handle that pushes increments back into the [`CaptureRecorder`].
+    struct CapCounter {
+        rec: Arc<CaptureRecorder>,
+        key: String,
+    }
+    impl metrics::CounterFn for CapCounter {
+        fn increment(&self, value: u64) {
+            *self
+                .rec
+                .counters
+                .lock()
+                .unwrap()
+                .entry(self.key.clone())
+                .or_insert(0) += value;
+        }
+        fn absolute(&self, value: u64) {
+            self.rec
+                .counters
+                .lock()
+                .unwrap()
+                .insert(self.key.clone(), value);
+        }
+    }
+
+    struct CapHistogram {
+        rec: Arc<CaptureRecorder>,
+        key: String,
+    }
+    impl metrics::HistogramFn for CapHistogram {
+        fn record(&self, value: f64) {
+            self.rec
+                .histograms
+                .lock()
+                .unwrap()
+                .entry(self.key.clone())
+                .or_default()
+                .push(value);
+        }
+    }
+
+    struct CaptureRecorderHandle(Arc<CaptureRecorder>);
+
+    impl Recorder for CaptureRecorderHandle {
+        fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
+        fn register_counter(&self, key: &Key, _: &Metadata<'_>) -> Counter {
+            Counter::from_arc(Arc::new(CapCounter {
+                rec: Arc::clone(&self.0),
+                key: CaptureRecorder::key_str(key),
+            }))
+        }
+        fn register_gauge(&self, _key: &Key, _: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, key: &Key, _: &Metadata<'_>) -> Histogram {
+            Histogram::from_arc(Arc::new(CapHistogram {
+                rec: Arc::clone(&self.0),
+                key: CaptureRecorder::key_str(key),
+            }))
+        }
+    }
+
+    /// `submit` records a wait-time histogram sample and bumps the
+    /// acquired-total counter for the corresponding lane label.
+    ///
+    /// Plain `#[test]` (not `#[tokio::test]`) so we own the runtime —
+    /// `metrics::with_local_recorder` installs a thread-local recorder
+    /// for the duration of its closure, and the closure must drive the
+    /// async work synchronously via `block_on` for the recorder to be
+    /// active during every metric emission.
+    #[test]
+    fn metrics_submit_records_wait_and_acquired() {
+        let rec = Arc::new(CaptureRecorder::new());
+        let handle = CaptureRecorderHandle(Arc::clone(&rec));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&handle, || {
+            rt.block_on(async {
+                let queue = CommandQueue::new();
+                let _ = queue.submit(Lane::Trigger, async { 1u32 }).await.unwrap();
+                let _ = queue.submit(Lane::Main, async { 2u32 }).await.unwrap();
+            });
+        });
+
+        assert_eq!(
+            rec.counter_value(METRIC_QUEUE_ACQUIRED_TOTAL, ("lane", "trigger")),
+            1,
+        );
+        assert_eq!(
+            rec.counter_value(METRIC_QUEUE_ACQUIRED_TOTAL, ("lane", "main")),
+            1,
+        );
+        assert_eq!(
+            rec.histogram_count(METRIC_QUEUE_WAIT_SECONDS, ("lane", "trigger")),
+            1,
+        );
+        assert_eq!(
+            rec.histogram_count(METRIC_QUEUE_WAIT_SECONDS, ("lane", "main")),
+            1,
+        );
+    }
+
+    /// `try_submit` against a saturated lane records a rejection counter
+    /// rather than a wait sample.
+    #[test]
+    fn metrics_try_submit_records_rejection_when_full() {
+        let rec = Arc::new(CaptureRecorder::new());
+        let handle = CaptureRecorderHandle(Arc::clone(&rec));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&handle, || {
+            rt.block_on(async {
+                let queue = CommandQueue::with_capacities(1, 1, 1, 1);
+                // Burn the only main permit.
+                let main_sem = queue.semaphore_for_lane(Lane::Main);
+                let _hold = main_sem.acquire().await.unwrap();
+                // try_submit should return None and record one rejection.
+                let result = queue.try_submit(Lane::Main, async { 99u32 }).await;
+                assert!(result.is_none());
+            });
+        });
+
+        assert_eq!(
+            rec.counter_value(METRIC_QUEUE_REJECTED_TOTAL, ("lane", "main")),
+            1,
+        );
+        assert_eq!(
+            rec.counter_value(METRIC_QUEUE_ACQUIRED_TOTAL, ("lane", "main")),
+            0,
+        );
+    }
+
+    /// `acquire_owned_with_metrics` is the helper kernel sites use; it
+    /// must record the same wait/acquired metrics as `submit`.
+    #[test]
+    fn metrics_acquire_owned_helper_records_wait() {
+        let rec = Arc::new(CaptureRecorder::new());
+        let handle = CaptureRecorderHandle(Arc::clone(&rec));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&handle, || {
+            rt.block_on(async {
+                let queue = CommandQueue::new();
+                let sem = queue.semaphore_for_lane(Lane::Cron);
+                let permit = acquire_owned_with_metrics(sem, Lane::Cron).await;
+                assert!(permit.is_some());
+            });
+        });
+
+        assert_eq!(
+            rec.counter_value(METRIC_QUEUE_ACQUIRED_TOTAL, ("lane", "cron")),
+            1,
+        );
+        assert_eq!(
+            rec.histogram_count(METRIC_QUEUE_WAIT_SECONDS, ("lane", "cron")),
+            1,
+        );
     }
 }
