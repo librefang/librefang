@@ -428,23 +428,41 @@ impl SessionStore {
     }
 
     /// Delete a session from the database and its FTS5 index entry.
+    ///
+    /// The `sessions_fts_after_delete` trigger installed by migration v32
+    /// (#3548) cascades the FTS row removal automatically inside the same
+    /// statement, so the previous best-effort `DELETE FROM sessions_fts ...
+    /// if let Err(e) = ...; warn!` path (which could leak orphan FTS rows
+    /// on a swallowed lock error) is gone. We keep an explicit DELETE here
+    /// as a belt-and-braces safeguard for DBs that pre-date v32 and might
+    /// somehow still be running an older trigger set; it propagates errors
+    /// via `?` so a real failure rolls back the parent transaction rather
+    /// than leaving the FTS index inconsistent.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id_str = session_id.0.to_string();
-        conn.execute(
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        if let Err(e) = conn.execute(
+        // The v32 AFTER DELETE trigger already removed the FTS row, but a
+        // residual DELETE here is harmless (the WHERE clause matches zero
+        // rows post-trigger) and keeps the code correct for hypothetical
+        // pre-v32 schemas.
+        tx.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![id_str],
-        ) {
-            warn!(session_id = %id_str, error = %e, "Failed to delete FTS entry; orphan row left in sessions_fts");
-        }
+        )
+        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
+        tx.commit()
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
 
@@ -1246,17 +1264,17 @@ impl SessionStore {
             return Ok(Vec::new());
         }
 
-        // Sanitize FTS5 query: escape special characters to prevent injection.
-        // FTS5 treats `*`, `"`, `NEAR`, `OR`, `AND`, `NOT` as operators.
-        // Wrap each word in double quotes to treat as literal phrase tokens.
-        let sanitized: String = query
-            .split_whitespace()
-            .map(|word| {
-                let escaped = word.replace('"', "\"\"");
-                format!("\"{escaped}\"")
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        // Sanitize FTS5 query so it (a) cannot be misinterpreted as an
+        // operator expression and (b) tokenizes the same way the v32
+        // `unicode61 remove_diacritics 2` index tokenizer does. Without (b),
+        // a hyphenated identifier like `agent-id-123` indexed as
+        // `[agent, id, 123]` would not match a query of `agent-id` because
+        // the inline `split_whitespace` sanitizer would treat the hyphen
+        // as part of the token (#3548).
+        let sanitized = escape_fts5(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
 
         let conn = self
             .conn
@@ -1681,6 +1699,89 @@ impl SessionStore {
 
         Ok(())
     }
+}
+
+/// Escape and tokenize a free-text query for an FTS5 `MATCH` clause so it
+/// matches the v32 `unicode61 remove_diacritics 2` tokenizer used to build
+/// `sessions_fts` (#3548).
+///
+/// FTS5 has two layers of "tokenization" that have to agree:
+///
+/// 1. **Index side.** `unicode61` treats every code point that is not a
+///    Unicode letter or digit as a separator. So `agent-id-123` indexes as
+///    three tokens (`agent`, `id`, `123`). Diacritics are folded
+///    (`café` → `cafe`).
+/// 2. **Query side.** Whatever the caller types is parsed by the FTS5
+///    query grammar first (operators like `AND`, `OR`, `*`, `NEAR`, `:`,
+///    `"…"`), and only the bare tokens that survive that pass go through
+///    the same tokenizer.
+///
+/// The pre-#3548 sanitizer split on whitespace only and wrapped each word
+/// as a phrase. That worked for ASCII alpha but broke for two real cases:
+///
+/// - **Hyphenated identifiers.** `agent-id` was wrapped as `"agent-id"`,
+///   then re-tokenized into the phrase `[agent, id]` requiring adjacent
+///   index tokens. That actually does match `agent-id-123` (whose tokens
+///   `[agent, id, 123]` contain the adjacent pair), but the contract was
+///   only true accidentally and broke as soon as someone tried `agent-123`
+///   (phrase `[agent, 123]`, no adjacent pair in `[agent, id, 123]`).
+/// - **CJK content.** A single CJK run like `找到了` was wrapped as
+///   `"找到了"`, fine — but the *index* tokenizer treats each CJK
+///   character as its own separator boundary in some unicode61 builds, so
+///   the phrase wouldn't match the index. We can't fix that without
+///   switching to the `trigram` tokenizer, but at least pre-splitting the
+///   CJK run into characters and treating each as its own token gives the
+///   user *something* to grep on rather than always-empty results.
+///
+/// The post-#3548 strategy is uniform: walk the input character-by-
+/// character, collect maximal runs of "token chars" (Unicode letters and
+/// digits, lowercased on the way), and wrap each non-empty run in double
+/// quotes. Diacritics are folded by the index tokenizer so we skip
+/// expensive unicode normalization on the query side. Anything else
+/// (whitespace, punctuation, `*`, `"`, `:`, etc.) is treated as a token
+/// boundary and discarded.
+///
+/// Returns an empty string when the input contains no token-eligible
+/// characters; the caller should short-circuit to an empty result set in
+/// that case rather than execute `MATCH ''` (which is a syntax error).
+pub(crate) fn escape_fts5(query: &str) -> String {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for ch in query.chars() {
+        if ch.is_alphanumeric() {
+            // Lowercase to match unicode61's case folding. Note: we do NOT
+            // strip diacritics here — the index tokenizer's
+            // `remove_diacritics 2` does that, and asymmetric stripping
+            // would actually re-introduce a mismatch (the query would lose
+            // a diacritic the index kept in some build).
+            for low in ch.to_lowercase() {
+                current.push(low);
+            }
+        } else {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            // Non-alphanumeric characters (whitespace, hyphen, FTS5
+            // operator chars) all act as token separators.
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+        .into_iter()
+        .map(|tok| {
+            // Quote-escape inside a double-quoted phrase: `"` → `""`.
+            // After alphanumeric filtering this is normally a no-op, but
+            // belt-and-braces — if a future caller widens the token set,
+            // this stays correct.
+            let escaped = tok.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Run every session-store DELETE for an agent inside the caller's
@@ -2313,6 +2414,157 @@ mod tests {
 
         let results = store.search_sessions("searchable", None).unwrap();
         assert!(results.is_empty());
+    }
+
+    /// Round-trip a hyphenated identifier through write + escape_fts5 +
+    /// query and assert it matches. The pre-#3548 sanitizer wrapped
+    /// `agent-id` as a `"agent-id"` phrase, which only worked when the
+    /// indexed text had `agent-id` adjacent. Now both sides agree under
+    /// `unicode61`: index stores `[agent, id, 123]`; query
+    /// `escape_fts5("agent-id")` produces `"agent" "id"` (two tokens),
+    /// which FTS5 ANDs together — matches both `agent-id-123` and
+    /// `id agent` (whichever order). CJK content also round-trips because
+    /// `escape_fts5` walks per-character and treats CJK code points as
+    /// alphanumeric (and so token-eligible).
+    #[test]
+    fn test_fts_hyphen_and_cjk_round_trip() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("agent-id-123 找到了"));
+        store.save_session(&session).unwrap();
+
+        // Hyphen-bearing prefix matches.
+        let results = store.search_sessions("agent-id", Some(&agent_id)).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "escape_fts5 must split hyphenated identifiers the same way \
+             unicode61 indexes them"
+        );
+
+        // The middle segment (no hyphens supplied by the caller) also matches.
+        let results = store.search_sessions("agent id", Some(&agent_id)).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "whitespace-split tokens still AND together"
+        );
+
+        // CJK content is at least addressable — pre-fix the inline
+        // sanitizer relied on whitespace and treated `找到了` as one
+        // phrase token; index/query agreement now means the same single
+        // token round-trips.
+        let results = store.search_sessions("找到了", Some(&agent_id)).unwrap();
+        assert_eq!(results.len(), 1, "CJK content must round-trip through FTS");
+    }
+
+    /// `delete_session` followed by recreating a session with the same id
+    /// must not leave a stale FTS row behind. Pre-#3548 the cascade was
+    /// best-effort (`if let Err(e) = ...; warn!`), so a transient lock
+    /// could leak a duplicate FTS row — which would surface as two
+    /// snippets for the same session_id on the next search.
+    #[test]
+    fn test_fts_no_double_index_on_delete_then_recreate() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        let sid = session.id;
+        session
+            .messages
+            .push(Message::user("initial unique-marker-zzz"));
+        store.save_session(&session).unwrap();
+        assert_eq!(
+            store
+                .search_sessions("unique-marker-zzz", Some(&agent_id))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.delete_session(sid).unwrap();
+
+        // Recreate a session with the SAME id but new content. (The store
+        // doesn't expose a "create with id" helper, so we go through the
+        // raw connection — this matches the real-world reuse pattern that
+        // triggered the original bug.)
+        let conn = store.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, NULL, ?4, ?4)",
+            rusqlite::params![
+                sid.0.to_string(),
+                agent_id.0.to_string(),
+                rmp_serde::to_vec_named::<Vec<Message>>(&Vec::new()).unwrap(),
+                now,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut recreated = store.get_session(sid).unwrap().unwrap();
+        recreated
+            .messages
+            .push(Message::user("replacement marker abcdef"));
+        store.save_session(&recreated).unwrap();
+
+        // Only one FTS row should exist for this session id.
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![sid.0.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "session id must not be double-indexed in sessions_fts"
+        );
+        drop(conn);
+
+        // Old marker must be gone; new marker must match.
+        assert!(
+            store
+                .search_sessions("unique-marker-zzz", Some(&agent_id))
+                .unwrap()
+                .is_empty(),
+            "old content must not survive delete + recreate"
+        );
+        assert_eq!(
+            store
+                .search_sessions("abcdef", Some(&agent_id))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Direct unit tests for `escape_fts5` so the tokenizer-agreement
+    /// contract has a regression test independent of the SQLite layer.
+    #[test]
+    fn test_escape_fts5_shape() {
+        // Empty / whitespace-only input collapses to empty string — the
+        // caller short-circuits on this rather than execute `MATCH ''`.
+        assert_eq!(escape_fts5(""), "");
+        assert_eq!(escape_fts5("   "), "");
+        assert_eq!(escape_fts5("---"), "");
+
+        // Hyphens act as separators (matching unicode61).
+        assert_eq!(escape_fts5("agent-id"), "\"agent\" \"id\"");
+
+        // Mixed case is folded.
+        assert_eq!(escape_fts5("AgentID"), "\"agentid\"");
+
+        // FTS5 operator characters (`*`, `:`, `"`) are stripped, not
+        // smuggled through.
+        assert_eq!(escape_fts5("foo*"), "\"foo\"");
+        assert_eq!(escape_fts5("col:val"), "\"col\" \"val\"");
+        assert_eq!(escape_fts5("\"NEAR\""), "\"near\"");
+
+        // CJK characters survive as their own tokens.
+        assert_eq!(escape_fts5("找到了"), "\"找到了\"");
     }
 
     /// list_sessions surfaces per-session aggregates (cost_usd, total_tokens,

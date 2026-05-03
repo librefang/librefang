@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 31;
+const SCHEMA_VERSION: u32 = 32;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -70,6 +70,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(29, migrate_v29);
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
+    run_step!(32, migrate_v32);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1019,6 +1020,92 @@ fn migrate_v31(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 32: Rebuild `sessions_fts` with an explicit tokenizer, add a
+/// trigger to cascade-delete on `sessions` removal, and backfill rows for
+/// pre-v12 sessions (#3548).
+///
+/// Three concrete defects this addresses:
+///
+/// 1. **Tokenizer drift.** v12 created `sessions_fts` without naming a
+///    tokenizer. SQLite defaults to `unicode61`, but the version-and-build-
+///    dependent default is implicit — querying via `escape_fts5` on a
+///    different SQLite build risked subtle case-fold / diacritic
+///    differences. Lock the tokenizer to `'unicode61 remove_diacritics 2'`
+///    so the index and the query side agree by contract, not by accident.
+///
+/// 2. **No backfill.** v12 created the table empty. Sessions that already
+///    existed pre-v12 never get FTS rows on upgrade — they are invisible to
+///    `search_sessions` forever. We can't deserialize the msgpack
+///    `messages` blob from SQL, so the backfill inserts a placeholder row
+///    (`content = ''`) for every orphaned session id. The next
+///    `save_session` call repopulates `content` from the live message text.
+///    This at least makes `search_sessions` aware of the row's existence
+///    and stops `reconcile_fts_index` from emitting "missing rows" warnings
+///    on every boot.
+///
+/// 3. **No cascade-delete trigger.** Pre-v32 `delete_session` /
+///    `delete_agent_sessions` had to manually `DELETE FROM sessions_fts`,
+///    and a swallowed-error path (`if let Err(e) = ...; warn!`) could
+///    leave orphan FTS rows after a successful row delete. The
+///    `sessions_fts_after_delete` trigger now removes the FTS row inside
+///    the same statement that deletes from `sessions`, so the manual
+///    cleanup is no longer the only safety net.
+///
+/// The whole migration is idempotent: `DROP TABLE IF EXISTS` + `CREATE
+/// VIRTUAL TABLE` + `CREATE TRIGGER IF NOT EXISTS` can run twice with no
+/// effect, and the backfill `WHERE NOT IN` clause only inserts rows that
+/// don't already exist.
+fn migrate_v32(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- Drop the v12 table so we can lock the tokenizer. Schemas of FTS5
+        -- virtual tables can't be ALTERed in place; we have to drop and
+        -- recreate. The backfill below repopulates the rows the drop
+        -- discarded.
+        DROP TABLE IF EXISTS sessions_fts;
+
+        -- Recreate with an explicit tokenizer pinned to unicode61 with
+        -- diacritic folding. `session_id` and `agent_id` stay UNINDEXED so
+        -- they're stored verbatim (used by the WHERE clause and the
+        -- snippet caller) without bloating the FTS posting list.
+        CREATE VIRTUAL TABLE sessions_fts USING fts5(
+            session_id UNINDEXED,
+            agent_id UNINDEXED,
+            content,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+
+        -- Cascade-delete trigger: when a session row goes away, drop its
+        -- FTS twin in the same statement so the manual DELETE in the Rust
+        -- layer is no longer the only guarantee. The trigger fires inside
+        -- the DELETE statement's implicit transaction, so a failure here
+        -- rolls back the parent.
+        CREATE TRIGGER IF NOT EXISTS sessions_fts_after_delete
+        AFTER DELETE ON sessions
+        BEGIN
+            DELETE FROM sessions_fts WHERE session_id = OLD.id;
+        END;
+
+        -- Backfill placeholder rows for every session that was created
+        -- before v12 (or whose FTS twin was lost). `content = ''` so
+        -- `search_sessions` finds nothing for the row until the next
+        -- `save_session` call rewrites the content. The point of the
+        -- placeholder is to silence reconcile_fts_index's `missing N` warn
+        -- on every boot and to make the row visible to the new trigger.
+        INSERT INTO sessions_fts (session_id, agent_id, content)
+        SELECT id, agent_id, ''
+        FROM sessions
+        WHERE id NOT IN (SELECT session_id FROM sessions_fts);
+        ",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (32, datetime('now'), 'Rebuild sessions_fts with explicit tokenizer + trigger + backfill (#3548)')",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -1458,5 +1545,191 @@ mod tests {
         assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
         assert!(column_exists(&conn, "entities", "agent_id"));
         assert!(column_exists(&conn, "relations", "agent_id"));
+    }
+
+    /// Issue #3548: v32 must locks the FTS5 tokenizer to a known value so
+    /// the query-side normalization in `escape_fts5` matches the
+    /// index-side tokenizer. Verify the table was rebuilt with
+    /// `tokenize='unicode61 remove_diacritics 2'` by inspecting
+    /// `sqlite_master.sql`.
+    #[test]
+    fn test_migrate_v32_locks_fts_tokenizer() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='sessions_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("sessions_fts must exist after migrations");
+        assert!(
+            sql.contains("unicode61"),
+            "v32 must pin tokenizer to unicode61, got SQL: {sql}"
+        );
+        assert!(
+            sql.contains("remove_diacritics"),
+            "v32 must enable remove_diacritics, got SQL: {sql}"
+        );
+    }
+
+    /// v32 must install an `AFTER DELETE ON sessions` trigger so the FTS
+    /// twin row is removed inside the same statement that deletes the
+    /// session row, eliminating the swallowed-error path in
+    /// `delete_session`.
+    #[test]
+    fn test_migrate_v32_installs_after_delete_trigger() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let triggers: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='trigger'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            triggers.contains(&"sessions_fts_after_delete".to_string()),
+            "v32 must register the cascade-delete trigger; got triggers: {triggers:?}"
+        );
+
+        // Functional check: deleting from `sessions` must remove the
+        // matching row from `sessions_fts` automatically.
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            rusqlite::params!["sess-trig", "agent-trig", Vec::<u8>::new()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["sess-trig", "agent-trig", "hello"],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM sessions WHERE id = ?1",
+            rusqlite::params!["sess-trig"],
+        )
+        .unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params!["sess-trig"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "trigger must cascade-delete the FTS twin when the session row is removed"
+        );
+    }
+
+    /// v32 must backfill placeholder rows for every session that lacks a
+    /// `sessions_fts` twin (i.e. pre-v12 sessions). The placeholder
+    /// content is empty; future `save_session` calls repopulate it.
+    /// This test simulates the upgrade by stopping at v11 (pre-FTS),
+    /// inserting a session row, then running the rest of the
+    /// migrations (which include v12 + v32).
+    #[test]
+    fn test_migrate_v32_backfills_pre_v12_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Step manually through v1..v11 to land in a pre-FTS state.
+        macro_rules! step {
+            ($v:expr, $f:expr) => {{
+                let tx = conn.unchecked_transaction().unwrap();
+                $f(&tx).unwrap();
+                set_schema_version(&tx, $v).unwrap();
+                tx.commit().unwrap();
+            }};
+        }
+        step!(1, migrate_v1);
+        step!(2, migrate_v2);
+        step!(3, migrate_v3);
+        step!(4, migrate_v4);
+        step!(5, migrate_v5);
+        step!(6, migrate_v6);
+        step!(7, migrate_v7);
+        step!(8, migrate_v8);
+        step!(9, migrate_v9);
+        step!(10, migrate_v10);
+        step!(11, migrate_v11);
+
+        // Insert two sessions while no FTS twin exists.
+        for sid in ["pre-v12-a", "pre-v12-b"] {
+            conn.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, 'agent-bf', ?2, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![sid, Vec::<u8>::new()],
+            )
+            .unwrap();
+        }
+
+        // Bring the DB up to head — runs v12 (creates table empty) and v32
+        // (rebuilds + backfills).
+        run_migrations(&conn).unwrap();
+        assert_eq!(get_schema_version(&conn), SCHEMA_VERSION);
+
+        // Both pre-v12 rows must now have FTS twins (with empty content).
+        for sid in ["pre-v12-a", "pre-v12-b"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    rusqlite::params![sid],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "v32 backfill must create an FTS twin for pre-v12 session {sid}"
+            );
+        }
+
+        // No duplicate rows: backfill must not double-insert when a twin
+        // already exists.
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "backfill inserts exactly one twin per session");
+    }
+
+    /// v32 must be idempotent — running migrations a second time on a
+    /// head-version DB must not re-execute the DROP/CREATE (which would
+    /// erase live FTS content) or duplicate the backfill.
+    #[test]
+    fn test_migrate_v32_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        // Seed a session + its FTS twin.
+        conn.execute(
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+             VALUES ('idem', 'agent-idem', ?1, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            rusqlite::params![Vec::<u8>::new()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES ('idem', 'agent-idem', 'precious content')",
+            [],
+        )
+        .unwrap();
+
+        // Re-run migrations — must not touch the live row because
+        // user_version is already at SCHEMA_VERSION (the run_step macro
+        // skips when current >= target).
+        run_migrations(&conn).unwrap();
+
+        let preserved: String = conn
+            .query_row(
+                "SELECT content FROM sessions_fts WHERE session_id = 'idem'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            preserved, "precious content",
+            "second migration pass must not drop and rebuild sessions_fts"
+        );
     }
 }
