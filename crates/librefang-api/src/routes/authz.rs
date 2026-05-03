@@ -23,11 +23,11 @@
 
 use super::AppState;
 use crate::middleware::AuthenticatedApiUser;
+use crate::middleware::UserRole;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::user_policy::UserToolGate;
 use serde::{Deserialize, Serialize};

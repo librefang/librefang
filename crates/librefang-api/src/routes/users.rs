@@ -23,11 +23,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::middleware::UserRole;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::auth::UserRole;
 use librefang_types::agent::UserId;
 use librefang_types::config::UserConfig;
 use librefang_types::user_policy::{

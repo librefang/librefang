@@ -412,7 +412,13 @@ pub async fn execute_tool_raw(
     let result = match tool_name {
         // Filesystem tools
         "file_read" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4434: widen with the channel bridge's download directory so
+            // agents can open Telegram/voice/etc. attachments the bridge
+            // saved outside their workspace_root.
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_file_read(input, *workspace_root, &extra_refs).await
         }
@@ -443,7 +449,11 @@ pub async fn execute_tool_raw(
             tool_file_write(input, *workspace_root, &extra_refs).await
         }
         "file_list" => {
-            let extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            let mut extra = named_ws_prefixes(*kernel, *caller_agent_id);
+            // #4434: see file_read above — bridge download dir is read-side allowlisted.
+            if let Some(dl) = kernel.and_then(|k| k.channel_file_download_dir()) {
+                extra.push(dl);
+            }
             let extra_refs: Vec<&Path> = extra.iter().map(|p| p.as_path()).collect();
             tool_file_list(input, *workspace_root, &extra_refs).await
         }
@@ -7145,6 +7155,10 @@ mod tests {
 
     struct NamedWsKernel {
         named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
+        /// Optional channel-bridge download dir surfaced via
+        /// `KernelHandle::channel_file_download_dir` (#4434 regression test
+        /// hook). `None` matches the default trait behaviour.
+        download_dir: Option<std::path::PathBuf>,
     }
 
     #[async_trait]
@@ -7263,12 +7277,25 @@ mod tests {
                 .map(|(p, _)| p.clone())
                 .collect()
         }
+        fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
+            self.download_dir.clone()
+        }
     }
 
     fn make_named_ws_kernel(
         named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
     ) -> Arc<dyn KernelHandle> {
-        Arc::new(NamedWsKernel { named })
+        Arc::new(NamedWsKernel {
+            named,
+            download_dir: None,
+        })
+    }
+
+    fn make_download_dir_kernel(download_dir: std::path::PathBuf) -> Arc<dyn KernelHandle> {
+        Arc::new(NamedWsKernel {
+            named: vec![],
+            download_dir: Some(download_dir),
+        })
     }
 
     #[tokio::test]
@@ -7362,6 +7389,155 @@ mod tests {
         assert!(!result.is_error, "got error: {}", result.content);
         assert!(result.content.contains("a.txt"));
         assert!(result.content.contains("b.txt"));
+    }
+
+    /// #4434: channel bridges save attachments to a shared download dir
+    /// (default `/tmp/librefang_uploads`) which lives outside any agent's
+    /// `workspace_root`. The runtime must widen `file_read`'s sandbox
+    /// accept-list with `KernelHandle::channel_file_download_dir()` so
+    /// agents can open the very files the bridge tells them about.
+    #[tokio::test]
+    async fn test_file_read_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = download_canon.join("attachment.txt");
+        std::fs::write(&target, "from-telegram").unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_read",
+            &serde_json::json!({"path": target.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000010"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert_eq!(result.content, "from-telegram");
+    }
+
+    /// Companion to the file_read test: file_list must also see into the
+    /// channel download dir so an agent can enumerate inbox attachments.
+    #[tokio::test]
+    async fn test_file_list_allows_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        std::fs::write(download_canon.join("one.pdf"), "1").unwrap();
+        std::fs::write(download_canon.join("two.pdf"), "2").unwrap();
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_list",
+            &serde_json::json!({"path": download_canon.to_str().unwrap()}),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000011"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(!result.is_error, "got error: {}", result.content);
+        assert!(result.content.contains("one.pdf"));
+        assert!(result.content.contains("two.pdf"));
+    }
+
+    /// Defense-in-depth: the download dir is a *read-side* allowlist only.
+    /// `file_write` still uses `named_ws_prefixes_writable`, so writes into
+    /// the bridge's directory must remain rejected.
+    #[tokio::test]
+    async fn test_file_write_rejects_channel_download_dir() {
+        let primary = tempfile::tempdir().expect("primary");
+        let download = tempfile::tempdir().expect("download");
+        let download_canon = download.path().canonicalize().unwrap();
+        let target = download_canon.join("smuggled.txt");
+
+        let kernel = make_download_dir_kernel(download_canon.clone());
+
+        let result = execute_tool(
+            "test-id",
+            "file_write",
+            &serde_json::json!({
+                "path": target.to_str().unwrap(),
+                "content": "should-not-land",
+            }),
+            Some(&kernel),
+            None,
+            Some("00000000-0000-0000-0000-000000000012"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(primary.path()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_error, "expected write to be rejected");
+        assert!(
+            !target.exists(),
+            "file should not have been written: {}",
+            target.display()
+        );
     }
 
     #[tokio::test]

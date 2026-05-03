@@ -19193,6 +19193,10 @@ impl KernelHandle for LibreFangKernel {
         Ok(result)
     }
 
+    fn channel_file_download_dir(&self) -> Option<std::path::PathBuf> {
+        Some(self.config.load().channels.effective_file_download_dir())
+    }
+
     fn readonly_workspace_prefixes(&self, agent_id: &str) -> Vec<std::path::PathBuf> {
         self.named_workspace_prefixes(agent_id)
             .into_iter()
