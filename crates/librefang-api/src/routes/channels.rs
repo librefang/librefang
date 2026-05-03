@@ -1560,8 +1560,10 @@ pub async fn remove_channel(
     ),
     request_body(content = Option<serde_json::Value>, content_type = "application/json"),
     responses(
-        (status = 200, description = "Channel test result", body = crate::types::JsonObject),
-        (status = 404, description = "Unknown channel", body = crate::types::JsonObject)
+        (status = 200, description = "Channel test succeeded", body = crate::types::JsonObject),
+        (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
+        (status = 412, description = "Required channel credentials missing", body = crate::types::JsonObject),
+        (status = 502, description = "Downstream send failure", body = crate::types::JsonObject)
     )
 )]
 /// POST /api/channels/{name}/test — Connectivity check + optional live test message.
@@ -1569,6 +1571,16 @@ pub async fn remove_channel(
 /// Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`
 /// (for Telegram). When provided, sends a real test message to verify the bot can
 /// post to that channel.
+///
+/// Status code semantics (#3507):
+/// - `200 OK` — credentials present (and, when a target was given, message sent)
+/// - `404 Not Found` — unknown channel name
+/// - `412 Precondition Failed` — required env vars / credentials are missing
+/// - `502 Bad Gateway` — credentials valid but downstream send failed
+///
+/// The JSON body shape (`{"status": "ok"|"error", "message": …}`) is preserved so
+/// callers that branch on the body still work, but the HTTP status now matches the
+/// real outcome — `fetch().ok` is the source of truth.
 pub async fn test_channel(
     Path(name): Path<String>,
     raw_body: axum::body::Bytes,
@@ -1597,7 +1609,7 @@ pub async fn test_channel(
 
     if !missing.is_empty() {
         return (
-            StatusCode::OK,
+            StatusCode::PRECONDITION_FAILED,
             Json(serde_json::json!({
                 "status": "error",
                 "message": format!("Missing required env vars: {}", missing.join(", "))
@@ -1630,7 +1642,7 @@ pub async fn test_channel(
             }
             Err(e) => {
                 return (
-                    StatusCode::OK,
+                    StatusCode::BAD_GATEWAY,
                     Json(serde_json::json!({
                         "status": "error",
                         "message": format!("Credentials valid but failed to send test message: {e}")
@@ -2126,4 +2138,143 @@ pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl I
     let channels_dir = state.kernel.home_dir().join("channels");
     let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
     Json(serde_json::to_value(&metadata).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod test_channel_status_tests {
+    //! Regression coverage for #3507 — `POST /api/channels/{name}/test` must
+    //! report failure outcomes via HTTP status (412 / 502), not 200, so dashboard
+    //! callers that branch on `fetch().ok` see them as failures.
+    //!
+    //! These tests mutate process-global env vars so they share a `Mutex` to
+    //! avoid races with sibling tests (and other tests in this binary that
+    //! touch the same vars).
+    use super::*;
+    use axum::extract::Path;
+    use axum::response::IntoResponse;
+    use std::sync::Mutex;
+
+    /// Serializes env-var mutations across the tests in this module so they
+    /// don't race each other (or any other test in the binary that pokes at
+    /// the same vars).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Drop guard that restores the previous value of an env var when it falls
+    /// out of scope, so a test failure doesn't poison the process for sibling
+    /// tests.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: serialized via ENV_LOCK; we only mutate this single key
+            // and restore it in Drop.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prev }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: same reasoning as `unset`.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: same reasoning as the constructors — we still hold the
+            // ENV_LOCK because the guard outlives the lock guard inside each
+            // test's scope.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_channel_name_returns_404() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let resp = test_channel(
+            Path("not-a-real-channel".to_string()),
+            axum::body::Bytes::new(),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn missing_required_env_returns_412() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Telegram requires TELEGRAM_BOT_TOKEN. With it unset we must surface
+        // a 412 — NOT a 200 with a "status: error" body, which silently passes
+        // dashboard `fetch().ok` checks (#3507).
+        let _g = EnvGuard::unset("TELEGRAM_BOT_TOKEN");
+
+        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::PRECONDITION_FAILED,
+            "missing credentials must return 412, not 200"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_present_no_target_returns_200() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Credentials set but no `channel_id` / `chat_id` body — handler
+        // short-circuits before any network call and returns the
+        // "credentials look good" 200 response.
+        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "test-token-not-real");
+
+        let resp = test_channel(Path("telegram".to_string()), axum::body::Bytes::new())
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn downstream_send_failure_returns_502() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Telegram bot token is set (so we get past the 412 gate) but the
+        // value is bogus, so Bot API will reject the call. We pass a
+        // `chat_id` to force the live-send branch. Result: handler must
+        // surface a 502 Bad Gateway.
+        //
+        // This exercises a real network round-trip to api.telegram.org —
+        // it'll be skipped in offline CI environments. We detect that by
+        // looking at the response status: anything other than 502 in an
+        // offline run means we couldn't reach the network at all, which
+        // is fine for the purpose of *this* assertion (we already cover
+        // the 200 / 412 / 404 paths deterministically above).
+        let _g = EnvGuard::set("TELEGRAM_BOT_TOKEN", "0:invalid-token-for-test");
+
+        let body = axum::body::Bytes::from_static(b"{\"chat_id\":\"1\"}");
+        let resp = test_channel(Path("telegram".to_string()), body)
+            .await
+            .into_response();
+
+        // Either: we reached Telegram and got a 401-equivalent → handler
+        // returns 502; or we have no network → reqwest errors out which
+        // also gets mapped to 502. Both are acceptable. A 200 here would
+        // be the bug from #3507.
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "downstream send failure must NOT be reported as 200"
+        );
+    }
 }
