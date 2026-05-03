@@ -253,7 +253,7 @@ async fn skills_detail_returns_full_manifest() {
     // forward-slash suffix.
     let normalized_path = body["path"]
         .as_str()
-        .unwrap_or("")
+        .expect("path field present and is a string")
         .replace('\\', "/");
     assert!(
         normalized_path.ends_with("skills/detail-skill"),

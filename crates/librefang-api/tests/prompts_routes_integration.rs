@@ -214,15 +214,14 @@ async fn activate_prompt_version_with_agent_id_in_body_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "body={body:?}");
-    // #4365: activate returns the full PromptVersion entity when one exists.
-    // This test exercises the activate path against a non-persisted VERSION_ID
-    // (the in-memory store accepts the activate UPDATE without error even
-    // though the row doesn't exist), so the read-back yields `Ok(None)` and
-    // the handler falls back to the legacy ack envelope. Either response
-    // shape is acceptable — both indicate the activation succeeded.
-    assert!(
-        body["id"] == VERSION_ID || body["success"] == true,
-        "expected PromptVersion entity or ack envelope, got body={body:?}"
+    // The mock kernel has no real PromptStore, so activate writes succeed but
+    // the subsequent read-back returns Ok(None). The handler falls back to the
+    // legacy ack envelope. Assert the ack shape explicitly — the entity-return
+    // path from #4365 requires a real PromptStore-backed fixture to verify.
+    assert_eq!(
+        body["success"],
+        serde_json::json!(true),
+        "expected ack envelope {{success:true}}, got body={body:?}"
     );
 }
 
