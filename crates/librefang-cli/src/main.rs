@@ -9744,7 +9744,7 @@ fn cmd_vault_remove(key: &str) {
 /// Source of the keys (in order):
 ///   - OLD: env var `LIBREFANG_VAULT_KEY_OLD` (REQUIRED)
 ///   - NEW: env var `LIBREFANG_VAULT_KEY_NEW` unless `--from-stdin` is set,
-///          in which case stdin is read until EOF and trimmed.
+///     in which case stdin is read until EOF and trimmed.
 ///
 /// Both must be base64 of exactly 32 raw bytes (`openssl rand -base64 32`,
 /// matches `LIBREFANG_VAULT_KEY` in production). Any other length is
