@@ -2653,7 +2653,10 @@ mod tests {
 
         vault.init_with_key(key_old.clone()).unwrap();
         vault
-            .set("API_KEY".to_string(), Zeroizing::new("secret-1".to_string()))
+            .set(
+                "API_KEY".to_string(),
+                Zeroizing::new("secret-1".to_string()),
+            )
             .unwrap();
         vault
             .set("DB_URL".to_string(), Zeroizing::new("secret-2".to_string()))

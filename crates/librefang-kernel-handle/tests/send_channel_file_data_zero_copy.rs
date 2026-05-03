@@ -140,10 +140,7 @@ impl KernelHandle for CapturingFileKernel {
         Err("not used".into())
     }
 
-    async fn knowledge_query(
-        &self,
-        _pattern: GraphPattern,
-    ) -> Result<Vec<GraphMatch>, String> {
+    async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, String> {
         Err("not used".into())
     }
 

@@ -1105,7 +1105,10 @@ mod tests {
         // The receiver must wake up promptly; bound the wait so a missed
         // broadcast surfaces as a test failure rather than a hang.
         let recv = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
-        assert!(matches!(recv, Ok(Ok(()))), "expected change event, got {recv:?}");
+        assert!(
+            matches!(recv, Ok(Ok(()))),
+            "expected change event, got {recv:?}"
+        );
     }
 
     /// #3513: a burst of mutations must all be observable by a subscriber.
@@ -1118,7 +1121,9 @@ mod tests {
 
         // Fire 5 in rapid succession.
         for i in 0..5 {
-            registry.register(test_entry(&format!("burst-{i}"))).unwrap();
+            registry
+                .register(test_entry(&format!("burst-{i}")))
+                .unwrap();
         }
 
         // Drain — we must observe at least one event (Ok or Lagged), and
