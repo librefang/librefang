@@ -542,6 +542,18 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
     PublicRoute::prefix_get("/dashboard/assets/"),
+    // PWA siblings of the dashboard shell. These are static bytes baked into
+    // the binary via `include_dir!`, identical for every user, leak nothing
+    // sensitive — and the W3C manifest spec mandates `credentials="omit"`
+    // for `<link rel="manifest">` fetches absent `crossorigin="use-credentials"`,
+    // so the session cookie is intentionally not sent. Without the exemption
+    // every authenticated dashboard load logs a stream of WARN 401s for these
+    // paths (#4529). Mirrors the rate-limiter exemption list at
+    // `rate_limiter.rs::is_rate_limit_exempt`.
+    PublicRoute::exact_get("/dashboard/icon-192.png"),
+    PublicRoute::exact_get("/dashboard/icon-512.png"),
+    PublicRoute::exact_get("/dashboard/manifest.json"),
+    PublicRoute::exact_get("/dashboard/sw.js"),
     // i18n locale bundles — static, fetched before auth flow
     PublicRoute::prefix_get("/locales/"),
 ];
