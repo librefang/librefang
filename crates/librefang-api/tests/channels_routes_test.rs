@@ -293,10 +293,11 @@ async fn channels_test_unknown_channel_returns_404() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
-    // The handler returns 200 even when credentials are missing — the
-    // diagnostic lives in the JSON body so the dashboard can render it
-    // without a separate error pipeline. Telegram requires
-    // `TELEGRAM_BOT_TOKEN`, which is not set in this test process.
+    // #3507 reshaped this handler so the HTTP status reflects the actual
+    // outcome — `412 Precondition Failed` for missing credentials, while
+    // the JSON body shape is unchanged so dashboards branching on
+    // `body.status` keep working. Previously this returned 200 + body
+    // diagnostic, which made `fetch().ok` lie to clients.
     //
     // We deliberately do not assert on a specific env var name to avoid
     // coupling the test to the registry; we only require the handler to
@@ -317,7 +318,7 @@ async fn channels_test_known_channel_with_no_creds_reports_missing_env() {
 
     let h = boot().await;
     let (status, body) = json_request(&h, Method::POST, "/api/channels/telegram/test", None).await;
-    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body:?}");
     assert_eq!(
         body["status"], "error",
         "missing creds must surface as status=error: {body}"
