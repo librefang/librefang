@@ -4449,8 +4449,14 @@ async fn stream_with_retry(
                     inactivity_secs,
                     partial_text_len, last_activity, "LLM stream timed out with partial output"
                 );
-                if !partial_text.is_empty() {
-                    let _ = tx.send(StreamEvent::TextDelta { text: partial_text }).await;
+                // #3552: `partial_text` is now `Option<bytes::Bytes>`. Forward
+                // any captured buffer to the stream as text (lossy decode —
+                // partial buffers may end mid-codepoint).
+                if let Some(buf) = partial_text {
+                    if !buf.is_empty() {
+                        let text = String::from_utf8_lossy(&buf).into_owned();
+                        let _ = tx.send(StreamEvent::TextDelta { text }).await;
+                    }
                 }
                 return Err(LibreFangError::LlmDriver(format!(
                     "Task timed out after {inactivity_secs}s of inactivity \

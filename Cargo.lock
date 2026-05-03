@@ -4461,6 +4461,7 @@ name = "librefang-llm-driver"
 version = "2026.5.2-beta8"
 dependencies = [
  "async-trait",
+ "bytes",
  "librefang-types",
  "serde",
  "serde_json",
@@ -4474,6 +4475,7 @@ version = "2026.5.2-beta8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "dashmap",
  "dirs 6.0.0",

@@ -61,10 +61,19 @@ pub enum LlmError {
     #[error("Model not found: {0}")]
     ModelNotFound(String),
     /// Subprocess timed out due to inactivity, but partial output was captured.
+    ///
+    /// `partial_text` is wrapped in `Option<bytes::Bytes>` so that cloning the
+    /// error variant through the error chain is O(1) (refcount bump) instead
+    /// of a multi-MiB deep copy. Producers that have a partial buffer should
+    /// pass `Some(Bytes::from(buf))`; producers / wrappers that don't have a
+    /// buffer pass `None`. `partial_text_len` remains the source of truth for
+    /// length (referenced by `Display`) even when the buffer is `None` — for
+    /// example when the buffer has been forwarded as a `StreamEvent::TextDelta`
+    /// and dropped before the error is returned. See #3552.
     #[error("Timed out after {inactivity_secs}s of inactivity (last: {last_activity}, {partial_text_len} chars partial output)")]
     TimedOut {
         inactivity_secs: u64,
-        partial_text: String,
+        partial_text: Option<bytes::Bytes>,
         partial_text_len: usize,
         /// Last known activity before the process stalled.
         last_activity: String,
@@ -728,6 +737,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// #3552: cloning `LlmError::TimedOut`'s partial payload must be O(1) —
+    /// the `bytes::Bytes` buffer should be refcounted, not deep-copied. This
+    /// asserts that 100 clones of the captured buffer all alias the same
+    /// allocation (`Bytes::as_ptr` is identical).
+    #[test]
+    fn test_timed_out_partial_text_is_refcounted_on_clone() {
+        let payload = "hello world".repeat(100_000);
+        let original = bytes::Bytes::from(payload);
+        let original_ptr = original.as_ptr();
+        let original_len = original.len();
+        let err = LlmError::TimedOut {
+            inactivity_secs: 30,
+            partial_text: Some(original),
+            partial_text_len: original_len,
+            last_activity: "stalled".to_string(),
+        };
+
+        // Pull the buffer back out and clone it 100 times. Each clone must
+        // share the same backing allocation; otherwise we've reintroduced the
+        // multi-MiB-per-clone footgun the issue was filed for.
+        let buf = match &err {
+            LlmError::TimedOut {
+                partial_text: Some(buf),
+                ..
+            } => buf.clone(),
+            other => panic!("expected TimedOut with Some partial_text, got {other:?}"),
+        };
+
+        let mut clones = Vec::with_capacity(100);
+        for _ in 0..100 {
+            clones.push(buf.clone());
+        }
+        for c in &clones {
+            assert_eq!(c.as_ptr(), original_ptr, "Bytes clone must share buffer");
+            assert_eq!(c.len(), original_len);
+        }
+    }
+
+    /// #3552: `Display` only references `partial_text_len`, so the human-
+    /// readable error string is unchanged after switching `partial_text` to
+    /// `Option<Bytes>`. Pin the format so future churn doesn't silently drift.
+    #[test]
+    fn test_timed_out_display_format_unchanged() {
+        let err = LlmError::TimedOut {
+            inactivity_secs: 42,
+            partial_text: Some(bytes::Bytes::from_static(b"ignored by Display")),
+            partial_text_len: 1234,
+            last_activity: "tool_call:web_search".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Timed out after 42s of inactivity (last: tool_call:web_search, 1234 chars partial output)"
+        );
+
+        // Same format when no buffer was captured (length is the source of truth).
+        let err_none = LlmError::TimedOut {
+            inactivity_secs: 42,
+            partial_text: None,
+            partial_text_len: 1234,
+            last_activity: "tool_call:web_search".to_string(),
+        };
+        assert_eq!(err.to_string(), err_none.to_string());
     }
 
     // #3543: dropping the receiver must surface as an error rather than being

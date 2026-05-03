@@ -608,7 +608,7 @@ mod tests {
     fn failover_reason_timed_out_variant() {
         let e = LlmError::TimedOut {
             inactivity_secs: 30,
-            partial_text: String::new(),
+            partial_text: None,
             partial_text_len: 0,
             last_activity: "none".to_string(),
         };

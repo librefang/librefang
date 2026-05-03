@@ -1094,7 +1094,7 @@ impl LlmDriver for ClaudeCodeDriver {
                         break Some(LlmError::TimedOut {
                             inactivity_secs: kill_secs,
                             partial_text_len: partial_len,
-                            partial_text: std::mem::take(&mut full_text),
+                            partial_text: Some(bytes::Bytes::from(std::mem::take(&mut full_text))),
                             last_activity: last_activity.clone(),
                         });
                     }
