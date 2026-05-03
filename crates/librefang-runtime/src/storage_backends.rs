@@ -72,6 +72,13 @@ pub trait AuditStore: Send + Sync {
     /// Whether the chain currently contains zero entries.
     fn is_empty(&self) -> bool;
 
+    /// Path to the external anchor file, if one is configured.
+    ///
+    /// Defaults to `None`; backends that support anchoring override this.
+    fn anchor_path(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Most recent `n` entries in chronological order.
     fn recent(&self, n: usize) -> Vec<AuditEntry>;
 
@@ -152,6 +159,10 @@ impl AuditStore for AuditLog {
         now: chrono::DateTime<chrono::Utc>,
     ) -> TrimReport {
         AuditLog::trim(self, config, now)
+    }
+
+    fn anchor_path(&self) -> Option<&std::path::Path> {
+        AuditLog::anchor_path(self)
     }
 }
 

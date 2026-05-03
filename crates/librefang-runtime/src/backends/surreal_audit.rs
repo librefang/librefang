@@ -510,6 +510,10 @@ impl AuditStore for SurrealAuditStore {
             new_chain_anchor,
         }
     }
+
+    fn anchor_path(&self) -> Option<&std::path::Path> {
+        self.anchor_path.as_deref()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

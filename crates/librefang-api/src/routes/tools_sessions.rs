@@ -289,7 +289,7 @@ pub async fn invoke_tool(
         audit_caller,
         librefang_runtime::audit::AuditAction::ToolInvoke,
         &name,
-        audit_outcome,
+        &audit_outcome,
     );
 
     let status = if result.is_error {
