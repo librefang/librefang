@@ -2200,7 +2200,8 @@
     "help": "Sessions are the live and historical conversation contexts of every agent. Each session is a thread of messages + tool calls bound to one agent and one origin (channel, cron, A2A peer, or manual). This page lets you browse them, label them, and clean up.\n\nHow to use this page:\n\n1. Search & filter. Type to search by agent, label, or recent message text. Active vs. idle is auto-derived from last activity.\n\n2. Label. \"Set label\" tags a session so it's easier to find later — useful for long-running threads.\n\n3. Delete. Remove old sessions you don't need. The agent's full message history for that thread goes with it.\n\nTypical scenarios:\n\n  · Finding the session where the agent and a user worked through a specific problem.\n  · Pruning channel sessions that have piled up after a busy week.\n  · Confirming an agent has the session you expect for a given (channel, chat) pair before debugging.\n\nThings to know:\n\n  · Channel messages always use a canonical session id — `(agent, \"<channel>:<chat>\")` — so a user always lands in the same thread.\n  · Cron fires share a single per-agent session; that's by design (prompt cache reuse) but it does mean cron history can grow.\n  · Deleting a session is irreversible. Memory entries the session created stay (Memory page is separate).",
     "set_label": "Set label",
     "no_label": "add label",
-    "label_placeholder": "Label..."
+    "label_placeholder": "Label...",
+    "open_in_chat": "Open this session in the chat page"
   },
   "approvals": {
     "title": "Approvals",
