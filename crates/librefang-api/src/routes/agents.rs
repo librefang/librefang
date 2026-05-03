@@ -2191,14 +2191,21 @@ pub async fn get_agent_session(
 }
 
 /// DELETE /api/agents/:id — Kill an agent.
+///
+/// Idempotent (RFC 9110 §9.2.2 / §9.3.5): deleting an agent that is already
+/// gone returns `200 OK` with `{"status": "already-deleted"}` instead of
+/// `404`. `404` is reserved for the malformed-UUID case alone, so retried
+/// or replayed DELETEs by clients (network blips, dashboard double-clicks)
+/// no longer surface a phantom error. Refs #3509.
 #[utoipa::path(
     delete,
     path = "/api/agents/{id}",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Agent killed"),
-        (status = 404, description = "Agent not found")
+        (status = 200, description = "Agent killed (or was already absent — idempotent)"),
+        (status = 400, description = "Malformed agent ID"),
+        (status = 409, description = "Agent is hand-owned and cannot be deleted directly")
     )
 )]
 pub async fn kill_agent(
@@ -2221,13 +2228,24 @@ pub async fn kill_agent(
     // can respawn or produce stale instance state — require callers to
     // deactivate or uninstall the owning hand instead. The dashboard hides
     // Delete for hand agents already; this closes the direct-API loophole.
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
-        if entry.is_hand {
+    match state.kernel.agent_registry().get(agent_id) {
+        Some(entry) if entry.is_hand => {
             return ApiErrorResponse::conflict(
                 "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead.",
             )
             .with_code("hand_agent_delete_denied")
             .into_response();
+        }
+        Some(_) => {}
+        None => {
+            // Idempotent DELETE: the agent is already gone (replayed request,
+            // double-click, race with another deleter). Treat as success per
+            // RFC 9110 §9.2.2 — DELETE is idempotent.
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
+            )
+                .into_response();
         }
     }
 
@@ -2238,9 +2256,25 @@ pub async fn kill_agent(
         )
             .into_response(),
         Err(e) => {
+            // The agent existed when we checked above but vanished mid-flight
+            // (concurrent delete). Still treat as idempotent success — the
+            // caller's intent ("agent {id} should be gone") is satisfied.
+            if matches!(
+                e,
+                librefang_kernel::error::KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::AgentNotFound(_)
+                )
+            ) {
+                tracing::debug!("kill_agent: agent {id} vanished mid-flight; treating as already-deleted");
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "already-deleted", "agent_id": id})),
+                )
+                    .into_response();
+            }
             tracing::warn!("kill_agent failed for {id}: {e}");
-            ApiErrorResponse::not_found(t.t("api-error-agent-not-found-or-terminated"))
-                .with_code("agent_not_found")
+            ApiErrorResponse::internal(format!("Failed to kill agent {id}: {e}"))
+                .with_code("agent_kill_failed")
                 .into_response()
         }
     }

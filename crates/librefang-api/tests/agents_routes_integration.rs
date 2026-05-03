@@ -332,3 +332,77 @@ async fn test_patch_agent_without_token_returns_401_when_api_key_set() {
     .await;
     assert_eq!(status_ok, StatusCode::OK);
 }
+
+// ---------------------------------------------------------------------------
+// DELETE /api/agents/{id} — idempotency (#3509)
+// ---------------------------------------------------------------------------
+
+fn delete(path: &str, bearer: Option<&str>) -> Request<Body> {
+    let mut b = Request::builder().method(Method::DELETE).uri(path);
+    if let Some(token) = bearer {
+        b = b.header("authorization", format!("Bearer {}", token));
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+/// Refs #3509: DELETE is idempotent (RFC 9110 §9.2.2). Killing the same
+/// agent twice MUST succeed both times — the second call returns
+/// `200 OK` with `status: already-deleted` instead of `404 Not Found`,
+/// so clients (dashboard double-clicks, CLI retries, network-recovery
+/// loops) never see a phantom error for an outcome that already matches
+/// their intent.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_agent_twice_both_succeed_idempotent() {
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "kill-target");
+
+    // First call — agent exists, normal kill path.
+    let (status1, body1) = send(
+        h.app.clone(),
+        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status1, StatusCode::OK, "first DELETE should be 200; body={body1:?}");
+    assert_eq!(body1["status"], "killed", "first DELETE body={body1:?}");
+
+    // Second call — agent already gone. MUST still be 200, not 404.
+    let (status2, body2) = send(
+        h.app.clone(),
+        delete(&format!("/api/agents/{}", id), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "second DELETE on a now-absent agent must be idempotent-200 (#3509); got {status2} body={body2:?}"
+    );
+    assert_eq!(body2["status"], "already-deleted", "second DELETE body={body2:?}");
+}
+
+/// Refs #3509: 400 stays reserved for malformed-id rejection. Only the
+/// `not-found` case relaxed to 200 idempotent. Without this the relaxation
+/// could mask genuine client bugs (typo'd id, wrong path).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_agent_invalid_id_still_returns_400() {
+    let h = boot(TEST_TOKEN).await;
+    let (status, body) = send(h.app.clone(), delete("/api/agents/not-a-uuid", Some(TEST_TOKEN))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body:?}");
+    assert_eq!(body["code"], "invalid_agent_id");
+}
+
+/// Refs #3509: deleting an unknown-but-well-formed UUID is idempotent —
+/// no agent existed under that id, so the caller's intent ("agent {id}
+/// should be gone") is already satisfied. 200 with `already-deleted` lets
+/// idempotent clients (Terraform-style reconcilers) skip the dance.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_agent_unknown_uuid_is_idempotent_200() {
+    let h = boot(TEST_TOKEN).await;
+    let unknown = AgentId::new();
+    let (status, body) = send(
+        h.app.clone(),
+        delete(&format!("/api/agents/{}", unknown), Some(TEST_TOKEN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    assert_eq!(body["status"], "already-deleted", "body={body:?}");
+}

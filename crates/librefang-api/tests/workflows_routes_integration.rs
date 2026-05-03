@@ -527,7 +527,10 @@ async fn cron_job_delete_invalid_id_returns_400() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cron_job_delete_unknown_uuid_returns_404() {
+async fn cron_job_delete_unknown_uuid_is_idempotent_200() {
+    // Refs #3509: DELETE is idempotent (RFC 9110 §9.2.2). Deleting an
+    // already-absent cron job returns 200 with `status: already-deleted`,
+    // not 404 — clients can replay/retry without seeing a phantom error.
     let h = boot().await;
     let (status, body) = json_request(
         &h,
@@ -536,7 +539,51 @@ async fn cron_job_delete_unknown_uuid_returns_404() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["status"], "already-deleted", "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_delete_twice_both_succeed() {
+    // Refs #3509: idempotent DELETE — calling DELETE on the same id twice
+    // never surfaces an error on the second call. Tests the
+    // already-absent path explicitly (no created job needed; the path
+    // taken on the second call is identical to "never existed").
+    let h = boot().await;
+    let path = "/api/cron/jobs/11111111-1111-1111-1111-111111111111";
+    for attempt in 1..=2 {
+        let (status, body) = json_request(&h, Method::DELETE, path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "attempt {attempt} should be 200; got {status} body={body:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_delete_unknown_uuid_is_idempotent_200() {
+    // Refs #3509: same idempotency contract for triggers.
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/triggers/00000000-0000-0000-0000-000000000000",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(body["status"], "already-deleted", "{body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_delete_invalid_uuid_returns_400() {
+    // Refs #3509: 400 stays reserved for malformed-id rejection. Only the
+    // `not-found` case relaxed to 200.
+    let h = boot().await;
+    let (status, _body) =
+        json_request(&h, Method::DELETE, "/api/triggers/not-a-uuid", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test(flavor = "multi_thread")]
