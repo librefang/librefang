@@ -897,6 +897,35 @@ mod tests {
         assert_eq!(sid_a, sid_b);
     }
 
+    /// Regression for #3657: pin the exact session id a `New`-mode cron fire
+    /// receives. The CLAUDE.md cron + session_mode note documents the
+    /// derivation as `SessionId::for_cron_run(agent, "<job_id>:<rfc3339_fire>")`
+    /// — if anyone changes the run_key shape (timestamp precision, separator,
+    /// ordering) without updating the doc, this test fails loudly. It also
+    /// guarantees the function actually routes through `for_cron_run` rather
+    /// than re-deriving via `for_channel("cron")`, which was the bug the
+    /// dispatcher change in #3597 fixed.
+    #[test]
+    fn fire_session_override_new_matches_for_cron_run_contract_3657() {
+        let agent = AgentId::new();
+        let job_id = CronJobId::new();
+        let fire_time = chrono::Utc.with_ymd_and_hms(2026, 4, 25, 10, 0, 0).unwrap();
+        let (mode, sid) =
+            cron_fire_session_override(agent, Some(SessionMode::New), job_id, fire_time);
+        assert_eq!(mode, Some(SessionMode::New));
+        let expected_run_key = format!(
+            "{}:{}",
+            job_id.0,
+            fire_time.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        );
+        assert_eq!(
+            sid,
+            Some(SessionId::for_cron_run(agent, &expected_run_key)),
+            "New-mode cron fire must materialize SessionId::for_cron_run(agent, run_key); \
+             see CLAUDE.md cron + session_mode note"
+        );
+    }
+
     /// Build a minimal valid `CronJob` with an `Every` schedule.
     fn make_job(agent_id: AgentId) -> CronJob {
         CronJob {
