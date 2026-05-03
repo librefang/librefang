@@ -441,13 +441,25 @@ export interface AgentSessionMessage {
   role?: string;
   /** Either a plain string (legacy `MessageContent::Text`) or an array
    *  of structured blocks (`MessageContent::Blocks`) — the Rust enum is
-   *  `#[serde(untagged)]` so both shapes appear on the wire. */
+   *  `#[serde(untagged)]` so both shapes appear on the wire.
+   *
+   *  The agent-scoped session endpoint (`/api/agents/{id}/session`) flattens
+   *  blocks server-side and returns a string here; the raw-blocks endpoint
+   *  (`/api/sessions/{id}`) returns the full `ContentBlock[]`. The mapper
+   *  handles both shapes via `extractAssistantHistoryParts`. */
   content?: string | ContentBlock[];
   tools?: AgentTool[];
   images?: AgentSessionImage[];
   /** RFC 3339 timestamp from the server; may be absent for messages
    * persisted before the field was introduced. */
   timestamp?: string;
+  /** Flat reasoning trace surfaced by the agent-scoped session endpoint
+   *  for assistant messages that contained `ContentBlock::Thinking`. The
+   *  server joins multiple thinking blocks with a blank line, mirroring
+   *  the live-streaming `thinking_delta` accumulation. Absent when the
+   *  message had no thinking blocks (preserves response shape for
+   *  non-thinking models). */
+  thinking?: string;
 }
 
 export interface AgentSessionResponse {

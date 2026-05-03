@@ -2015,6 +2015,16 @@ pub async fn get_agent_session(
             for m in &session.messages {
                 let mut tools: Vec<serde_json::Value> = Vec::new();
                 let mut msg_images: Vec<serde_json::Value> = Vec::new();
+                // Extended-thinking traces are flattened the same way text /
+                // tool_use / images already are. The dashboard renders these
+                // in a collapsible drawer; without surfacing them here, the
+                // reload path silently loses reasoning that was visible during
+                // streaming. Multiple thinking blocks in a single turn are
+                // joined with a blank line so the drawer reads naturally —
+                // matches the live `thinking_delta` accumulation on the WS
+                // path. `redacted_thinking` is not modeled separately yet and
+                // would fall through the catch-all, same as today.
+                let mut thinkings: Vec<String> = Vec::new();
                 let content = match &m.content {
                     librefang_types::message::MessageContent::Text(t) => t.clone(),
                     librefang_types::message::MessageContent::Blocks(blocks) => {
@@ -2023,6 +2033,12 @@ pub async fn get_agent_session(
                             match b {
                                 librefang_types::message::ContentBlock::Text { text, .. } => {
                                     texts.push(text.clone());
+                                }
+                                librefang_types::message::ContentBlock::Thinking {
+                                    thinking,
+                                    ..
+                                } => {
+                                    thinkings.push(thinking.clone());
                                 }
                                 librefang_types::message::ContentBlock::Image {
                                     media_type,
@@ -2111,6 +2127,12 @@ pub async fn get_agent_session(
                 }
                 if !msg_images.is_empty() {
                     msg["images"] = serde_json::Value::Array(msg_images);
+                }
+                if !thinkings.is_empty() {
+                    // Joined the same way the dashboard's history mapper joins
+                    // thinking deltas during live streaming — a blank line
+                    // between blocks keeps the collapsible drawer readable.
+                    msg["thinking"] = serde_json::Value::String(thinkings.join("\n\n"));
                 }
                 // Expose the real message timestamp so the dashboard can
                 // render historical times correctly on resume instead of
