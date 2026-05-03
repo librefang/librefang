@@ -103,11 +103,11 @@ impl KernelHandle for NoopKernelHandle {
         Err("not implemented".into())
     }
 
-    async fn knowledge_add_entity(&self, _entity: Entity) -> Result<String, String> {
+    async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, String> {
         Err("not implemented".into())
     }
 
-    async fn knowledge_add_relation(&self, _relation: Relation) -> Result<String, String> {
+    async fn knowledge_add_relation(&self, _relation: &Relation) -> Result<String, String> {
         Err("not implemented".into())
     }
 

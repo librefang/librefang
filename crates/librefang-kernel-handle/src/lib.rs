@@ -131,15 +131,25 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<(), String>;
 
     /// Add an entity to the knowledge graph.
+    ///
+    /// Takes `entity` by reference so callers that already hold an owned
+    /// value (e.g. proactive memory extractors that may retry the call)
+    /// avoid forced moves and downstream `.clone()` chains. The kernel
+    /// implementation clones into the underlying store when it actually
+    /// needs ownership; total clone count is unchanged but the choice
+    /// moves from caller to callee. See issue #3553.
     async fn knowledge_add_entity(
         &self,
-        entity: librefang_types::memory::Entity,
+        entity: &librefang_types::memory::Entity,
     ) -> Result<String, String>;
 
     /// Add a relation to the knowledge graph.
+    ///
+    /// Takes `relation` by reference for the same reason as
+    /// [`knowledge_add_entity`](Self::knowledge_add_entity). See #3553.
     async fn knowledge_add_relation(
         &self,
-        relation: librefang_types::memory::Relation,
+        relation: &librefang_types::memory::Relation,
     ) -> Result<String, String>;
 
     /// Query the knowledge graph with a pattern.
@@ -393,12 +403,18 @@ pub trait KernelHandle: Send + Sync {
     /// Used by the `channel_send` tool when `file_path` is provided.
     /// When `thread_id` is provided, the file is sent as a thread reply.
     /// When `account_id` is provided, routes through the specific configured bot with that ID.
+    ///
+    /// `data` is a `bytes::Bytes` so wrapping layers (metering, retry,
+    /// fan-out to multiple adapters) can `clone()` it for free instead
+    /// of cloning the underlying buffer. With the 10 MiB upload bump
+    /// (#3514) this avoids per-send buffer copies in every wrapping
+    /// layer. See issue #3553.
     #[allow(clippy::too_many_arguments)]
     async fn send_channel_file_data(
         &self,
         channel: &str,
         recipient: &str,
-        data: Vec<u8>,
+        data: bytes::Bytes,
         filename: &str,
         mime_type: &str,
         thread_id: Option<&str>,
@@ -493,9 +509,13 @@ pub trait KernelHandle: Send + Sync {
     }
 
     /// Create a new prompt version. Default: error.
+    ///
+    /// Takes `version` by reference; the kernel clones into the
+    /// underlying store. Lets API handlers keep a copy for the response
+    /// JSON without forcing two clones. See #3553.
     fn create_prompt_version(
         &self,
-        _version: librefang_types::agent::PromptVersion,
+        _version: &librefang_types::agent::PromptVersion,
     ) -> Result<(), String> {
         Err("Prompt store not available".to_string())
     }
@@ -519,9 +539,12 @@ pub trait KernelHandle: Send + Sync {
     }
 
     /// Create a new experiment. Default: error.
+    ///
+    /// Takes `experiment` by reference for the same reason as
+    /// [`create_prompt_version`](Self::create_prompt_version). See #3553.
     fn create_experiment(
         &self,
-        _experiment: librefang_types::agent::PromptExperiment,
+        _experiment: &librefang_types::agent::PromptExperiment,
     ) -> Result<(), String> {
         Err("Prompt store not available".to_string())
     }

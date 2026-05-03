@@ -1302,13 +1302,13 @@ mod tests {
         }
         async fn knowledge_add_entity(
             &self,
-            _: librefang_types::memory::Entity,
+            _: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not implemented".to_string())
         }
         async fn knowledge_add_relation(
             &self,
-            _: librefang_types::memory::Relation,
+            _: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not implemented".to_string())
         }

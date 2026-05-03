@@ -3636,7 +3636,7 @@ async fn tool_knowledge_add_entity(
         updated_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_entity(entity).await?;
+    let id = kh.knowledge_add_entity(&entity).await?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
 }
 
@@ -3670,7 +3670,7 @@ async fn tool_knowledge_add_relation(
         created_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_relation(relation).await?;
+    let id = kh.knowledge_add_relation(&relation).await?;
     Ok(format!(
         "Relation '{source}' --[{relation_str}]--> '{target}' added with ID: {id}"
     ))
@@ -4184,9 +4184,18 @@ async fn tool_channel_send(
             _ => "application/octet-stream",
         };
 
+        // `Bytes::from(Vec<u8>)` is O(1) — it takes ownership of the
+        // Vec's allocation without copying. Subsequent clones (retry,
+        // metering wrappers, fan-out) become refcount bumps. See #3553.
         return kh
             .send_channel_file_data(
-                &channel, recipient, data, &filename, mime_type, thread_id, account_id,
+                &channel,
+                recipient,
+                bytes::Bytes::from(data),
+                &filename,
+                mime_type,
+                thread_id,
+                account_id,
             )
             .await;
     }
@@ -6590,14 +6599,14 @@ mod tests {
 
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
 
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
@@ -6737,13 +6746,13 @@ mod tests {
         }
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
@@ -7248,13 +7257,13 @@ mod tests {
         }
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
@@ -9881,14 +9890,14 @@ mod tests {
 
         async fn knowledge_add_entity(
             &self,
-            _entity: librefang_types::memory::Entity,
+            _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
 
         async fn knowledge_add_relation(
             &self,
-            _relation: librefang_types::memory::Relation,
+            _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }

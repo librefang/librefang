@@ -99,7 +99,7 @@ async fn create_prompt_version(
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
-    match state.kernel.create_prompt_version(version.clone()) {
+    match state.kernel.create_prompt_version(&version) {
         Ok(_) => Json(version).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
@@ -208,7 +208,7 @@ async fn create_experiment(
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();
     }
-    match state.kernel.create_experiment(experiment.clone()) {
+    match state.kernel.create_experiment(&experiment) {
         Ok(_) => Json(experiment).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
