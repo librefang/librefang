@@ -195,8 +195,11 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/pairing/complete", Expect::AlwaysPublic),
     re("/a2a/agents", Expect::AlwaysPublic),
     re("/dashboard/assets/main.js", Expect::AlwaysPublic),
-    // PWA static files — fetched by the browser before/around login. The manifest
-    // request in particular omits credentials per spec, so it MUST stay public.
+    // PWA siblings of the dashboard shell. Mirror set in
+    // `middleware.rs::PUBLIC_ROUTES_GET_ONLY`; source of truth for the file
+    // list is `dashboard/public/`. Fetched by the browser before/around login
+    // (manifest with `credentials="omit"` per spec, SW register, icons), so
+    // they MUST stay public or every authenticated load 401-storms.
     re("/dashboard/icon-192.png", Expect::AlwaysPublic),
     re("/dashboard/icon-512.png", Expect::AlwaysPublic),
     re("/dashboard/manifest.json", Expect::AlwaysPublic),
