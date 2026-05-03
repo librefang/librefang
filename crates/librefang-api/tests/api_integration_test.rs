@@ -1213,7 +1213,12 @@ async fn test_invalid_agent_id_returns_400() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_kill_nonexistent_agent_returns_404() {
+async fn test_kill_nonexistent_agent_is_idempotent() {
+    // #3509: DELETE on a valid UUID that doesn't exist no longer returns 404
+    // — that status is now reserved for the malformed-UUID case alone, and
+    // a kill of an already-absent agent succeeds with a tagged body so
+    // retried/replayed deletes by clients (network blip, dashboard double
+    // click) don't surface a phantom error.
     let server = start_test_server().await;
     let client = reqwest::Client::new();
 
@@ -1223,7 +1228,9 @@ async fn test_kill_nonexistent_agent_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "already-deleted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
