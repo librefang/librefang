@@ -2989,8 +2989,15 @@ export interface A2ATaskStatus {
 }
 
 export async function listA2AAgents(): Promise<A2AAgentItem[]> {
-  const data = await get<{ agents?: A2AAgentItem[] }>("/api/a2a/agents");
-  return data.agents ?? [];
+  // #3842: backend now returns the canonical PaginatedResponse envelope
+  // (`items`/`total`/`offset`/`limit`). Tolerate the legacy `agents` shape
+  // until the next dashboard release ships, in case a daemon pre-#3842
+  // is paired with this dashboard during rolling upgrade.
+  const data = await get<{
+    items?: A2AAgentItem[];
+    agents?: A2AAgentItem[];
+  }>("/api/a2a/agents");
+  return data.items ?? data.agents ?? [];
 }
 
 export async function discoverA2AAgent(url: string): Promise<ApiActionResponse> {
