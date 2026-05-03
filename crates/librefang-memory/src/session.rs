@@ -377,16 +377,24 @@ impl SessionStore {
             .unchecked_transaction()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
+        // `message_count` is denormalised here so `list_sessions()` can
+        // render the count column without deserialising the messages blob
+        // for every row (#3607). It mirrors the *persisted* slice length
+        // (post-trim), which matches the count `list_sessions` previously
+        // derived by decoding the blob.
+        let message_count = messages_to_persist.len() as i64;
+
         tx.execute(
-            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, updated_at = ?6",
+            "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, label, message_count, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             ON CONFLICT(id) DO UPDATE SET messages = ?3, context_window_tokens = ?4, label = ?5, message_count = ?6, updated_at = ?7",
             rusqlite::params![
                 session_id_str,
                 session.agent_id.0.to_string(),
                 messages_blob,
                 session.context_window_tokens as i64,
                 session.label.as_deref(),
+                message_count,
                 now,
             ],
         )
@@ -652,9 +660,12 @@ impl SessionStore {
     ///
     /// `duration_ms` is the wall-clock span between the first and last
     /// message timestamps — `None` for empty sessions or sessions whose
-    /// messages all pre-date the timestamp field. The Messages blob is
-    /// already being deserialized for `message_count`, so this adds no
-    /// extra round-trip per row.
+    /// messages all pre-date the timestamp field. The blob round-trip is
+    /// kept here because both the label fallback and `duration_ms` need
+    /// fields that only live inside the serialised messages — but
+    /// `message_count` itself is now read directly from the dedicated
+    /// `sessions.message_count` column maintained by `save_session()`
+    /// (#3607), so it stays correct even if the blob fails to decode.
     ///
     /// `cost_usd` and `total_tokens` are aggregated from `usage_events`
     /// joined on `session_id` (added in schema v30). Pre-v30 events have
@@ -885,6 +896,7 @@ impl SessionStore {
         let mut stmt = conn
             .prepare(
                 "SELECT s.id, s.agent_id, s.messages, s.context_window_tokens, s.created_at, s.label,
+                        s.message_count,
                         COALESCE(u.total_cost_usd, 0.0) AS total_cost_usd,
                         COALESCE(u.total_tokens, 0)    AS total_tokens
                  FROM sessions s
@@ -908,11 +920,17 @@ impl SessionStore {
                 let context_window_tokens: i64 = row.get(3)?;
                 let created_at: String = row.get(4)?;
                 let label: Option<String> = row.get(5)?;
-                let total_cost_usd: f64 = row.get(6)?;
-                let total_tokens: i64 = row.get(7)?;
+                // `message_count` comes from the denormalised column maintained
+                // by `save_session()` (#3607). Pre-v32 rows whose blobs failed
+                // to decode during the migration backfill stay at 0 here —
+                // matching the pre-fix behaviour where `unwrap_or_default()`
+                // produced an empty vec and a count of 0.
+                let stored_msg_count: i64 = row.get(6)?;
+                let total_cost_usd: f64 = row.get(7)?;
+                let total_tokens: i64 = row.get(8)?;
                 let messages: Vec<Message> =
                     rmp_serde::from_slice(&messages_blob).unwrap_or_default();
-                let msg_count = messages.len();
+                let msg_count = stored_msg_count.max(0) as usize;
                 let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
                 // Duration spans the first to the last message that carries
                 // a timestamp. Skip messages with no timestamp so
@@ -1041,6 +1059,22 @@ impl SessionStore {
 
 impl SessionStore {
     /// List all sessions for a specific agent.
+    ///
+    /// Reads the denormalised `message_count` column maintained by
+    /// `save_session()` (#3607) instead of deserialising every messages
+    /// blob — for an agent with many long sessions this changes the
+    /// per-call cost from O(N x blob_size) to O(N).
+    ///
+    /// Because the blob is no longer fetched, the label fallback now
+    /// returns `null` when no explicit `label` column value exists for
+    /// a row, instead of synthesising one from the first user message.
+    /// The dashboard already tolerates `null` labels (renders the
+    /// session id), and the per-agent listing is a hot path on the
+    /// chat picker — preserving the derive_session_label fallback
+    /// would re-introduce the per-row blob deserialisation this fix
+    /// is meant to remove. The global `list_sessions_paginated` path
+    /// that powers Overview "Recent sessions" still loads the blob and
+    /// keeps the fallback.
     pub fn list_agent_sessions(
         &self,
         agent_id: AgentId,
@@ -1051,25 +1085,22 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, messages, created_at, label FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC",
+                "SELECT id, message_count, created_at, label \
+                 FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC",
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let session_id: String = row.get(0)?;
-                let messages_blob: Vec<u8> = row.get(1)?;
+                let stored_msg_count: i64 = row.get(1)?;
                 let created_at: String = row.get(2)?;
                 let label: Option<String> = row.get(3)?;
-                let messages: Vec<Message> =
-                    rmp_serde::from_slice(&messages_blob).unwrap_or_default();
-                let msg_count = messages.len();
-                let resolved_label = label.clone().or_else(|| derive_session_label(&messages));
                 Ok(serde_json::json!({
                     "session_id": session_id,
-                    "message_count": msg_count,
+                    "message_count": stored_msg_count.max(0) as u64,
                     "created_at": created_at,
-                    "label": resolved_label,
+                    "label": label,
                 }))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -2382,6 +2413,107 @@ mod tests {
         );
         assert!((row["cost_usd"].as_f64().unwrap() - 0.012).abs() < 1e-9);
         assert_eq!(row["total_tokens"].as_u64(), Some(150));
+    }
+
+    /// Issue #3607: `save_session` now writes `sessions.message_count`
+    /// directly so `list_sessions()` can read it without deserialising
+    /// the messages blob. This test asserts the writer keeps the column
+    /// in sync across both initial INSERT and the ON CONFLICT UPDATE
+    /// path, and that the per-agent listing returns the same count.
+    #[test]
+    fn save_session_writes_message_count_column() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Initial INSERT path: 3 messages.
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("one"));
+        session.messages.push(Message::assistant("two"));
+        session.messages.push(Message::user("three"));
+        store.save_session(&session).unwrap();
+
+        // The dedicated column must reflect the persisted count without
+        // any blob deserialisation on the reader side.
+        let stored: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(stored, 3, "column must mirror persisted message count");
+
+        // list_agent_sessions reads the column — never decodes the blob.
+        let listed = store.list_agent_sessions(agent_id).unwrap();
+        let row = listed
+            .iter()
+            .find(|v| v["session_id"].as_str() == Some(&session.id.0.to_string()))
+            .expect("created session must be listed");
+        assert_eq!(row["message_count"].as_u64(), Some(3));
+
+        // ON CONFLICT UPDATE path: append two more, save again, count moves.
+        session.messages.push(Message::assistant("four"));
+        session.messages.push(Message::user("five"));
+        store.save_session(&session).unwrap();
+
+        let after: i64 = {
+            let conn = store.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                rusqlite::params![session.id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(after, 5, "ON CONFLICT UPDATE must refresh message_count");
+
+        let listed = store.list_agent_sessions(agent_id).unwrap();
+        let row = listed
+            .iter()
+            .find(|v| v["session_id"].as_str() == Some(&session.id.0.to_string()))
+            .unwrap();
+        assert_eq!(row["message_count"].as_u64(), Some(5));
+    }
+
+    /// `list_sessions_paginated` (powering `list_sessions`) must also
+    /// surface the count from the column, not from the blob — so that
+    /// the API response stays correct even if the messages blob is
+    /// ever unreadable for a row.
+    #[test]
+    fn list_sessions_uses_message_count_column() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("hello"));
+        session.messages.push(Message::assistant("world"));
+        store.save_session(&session).unwrap();
+
+        // Corrupt the messages blob in place. The blob decode in
+        // list_sessions_paginated will now produce an empty Vec via
+        // unwrap_or_default(), but the dedicated column is the source
+        // of truth for the count.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE sessions SET messages = ?1 WHERE id = ?2",
+                rusqlite::params![vec![0xff_u8, 0xff], session.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        let listed = store.list_sessions().unwrap();
+        let row = listed
+            .iter()
+            .find(|v| v["session_id"].as_str() == Some(&session.id.0.to_string()))
+            .expect("session must be listed");
+        assert_eq!(
+            row["message_count"].as_u64(),
+            Some(2),
+            "count column survives a corrupted messages blob",
+        );
     }
 
     /// Sessions with no usage_events still list with cost_usd=0 and

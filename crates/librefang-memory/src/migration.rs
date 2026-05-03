@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 31;
+const SCHEMA_VERSION: u32 = 32;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -70,6 +70,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     run_step!(29, migrate_v29);
     run_step!(30, migrate_v30);
     run_step!(31, migrate_v31);
+    run_step!(32, migrate_v32);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -168,12 +169,21 @@ fn migrate_v1(conn: &Connection) -> Result<(), rusqlite::Error> {
             updated_at TEXT NOT NULL
         );
 
-        -- Session history
+        -- Session history.
+        --
+        -- `message_count` is a denormalised mirror of `len(rmp_serde::decode(messages))`
+        -- maintained by `save_session`. It exists so `list_sessions` (and the
+        -- per-agent variant) can render a count column without deserialising
+        -- every potentially MB-sized blob (#3607). The column is added on the
+        -- v1 CREATE TABLE for fresh installs; existing databases gain it via
+        -- migration v32, which also backfills `message_count` from the blob
+        -- one row at a time.
         CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
             agent_id TEXT NOT NULL,
             messages BLOB NOT NULL,
             context_window_tokens INTEGER DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -1001,6 +1011,101 @@ fn migrate_v30(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+/// Version 32: Add `message_count` column to `sessions` and backfill it (#3607).
+///
+/// Pre-v32, `list_sessions()` deserialised every session's full `messages`
+/// MessagePack blob solely to populate the `message_count` field in API
+/// responses. With many sessions per agent (a 100-agent x 10-session system
+/// is typical) that's a thousand multi-MB deserialisations per dashboard
+/// page load.
+///
+/// The fix is a redundant `message_count` column kept in sync inside
+/// `save_session()`. Because the writer maintains the invariant from now
+/// on, `list_sessions()` can read it directly with no blob round-trip.
+///
+/// Backfill walks every existing row, decodes the blob once, and writes
+/// the count. Rows that fail to decode (corrupt or empty blobs) are left
+/// at the column default of `0` and a warning is logged — that matches
+/// the pre-fix behaviour where `unwrap_or_default()` produced an empty
+/// `Vec<Message>` and a count of `0`. Each row commits in its own
+/// statement so the migration's memory footprint is bounded by the
+/// largest single blob, not the whole table.
+fn migrate_v32(conn: &Connection) -> Result<(), rusqlite::Error> {
+    // 1. Add the column. NOT NULL with a literal default is permitted by
+    //    SQLite for `ALTER TABLE ... ADD COLUMN`, so existing rows
+    //    immediately satisfy the constraint at `0`.
+    if !column_exists(conn, "sessions", "message_count") {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+
+    // 2. Backfill: stream rows one at a time so a database with thousands
+    //    of large blobs doesn't pin everything in RAM at once. We use a
+    //    fresh prepared statement scope so the read borrow on `conn` is
+    //    dropped before we issue the per-row UPDATE statements (rusqlite
+    //    forbids holding a `Statement` and calling `execute` on the same
+    //    `Connection` simultaneously).
+    let mut to_update: Vec<(String, Vec<u8>)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, messages FROM sessions WHERE message_count = 0 AND LENGTH(messages) > 0",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        for row in rows {
+            to_update.push(row?);
+        }
+    }
+
+    let mut decoded_ok: u64 = 0;
+    let mut decoded_err: u64 = 0;
+    for (id, blob) in to_update {
+        // Decode just enough to count entries. We use the same deserialiser
+        // that `save_session`/`get_session` use, so a row that cannot be
+        // counted here cannot be loaded as a session either — leaving
+        // `message_count = 0` for those rows preserves the pre-fix
+        // observable behaviour (`unwrap_or_default()` produced len = 0).
+        match rmp_serde::from_slice::<Vec<librefang_types::message::Message>>(&blob) {
+            Ok(messages) => {
+                let n = messages.len() as i64;
+                conn.execute(
+                    "UPDATE sessions SET message_count = ?1 WHERE id = ?2",
+                    rusqlite::params![n, id],
+                )?;
+                decoded_ok += 1;
+            }
+            Err(e) => {
+                decoded_err += 1;
+                tracing::warn!(
+                    session_id = %id,
+                    error = %e,
+                    "v32 backfill: could not decode messages blob; leaving message_count = 0",
+                );
+            }
+        }
+    }
+
+    if decoded_ok > 0 || decoded_err > 0 {
+        tracing::info!(
+            backfilled = decoded_ok,
+            skipped = decoded_err,
+            "v32 backfill: populated sessions.message_count from existing blobs (#3607)",
+        );
+    }
+
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (32, datetime('now'), 'Add message_count column to sessions and backfill from blob (#3607)')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Version 31: Bind TOTP used codes to the action they authorized (#3360).
 ///
 /// Adds a nullable `bound_to` column on `totp_used_codes` so an auditor can
@@ -1368,6 +1473,131 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bound, "approval:abc");
+    }
+
+    /// Issue #3607: v32 adds a `message_count` column on `sessions` and
+    /// backfills it from the messages blob so `list_sessions()` can read
+    /// the count directly instead of deserialising every blob.
+    #[test]
+    fn test_migrate_v32_adds_and_backfills_message_count() {
+        use librefang_types::message::Message;
+
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        assert!(column_exists(&conn, "sessions", "message_count"));
+
+        // Seed two sessions through the raw INSERT path with a messages
+        // blob holding 3 messages, deliberately leaving message_count
+        // at the default (0) — this simulates a row written by the
+        // pre-v32 writer.
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let three: Vec<Message> = vec![
+            Message::user("a"),
+            Message::assistant("b"),
+            Message::user("c"),
+        ];
+        let blob = rmp_serde::to_vec_named(&three).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sid_a = uuid::Uuid::new_v4().to_string();
+        let sid_b = uuid::Uuid::new_v4().to_string();
+        for sid in [&sid_a, &sid_b] {
+            conn.execute(
+                "INSERT INTO sessions \
+                   (id, agent_id, messages, context_window_tokens, message_count, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+                rusqlite::params![sid, agent_id, blob, now],
+            )
+            .unwrap();
+        }
+        // A third session with an undecodable blob — backfill must not
+        // abort the whole migration; that row stays at the default 0.
+        let sid_bad = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions \
+               (id, agent_id, messages, context_window_tokens, message_count, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+            rusqlite::params![sid_bad, agent_id, vec![0xff_u8, 0xff, 0xff], now],
+        )
+        .unwrap();
+
+        // Re-run the v32 backfill explicitly. `run_migrations` is a no-op
+        // at this point because `user_version` is already at the head, so
+        // we drive the backfill directly to assert it works on a
+        // pre-populated table.
+        migrate_v32(&conn).unwrap();
+
+        let count_a: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                [&sid_a],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let count_b: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                [&sid_b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let count_bad: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                [&sid_bad],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count_a, 3);
+        assert_eq!(count_b, 3);
+        assert_eq!(
+            count_bad, 0,
+            "undecodable blob must leave message_count at the default"
+        );
+    }
+
+    /// v32 must be idempotent — running it again must not double-count or
+    /// re-process rows that already have a non-zero `message_count`.
+    #[test]
+    fn test_migrate_v32_is_idempotent() {
+        use librefang_types::message::Message;
+
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let two: Vec<Message> = vec![Message::user("x"), Message::assistant("y")];
+        let blob = rmp_serde::to_vec_named(&two).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sid = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO sessions \
+               (id, agent_id, messages, context_window_tokens, message_count, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, 0, 0, ?4, ?4)",
+            rusqlite::params![sid, agent_id, blob, now],
+        )
+        .unwrap();
+
+        migrate_v32(&conn).unwrap();
+        let after_first: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                [&sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after_first, 2);
+
+        // Second pass must not change anything — the WHERE clause filters
+        // out rows with `message_count > 0`, so this row is skipped.
+        migrate_v32(&conn).unwrap();
+        let after_second: i64 = conn
+            .query_row(
+                "SELECT message_count FROM sessions WHERE id = ?1",
+                [&sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after_second, 2);
     }
 
     #[test]
