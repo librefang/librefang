@@ -6250,7 +6250,40 @@ system_prompt = "You are a helpful assistant."
                         Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                         _ => ctx.channel.clone(),
                     };
-                    SessionId::for_channel(agent_id, &scope)
+                    let derived = SessionId::for_channel(agent_id, &scope);
+                    // #3692: surface when the channel branch silently
+                    // overrides a non-default manifest `session_mode`.
+                    // Operators previously had no way to tell from logs
+                    // why their `session_mode = "new"` declaration was
+                    // not producing per-fire isolation for channel /
+                    // cron traffic. Demoted to `trace!` when the
+                    // manifest is on the default (Persistent) so the
+                    // override is observationally a no-op.
+                    let requested_mode = entry.manifest.session_mode;
+                    if matches!(
+                        requested_mode,
+                        librefang_types::agent::SessionMode::New
+                    ) {
+                        debug!(
+                            agent_id = %agent_id,
+                            effective_session_id = %derived,
+                            resolution_source = "channel-derived",
+                            requested_session_mode = ?requested_mode,
+                            channel = %ctx.channel,
+                            chat_id = ctx.chat_id.as_deref().unwrap_or(""),
+                            "session_mode override ignored: channel branch derives a deterministic SessionId::for_channel(agent, channel:chat)"
+                        );
+                    } else {
+                        tracing::trace!(
+                            agent_id = %agent_id,
+                            effective_session_id = %derived,
+                            resolution_source = "channel-derived",
+                            requested_session_mode = ?requested_mode,
+                            channel = %ctx.channel,
+                            "session resolved via channel branch"
+                        );
+                    }
+                    derived
                 }
                 // Fork calls always target the agent's canonical session —
                 // the whole point of fork mode is to share the parent turn's
@@ -7851,7 +7884,43 @@ system_prompt = "You are a helpful assistant."
                         Some(cid) if !cid.is_empty() => format!("{}:{}", ctx.channel, cid),
                         _ => ctx.channel.clone(),
                     };
-                    SessionId::for_channel(agent_id, &scope)
+                    let derived = SessionId::for_channel(agent_id, &scope);
+                    // #3692: surface when the channel branch silently
+                    // overrides a non-default manifest `session_mode`.
+                    // The `execute_llm_agent` path is reached by
+                    // channel bridges (always) and by the cron
+                    // dispatcher (synthetic `SenderContext{channel:
+                    // "cron"}`), so this is the canonical place where
+                    // the manifest declaration gets dropped on the
+                    // floor. Logged at `debug!` when the manifest /
+                    // per-trigger override actually disagrees with the
+                    // channel-derived id; `trace!` otherwise.
+                    let requested_mode =
+                        session_mode_override.unwrap_or(entry.manifest.session_mode);
+                    if matches!(
+                        requested_mode,
+                        librefang_types::agent::SessionMode::New
+                    ) {
+                        debug!(
+                            agent_id = %agent_id,
+                            effective_session_id = %derived,
+                            resolution_source = "channel-derived",
+                            requested_session_mode = ?requested_mode,
+                            channel = %ctx.channel,
+                            chat_id = ctx.chat_id.as_deref().unwrap_or(""),
+                            "session_mode override ignored: channel branch derives a deterministic SessionId::for_channel(agent, channel:chat)"
+                        );
+                    } else {
+                        tracing::trace!(
+                            agent_id = %agent_id,
+                            effective_session_id = %derived,
+                            resolution_source = "channel-derived",
+                            requested_session_mode = ?requested_mode,
+                            channel = %ctx.channel,
+                            "session resolved via channel branch"
+                        );
+                    }
+                    derived
                 }
                 _ => {
                     let mode = session_mode_override.unwrap_or(entry.manifest.session_mode);
@@ -13606,14 +13675,43 @@ system_prompt = "You are a helpful assistant."
                                 // `session_mode` so that agents with
                                 // `session_mode = "new"` in agent.toml get
                                 // per-fire isolation for cron jobs as well.
-                                let effective_session_mode = job.session_mode.or_else(|| {
-                                    kernel
-                                        .registry
-                                        .get(agent_id)
-                                        .map(|entry| entry.manifest.session_mode)
-                                });
+                                // Snapshot the manifest's declared session_mode
+                                // separately so the trace below can show what
+                                // the agent.toml actually asked for, in
+                                // addition to the per-job override.
+                                let manifest_session_mode = kernel
+                                    .registry
+                                    .get(agent_id)
+                                    .map(|entry| entry.manifest.session_mode);
+                                let effective_session_mode = job
+                                    .session_mode
+                                    .or(manifest_session_mode);
                                 let wants_new_session = effective_session_mode
                                     == Some(librefang_types::agent::SessionMode::New);
+                                // #3692: emit a structured event recording how
+                                // the cron fire's session id was resolved, so
+                                // operators can grep logs to confirm whether
+                                // their `session_mode = "new"` (per-job or
+                                // manifest) was honored — or silently ignored
+                                // because neither path set it.
+                                let resolution_source = if job.session_mode.is_some() {
+                                    "cron-job-override"
+                                } else if manifest_session_mode
+                                    == Some(librefang_types::agent::SessionMode::New)
+                                {
+                                    "cron-manifest-fallback"
+                                } else {
+                                    "cron-default-persistent"
+                                };
+                                debug!(
+                                    agent_id = %agent_id,
+                                    job = %job_name,
+                                    resolution_source = resolution_source,
+                                    job_session_mode = ?job.session_mode,
+                                    manifest_session_mode = ?manifest_session_mode,
+                                    effective_session_mode = ?effective_session_mode,
+                                    "cron session_mode resolved"
+                                );
                                 let cron_sender = SenderContext {
                                     channel: SYSTEM_CHANNEL_CRON.to_string(),
                                     user_id: job.peer_id.clone().unwrap_or_default(),

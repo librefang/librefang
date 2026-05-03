@@ -743,6 +743,36 @@ pub struct AgentManifest {
     /// Session mode for automated (non-channel) invocations.
     /// Controls whether background ticks, triggers, and `agent_send` calls
     /// reuse the agent's persistent session or create a fresh one.
+    ///
+    /// Resolved session id precedence (highest first):
+    /// 1. Explicit `session_id_override` from the dispatch caller (HTTP /
+    ///    multi-tab UIs, fork plumbing) — always wins.
+    /// 2. Per-trigger override (`Trigger.session_mode`) — honored for
+    ///    event triggers and `agent_send`.
+    /// 3. Channel branch — ALWAYS uses
+    ///    `SessionId::for_channel(agent, "channel:chat")`, overriding both
+    ///    per-trigger and manifest values whenever a non-empty
+    ///    `SenderContext.channel` is present (and `use_canonical_session`
+    ///    is false).
+    /// 4. Cron — synthesizes `SenderContext{channel:"cron"}` and takes
+    ///    the channel branch, so all cron fires for an agent share one
+    ///    `(agent, "cron")` session unless the per-job `session_mode` is
+    ///    set to `New`. The cron dispatcher sidesteps the channel branch
+    ///    by passing an explicit `session_id_override` derived from the
+    ///    job id and fire timestamp; manifest-level `session_mode = "new"`
+    ///    is also consulted as a fallback when the per-job override is
+    ///    unset.
+    /// 5. Manifest `session_mode` — final fallback; honored by event
+    ///    triggers and `agent_send` when no higher-priority signal
+    ///    applies.
+    ///
+    /// Diagnostic: when the channel branch or the cron path overrides a
+    /// non-default manifest setting, the kernel emits a
+    /// `tracing::debug!` event with `resolution_source` set to
+    /// `"channel-derived"`, `"cron-job-override"`, or
+    /// `"cron-manifest-fallback"` so operators can grep logs to confirm
+    /// why a `session_mode = "new"` declaration is or is not being
+    /// honored.
     #[serde(default)]
     pub session_mode: SessionMode,
     /// LLM model configuration.
