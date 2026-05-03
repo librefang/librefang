@@ -447,9 +447,23 @@ pub async fn agent_ws(
         }
     }
 
-    // SECURITY: Enforce per-IP WebSocket connection limit
-    let ip = addr.ip();
-    let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
+    // SECURITY: Enforce per-IP WebSocket connection limit.
+    //
+    // When the daemon sits behind a trusted reverse proxy, the TCP peer
+    // is the proxy and every browser collapses onto the same per-IP
+    // bucket. Use the configured allowlist to swap the peer for the
+    // real client IP from forwarding headers — gated on
+    // `trust_forwarded_for` AND a peer match in `trusted_proxies`, so
+    // an unproxied direct hit can never spoof. See `client_ip` module.
+    let cfg = state.kernel.config_ref();
+    let trusted = crate::client_ip::TrustedProxies::compile(&cfg.trusted_proxies);
+    let ip = crate::client_ip::resolve_real_client_ip(
+        addr.ip(),
+        &headers,
+        &trusted,
+        cfg.trust_forwarded_for,
+    );
+    let max_ws_per_ip = cfg.rate_limit.max_ws_per_ip;
 
     let guard = match try_acquire_ws_slot(ip, max_ws_per_ip) {
         Some(g) => g,

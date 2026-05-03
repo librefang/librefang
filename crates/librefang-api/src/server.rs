@@ -1215,12 +1215,24 @@ pub async fn build_router(
         audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
+    // Compile the trusted-proxies allowlist once at boot so every
+    // request middleware reuses the same parsed entries. Empty list +
+    // trust_forwarded_for=false (the defaults) keep the conservative
+    // TCP-peer-only behaviour.
+    let proxy_cfg = state.kernel.config_ref();
+    let trusted_proxies = Arc::new(crate::client_ip::TrustedProxies::compile(
+        &proxy_cfg.trusted_proxies,
+    ));
+    let trust_forwarded_for = proxy_cfg.trust_forwarded_for;
+    drop(proxy_cfg);
     // Reuse the limiter Arc already stored in AppState (created above before
     // the AppState constructor so the background GC task can share it for
     // periodic retain_recent() eviction — see #3668).
     let gcra_limiter = rate_limiter::GcraState {
         limiter: state.gcra_limiter.clone(),
         retry_after_secs: rl_cfg.retry_after_secs,
+        trusted_proxies: trusted_proxies.clone(),
+        trust_forwarded_for,
     };
     let auth_rl_max_attempts = rl_cfg.auth_rate_limit_per_ip;
 
@@ -1313,7 +1325,12 @@ pub async fn build_router(
             rate_limiter::gcra_rate_limit,
         ))
         .layer(axum::middleware::from_fn_with_state(
-            (auth_login_limiter, auth_rl_max_attempts),
+            rate_limiter::AuthRateLimitState {
+                limiter: auth_login_limiter,
+                max_attempts: auth_rl_max_attempts,
+                trusted_proxies: trusted_proxies.clone(),
+                trust_forwarded_for,
+            },
             rate_limiter::auth_rate_limit_layer,
         ))
         .layer(axum::middleware::from_fn(middleware::api_version_headers))
