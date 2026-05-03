@@ -1,0 +1,31 @@
+# Forward-compat fixture: prior major version's KernelConfig shape.
+#
+# This is the v1 layout described in
+# `crates/librefang-types/src/config/version.rs`, before the v1->v2
+# migration hoisted the `[api]` table to root-level fields. We pin a
+# narrow subset that:
+#
+#   * carries `config_version = 1` so `run_migrations` recognises it
+#   * uses the `[api] api_key / api_listen / log_level` shape that the
+#     v1->v2 migration is documented to hoist
+#   * keeps everything else minimal so the fixture tests forward-compat
+#     of the *load* path, not the schema's full surface area
+#
+# The current `KernelConfig` derives `#[serde(default)]` and does NOT
+# `deny_unknown_fields`, so this file must:
+#
+#   a) deserialise into `KernelConfig` directly (unknown `[api]` ignored,
+#      missing root fields filled from `Default`); and
+#   b) round-trip through `run_migrations` from v1 to the current
+#      `CONFIG_VERSION`, with the hoisted fields landing at root level.
+#
+# Both behaviours are pinned by `tests/idempotency.rs`. If you bump
+# `CONFIG_VERSION` past 2, leave this file alone — the whole point of
+# this fixture is to assert the *prior* major version still parses.
+
+config_version = 1
+
+[api]
+api_key = "legacy-secret-key"
+api_listen = "127.0.0.1:4545"
+log_level = "info"
