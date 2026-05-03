@@ -324,8 +324,14 @@ function useWebSocket(
   return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement, ariaNonce };
 }
 
-// Per-agent session cache — survives agent switches within the same page lifecycle
+// Per-(agent, session) message cache — survives agent/session switches within
+// the same page lifecycle. Keying by agent alone (issue #4295) returned the
+// previously-viewed session's messages whenever the user switched sessions on
+// the same agent, because the cache hit on a fresh mount didn't consult the
+// requested sessionId.
 const sessionCache = new Map<string, ChatMessage[]>();
+const cacheKey = (agentId: string, sessionId: string | null): string =>
+  `${agentId}:${sessionId ?? ""}`;
 
 // Chat message management - includes history loading and sending (with WS streaming)
 // sessionVersion: bump to force reload after session switch
@@ -401,6 +407,10 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
   // during a previous render can tell whether their target is still on screen.
   const currentAgentRef = useRef<string | null>(agentId);
   useEffect(() => { currentAgentRef.current = agentId; }, [agentId]);
+  // Track the currently-viewed sessionId too so off-screen cache writes target
+  // the right (agent, session) bucket (issue #4295).
+  const currentSessionRef = useRef<string | null>(sessionId);
+  useEffect(() => { currentSessionRef.current = sessionId; }, [sessionId]);
 
   // Route a message update to either live React state (when the target agent
   // is on screen) or straight to the session cache (when the user has
@@ -415,8 +425,16 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     if (id === currentAgentRef.current) {
       setMessages(updater);
     } else {
-      const current = sessionCache.get(id) ?? [];
-      sessionCache.set(id, updater(current));
+      // Off-screen update: route into the cache bucket for whichever session
+      // was active for that agent at the time we swapped away. We don't track
+      // per-agent session pointers, so fall back to the live currentSessionRef
+      // when the off-screen agent matches; otherwise key by agent only with an
+      // empty session segment (best-effort — the load-effect will overwrite on
+      // next view anyway).
+      const sid = id === currentAgentRef.current ? currentSessionRef.current : null;
+      const key = cacheKey(id, sid);
+      const current = sessionCache.get(key) ?? [];
+      sessionCache.set(key, updater(current));
     }
   }, []);
 
@@ -465,25 +483,27 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
 
     prevAgentRef.current = agentId;
     const ownedAgentId = agentId;
+    const ownedSessionId = sessionId;
 
     return () => {
-      sessionCache.set(ownedAgentId, messagesRef.current);
+      sessionCache.set(cacheKey(ownedAgentId, ownedSessionId), messagesRef.current);
     };
-  }, [agentId]);
+  }, [agentId, sessionId]);
 
   // Load history — use cache if available, otherwise fetch
   // sessionVersion changes force a fresh load (skip cache)
   useEffect(() => {
     if (!agentId) { setMessages([]); return; }
 
+    const key = cacheKey(agentId, sessionId);
     if (sessionVersion === 0) {
-      const cached = sessionCache.get(agentId);
+      const cached = sessionCache.get(key);
       if (cached) {
         setMessages(cached);
         return;
       }
     } else {
-      sessionCache.delete(agentId);
+      sessionCache.delete(key);
     }
 
     setMessages([]);
@@ -536,8 +556,8 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           // for loadId. Only touch live React state when the user is still
           // viewing loadId; otherwise a slow A load resolving after the
           // user has swapped to B would overwrite B's displayed messages.
-          sessionCache.set(loadId, historical);
-          if (loadId === currentAgentRef.current) {
+          sessionCache.set(cacheKey(loadId, sessionId), historical);
+          if (loadId === currentAgentRef.current && sessionId === currentSessionRef.current) {
             setMessages(historical);
           }
         }
@@ -551,7 +571,12 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
         onClearError?.(message);
       })
       .finally(() => setAgentLoading(loadId, false));
-  }, [agentId, sessionVersion]);
+    // sessionId is in the deps so picking a different session in the dropdown
+    // re-runs the loader. Without it, the navigate() URL update lands a render
+    // after setSessionVersion, but the effect doesn't re-run on that render —
+    // so the previous session's messages stay on screen until a second click
+    // bumps sessionVersion again (issue #4295, Bug A).
+  }, [agentId, sessionId, sessionVersion]);
 
   const clearHistory = useCallback(async () => {
     if (!agentId) {
@@ -560,7 +585,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     }
     try {
       await clearAgentHistory(agentId);
-      sessionCache.delete(agentId);
+      sessionCache.delete(cacheKey(agentId, sessionId));
       if (prevAgentRef.current === agentId) {
         messagesRef.current = [];
       }
@@ -568,7 +593,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
     } catch (error) {
       onClearError?.(error instanceof Error ? error.message : t("common.error"));
     }
-  }, [agentId, onClearError, t]);
+  }, [agentId, sessionId, onClearError, t]);
 
   // Send message - WS first, HTTP fallback. `attachments` is the list of
   // already-uploaded files that the agent should attach to this turn (image
@@ -2655,11 +2680,31 @@ export function ChatPage() {
   // (multi-tab safety, issue #2959); if absent, fall back to the server's
   // canonical active session so initial navigation still highlights correctly.
   const sessionsQuery = useAgentSessions(selectedAgentId);
-  const serverActiveSessionId = useMemo(() => {
-    const active = sessionsQuery.data?.find((s: SessionListItem) => s.active);
-    return active?.session_id;
+  // Fallback session pick when the URL has no `?sessionId=`. The server's
+  // `active` field is broken for trigger-driven agents using
+  // `session_mode = "new"` — the registry pointer often lands on a session
+  // not yet in the SQL listing, so zero rows report `active: true` and the
+  // chat lands with no session selected (issue #4295 Bug C, root cause #4293).
+  // Pick the most-recently-created session instead — that's what users
+  // actually want when they click an agent with many stored sessions, and it
+  // matches what the Agent detail Conversation tab does.
+  const fallbackSessionId = useMemo(() => {
+    const sessions = sessionsQuery.data;
+    if (!sessions || sessions.length === 0) return undefined;
+    let newest: SessionListItem | undefined;
+    let newestTs = -Infinity;
+    for (const s of sessions) {
+      const ts = s.created_at ? Date.parse(s.created_at) : NaN;
+      if (Number.isFinite(ts) && ts > newestTs) {
+        newestTs = ts;
+        newest = s;
+      }
+    }
+    // If no row had a parseable created_at, fall back to the first entry so
+    // the dropdown still highlights something rather than going blank.
+    return (newest ?? sessions[0]).session_id;
   }, [sessionsQuery.data]);
-  const activeSessionId = urlSessionId ?? serverActiveSessionId;
+  const activeSessionId = urlSessionId ?? fallbackSessionId;
 
   // Multi-attach SSE viewer (issue #3078). Opt-in behind ?attach=1 — the
   // server-side route ships in a separate PR; until that lands the hook
