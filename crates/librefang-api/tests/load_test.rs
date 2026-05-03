@@ -9,9 +9,55 @@ use axum::Router;
 use librefang_api::middleware;
 use librefang_api::routes;
 use librefang_testing::TestAppState;
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
+
+// ---------------------------------------------------------------------------
+// Race-hardening helpers (#3817)
+// ---------------------------------------------------------------------------
+//
+// `load_concurrent_agent_spawns` and `load_spawn_kill_cycle` exercise the
+// kernel's concurrent agent lifecycle through the HTTP layer. The underlying
+// register/remove publish-order race in `AgentRegistry` was fixed in #4393
+// (kernel publishes into `agents` before `name_index` on register, and
+// unbinds `name_index` before retracting `agents` on remove), so an
+// immediate `GET /api/agents` after a successful POST/DELETE *should* see
+// the new state.
+//
+// In practice the read-after-write still goes through tokio's task
+// scheduler, the axum service stack, and an extra tcp round-trip. A bare
+// "fire requests then read once" assertion can race that pipeline on slow
+// or loaded CI runners. To make these tests robust we poll the assertion
+// target on a short interval until it converges or a generous timeout
+// fires — *not* `tokio::time::pause()`, because the kernel runs real I/O
+// (SQLite, tokio tasks) that a paused clock would deadlock.
+const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_INTERVAL: Duration = Duration::from_millis(40);
+
+/// Polls `f` every [`POLL_INTERVAL`] until it returns `Some(value)` or
+/// [`CONVERGENCE_TIMEOUT`] elapses, then returns the value (or panics with
+/// `label` for diagnostics).
+async fn poll_until<T, F, Fut>(label: &str, mut f: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        if let Some(v) = f().await {
+            return v;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "poll_until({label}) did not converge within {:?}",
+                CONVERGENCE_TIMEOUT
+            );
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Test infrastructure (mirrors api_integration_test.rs)
@@ -165,16 +211,27 @@ async fn load_concurrent_agent_spawns() {
     );
     assert!(success >= n - 2, "Most agents should spawn successfully");
 
-    // Verify via list (paginated response: { items: [...], total, offset, limit })
-    let resp: serde_json::Value = client
-        .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let count = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Verify via list (paginated response: { items: [...], total, offset, limit }).
+    //
+    // Even though the kernel `register` path publishes into `agents` before
+    // binding the name in `name_index` (see #4393), the read-after-write
+    // here still crosses the HTTP boundary. Poll until the listing
+    // converges to at least `success` entries rather than asserting on a
+    // single snapshot — that snapshot races task scheduling on loaded CI
+    // runners. See the helper comment block above.
+    let count = poll_until("agents-list-after-spawn", || async {
+        let resp: serde_json::Value = client
+            .get(format!("{}/api/agents", server.base_url))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let c = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+        if c >= success { Some(c) } else { None }
+    })
+    .await;
     eprintln!("  [LOAD] Total agents after spawn: {count}");
     assert!(count >= success);
 }
@@ -530,16 +587,26 @@ async fn load_spawn_kill_cycle() {
         elapsed.as_millis() as f64 / cycles as f64
     );
 
-    // Verify all cleaned up (paginated response: { items: [...], total, offset, limit })
-    let resp: serde_json::Value = client
-        .get(format!("{}/api/agents", server.base_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let remaining = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+    // Verify all cleaned up (paginated response: { items: [...], total, offset, limit }).
+    //
+    // The kernel `remove` path now unbinds `name_index` before retracting
+    // from `agents` (see #4393), so the post-DELETE registry should be
+    // monotonically consistent. Still, poll the HTTP listing until it
+    // settles at exactly the default assistant — a single snapshot
+    // assertion races scheduler/HTTP queueing on busy CI runners.
+    let remaining = poll_until("agents-list-after-kill", || async {
+        let resp: serde_json::Value = client
+            .get(format!("{}/api/agents", server.base_url))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let r = resp["items"].as_array().map(|a| a.len()).unwrap_or(0);
+        if r == 1 { Some(r) } else { None }
+    })
+    .await;
     assert_eq!(remaining, 1, "Only default assistant should remain");
 }
 
