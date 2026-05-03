@@ -4152,7 +4152,15 @@ pub async fn delete_mcp_server(
     }
     drop(t);
 
-    // Clean up OAuth vault tokens, auth state, and live connections
+    // Clean up OAuth vault tokens, auth state, and live connections.
+    //
+    // #3651: replaced `let _ = vault_remove(...)` so vault crypto failures
+    // during MCP server uninstall are no longer silently dropped. Behavior
+    // is intentionally unchanged on success (uninstall continues even if a
+    // few vault entries can't be wiped — the auth state is reset
+    // unconditionally below) but each failure now produces an `audit` log
+    // line so operators can detect leftover credentials after a wrong-key
+    // boot.
     if let Some(ref url) = server_url {
         let provider = KernelOAuthProvider::new(state.kernel.home_dir().to_path_buf());
         for field in &[
@@ -4165,7 +4173,16 @@ pub async fn delete_mcp_server(
             "pkce_state",
             "redirect_uri",
         ] {
-            let _ = provider.vault_remove(&KernelOAuthProvider::vault_key(url, field));
+            let vault_key = KernelOAuthProvider::vault_key(url, field);
+            if let Err(e) = provider.vault_remove(&vault_key) {
+                tracing::error!(
+                    target: "audit",
+                    op = "vault_remove",
+                    key = %vault_key,
+                    error = %e,
+                    "vault op failed during MCP server uninstall"
+                );
+            }
         }
     }
     state

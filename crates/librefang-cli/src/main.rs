@@ -540,6 +540,27 @@ enum VaultCommands {
         /// Credential key.
         key: String,
     },
+    /// Rotate the vault master key (re-encrypt every entry with a new key).
+    ///
+    /// Recovery / hygiene workflow shipped for #3651. By default reads the
+    /// old key from `LIBREFANG_VAULT_KEY_OLD` and the new key from
+    /// `LIBREFANG_VAULT_KEY_NEW`; pass `--from-stdin` to read the new key
+    /// from stdin instead (useful when the new key cannot safely live in
+    /// the shell history). Both keys must be valid base64 of exactly
+    /// 32 bytes (`openssl rand -base64 32`).
+    ///
+    /// The vault is re-encrypted to a temp file, fsync'd, then atomically
+    /// renamed over the original — no half-rotated state on disk if the
+    /// process is killed mid-way. The startup sentinel is preserved so the
+    /// daemon will boot cleanly under the new key.
+    #[command(
+        long_about = "Rotate the vault master key (re-encrypt every entry with a new key).\n\nReads the old key from LIBREFANG_VAULT_KEY_OLD and the new key from LIBREFANG_VAULT_KEY_NEW (or from stdin with --from-stdin). Both must be base64 of exactly 32 bytes (openssl rand -base64 32).\n\nAfter a successful rotation, restart the daemon with the new LIBREFANG_VAULT_KEY set to the new value. Until you do, the daemon will refuse to boot — the startup sentinel verifies the key matches the rotated vault.\n\nExamples:\n  LIBREFANG_VAULT_KEY_OLD=$(cat .key.old) \\\n  LIBREFANG_VAULT_KEY_NEW=$(cat .key.new) \\\n    librefang vault rotate-key\n\n  echo $NEW_KEY | LIBREFANG_VAULT_KEY_OLD=$OLD_KEY librefang vault rotate-key --from-stdin"
+    )]
+    RotateKey {
+        /// Read the new key from stdin instead of `LIBREFANG_VAULT_KEY_NEW`.
+        #[arg(long)]
+        from_stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2185,6 +2206,7 @@ fn main() {
             VaultCommands::Set { key } => cmd_vault_set(&key),
             VaultCommands::List => cmd_vault_list(),
             VaultCommands::Remove { key } => cmd_vault_remove(&key),
+            VaultCommands::RotateKey { from_stdin } => cmd_vault_rotate_key(from_stdin),
         },
         Some(Commands::New { kind }) => cmd_scaffold(kind),
         // ── New commands ────────────────────────────────────────────────
@@ -9714,6 +9736,150 @@ fn cmd_vault_remove(key: &str) {
             std::process::exit(1);
         }
     }
+}
+
+/// Rotate the vault master key by re-encrypting every entry under a fresh
+/// 32-byte key. Issue #3651.
+///
+/// Source of the keys (in order):
+///   - OLD: env var `LIBREFANG_VAULT_KEY_OLD` (REQUIRED)
+///   - NEW: env var `LIBREFANG_VAULT_KEY_NEW` unless `--from-stdin` is set,
+///          in which case stdin is read until EOF and trimmed.
+///
+/// Both must be base64 of exactly 32 raw bytes (`openssl rand -base64 32`,
+/// matches `LIBREFANG_VAULT_KEY` in production). Any other length is
+/// rejected up-front before any vault state is touched.
+///
+/// On success the vault file is atomically replaced (vault.rs's `save()`
+/// already writes to `<path>.tmp` and `rename`s — re-using it gives us the
+/// atomic-swap-on-disk guarantee for free) and prints the new key fingerprint
+/// so the operator has a non-secret confirmation that the rotation took.
+fn cmd_vault_rotate_key(from_stdin: bool) {
+    use std::io::Read as _;
+    use zeroize::Zeroizing;
+
+    let home = librefang_home();
+    let vault_path = home.join("vault.enc");
+
+    // Pre-flight: vault must already exist. Refuse on missing file rather
+    // than silently `init()` — rotating a vault that was never created is
+    // a no-op masking an operator error.
+    if !vault_path.exists() {
+        ui::error(&i18n::t("vault-rotate-no-vault"));
+        std::process::exit(1);
+    }
+
+    // Read OLD key from env. Always required.
+    let old_key_b64 = match std::env::var("LIBREFANG_VAULT_KEY_OLD") {
+        Ok(s) if !s.is_empty() => Zeroizing::new(s),
+        _ => {
+            ui::error(&i18n::t("vault-rotate-old-key-missing"));
+            std::process::exit(1);
+        }
+    };
+
+    // Read NEW key from stdin or env, depending on the flag. stdin wins
+    // when `--from-stdin` is set so a key in env can't accidentally
+    // override an explicit stdin pipe.
+    let new_key_b64 = if from_stdin {
+        let mut buf = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+            ui::error(&i18n::t_args(
+                "vault-rotate-stdin-read-failed",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+        let trimmed = buf.trim().to_string();
+        if trimmed.is_empty() {
+            ui::error(&i18n::t("vault-rotate-stdin-empty"));
+            std::process::exit(1);
+        }
+        Zeroizing::new(trimmed)
+    } else {
+        match std::env::var("LIBREFANG_VAULT_KEY_NEW") {
+            Ok(s) if !s.is_empty() => Zeroizing::new(s),
+            _ => {
+                ui::error(&i18n::t("vault-rotate-new-key-missing"));
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Reject identical OLD/NEW up-front — silently no-op rotations are a
+    // footgun. (`Zeroizing<String>` derefs to `&str` so direct comparison
+    // is safe and constant-time on equal-length strings is unnecessary
+    // here: this is a configuration check, not a credential check.)
+    if old_key_b64.as_str() == new_key_b64.as_str() {
+        ui::error(&i18n::t("vault-rotate-same-key"));
+        std::process::exit(1);
+    }
+
+    // Decode both keys via the same parser the production daemon uses so
+    // any rejection here matches what the daemon will reject at boot.
+    let old_key_bytes = match librefang_extensions::vault::decode_master_key(&old_key_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "vault-rotate-old-key-invalid",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+    };
+    let new_key_bytes = match librefang_extensions::vault::decode_master_key(&new_key_b64) {
+        Ok(k) => k,
+        Err(e) => {
+            ui::error(&i18n::t_args(
+                "vault-rotate-new-key-invalid",
+                &[("error", &e.to_string())],
+            ));
+            std::process::exit(1);
+        }
+    };
+
+    // Open + unlock with OLD key. Use `unlock_with_key` so the rotation
+    // doesn't accidentally pick up a stale env / keyring value — we want
+    // the rotation to fail loudly if `LIBREFANG_VAULT_KEY_OLD` doesn't
+    // match the on-disk vault.
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+    if let Err(e) = vault.unlock_with_key(old_key_bytes) {
+        ui::error(&i18n::t_args(
+            "vault-rotate-unlock-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    // Verify (or backfill) the sentinel under the OLD key BEFORE rotating.
+    // This catches "OLD key decrypted noise" and ensures legacy vaults
+    // gain a sentinel during rotation rather than after.
+    if let Err(e) = vault.verify_or_install_sentinel() {
+        ui::error(&i18n::t_args(
+            "vault-rotate-sentinel-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    let entry_count = vault.list_keys().len();
+
+    // Re-encrypt the entire vault under the NEW key. `rewrap_with_new_key`
+    // re-uses the proven atomic save path inside vault.rs (write to
+    // `<path>.tmp`, fsync, rename) — no separate code path to maintain.
+    if let Err(e) = vault.rewrap_with_new_key(new_key_bytes) {
+        ui::error(&i18n::t_args(
+            "vault-rotate-rewrap-failed",
+            &[("error", &e.to_string())],
+        ));
+        std::process::exit(1);
+    }
+
+    ui::success(&i18n::t_args(
+        "vault-rotate-success",
+        &[("count", &entry_count.to_string())],
+    ));
+    println!("{}", i18n::t("vault-rotate-next-step"));
 }
 
 // ---------------------------------------------------------------------------

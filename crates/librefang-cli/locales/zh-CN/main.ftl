@@ -271,6 +271,19 @@ vault-store-failed = 存储失败：{ $error }
 vault-removed = 已从保险库中移除 '{ $key }'。
 vault-key-not-found = 在保险库中未找到密钥 '{ $key }'。
 vault-remove-failed = 移除失败：{ $error }
+vault-rotate-no-vault = 未找到保险库文件。请先运行 `librefang vault init`。
+vault-rotate-old-key-missing = 未设置 LIBREFANG_VAULT_KEY_OLD。请在轮换前提供当前主密钥（32 字节的 base64）。
+vault-rotate-new-key-missing = 未设置 LIBREFANG_VAULT_KEY_NEW。请提供新的主密钥（32 字节的 base64），或使用 --from-stdin 从标准输入读取。
+vault-rotate-stdin-read-failed = 从标准输入读取新密钥失败：{ $error }
+vault-rotate-stdin-empty = 从标准输入读取的新密钥为空。
+vault-rotate-same-key = LIBREFANG_VAULT_KEY_OLD 与新密钥相同 — 拒绝轮换到相同的密钥。
+vault-rotate-old-key-invalid = LIBREFANG_VAULT_KEY_OLD 不是有效的 32 字节 base64 密钥：{ $error }
+vault-rotate-new-key-invalid = 新密钥不是有效的 32 字节 base64 密钥：{ $error }
+vault-rotate-unlock-failed = 使用旧密钥解锁保险库失败：{ $error }。请检查 LIBREFANG_VAULT_KEY_OLD 是否与最初加密保险库时使用的密钥一致。
+vault-rotate-sentinel-failed = 使用旧密钥验证保险库哨兵值失败：{ $error }
+vault-rotate-rewrap-failed = 使用新密钥重新加密保险库失败：{ $error }。原始保险库文件未被修改。
+vault-rotate-success = 已使用新主密钥重新加密保险库（保留了 { $count } 条用户条目）。
+vault-rotate-next-step = 下一步：在重启守护进程前，将 LIBREFANG_VAULT_KEY 设置为新值。
 
 # --- Cron ---
 cron-created = 定时任务已创建：{ $id }

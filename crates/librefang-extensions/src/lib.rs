@@ -44,6 +44,18 @@ pub enum ExtensionError {
     Vault(String),
     #[error("Vault locked — unlock with vault key or LIBREFANG_VAULT_KEY env var")]
     VaultLocked,
+    /// The vault was opened with a key that does not match the key it was
+    /// encrypted with. Surfaced from #3651: pre-fix the daemon would silently
+    /// boot, then every subsequent vault read would error with a generic
+    /// "Decryption failed" log line — the operator never learned the root
+    /// cause was a mismatched `LIBREFANG_VAULT_KEY`.
+    ///
+    /// `hint` carries the recovery instruction for the operator (typically
+    /// "restore the original env var, or rebuild from backup"). The
+    /// boot-path translates this into a `KernelError::BootFailed` so the
+    /// daemon refuses to start instead of corrupting downstream state.
+    #[error("Vault key mismatch: {hint}")]
+    VaultKeyMismatch { hint: String },
     #[error("OAuth error: {0}")]
     OAuth(String),
     #[error("TOML parse error: {0}")]

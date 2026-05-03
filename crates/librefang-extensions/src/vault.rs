@@ -28,6 +28,26 @@ use zeroize::Zeroizing;
 /// Env var fallback for vault key.
 const VAULT_KEY_ENV: &str = "LIBREFANG_VAULT_KEY";
 
+/// Reserved vault key for the startup-validated sentinel (#3651).
+///
+/// The sentinel is a known plaintext written under this key when a vault is
+/// first created (or backfilled on the first open of a legacy vault). Every
+/// subsequent unlock reads the sentinel and verifies its plaintext matches
+/// `SENTINEL_VALUE`; any mismatch means the unlocking key does not match the
+/// key the vault was originally encrypted with, and the boot path refuses to
+/// start so encrypted credentials are not silently lost.
+///
+/// Reserved namespace: callers MUST NOT write to this key directly. The
+/// `__sentinel__` prefix matches the pattern used by other reserved internal
+/// keys (TOTP recovery codes use `_recovery_codes`, totp_confirmed, …).
+pub const SENTINEL_KEY: &str = "__sentinel__";
+
+/// Versioned sentinel plaintext (#3651). The `v1` suffix lets future format
+/// migrations detect the sentinel scheme — bumping the version in this
+/// constant without touching the verification logic would intentionally fail
+/// the comparison and force a migration code path.
+pub const SENTINEL_VALUE: &str = "librefang-vault-sentinel-v1";
+
 /// Env var that, when set to `1` or `true` (case-insensitive), forces the
 /// vault to skip the OS keyring entirely and use the AES-256-GCM-wrapped
 /// file fallback at `<data_local_dir>/librefang/.keyring` (mode 0600).
@@ -308,8 +328,15 @@ impl CredentialVault {
             kb
         };
 
-        // Create empty vault file
+        // Create empty vault file with the startup sentinel pre-written
+        // (#3651). Doing it here means every fresh vault is born with the
+        // sentinel — only legacy vaults from before this commit will need
+        // backfill at unlock time.
         self.entries.clear();
+        self.entries.insert(
+            SENTINEL_KEY.to_string(),
+            Zeroizing::new(SENTINEL_VALUE.to_string()),
+        );
         self.unlocked = true;
         self.save(&key_bytes)?;
         self.cached_key = Some(key_bytes);
@@ -341,8 +368,31 @@ impl CredentialVault {
         self.entries.get(key).cloned()
     }
 
-    /// Store a secret in the vault.
-    pub fn set(&mut self, key: String, value: Zeroizing<String>) -> ExtensionResult<()> {
+    /// Iterate over every (key, value) pair, including reserved internal
+    /// keys. Used by the `librefang vault rotate-key` workflow which has to
+    /// re-encrypt the sentinel along with every user-facing entry.
+    ///
+    /// The values are exposed as `&str` references rather than cloned
+    /// `Zeroizing<String>` to avoid an unnecessary allocation pass — the
+    /// caller is expected to feed each value straight into the new vault's
+    /// `set_internal` and drop it.
+    pub fn iter_all_entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
+    /// Internal write that bypasses the reserved-key guard in [`Self::set`].
+    ///
+    /// Sole legitimate caller is the `librefang vault rotate-key` migration:
+    /// when re-encrypting an existing vault under a new master key, the
+    /// sentinel must be carried across alongside every other entry, but
+    /// the public `set` would reject it. Marked `pub(crate)` so external
+    /// crates can't accidentally bypass the guard — the rotate-key CLI
+    /// goes through [`Self::rewrap_with_new_key`] instead.
+    pub(crate) fn set_internal(
+        &mut self,
+        key: String,
+        value: Zeroizing<String>,
+    ) -> ExtensionResult<()> {
         if !self.unlocked {
             return Err(ExtensionError::VaultLocked);
         }
@@ -351,10 +401,81 @@ impl CredentialVault {
         self.save(&master_key)
     }
 
+    /// Re-encrypt the entire vault under a new master key (#3651 rotate-key).
+    ///
+    /// Preconditions:
+    /// - The vault is currently unlocked with the OLD master key.
+    /// - The OLD vault file exists at `self.path`.
+    ///
+    /// The implementation writes the re-encrypted vault to `<path>.new`
+    /// first (atomic temp file), `fsync`s it, then renames over the
+    /// original. The sentinel is deliberately re-written so the post-
+    /// rotation vault still verifies on next boot under the new key.
+    ///
+    /// Caller is responsible for:
+    /// - Validating that `new_master_key` is a 32-byte base64 value
+    ///   (use [`crate::vault::decode_master_key`] via the public CLI
+    ///   wrapper). Garbage-in, garbage-out otherwise.
+    /// - Persisting the new key (env var, OS keyring, file fallback) so
+    ///   the daemon can read it on next boot.
+    pub fn rewrap_with_new_key(
+        &mut self,
+        new_master_key: Zeroizing<[u8; 32]>,
+    ) -> ExtensionResult<()> {
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
+        }
+        // Make sure the sentinel is present so the post-rotation vault
+        // verifies on next boot. Idempotent — a sentinel-bearing vault
+        // gets the same insert.
+        self.entries.insert(
+            SENTINEL_KEY.to_string(),
+            Zeroizing::new(SENTINEL_VALUE.to_string()),
+        );
+        // `save()` already does an atomic write via `<path>.tmp` + rename,
+        // mode 0600. Reusing it keeps the rotate-key path on the same
+        // proven IO code path — there is no separate "rotate" disk format.
+        self.save(&new_master_key)?;
+        // The cached_key now reflects the new master key for any
+        // subsequent ops on this vault instance (e.g. an immediate verify).
+        self.cached_key = Some(new_master_key);
+        Ok(())
+    }
+
+    /// Store a secret in the vault.
+    ///
+    /// Rejects writes to the reserved [`SENTINEL_KEY`] (#3651) so external
+    /// callers cannot corrupt the startup-validation contract by overwriting
+    /// the sentinel with arbitrary plaintext.
+    pub fn set(&mut self, key: String, value: Zeroizing<String>) -> ExtensionResult<()> {
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
+        }
+        if key == SENTINEL_KEY {
+            return Err(ExtensionError::Vault(format!(
+                "Refusing to write reserved key {SENTINEL_KEY}; this slot is owned by \
+                 the vault startup-validation sentinel (#3651)."
+            )));
+        }
+        self.entries.insert(key, value);
+        let master_key = self.resolve_master_key()?;
+        self.save(&master_key)
+    }
+
     /// Remove a secret from the vault.
+    ///
+    /// Rejects deletes of the reserved [`SENTINEL_KEY`] (#3651): removing the
+    /// sentinel would silently regress to the pre-#3651 behaviour where a
+    /// wrong-key boot is undetectable.
     pub fn remove(&mut self, key: &str) -> ExtensionResult<bool> {
         if !self.unlocked {
             return Err(ExtensionError::VaultLocked);
+        }
+        if key == SENTINEL_KEY {
+            return Err(ExtensionError::Vault(format!(
+                "Refusing to remove reserved key {SENTINEL_KEY}; this slot is owned by \
+                 the vault startup-validation sentinel (#3651)."
+            )));
         }
         let removed = self.entries.remove(key).is_some();
         if removed {
@@ -365,7 +486,25 @@ impl CredentialVault {
     }
 
     /// List all keys in the vault (not values).
+    ///
+    /// Reserved internal keys (e.g. the #3651 [`SENTINEL_KEY`]) are filtered
+    /// out — callers should never see them via `list_keys` or be tempted to
+    /// remove them. Use [`Self::list_keys_including_internal`] when the
+    /// caller genuinely needs every entry (e.g. the rotate-key migration).
     pub fn list_keys(&self) -> Vec<&str> {
+        self.entries
+            .keys()
+            .filter(|k| k.as_str() != SENTINEL_KEY)
+            .map(|k| k.as_str())
+            .collect()
+    }
+
+    /// List every key in the vault, including reserved internal keys.
+    ///
+    /// Used by the `librefang vault rotate-key` workflow which must
+    /// re-encrypt the sentinel along with every user-facing entry so the
+    /// post-rotation vault still verifies on next boot.
+    pub fn list_keys_including_internal(&self) -> Vec<&str> {
         self.entries.keys().map(|k| k.as_str()).collect()
     }
 
@@ -379,6 +518,69 @@ impl CredentialVault {
         self.unlocked
     }
 
+    /// Verify (or backfill) the startup sentinel introduced in #3651.
+    ///
+    /// The vault MUST already be unlocked. Behavior by sentinel state:
+    ///
+    /// - **Absent** (legacy vault written before #3651, or fresh vault that
+    ///   has not yet been initialized) → write [`SENTINEL_VALUE`] under
+    ///   [`SENTINEL_KEY`]. One-time backfill; subsequent boots will see it
+    ///   and take the verify branch.
+    /// - **Present and matches [`SENTINEL_VALUE`]** → return `Ok(())`.
+    /// - **Present but does not match** → return
+    ///   [`ExtensionError::VaultKeyMismatch`]. This is structurally
+    ///   impossible if the unlocking key is correct: AES-GCM authenticates
+    ///   every entry, so a wrong key would have already failed at `unlock()`.
+    ///   This branch only fires if a future format change writes a new
+    ///   sentinel value (e.g. `v2`) — it forces an explicit migration
+    ///   instead of a silent boot.
+    ///
+    /// This method must be called from the daemon boot path **after** every
+    /// successful `unlock()` so a fresh-install / corrupt-vault distinction
+    /// is enforced before any credential is read or written.
+    pub fn verify_or_install_sentinel(&mut self) -> ExtensionResult<()> {
+        if !self.unlocked {
+            return Err(ExtensionError::VaultLocked);
+        }
+        match self.entries.get(SENTINEL_KEY) {
+            Some(stored) if stored.as_str() == SENTINEL_VALUE => {
+                debug!("Vault sentinel verified ({SENTINEL_VALUE})");
+                Ok(())
+            }
+            Some(other) => {
+                // Sentinel present but plaintext differs from the expected
+                // value. This is NOT a wrong-key case (AES-GCM would have
+                // failed at unlock); it means the sentinel scheme has been
+                // upgraded out from under this binary. Refuse to boot rather
+                // than mix v1 and v2 sentinels in the same vault file.
+                let sample = other.as_str().chars().take(40).collect::<String>();
+                Err(ExtensionError::VaultKeyMismatch {
+                    hint: format!(
+                        "vault sentinel value differs from expected ({SENTINEL_VALUE}); \
+                         saw {sample:?}. The vault may have been written by a newer \
+                         LibreFang release. Upgrade the daemon binary or restore the \
+                         vault file from backup."
+                    ),
+                })
+            }
+            None => {
+                // Legacy / fresh vault: write the sentinel so future boots
+                // take the verify branch. Idempotent — re-running on a
+                // post-backfill vault is a no-op via the matched branch.
+                info!(
+                    "Vault sentinel missing — backfilling {SENTINEL_VALUE} \
+                     (one-time migration for vaults predating #3651)"
+                );
+                let master_key = self.resolve_master_key()?;
+                self.entries.insert(
+                    SENTINEL_KEY.to_string(),
+                    Zeroizing::new(SENTINEL_VALUE.to_string()),
+                );
+                self.save(&master_key)
+            }
+        }
+    }
+
     /// Initialize a vault with an explicit master key (for testing / programmatic use).
     pub fn init_with_key(&mut self, master_key: Zeroizing<[u8; 32]>) -> ExtensionResult<()> {
         if self.path.exists() {
@@ -386,7 +588,14 @@ impl CredentialVault {
                 "Vault already exists. Delete it first to re-initialize.".to_string(),
             ));
         }
+        // Mirror `init()`: pre-write the #3651 sentinel so the boot-path
+        // verify branch sees a valid sentinel without needing a separate
+        // backfill pass.
         self.entries.clear();
+        self.entries.insert(
+            SENTINEL_KEY.to_string(),
+            Zeroizing::new(SENTINEL_VALUE.to_string()),
+        );
         self.unlocked = true;
         self.save(&master_key)?;
         self.cached_key = Some(master_key);
@@ -417,14 +626,19 @@ impl CredentialVault {
         Ok(())
     }
 
-    /// Number of entries.
+    /// Number of user-visible entries (excludes reserved internal keys
+    /// such as the #3651 [`SENTINEL_KEY`] so a freshly-init'd vault still
+    /// reports as empty to callers).
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .keys()
+            .filter(|k| k.as_str() != SENTINEL_KEY)
+            .count()
     }
 
-    /// Whether the vault is empty.
+    /// Whether the vault is empty (ignoring reserved internal keys).
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
@@ -663,7 +877,13 @@ fn derive_key(master_key: &[u8; 32], salt: &[u8]) -> ExtensionResult<Zeroizing<[
 }
 
 /// Decode a base64 master key into raw bytes.
-fn decode_master_key(key_b64: &str) -> ExtensionResult<Zeroizing<[u8; 32]>> {
+///
+/// Public since #3651 so the `librefang vault rotate-key` CLI subcommand
+/// can validate `LIBREFANG_VAULT_KEY_OLD` / `LIBREFANG_VAULT_KEY_NEW` (or
+/// stdin-supplied values) using the exact same parser that production
+/// `unlock()` uses — guarantees that "the CLI accepted my new key" implies
+/// the daemon will accept it on next boot.
+pub fn decode_master_key(key_b64: &str) -> ExtensionResult<Zeroizing<[u8; 32]>> {
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key_b64)
         .map_err(|e| ExtensionError::Vault(format!("Key decode failed: {e}")))?;
     if bytes.len() != 32 {
@@ -2312,5 +2532,195 @@ mod tests {
     fn platform_default_skips_keyring_only_on_macos() {
         let expected = !cfg!(target_os = "macos");
         assert_eq!(default_use_os_keyring_for_platform(), expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel tests (#3651)
+    // -----------------------------------------------------------------------
+
+    /// A freshly-init'd vault has the sentinel pre-written and verifies
+    /// cleanly without any backfill.
+    #[test]
+    fn sentinel_present_after_init_with_key() {
+        let (_dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key).unwrap();
+
+        // Sentinel present in the underlying map …
+        assert_eq!(
+            vault.entries.get(SENTINEL_KEY).map(|v| v.as_str()),
+            Some(SENTINEL_VALUE),
+            "init must write the sentinel"
+        );
+        // … but hidden from list_keys / len so users still see "empty".
+        assert!(vault.list_keys().is_empty());
+        assert_eq!(vault.len(), 0);
+        assert!(vault.is_empty());
+        // verify_or_install_sentinel is a no-op on the present-and-correct path.
+        vault.verify_or_install_sentinel().unwrap();
+    }
+
+    /// A "legacy" vault (one written before #3651, simulated by deleting the
+    /// sentinel from the entries map and re-saving) gets the sentinel
+    /// backfilled on first verify call.
+    #[test]
+    fn sentinel_backfilled_on_legacy_vault() {
+        let (dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key.clone()).unwrap();
+
+        // Simulate a pre-#3651 vault: pop the sentinel and re-save with the
+        // same key. We can't go through `remove()` (which would reject the
+        // reserved key) so we reach in directly — exactly what production
+        // legacy vaults look like on disk.
+        vault.entries.remove(SENTINEL_KEY);
+        let mk = vault.resolve_master_key().unwrap();
+        vault.save(&mk).unwrap();
+        drop(vault);
+
+        // Re-open as a fresh instance and run the verify-or-install path.
+        let mut vault2 = CredentialVault::new(dir.path().join("vault.enc"));
+        vault2.unlock_with_key(key.clone()).unwrap();
+        assert!(
+            vault2.entries.get(SENTINEL_KEY).is_none(),
+            "precondition: simulated legacy vault must have no sentinel"
+        );
+        vault2.verify_or_install_sentinel().unwrap();
+        assert_eq!(
+            vault2.entries.get(SENTINEL_KEY).map(|v| v.as_str()),
+            Some(SENTINEL_VALUE),
+            "backfill must persist the sentinel in memory"
+        );
+
+        // Re-open *again* — sentinel must now be on disk.
+        drop(vault2);
+        let mut vault3 = CredentialVault::new(dir.path().join("vault.enc"));
+        vault3.unlock_with_key(key).unwrap();
+        assert_eq!(
+            vault3.entries.get(SENTINEL_KEY).map(|v| v.as_str()),
+            Some(SENTINEL_VALUE),
+            "backfill must persist the sentinel to disk"
+        );
+    }
+
+    /// A sentinel whose plaintext disagrees with `SENTINEL_VALUE` triggers
+    /// `VaultKeyMismatch`. This is the "future scheme version" branch — a
+    /// wrong-key boot would already have failed at AES-GCM decrypt time.
+    #[test]
+    fn sentinel_mismatch_returns_vault_key_mismatch() {
+        let (_dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key).unwrap();
+
+        // Tamper with the sentinel plaintext to simulate a future v2 sentinel.
+        vault.entries.insert(
+            SENTINEL_KEY.to_string(),
+            Zeroizing::new("librefang-vault-sentinel-v999".to_string()),
+        );
+
+        let err = vault.verify_or_install_sentinel().unwrap_err();
+        match err {
+            ExtensionError::VaultKeyMismatch { hint } => {
+                assert!(
+                    hint.contains("sentinel"),
+                    "hint should mention the sentinel, got: {hint}"
+                );
+            }
+            other => panic!("expected VaultKeyMismatch, got {other:?}"),
+        }
+    }
+
+    /// External callers must not be able to overwrite the sentinel via the
+    /// public `set` API — that would silently regress the boot-validation
+    /// contract.
+    #[test]
+    fn set_rejects_reserved_sentinel_key() {
+        let (_dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key).unwrap();
+
+        let err = vault
+            .set(
+                SENTINEL_KEY.to_string(),
+                Zeroizing::new("attacker-controlled".to_string()),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ExtensionError::Vault(ref m) if m.contains("Refusing to write reserved key")),
+            "set must reject SENTINEL_KEY, got: {err:?}"
+        );
+    }
+
+    /// External callers must not be able to remove the sentinel via the
+    /// public `remove` API.
+    #[test]
+    fn remove_rejects_reserved_sentinel_key() {
+        let (_dir, mut vault) = test_vault();
+        let key = random_key();
+        vault.init_with_key(key).unwrap();
+
+        let err = vault.remove(SENTINEL_KEY).unwrap_err();
+        assert!(
+            matches!(err, ExtensionError::Vault(ref m) if m.contains("Refusing to remove reserved key")),
+            "remove must reject SENTINEL_KEY, got: {err:?}"
+        );
+        // Sentinel must still be present after the rejected remove.
+        assert!(vault.entries.contains_key(SENTINEL_KEY));
+    }
+
+    /// `rewrap_with_new_key` re-encrypts every entry including the sentinel
+    /// so the rotated vault verifies on next boot under the new key.
+    #[test]
+    fn rewrap_with_new_key_preserves_entries_and_sentinel() {
+        let (dir, mut vault) = test_vault();
+        let key_old = random_key();
+        let key_new = random_key();
+        assert_ne!(key_old.as_ref(), key_new.as_ref());
+
+        vault.init_with_key(key_old.clone()).unwrap();
+        vault
+            .set("API_KEY".to_string(), Zeroizing::new("secret-1".to_string()))
+            .unwrap();
+        vault
+            .set("DB_URL".to_string(), Zeroizing::new("secret-2".to_string()))
+            .unwrap();
+
+        // Rotate to the new key.
+        vault.rewrap_with_new_key(key_new.clone()).unwrap();
+        drop(vault);
+
+        // New key must work and recover every entry.
+        let mut vault2 = CredentialVault::new(dir.path().join("vault.enc"));
+        vault2.unlock_with_key(key_new).unwrap();
+        assert_eq!(vault2.get("API_KEY").unwrap().as_str(), "secret-1");
+        assert_eq!(vault2.get("DB_URL").unwrap().as_str(), "secret-2");
+        // Sentinel survived the rotation.
+        vault2.verify_or_install_sentinel().unwrap();
+
+        // Old key must NO LONGER work — the file has been re-encrypted.
+        let mut vault3 = CredentialVault::new(dir.path().join("vault.enc"));
+        assert!(
+            vault3.unlock_with_key(key_old).is_err(),
+            "rotated vault must reject the old master key"
+        );
+    }
+
+    /// `iter_all_entries` exposes the sentinel so the rotate-key migration
+    /// can reason about the full set of slots; `list_keys` does not.
+    #[test]
+    fn iter_all_entries_includes_sentinel_but_list_keys_does_not() {
+        let (_dir, mut vault) = test_vault();
+        vault.init_with_key(random_key()).unwrap();
+        vault
+            .set("USER_KEY".to_string(), Zeroizing::new("v".to_string()))
+            .unwrap();
+
+        let all: Vec<&str> = vault.iter_all_entries().map(|(k, _)| k).collect();
+        assert!(all.contains(&SENTINEL_KEY));
+        assert!(all.contains(&"USER_KEY"));
+
+        let user_visible = vault.list_keys();
+        assert!(!user_visible.contains(&SENTINEL_KEY));
+        assert!(user_visible.contains(&"USER_KEY"));
     }
 }

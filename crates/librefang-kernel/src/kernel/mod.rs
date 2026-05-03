@@ -2397,6 +2397,74 @@ impl LibreFangKernel {
         // path that touches MCP OAuth tokens. Idempotent: first call wins.
         librefang_extensions::vault::CredentialVault::init_with_config(config.vault.use_os_keyring);
 
+        // Vault startup-sentinel verification (#3651).
+        //
+        // If a vault file already exists, refuse to boot when it cannot be
+        // unlocked with the resolved master key OR when the sentinel
+        // plaintext does not match. Pre-fix, the daemon would silently
+        // boot with the wrong key and every subsequent vault read would
+        // fail with a generic "Decryption failed" log line — operators
+        // never learned the root cause. The sentinel turns that into a
+        // single, actionable error at boot time.
+        //
+        // If the vault does not yet exist we say nothing — first-run / CLI
+        // bootstrap creates it later via `init()`, which writes the
+        // sentinel automatically.
+        let vault_path = config.home_dir.join("vault.enc");
+        if vault_path.exists() {
+            let mut vault =
+                librefang_extensions::vault::CredentialVault::new(vault_path.clone());
+            match vault.unlock() {
+                Ok(()) => {
+                    if let Err(e) = vault.verify_or_install_sentinel() {
+                        match e {
+                            librefang_extensions::ExtensionError::VaultKeyMismatch { hint } => {
+                                return Err(KernelError::BootFailed(format!(
+                                    "Vault key mismatch — refusing to boot. {hint} \
+                                     Recovery: restore the original LIBREFANG_VAULT_KEY env var, \
+                                     restore the vault file from backup, or run \
+                                     `librefang vault rotate-key` if you intended to rotate."
+                                )));
+                            }
+                            other => {
+                                // Sentinel backfill failed for some other
+                                // reason (disk full, permissions). Surface
+                                // it but don't pretend it's a key mismatch.
+                                return Err(KernelError::BootFailed(format!(
+                                    "Vault sentinel write failed: {other}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                Err(librefang_extensions::ExtensionError::VaultLocked) => {
+                    // No master key available at all — don't refuse boot
+                    // (some deployments run without a vault and rely on env
+                    // vars), but warn loudly so the operator notices the
+                    // mismatch between "vault file exists" and "no key".
+                    warn!(
+                        "Vault file exists at {:?} but no master key is \
+                         resolvable (LIBREFANG_VAULT_KEY unset and OS keyring \
+                         empty). Encrypted credentials will be unreadable until \
+                         the key is restored.",
+                        vault_path
+                    );
+                }
+                Err(e) => {
+                    // Non-locked unlock failure is almost always wrong-key
+                    // (AES-GCM decrypt fails). Refuse to boot — same
+                    // rationale as the sentinel-mismatch branch above.
+                    return Err(KernelError::BootFailed(format!(
+                        "Vault unlock failed at boot ({e}). This usually means \
+                         LIBREFANG_VAULT_KEY does not match the key the vault \
+                         was encrypted with. Recovery: restore the original \
+                         env var, restore the vault file from backup, or run \
+                         `librefang vault rotate-key` if you intended to rotate."
+                    )));
+                }
+            }
+        }
+
         match config.mode {
             KernelMode::Stable => {
                 info!("Booting LibreFang kernel in STABLE mode — conservative defaults enforced");

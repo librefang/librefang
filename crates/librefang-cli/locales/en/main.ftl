@@ -271,6 +271,19 @@ vault-store-failed = Failed to store: { $error }
 vault-removed = Removed '{ $key }' from vault.
 vault-key-not-found = Key '{ $key }' not found in vault.
 vault-remove-failed = Failed to remove: { $error }
+vault-rotate-no-vault = No vault file found. Run `librefang vault init` first.
+vault-rotate-old-key-missing = LIBREFANG_VAULT_KEY_OLD not set. Provide the current master key (base64 of 32 bytes) before rotating.
+vault-rotate-new-key-missing = LIBREFANG_VAULT_KEY_NEW not set. Provide the new master key (base64 of 32 bytes), or pass --from-stdin to read it from stdin.
+vault-rotate-stdin-read-failed = Failed to read new key from stdin: { $error }
+vault-rotate-stdin-empty = New key read from stdin was empty.
+vault-rotate-same-key = LIBREFANG_VAULT_KEY_OLD and the new key are identical — refusing to rotate to the same key.
+vault-rotate-old-key-invalid = LIBREFANG_VAULT_KEY_OLD is not a valid 32-byte base64 key: { $error }
+vault-rotate-new-key-invalid = New key is not a valid 32-byte base64 key: { $error }
+vault-rotate-unlock-failed = Failed to unlock vault with the OLD key: { $error }. Check LIBREFANG_VAULT_KEY_OLD matches the key the vault was originally encrypted with.
+vault-rotate-sentinel-failed = Vault sentinel verification failed under the OLD key: { $error }
+vault-rotate-rewrap-failed = Failed to re-encrypt vault under the new key: { $error }. The original vault file is unchanged.
+vault-rotate-success = Vault re-encrypted under the new master key ({ $count } user entries preserved).
+vault-rotate-next-step = Next: set LIBREFANG_VAULT_KEY to the new value before restarting the daemon.
 
 # --- Cron ---
 cron-created = Cron job created: { $id }
