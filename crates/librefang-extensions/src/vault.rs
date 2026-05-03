@@ -388,6 +388,7 @@ impl CredentialVault {
     /// the public `set` would reject it. Marked `pub(crate)` so external
     /// crates can't accidentally bypass the guard — the rotate-key CLI
     /// goes through [`Self::rewrap_with_new_key`] instead.
+    #[expect(dead_code, reason = "public-crate hook for rotate-key migration; see doc above")]
     pub(crate) fn set_internal(
         &mut self,
         key: String,
