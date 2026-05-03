@@ -469,11 +469,6 @@ fn classify_audit_level(action: &str) -> &'static str {
 }
 
 // ─── Agent Bindings API ────────────────────────────────────────────────
-// These were originally interleaved with the webhook + chat-command
-// handlers; the #3749 4/N extraction (`hooks_commands.rs`) accidentally
-// swept them out alongside the hooks/commands functions even though they
-// are unrelated. Restored here so `system.rs::router()` keeps wiring the
-// `/bindings` and `/queue/status` routes against real handlers.
 
 /// GET /api/bindings — List all agent bindings.
 #[utoipa::path(get, path = "/api/bindings", tag = "system", responses((status = 200, description = "List key bindings", body = Vec<serde_json::Value>)))]
