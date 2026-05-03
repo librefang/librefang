@@ -944,7 +944,7 @@ pub async fn save_workflow_as_template(
         }
     };
 
-    let template = state.kernel.workflow_to_template(&workflow);
+    let template = workflow.to_template();
 
     // Persist template to TOML file under the active kernel home directory.
     let templates_dir = state.kernel.home_dir().join("workflows").join("templates");
