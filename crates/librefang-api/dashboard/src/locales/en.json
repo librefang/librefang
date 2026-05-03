@@ -2149,6 +2149,7 @@
     "info_provider": "Provider",
     "info_state": "State",
     "ws_not_connected": "WebSocket not connected. Please refresh the page.",
+    "command_timeout": "Command timed out or connection dropped — please try again.",
     "delete_session": "Delete session",
     "export": "Export",
     "export_markdown": "Export as Markdown",
