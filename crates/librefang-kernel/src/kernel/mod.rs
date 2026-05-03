@@ -1916,6 +1916,23 @@ impl LibreFangKernel {
             .map(|e| e.value().clone())
     }
 
+    /// First currently-active `(parent_session_id, parent_interrupt)` pair
+    /// for `agent_id`. Same DashMap-iteration-order semantics as
+    /// [`Self::any_session_interrupt_for_agent`], but also returns the
+    /// session key the interrupt was registered under so fork-spawn sites
+    /// can pin themselves to the parent turn's actual session — rather
+    /// than re-reading `entry.session_id`, which is a TOCTOU race against
+    /// `switch_agent_session` (#4291).
+    pub(crate) fn any_session_interrupt_with_id_for_agent(
+        &self,
+        agent_id: AgentId,
+    ) -> Option<(SessionId, librefang_runtime::interrupt::SessionInterrupt)> {
+        self.session_interrupts
+            .iter()
+            .find(|e| e.key().0 == agent_id)
+            .map(|e| (e.key().1, e.value().clone()))
+    }
+
     /// Per-agent decision traces.
     #[inline]
     pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
@@ -5176,6 +5193,7 @@ system_prompt = "You are a helpful assistant."
                 max_iterations: self.config.load().agent_max_iterations,
                 max_history_messages: self.config.load().max_history_messages,
                 aux_client: Some(self.aux_client.load_full()),
+                parent_session_id: None,
             },
         )
         .await
@@ -6012,9 +6030,24 @@ system_prompt = "You are a helpful assistant."
         // shared Arc<AtomicBool> still work — `stop_agent_run(agent_id)`
         // fans out across all sessions, so no matter which entry we
         // borrowed from, the cascade reaches this fork.
-        let interrupt = self
-            .any_session_interrupt_for_agent(agent_id)
-            .unwrap_or_default();
+        //
+        // We also snapshot the parent session id from the same lookup so
+        // the kernel's session resolver can pin the fork to the parent
+        // turn's session for prompt-cache alignment, instead of
+        // re-reading `entry.session_id` later (which is mutable by
+        // `switch_agent_session`, producing a TOCTOU race — #4291). When
+        // no parent loop is in flight, fall back to the registry pointer
+        // — the only signal we have, and the fork will create/resume
+        // that session on its own.
+        let (parent_session_id, interrupt) = match self
+            .any_session_interrupt_with_id_for_agent(agent_id)
+        {
+            Some((sid, intr)) => (sid, intr),
+            None => (
+                entry.session_id,
+                librefang_runtime::interrupt::SessionInterrupt::default(),
+            ),
+        };
         let loop_opts = librefang_runtime::agent_loop::LoopOptions {
             is_fork: true,
             allowed_tools,
@@ -6022,6 +6055,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: Some(parent_session_id),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -6093,6 +6127,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: None,
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -6252,20 +6287,36 @@ system_prompt = "You are a helpful assistant."
                     };
                     SessionId::for_channel(agent_id, &scope)
                 }
-                // Fork calls always target the agent's canonical session —
-                // the whole point of fork mode is to share the parent turn's
+                // Fork calls always target the parent turn's session — the
+                // whole point of fork mode is to share the parent's
                 // context (and therefore its prompt-cache prefix). An agent
                 // with `session_mode = "new"` would otherwise land on
                 // `SessionId::new()` here, producing a fresh empty session
                 // and breaking cache alignment. Force Persistent for forks
                 // regardless of manifest.
                 //
+                // We read the parent session id from `loop_opts`, NOT from
+                // `entry.session_id`. The registry pointer is mutable by
+                // `switch_agent_session` / `update_session_id` and can flip
+                // between parent loop start and fork spawn, sending the
+                // fork to the wrong session and polluting that session's
+                // history (#4291). The fork-spawn site
+                // (`run_forked_agent_streaming`) snapshots the parent
+                // session at fork-construction time and threads it through
+                // `LoopOptions::parent_session_id`.
+                //
                 // NOTE: an explicit `session_id_override` (above) wins over
                 // this branch — if you ever plumb an override through a fork
                 // caller, prompt-cache alignment WILL break. The current
                 // `run_forked_agent_streaming` deliberately passes `None` to
                 // preserve this invariant.
-                _ if loop_opts.is_fork => entry.session_id,
+                _ if loop_opts.is_fork => loop_opts.parent_session_id.ok_or_else(|| {
+                    KernelError::LibreFang(LibreFangError::Internal(
+                        "fork loop_opts missing parent_session_id (must be set by \
+                         run_forked_agent_streaming before reaching the session resolver)"
+                            .to_string(),
+                    ))
+                })?,
                 _ => match entry.manifest.session_mode {
                     librefang_types::agent::SessionMode::Persistent => entry.session_id,
                     librefang_types::agent::SessionMode::New => SessionId::new(),
@@ -8413,6 +8464,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            parent_session_id: None,
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

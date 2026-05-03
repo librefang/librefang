@@ -3907,6 +3907,176 @@ fn test_fork_does_not_overwrite_parent_registration() {
     kernel.shutdown();
 }
 
+/// Regression for #4291. The previous fork-spawn site read
+/// `entry.session_id` from the agent registry to decide which session
+/// the fork should land on — but `entry.session_id` is mutable by
+/// `switch_agent_session` (`POST /api/agents/{id}/sessions/{sid}/switch`),
+/// which any dashboard tab can call mid-turn. A fork emitted between
+/// the parent's `effective_session_id` resolution and the fork-spawn
+/// lookup would read the *new* registry pointer and pollute the wrong
+/// session's history, breaking prompt-cache alignment.
+///
+/// The fix snapshots the parent session id at fork construction time
+/// (from `session_interrupts`, which is keyed by the parent's actual
+/// `effective_session_id`) and threads it through
+/// `LoopOptions::parent_session_id`. The session resolver in
+/// `send_message_streaming_with_sender_and_opts` reads
+/// `loop_opts.parent_session_id` for forks and never re-touches
+/// `entry.session_id`.
+///
+/// This test exercises the snapshot primitive: register a parent
+/// interrupt for `(agent, X)`, mutate the registry to point at `Y`
+/// via `update_session_id`, then re-snapshot via
+/// `any_session_interrupt_with_id_for_agent`. The snapshot must still
+/// return `X` — the helper reads the in-flight interrupt map, not the
+/// registry pointer, so a concurrent `switch_agent_session` cannot
+/// drag the fork onto the wrong session.
+#[test]
+fn fork_session_snapshot_is_unaffected_by_registry_mutation_4291() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-fork-toctou-4291");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    let kernel = LibreFangKernel::boot_with_config(KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    })
+    .expect("kernel should boot");
+
+    // Register a real agent so `update_session_id` can find it. The
+    // initial entry.session_id is `parent_session` — what the parent
+    // turn was actually invoked with.
+    let agent_id = AgentId::new();
+    let parent_session = SessionId::new();
+    let entry = librefang_types::agent::AgentEntry {
+        id: agent_id,
+        name: format!("toctou-agent-{}", agent_id),
+        manifest: librefang_types::agent::AgentManifest {
+            name: format!("toctou-agent-{}", agent_id),
+            description: "test".into(),
+            author: "test".into(),
+            module: "test".into(),
+            ..Default::default()
+        },
+        state: librefang_types::agent::AgentState::Running,
+        mode: librefang_types::agent::AgentMode::default(),
+        created_at: chrono::Utc::now(),
+        last_active: chrono::Utc::now(),
+        parent: None,
+        children: vec![],
+        session_id: parent_session,
+        tags: vec![],
+        identity: Default::default(),
+        onboarding_completed: false,
+        onboarding_completed_at: None,
+        source_toml_path: None,
+        is_hand: false,
+        ..Default::default()
+    };
+    kernel.registry.register(entry).expect("register agent");
+
+    // Simulate the parent loop being mid-turn: insert its interrupt
+    // under `(agent, parent_session)`, exactly as
+    // `send_message_streaming_with_sender_and_opts` does at the
+    // `if !loop_opts.is_fork` register block. This is what the fork-
+    // spawn site uses to discover which session to land on.
+    let parent_interrupt = librefang_runtime::interrupt::SessionInterrupt::new();
+    kernel
+        .session_interrupts
+        .insert((agent_id, parent_session), parent_interrupt.clone());
+
+    // Pre-mutation snapshot: helper must return the parent session.
+    let (snapshot_sid_before, _) = kernel
+        .any_session_interrupt_with_id_for_agent(agent_id)
+        .expect("parent loop must be discoverable via session_interrupts");
+    assert_eq!(
+        snapshot_sid_before, parent_session,
+        "fork-spawn snapshot must return the session the parent loop is actually \
+         running on, not whatever the registry currently points at"
+    );
+
+    // Now do exactly what the dashboard's Sessions-page Play button
+    // (or any other `switch_agent_session` caller) would do mid-turn:
+    // mutate the registry pointer to a *different* session.
+    let switched_session = SessionId::new();
+    assert_ne!(switched_session, parent_session);
+    kernel
+        .registry
+        .update_session_id(agent_id, switched_session)
+        .expect("update_session_id");
+
+    // Sanity: the registry pointer really did flip.
+    let entry_after = kernel
+        .registry
+        .get(agent_id)
+        .expect("agent still registered");
+    assert_eq!(
+        entry_after.session_id, switched_session,
+        "registry mutation must have taken effect — otherwise this test \
+         is not actually exercising the TOCTOU window"
+    );
+
+    // Critical assertion: the fork-spawn snapshot is UNCHANGED. The
+    // helper reads the in-flight interrupt map (parent's actual
+    // session), not the now-stale registry pointer. The fork plumbed
+    // through `LoopOptions::parent_session_id` would therefore land on
+    // `parent_session`, NOT `switched_session`.
+    let (snapshot_sid_after, _) = kernel
+        .any_session_interrupt_with_id_for_agent(agent_id)
+        .expect("parent loop must still be discoverable after registry mutation");
+    assert_eq!(
+        snapshot_sid_after, parent_session,
+        "fork-spawn snapshot must NOT follow registry mutations — that is the \
+         whole TOCTOU race in #4291. Got {:?}, expected {:?}",
+        snapshot_sid_after, parent_session
+    );
+
+    // Belt-and-braces: the canonical fork-time `LoopOptions` carries
+    // exactly this snapshot, so a fork constructed *after* the
+    // registry flip still targets the parent's session. Build the
+    // options the same way `run_forked_agent_streaming` does and
+    // assert.
+    let loop_opts = librefang_runtime::agent_loop::LoopOptions {
+        is_fork: true,
+        parent_session_id: Some(snapshot_sid_after),
+        ..Default::default()
+    };
+    assert_eq!(
+        loop_opts.parent_session_id,
+        Some(parent_session),
+        "fork LoopOptions must carry the parent's actual session id, \
+         not the post-mutation registry pointer"
+    );
+    assert_ne!(
+        loop_opts.parent_session_id,
+        Some(switched_session),
+        "fork LoopOptions must not have followed the registry switch"
+    );
+
+    kernel.shutdown();
+}
+
+/// Default `LoopOptions` must have `parent_session_id == None`, and
+/// non-fork construction sites that don't set it explicitly inherit
+/// the default. The session resolver MUST refuse to read this field
+/// when `is_fork = false` — that contract is asserted at the resolver
+/// arm. This test just pins the default value so a future refactor of
+/// `LoopOptions::Default` doesn't accidentally start sending forks to
+/// a stale id.
+#[test]
+fn loop_options_default_has_no_parent_session_id_4291() {
+    let opts = librefang_runtime::agent_loop::LoopOptions::default();
+    assert!(
+        opts.parent_session_id.is_none(),
+        "LoopOptions::default() must leave parent_session_id unset; \
+         only run_forked_agent_streaming should populate it"
+    );
+    assert!(
+        !opts.is_fork,
+        "LoopOptions::default() must be a non-fork main turn"
+    );
+}
+
 /// `agent_concurrency_for` resolves a `New`-mode manifest with
 /// `max_concurrent_invocations = 4` to a 4-permit semaphore — the
 /// happy path for parallel trigger fires.
