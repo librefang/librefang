@@ -1216,6 +1216,142 @@ impl MemorySubstrate {
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
+
+    // -----------------------------------------------------------------
+    // Async wrappers for sync substrate methods invoked from tokio tasks.
+    //
+    // Each wrapper here moves the std::Mutex<Connection> acquisition onto
+    // tokio's blocking thread pool (#3378). Without it, slow INSERTs
+    // (FTS5 tokenization, transactional cascades, large UPDATE plans) would
+    // park whichever tokio worker thread was running the future, stalling
+    // every other future scheduled on that worker until the blocking I/O
+    // completed. The underlying sync methods are kept verbatim — they are
+    // still used by tests, migrations, and other non-async paths.
+    // -----------------------------------------------------------------
+
+    /// Async wrapper for [`Self::save_agent`].
+    pub async fn save_agent_async(&self, entry: &AgentEntry) -> LibreFangResult<()> {
+        let store = self.structured.clone();
+        let entry = entry.clone();
+        tokio::task::spawn_blocking(move || store.save_agent(&entry))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::load_all_agents`].
+    pub async fn load_all_agents_async(&self) -> LibreFangResult<Vec<AgentEntry>> {
+        let store = self.structured.clone();
+        tokio::task::spawn_blocking(move || store.load_all_agents())
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::remove_agent`].
+    pub async fn remove_agent_async(&self, agent_id: AgentId) -> LibreFangResult<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let id = agent_id.0.to_string();
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            crate::session::execute_session_agent_deletes(&tx, &id)?;
+            crate::structured::execute_structured_agent_deletes(&tx, &id)?;
+            tx.commit()
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::structured_get`].
+    pub async fn structured_get_async(
+        &self,
+        agent_id: AgentId,
+        key: &str,
+    ) -> LibreFangResult<Option<serde_json::Value>> {
+        let store = self.structured.clone();
+        let key = key.to_string();
+        tokio::task::spawn_blocking(move || store.get(agent_id, &key))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::get_session`].
+    pub async fn get_session_async(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<Session>> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.get_session(session_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::get_agent_session_ids`].
+    pub async fn get_agent_session_ids_async(
+        &self,
+        agent_id: AgentId,
+    ) -> LibreFangResult<Vec<SessionId>> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.get_agent_session_ids(agent_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::delete_canonical_session`].
+    pub async fn delete_canonical_session_async(&self, agent_id: AgentId) -> LibreFangResult<()> {
+        let store = self.sessions.clone();
+        tokio::task::spawn_blocking(move || store.delete_canonical_session(agent_id))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::append_canonical`].
+    pub async fn append_canonical_async(
+        &self,
+        agent_id: AgentId,
+        messages: &[librefang_types::message::Message],
+        compaction_threshold: Option<usize>,
+        session_id: Option<SessionId>,
+    ) -> LibreFangResult<()> {
+        let store = self.sessions.clone();
+        let messages = messages.to_vec();
+        tokio::task::spawn_blocking(move || {
+            store.append_canonical(agent_id, &messages, compaction_threshold, session_id)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Async wrapper for [`Self::vacuum_if_shrank`]. VACUUM rewrites the
+    /// whole DB file and can take seconds — keeping it on the blocking
+    /// pool is even more important than for the small CRUD wrappers above.
+    pub async fn vacuum_if_shrank_async(&self, pruned_count: usize) -> LibreFangResult<()> {
+        if pruned_count == 0 {
+            return Ok(());
+        }
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> LibreFangResult<()> {
+            let conn = conn
+                .lock()
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                tracing::warn!(error = %e, "WAL checkpoint before VACUUM failed; continuing");
+            }
+            tracing::info!(pruned_count, "Running VACUUM after session prune");
+            if let Err(e) = conn.execute_batch("VACUUM;") {
+                tracing::warn!(error = %e, "VACUUM after session prune failed");
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
 }
 
 #[async_trait]
@@ -1925,5 +2061,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fts_count, 0, "sessions_fts must cascade-delete");
+    }
+
+    /// #3378: each `_async` substrate wrapper must offload its
+    /// `std::sync::Mutex<Connection>` acquisition to tokio's blocking
+    /// pool. This test holds the connection mutex from a non-tokio OS
+    /// thread, then drives a wrapper from a `current_thread` runtime.
+    /// If the wrapper took the lock on the runtime worker (the pre-fix
+    /// kernel pattern), the spawned task would block for the full hold
+    /// time AND a concurrently-scheduled `tokio::time::sleep` on the
+    /// same runtime would never tick — the runtime has only one worker
+    /// thread, the test thread itself. Putting the lock behind
+    /// `spawn_blocking` lets the worker pump other futures while the
+    /// DB I/O runs on a dedicated thread.
+    #[test]
+    fn async_wrappers_do_not_park_current_thread_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+            let entry = AgentEntry {
+                id: AgentId::new(),
+                name: "starvation-test".to_string(),
+                session_id: SessionId::new(),
+                ..Default::default()
+            };
+
+            // Round-trip through save_agent_async + load_all_agents_async
+            // first to confirm the wrappers persist correctly before we
+            // assert on scheduling behaviour.
+            substrate.save_agent_async(&entry).await.unwrap();
+            let loaded = substrate.load_all_agents_async().await.unwrap();
+            assert_eq!(loaded.len(), 1);
+            assert_eq!(loaded[0].name, "starvation-test");
+
+            // Saturate the connection mutex from outside tokio for ~30 ms.
+            let conn = Arc::clone(&substrate.conn);
+            let blocker_holds = Arc::new(std::sync::Barrier::new(2));
+            let blocker_holds_inner = Arc::clone(&blocker_holds);
+            let blocker = std::thread::spawn(move || {
+                let _g = conn.lock().expect("conn mutex");
+                blocker_holds_inner.wait();
+                std::thread::sleep(std::time::Duration::from_millis(30));
+            });
+            blocker_holds.wait();
+
+            // While the mutex is held, kick off a wrapper that wants
+            // it. With spawn_blocking it parks on the blocking pool,
+            // not the runtime. The runtime stays free to drive the
+            // sleep below.
+            let s = Arc::clone(&substrate);
+            let mut entry2 = entry.clone();
+            entry2.id = AgentId::new();
+            entry2.name = "starvation-test-2".to_string();
+            let pending = tokio::spawn(async move { s.save_agent_async(&entry2).await });
+
+            let started = std::time::Instant::now();
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let sleep_elapsed = started.elapsed();
+
+            pending.await.unwrap().unwrap();
+            blocker.join().unwrap();
+
+            assert!(
+                sleep_elapsed < std::time::Duration::from_millis(25),
+                "runtime parked on the connection mutex (#3378): \
+                 5 ms sleep took {sleep_elapsed:?}"
+            );
+        });
     }
 }
