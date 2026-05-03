@@ -74,7 +74,13 @@ jobs:
           # Boolean flags — `grep -q` against the diff filenames.
           has() { printf '%s\n' "$CHANGED" | grep -qE "$1"; }
 
-          RUST=false;    has '^(crates/|Cargo\.toml$|Cargo\.lock$|xtask/)'            && RUST=true
+          # `openapi.json` and `sdk/` are tracked outputs of `cargo xtask
+          # codegen --openapi` + `scripts/codegen-sdks.py`. A manual edit
+          # to either (without a corresponding source change) is a drift
+          # vector that the local hook used to catch. Now that pre-push
+          # no longer runs codegen, fold those paths into RUST so the
+          # `openapi-drift` job still gates direct edits.
+          RUST=false;    has '^(crates/|Cargo\.(toml|lock)$|xtask/|openapi\.json$|sdk/)' && RUST=true
           DOCS=false;    has '^(docs/|.*\.md$)'                                       && DOCS=true
           CI=false;      has '^\.github/workflows/'                                   && CI=true
           INSTALL=false; has '^web/public/install\.(sh|ps1)$|^scripts/tests/install_sh_test\.sh$' && INSTALL=true
