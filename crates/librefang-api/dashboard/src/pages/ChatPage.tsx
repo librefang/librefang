@@ -578,6 +578,11 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
                 content_type: img.content_type,
               })),
               thinking: hasThinking ? thinking : undefined,
+              // Collapsed by default on history reload — long sessions with
+              // many reasoning turns would otherwise be a wall of text. Live
+              // streaming keeps its expanded default so the user can watch
+              // reasoning happen in real time.
+              thinkingCollapsed: hasThinking ? true : undefined,
             }];
           });
           // Refresh the cache unconditionally — the data is still correct
