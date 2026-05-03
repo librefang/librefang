@@ -379,6 +379,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         resolution.driver.complete(req).await.unwrap();
         assert_eq!(primary_calls.1.load(Ordering::SeqCst), 1);

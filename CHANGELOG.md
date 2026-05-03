@@ -386,6 +386,7 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ### Added
 
+- Surface caller agent / session / step IDs as `x-librefang-{agent,session,step}-id` headers on outbound OpenAI-compatible requests, so observability sidecars in front of the upstream provider can correlate request log records without parsing the JSON body. New `session_id` and `step_id` fields on `CompletionRequest` (sibling to the existing `agent_id`); both `Option<String>`, omitted from the wire when `None`. Other drivers (Anthropic, Gemini, Bedrock, Vertex, etc.) accept the new fields but do not yet emit headers.
 - Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
 
 ### Changed

@@ -1275,6 +1275,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1320,6 +1322,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1382,6 +1386,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -1460,6 +1466,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);

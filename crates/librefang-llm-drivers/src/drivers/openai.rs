@@ -334,6 +334,27 @@ impl OpenAIDriver {
     }
 }
 
+/// Append `x-librefang-{agent,session,step}-id` headers to a request when the
+/// caller populated the matching field on [`CompletionRequest`]. Headers are
+/// only emitted for fields that are `Some`; unset fields produce no header at
+/// all (rather than an empty value).
+fn inject_trace_headers(
+    builder: reqwest::RequestBuilder,
+    request: &CompletionRequest,
+) -> reqwest::RequestBuilder {
+    let mut b = builder;
+    if let Some(id) = request.agent_id.as_deref() {
+        b = b.header("x-librefang-agent-id", id);
+    }
+    if let Some(id) = request.session_id.as_deref() {
+        b = b.header("x-librefang-session-id", id);
+    }
+    if let Some(id) = request.step_id.as_deref() {
+        b = b.header("x-librefang-step-id", id);
+    }
+    b
+}
+
 /// Map a MIME type to a file extension for Moonshot file uploads.
 fn ext_from_media_type(mime: &str) -> &'static str {
     match mime {
@@ -1010,6 +1031,14 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
+            // Per-request caller-identity headers. Surface agent / session /
+            // step IDs from the CompletionRequest as `x-librefang-*` headers
+            // so any observability sidecar in front of the upstream provider
+            // can attach them to its own log records without parsing the
+            // JSON body. Only emitted when the caller actually populated the
+            // field — out-of-band callers (compaction, routing probes, tests)
+            // leave them None and the headers are absent from the wire.
+            req_builder = inject_trace_headers(req_builder, &request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -1425,6 +1454,14 @@ impl LlmDriver for OpenAIDriver {
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
             }
+            // Per-request caller-identity headers. Surface agent / session /
+            // step IDs from the CompletionRequest as `x-librefang-*` headers
+            // so any observability sidecar in front of the upstream provider
+            // can attach them to its own log records without parsing the
+            // JSON body. Only emitted when the caller actually populated the
+            // field — out-of-band callers (compaction, routing probes, tests)
+            // leave them None and the headers are absent from the wire.
+            req_builder = inject_trace_headers(req_builder, &request);
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -2420,6 +2457,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -2448,6 +2487,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         let extra = oai.extra_body.as_ref().expect("extra_body present");
@@ -2476,6 +2517,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let oai = driver.build_request(&request).expect("build request");
         // Non-ollama: extra_body should mirror the (None) request.extra_body.

@@ -248,7 +248,31 @@ pub struct CompletionRequest {
     /// agent's workspace, tool allowlist, and skill allowlist from the
     /// registry. `None` for out-of-band callers (compaction, routing
     /// probes, tests) that have no agent identity to propagate.
+    ///
+    /// Drivers that talk to OpenAI-compatible HTTP endpoints additionally
+    /// surface this value on the wire as `x-librefang-agent-id`, so any
+    /// observability sidecar in front of the upstream provider can attach
+    /// the value to its own log records without parsing the request body.
     pub agent_id: Option<String>,
+    /// Caller session identity.
+    ///
+    /// Identifies the conversation/session the request belongs to. Combined
+    /// with [`Self::agent_id`] this gives a stable correlation key for
+    /// downstream tracing and observability. Drivers that talk to
+    /// OpenAI-compatible HTTP endpoints surface this on the wire as
+    /// `x-librefang-session-id`. `None` for out-of-band callers that have
+    /// no session identity to propagate.
+    pub session_id: Option<String>,
+    /// Caller step identity.
+    ///
+    /// Identifies the iteration / turn within a session that produced this
+    /// request. Useful when a single session issues multiple sequential
+    /// LLM calls (e.g. tool-use loops), since `agent_id` + `session_id`
+    /// alone collapse all of them onto a single correlation key. Drivers
+    /// that talk to OpenAI-compatible HTTP endpoints surface this on the
+    /// wire as `x-librefang-step-id`. `None` for callers that don't
+    /// distinguish between steps.
+    pub step_id: Option<String>,
 }
 
 /// A response from an LLM completion.
@@ -771,6 +795,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();
@@ -833,6 +859,8 @@ mod tests {
             timeout_secs: None,
             extra_body: None,
             agent_id: None,
+            session_id: None,
+            step_id: None,
         };
         let err = driver.stream(request, tx).await.unwrap_err();
         assert!(
