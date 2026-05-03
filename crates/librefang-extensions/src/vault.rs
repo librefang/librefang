@@ -371,35 +371,8 @@ impl CredentialVault {
     /// Iterate over every (key, value) pair, including reserved internal
     /// keys. Used by the `librefang vault rotate-key` workflow which has to
     /// re-encrypt the sentinel along with every user-facing entry.
-    ///
-    /// The values are exposed as `&str` references rather than cloned
-    /// `Zeroizing<String>` to avoid an unnecessary allocation pass — the
-    /// caller is expected to feed each value straight into the new vault's
-    /// `set_internal` and drop it.
     pub fn iter_all_entries(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
-    /// Internal write that bypasses the reserved-key guard in [`Self::set`].
-    ///
-    /// Sole legitimate caller is the `librefang vault rotate-key` migration:
-    /// when re-encrypting an existing vault under a new master key, the
-    /// sentinel must be carried across alongside every other entry, but
-    /// the public `set` would reject it. Marked `pub(crate)` so external
-    /// crates can't accidentally bypass the guard — the rotate-key CLI
-    /// goes through [`Self::rewrap_with_new_key`] instead.
-    #[expect(dead_code, reason = "public-crate hook for rotate-key migration; see doc above")]
-    pub(crate) fn set_internal(
-        &mut self,
-        key: String,
-        value: Zeroizing<String>,
-    ) -> ExtensionResult<()> {
-        if !self.unlocked {
-            return Err(ExtensionError::VaultLocked);
-        }
-        self.entries.insert(key, value);
-        let master_key = self.resolve_master_key()?;
-        self.save(&master_key)
     }
 
     /// Re-encrypt the entire vault under a new master key (#3651 rotate-key).
@@ -2583,7 +2556,7 @@ mod tests {
         let mut vault2 = CredentialVault::new(dir.path().join("vault.enc"));
         vault2.unlock_with_key(key.clone()).unwrap();
         assert!(
-            vault2.entries.get(SENTINEL_KEY).is_none(),
+            !vault2.entries.contains_key(SENTINEL_KEY),
             "precondition: simulated legacy vault must have no sentinel"
         );
         vault2.verify_or_install_sentinel().unwrap();

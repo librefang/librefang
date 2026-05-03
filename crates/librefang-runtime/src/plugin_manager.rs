@@ -4975,7 +4975,7 @@ ingest = "hooks/ingest.py"
             parsed.integrity.get("hooks/ingest.py").map(String::as_str),
             Some(sha256_hex(ingest_body).as_str())
         );
-        assert!(parsed.integrity.get("hooks/removed.py").is_none());
+        assert!(!parsed.integrity.contains_key("hooks/removed.py"));
     }
 
     /// pack_plugin_for_publish must fail loudly when a manifest references
