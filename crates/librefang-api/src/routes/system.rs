@@ -478,6 +478,110 @@ fn classify_audit_level(action: &str) -> &'static str {
     }
 }
 
+// ─── Agent Bindings API ────────────────────────────────────────────────
+// These were originally interleaved with the webhook + chat-command
+// handlers; the #3749 4/N extraction (`hooks_commands.rs`) accidentally
+// swept them out alongside the hooks/commands functions even though they
+// are unrelated. Restored here so `system.rs::router()` keeps wiring the
+// `/bindings` and `/queue/status` routes against real handlers.
+
+/// GET /api/bindings — List all agent bindings.
+#[utoipa::path(get, path = "/api/bindings", tag = "system", responses((status = 200, description = "List key bindings", body = Vec<serde_json::Value>)))]
+pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let bindings = state.kernel.list_bindings();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "bindings": bindings })),
+    )
+}
+
+/// POST /api/bindings — Add a new agent binding.
+#[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = crate::types::JsonObject, responses((status = 200, description = "Binding added", body = crate::types::JsonObject)))]
+pub async fn add_binding(
+    State(state): State<Arc<AppState>>,
+    Json(binding): Json<librefang_types::config::AgentBinding>,
+) -> impl IntoResponse {
+    // Validate agent exists
+    let agents = state.kernel.agent_registry().list();
+    let agent_exists = agents.iter().any(|e| e.name == binding.agent)
+        || binding.agent.parse::<uuid::Uuid>().is_ok();
+    if !agent_exists {
+        tracing::warn!(agent = %binding.agent, "Binding references unknown agent");
+    }
+
+    state.kernel.add_binding(binding);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "status": "created" })),
+    )
+}
+
+/// DELETE /api/bindings/:index — Remove a binding by index.
+#[utoipa::path(delete, path = "/api/bindings/{index}", tag = "system", params(("index" = u32, Path, description = "Binding index")), responses((status = 200, description = "Binding removed")))]
+pub async fn remove_binding(
+    State(state): State<Arc<AppState>>,
+    Path(index): Path<usize>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    match state.kernel.remove_binding(index) {
+        Some(_) => (StatusCode::NO_CONTENT, Json(serde_json::json!(null))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
+        ),
+    }
+}
+
+// ─── Queue status ──────────────────────────────────────────────────────
+
+/// GET /api/queue/status — Command queue status and occupancy.
+#[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = crate::types::JsonObject)))]
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let occupancy = state.kernel.command_queue_ref().occupancy();
+    let lanes: Vec<serde_json::Value> = occupancy
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "lane": o.lane.to_string(),
+                "active": o.active,
+                "capacity": o.capacity,
+            })
+        })
+        .collect();
+
+    let kcfg2 = state.kernel.config_ref();
+    let queue_cfg = &kcfg2.queue;
+    Json(serde_json::json!({
+        "lanes": lanes,
+        "config": {
+            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+            "max_depth_global": queue_cfg.max_depth_global,
+            "task_ttl_secs": queue_cfg.task_ttl_secs,
+            "concurrency": {
+                "main_lane": queue_cfg.concurrency.main_lane,
+                "cron_lane": queue_cfg.concurrency.cron_lane,
+                "subagent_lane": queue_cfg.concurrency.subagent_lane,
+                "trigger_lane": queue_cfg.concurrency.trigger_lane,
+                "default_per_agent": queue_cfg.concurrency.default_per_agent,
+            },
+        },
+    }))
+}
+
+/// Get the machine hostname (best-effort).
+pub(crate) fn hostname_string() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .map_err(|_| std::env::VarError::NotPresent)
+        })
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // API versioning
 // ---------------------------------------------------------------------------
