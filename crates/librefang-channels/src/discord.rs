@@ -21,6 +21,12 @@ use zeroize::Zeroizing;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
+/// Returns the default Discord REST API base URL. Used to initialise `DiscordAdapter::api_base`.
+#[inline]
+fn default_discord_api_base() -> String {
+    DISCORD_API_BASE.to_string()
+}
+
 /// Discord Gateway opcodes.
 mod opcode {
     pub const DISPATCH: u64 = 0;
@@ -37,6 +43,9 @@ mod opcode {
 pub struct DiscordAdapter {
     /// SECURITY: Bot token is zeroized on drop to prevent memory disclosure.
     token: Zeroizing<String>,
+    /// Base URL for the Discord REST API. Defaults to `https://discord.com/api/v10`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
     client: reqwest::Client,
     allowed_guilds: Vec<String>,
     allowed_users: Vec<String>,
@@ -83,6 +92,7 @@ impl DiscordAdapter {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             token: Zeroizing::new(token),
+            api_base: default_discord_api_base(),
             client: crate::http_client::new_client(),
             allowed_guilds,
             allowed_users,
@@ -106,6 +116,14 @@ impl DiscordAdapter {
         self
     }
 
+    /// Override the Discord REST API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://discord.com/api/v10`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
+        self
+    }
+
     /// Set backoff configuration. Returns self for builder chaining.
     pub fn with_backoff(mut self, initial_backoff_secs: u64, max_backoff_secs: u64) -> Self {
         self.initial_backoff = Duration::from_secs(initial_backoff_secs);
@@ -115,7 +133,7 @@ impl DiscordAdapter {
 
     /// Get the WebSocket gateway URL from the Discord API.
     async fn get_gateway_url(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{DISCORD_API_BASE}/gateway/bot");
+        let url = format!("{}/gateway/bot", self.api_base);
         let resp: serde_json::Value = self
             .client
             .get(&url)
@@ -138,7 +156,7 @@ impl DiscordAdapter {
         channel_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let url = format!("{}/channels/{channel_id}/messages", self.api_base);
         // Discord's 2000-character limit is measured in UTF-16 code units.
         let chunks = split_to_utf16_chunks(text, DISCORD_MESSAGE_LIMIT);
 
@@ -165,7 +183,7 @@ impl DiscordAdapter {
         &self,
         channel_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/typing");
+        let url = format!("{}/channels/{channel_id}/typing", self.api_base);
         let _ = self
             .client
             .post(&url)
@@ -196,7 +214,7 @@ impl DiscordAdapter {
         if let Some(cached) = self.channel_to_guild.get(channel_id) {
             return Ok(cached.clone());
         }
-        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}");
+        let url = format!("{}/channels/{channel_id}", self.api_base);
         let resp = self
             .client
             .get(&url)
@@ -234,7 +252,7 @@ impl DiscordAdapter {
         user_id: &str,
     ) -> Result<Option<Vec<String>>, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Fetch the member's role IDs.
-        let member_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/members/{user_id}");
+        let member_url = format!("{}/guilds/{guild_id}/members/{user_id}", self.api_base);
         let resp = self
             .client
             .get(&member_url)
@@ -257,7 +275,7 @@ impl DiscordAdapter {
 
         // 2. Resolve role IDs → role names. The roles list is small (≤ a few
         // hundred per guild) so a single fetch + linear lookup is fine.
-        let roles_url = format!("{DISCORD_API_BASE}/guilds/{guild_id}/roles");
+        let roles_url = format!("{}/guilds/{guild_id}/roles", self.api_base);
         let roles_resp = self
             .client
             .get(&roles_url)
@@ -872,6 +890,90 @@ fn parse_discord_attachment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `DiscordAdapter`
+    // at it via `with_api_base()`. This mirrors the pattern used for the gotify
+    // slice (PR #4447) and the slack slice (PR #4545), and exercises the
+    // `POST /channels/{id}/messages` call made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> DiscordAdapter {
+        DiscordAdapter::new(
+            "Bot-test-token".to_string(),
+            vec![],
+            vec![],
+            true,
+            vec![],
+            0,
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_send_posts_channel_message_with_auth_and_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/123456789/messages$"))
+            .and(header("Authorization", "Bot Bot-test-token"))
+            .and(body_json(serde_json::json!({ "content": "hello from librefang" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "999",
+                "channel_id": "123456789",
+                "content": "hello from librefang",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("123456789"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn discord_send_non_text_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/987654321/messages$"))
+            .and(body_json(serde_json::json!({ "content": "(Unsupported content type)" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "998",
+                "channel_id": "987654321",
+                "content": "(Unsupported content type)",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("987654321"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn role_resolution_parses_member_role_ids() {
