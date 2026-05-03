@@ -1906,6 +1906,72 @@ mod tests {
         );
     }
 
+    /// Regression for #3515: when the persist destination is not writable
+    /// (here: `data/` exists as a regular file instead of a directory so
+    /// `create_dir_all` fails), `persist()` MUST surface the I/O error
+    /// rather than swallow it. The route layer relies on this `Err` to
+    /// translate into a 500 response, otherwise UI-driven cron updates
+    /// silently revert on the next daemon restart.
+    #[test]
+    fn persist_returns_error_when_data_dir_unwritable() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Pre-create `data` as a regular file so `create_dir_all` fails on
+        // the persist path's parent. This is portable across platforms
+        // (no need for chmod/permission tricks that don't work on
+        // Windows or as root in CI).
+        std::fs::write(tmp.path().join("data"), b"not a directory").unwrap();
+
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let agent = AgentId::new();
+        sched.add_job(make_job(agent), false).unwrap();
+
+        let result = sched.persist();
+        assert!(
+            result.is_err(),
+            "persist() must surface I/O failure (got Ok). Without this signal \
+             the API layer cannot return 500 and silently reverts schedules \
+             on restart (#3515)."
+        );
+    }
+
+    /// Regression for #3515: an `update_job` that successfully patches the
+    /// in-memory state must not mask a subsequent `persist()` failure.
+    /// The two operations are independent — `update_job` returns Ok, then
+    /// `persist()` returns Err on a non-writable path — and the route
+    /// handler must observe both results separately.
+    #[test]
+    fn update_job_then_persist_failure_is_observable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = CronScheduler::new(tmp.path(), 100);
+        let agent = AgentId::new();
+        let id = sched.add_job(make_job(agent), false).unwrap();
+
+        // First persist succeeds (data/ does not yet exist as a file).
+        sched.persist().unwrap();
+
+        // Now sabotage the parent dir so future persists fail. We replace
+        // the existing data/ directory with a regular file of the same
+        // name. `create_dir_all` on the parent will then fail because
+        // a non-directory already occupies that path.
+        let data_dir = tmp.path().join("data");
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::write(&data_dir, b"sabotage").unwrap();
+
+        // In-memory update still succeeds (it doesn't touch disk).
+        let updates = serde_json::json!({ "name": "renamed-after-sabotage" });
+        let updated = sched.update_job(id, &updates).expect("update_job must succeed in-memory");
+        assert_eq!(updated.name, "renamed-after-sabotage");
+
+        // But persist now fails — and the route handler must see this Err
+        // so it can return 500 instead of pretending the change was saved.
+        let persist_result = sched.persist();
+        assert!(
+            persist_result.is_err(),
+            "persist() after in-memory update must fail loudly when disk \
+             write is impossible (#3515)"
+        );
+    }
+
     #[test]
     fn delivery_targets_persist_across_reload() {
         use librefang_types::scheduler::CronDeliveryTarget;

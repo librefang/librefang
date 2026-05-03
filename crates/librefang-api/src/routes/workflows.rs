@@ -1941,7 +1941,11 @@ pub async fn create_cron_job(
 }
 
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
-#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted")))]
+///
+/// Returns 500 if the in-memory removal succeeds but persistence to disk
+/// fails — without persistence, the deletion would silently revert on
+/// daemon restart (issue #3515).
+#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted"), (status = 500, description = "Persist failed; change will not survive restart")))]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1952,7 +1956,10 @@ pub async fn delete_cron_job(
             match state.kernel.cron().remove_job(job_id) {
                 Ok(_) => {
                     if let Err(e) = state.kernel.cron().persist() {
-                        tracing::warn!("Failed to persist cron scheduler state: {e}");
+                        tracing::error!(
+                            "Failed to persist cron scheduler state after delete: {e}"
+                        );
+                        return cron_persist_failed_response("delete", &e.to_string());
                     }
                     (
                         StatusCode::OK,
@@ -1967,7 +1974,11 @@ pub async fn delete_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id} — Update a cron job's configuration.
-#[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job updated", body = crate::types::JsonObject)))]
+///
+/// Returns 500 if the in-memory update succeeds but persistence to disk
+/// fails — without persistence, the new schedule runs in-memory until the
+/// next restart, then silently reverts to the old schedule (issue #3515).
+#[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job updated", body = crate::types::JsonObject), (status = 500, description = "Persist failed; change will not survive restart")))]
 pub async fn update_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1978,7 +1989,12 @@ pub async fn update_cron_job(
             let job_id = librefang_types::scheduler::CronJobId(uuid);
             match state.kernel.cron().update_job(job_id, &body) {
                 Ok(job) => {
-                    let _ = state.kernel.cron().persist();
+                    if let Err(e) = state.kernel.cron().persist() {
+                        tracing::error!(
+                            "Failed to persist cron scheduler state after update: {e}"
+                        );
+                        return cron_persist_failed_response("update", &e.to_string());
+                    }
                     (
                         StatusCode::OK,
                         Json(serde_json::to_value(&job).unwrap_or_default()),
@@ -1992,7 +2008,11 @@ pub async fn update_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.
-#[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job toggled", body = crate::types::JsonObject)))]
+///
+/// Returns 500 if the in-memory toggle succeeds but persistence to disk
+/// fails — without persistence, the new enabled state would silently
+/// revert on daemon restart (issue #3515).
+#[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Cron job toggled", body = crate::types::JsonObject), (status = 500, description = "Persist failed; change will not survive restart")))]
 pub async fn toggle_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2005,7 +2025,10 @@ pub async fn toggle_cron_job(
             match state.kernel.cron().set_enabled(job_id, enabled) {
                 Ok(()) => {
                     if let Err(e) = state.kernel.cron().persist() {
-                        tracing::warn!("Failed to persist cron scheduler state: {e}");
+                        tracing::error!(
+                            "Failed to persist cron scheduler state after toggle: {e}"
+                        );
+                        return cron_persist_failed_response("toggle", &e.to_string());
                     }
                     (
                         StatusCode::OK,
@@ -2017,6 +2040,31 @@ pub async fn toggle_cron_job(
         }
         Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
     }
+}
+
+/// Build a 500 response for cron persist failures.
+///
+/// The in-memory scheduler change has already been applied at this point,
+/// so the response signals two things: (a) the change is live in-memory
+/// right now, but (b) it will silently revert on daemon restart unless
+/// the persist failure is resolved. Clients should surface this clearly
+/// (it is *not* a routine 500).
+fn cron_persist_failed_response(
+    operation: &str,
+    detail: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": "Failed to persist cron job change",
+            "code": "cron_persist_failed",
+            "type": "cron_persist_failed",
+            "operation": operation,
+            "in_memory_applied": true,
+            "will_survive_restart": false,
+            "detail": detail,
+        })),
+    )
 }
 
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
