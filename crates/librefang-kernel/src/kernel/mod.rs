@@ -9340,15 +9340,22 @@ system_prompt = "You are a helpful assistant."
             .list_agent_sessions(agent_id)
             .map_err(KernelError::LibreFang)?;
 
-        // Mark the active session
+        // `active` means "an agent loop is currently running against this
+        // session" — matching `/api/sessions` (#4290) and the dashboard's
+        // green-dot/pulse rendering. The legacy "is registry pointer"
+        // meaning is preserved as `is_canonical`, which forks /
+        // `agent_send` defaults still rely on. See #4293.
+        let running = self.running_session_ids();
+        let canonical_sid = entry.session_id.0.to_string();
         for s in &mut sessions {
             if let Some(obj) = s.as_object_mut() {
-                let is_active = obj
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(|sid| sid == entry.session_id.0.to_string())
+                let sid_str = obj.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                let is_active = uuid::Uuid::parse_str(sid_str)
+                    .map(|u| running.contains(&SessionId(u)))
                     .unwrap_or(false);
+                let is_canonical = sid_str == canonical_sid;
                 obj.insert("active".to_string(), serde_json::json!(is_active));
+                obj.insert("is_canonical".to_string(), serde_json::json!(is_canonical));
             }
         }
 
@@ -10436,11 +10443,12 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Snapshot of every `SessionId` whose agent loop is currently in flight,
-    /// kernel-wide. Used by `/api/sessions` (and friends) to populate the
-    /// `active` field on each session row so the dashboard can distinguish
-    /// running vs idle. DashMap iteration is unordered; the caller treats
-    /// the result as a set lookup, never as a list. Cheap: one
-    /// `(AgentId, SessionId)` clone per running task.
+    /// kernel-wide. Used by `/api/sessions` and per-agent session-listing
+    /// endpoints to populate the `active` field with "loop is currently
+    /// running" semantics — matching the dashboard's green-dot/pulse
+    /// rendering (see #4290, #4293). DashMap iteration is unordered; the
+    /// caller treats the result as a set lookup, never as a list. Cheap:
+    /// one `(AgentId, SessionId)` clone per running task.
     pub fn running_session_ids(&self) -> std::collections::HashSet<SessionId> {
         self.running_tasks.iter().map(|e| e.key().1).collect()
     }

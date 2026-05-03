@@ -162,6 +162,13 @@ function useWebSocket(
   const retriesRef = useRef(0);
   // Callback fired when WS closes while a response is pending
   const onDropRef = useRef<(() => void) | null>(null);
+  // Issue #3550: every in-flight slash-command listener registers its
+  // AbortController here so ws.onclose can detach them all at once.
+  // Without this the listeners stay attached on the dead WebSocket
+  // reference and re-issuing the command silently no-ops on the new
+  // socket. Each registrant is responsible for removing its own entry
+  // on the success/error/timeout paths.
+  const pendingCommandsRef = useRef<Set<AbortController>>(new Set());
   // Bug #3847: store the current URL + WS sub-protocols in refs so the
   // reconnect closure always reads the latest values rather than capturing
   // them from the previous agent via a stale closure.
@@ -232,6 +239,16 @@ function useWebSocket(
           if (onDropRef.current) {
             onDropRef.current();
             onDropRef.current = null;
+          }
+          // Issue #3550: detach any pending slash-command listeners.
+          // Their handlers were registered with { signal } so abort()
+          // both removes the listener from the (about-to-be-replaced)
+          // socket AND fires the abort handler that surfaces a system
+          // message to the user.
+          if (pendingCommandsRef.current.size > 0) {
+            const pending = Array.from(pendingCommandsRef.current);
+            pendingCommandsRef.current.clear();
+            for (const ctrl of pending) ctrl.abort();
           }
 
           // Bug #3854: stop reconnecting on auth-failure close codes
@@ -306,6 +323,15 @@ function useWebSocket(
       authErrorRef.current = false;
       gaveUpRef.current = false;
       onDropRef.current = null;
+      // Issue #3550: agent/session change tears down the socket. Any
+      // command listener still pending would be orphaned, so abort
+      // them here too — abort() detaches the listener via the
+      // AbortSignal we registered with addEventListener.
+      if (pendingCommandsRef.current.size > 0) {
+        const pending = Array.from(pendingCommandsRef.current);
+        pendingCommandsRef.current.clear();
+        for (const ctrl of pending) ctrl.abort();
+      }
       const ws = wsRef.current;
       if (ws) {
         ws.onclose = null; // prevent reconnect on intentional close
@@ -321,7 +347,7 @@ function useWebSocket(
     };
   }, [agentId, sessionId]);
 
-  return { ws: wsRef, wsConnected, onDropRef, ariaAnnouncement, ariaNonce };
+  return { ws: wsRef, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce };
 }
 
 // Per-(agent, session) message cache — survives agent/session switches within
@@ -398,7 +424,7 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       if (!alive.has(id)) delete latestTurns[id];
     }
   }, [agents]);
-  const { ws, wsConnected, onDropRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
+  const { ws, wsConnected, onDropRef, pendingCommandsRef, ariaAnnouncement, ariaNonce } = useWebSocket(agentId, sessionId, onClearError);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
   const deepThinking = useUIStore((s) => s.deepThinking);
   const showThinkingProcess = useUIStore((s) => s.showThinkingProcess);
@@ -643,11 +669,32 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
           { id: makeMessageId("user"), role: "user" as const, content: trimmed, timestamp: new Date() },
         ]);
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+          // Issue #3550: a one-shot listener that's only removed inside the
+          // handler leaks on dead-socket scenarios (network blip, daemon
+          // restart, route navigation between send and response). The dead
+          // socket is replaced by the reconnect path; the leaked listener
+          // sits on the old reference and the user's retry silently no-ops.
+          // Wrap the listener in an AbortController + 30s watchdog and
+          // register the controller in `pendingCommandsRef` so the WS
+          // close path (in useWebSocket) can mass-abort on disconnect.
+          const ctrl = new AbortController();
+          let settled = false;
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          const finalize = () => {
+            if (settled) return;
+            settled = true;
+            if (timer) { clearTimeout(timer); timer = null; }
+            pendingCommandsRef.current.delete(ctrl);
+            // abort() is idempotent and doubles as the listener removal —
+            // calling it on success keeps us off the socket for any late
+            // straggler frames.
+            ctrl.abort();
+          };
           const handleCmdResponse = (event: MessageEvent) => {
             try {
               const data = JSON.parse(event.data as string);
               if (data.type === "command_result" || data.type === "error") {
-                ws.current?.removeEventListener("message", handleCmdResponse);
+                finalize();
                 const responseText = data.message || data.content || "";
                 // /new and /reset clear the backend session, so clear frontend too
                 if (data.type === "command_result" && (cmd === "new" || cmd === "reset")) {
@@ -671,8 +718,30 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               }
             } catch { /* ignore non-JSON */ }
           };
-          ws.current.addEventListener("message", handleCmdResponse);
+          // When the abort fires (timeout, ws close, or success), surface
+          // a system message ONLY if we got there from timeout / drop,
+          // not from the success path which already pushed its own reply.
+          ctrl.signal.addEventListener("abort", () => {
+            if (timer) { clearTimeout(timer); timer = null; }
+            pendingCommandsRef.current.delete(ctrl);
+            if (!settled) {
+              // We got aborted before the response landed — either the
+              // 30s timer expired or the WS dropped. Either way the user
+              // needs a visible "command lost" hint so the silent no-op
+              // doesn't repeat.
+              settled = true;
+              setMessages(prev => [...prev,
+                { id: makeMessageId("sys"), role: "system" as const, content: t("chat.command_timeout"), timestamp: new Date() }
+              ]);
+            }
+          });
+          pendingCommandsRef.current.add(ctrl);
+          ws.current.addEventListener("message", handleCmdResponse, { signal: ctrl.signal });
           ws.current.send(JSON.stringify({ type: "command", command: cmd, args: cmdArgs }));
+          // 30s watchdog mirrors the slash-command UX expectation that
+          // backend commands are near-instant; LLM turns get the longer
+          // 180s window further down.
+          timer = setTimeout(() => { ctrl.abort(); }, 30_000);
         } else {
           sysMsg(t("chat.ws_not_connected"));
         }

@@ -6319,3 +6319,166 @@ async fn vault_cache_reuses_unlocked_handle_across_calls() {
 
     kernel.shutdown();
 }
+
+// ── /api/agents/{id}/sessions `active` semantics (#4293) ────────────────────
+//
+// `list_agent_sessions` historically marked `active = (sid == registry pointer)`.
+// That disagrees with the dashboard's "loop is running" rendering and with
+// /api/sessions (#4290). These tests pin the new contract: `active` reflects
+// `running_session_ids()` membership; the registry-pointer answer is preserved
+// as `is_canonical`.
+
+#[test]
+fn list_agent_sessions_active_reflects_running_tasks_not_registry_pointer() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "busy");
+
+    // Seed three persisted sessions for this agent.
+    let s1 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("one"))
+        .unwrap();
+    let s2 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("two"))
+        .unwrap();
+    let s3 = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("three"))
+        .unwrap();
+
+    // Point the registry pointer at s2 — the legacy "active" answer.
+    kernel.registry.update_session_id(agent_id, s2.id).unwrap();
+
+    // Mark s1 and s3 as in-flight via running_tasks (not s2).
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h1 = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let h3 = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    kernel.running_tasks.insert(
+        (agent_id, s1.id),
+        RunningTask {
+            abort: h1.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+    kernel.running_tasks.insert(
+        (agent_id, s3.id),
+        RunningTask {
+            abort: h3.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 3);
+
+    let by_id: std::collections::HashMap<String, &serde_json::Value> = listed
+        .iter()
+        .map(|v| {
+            (
+                v.get("session_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap()
+                    .to_string(),
+                v,
+            )
+        })
+        .collect();
+
+    let row1 = by_id.get(&s1.id.0.to_string()).unwrap();
+    let row2 = by_id.get(&s2.id.0.to_string()).unwrap();
+    let row3 = by_id.get(&s3.id.0.to_string()).unwrap();
+
+    // active == running_session_ids membership
+    assert_eq!(row1.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(row2.get("active").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(row3.get("active").and_then(|v| v.as_bool()), Some(true));
+
+    // is_canonical == registry pointer
+    assert_eq!(
+        row1.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        row2.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        row3.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
+    // Cleanup.
+    let _ = kernel.stop_session_run(agent_id, s1.id);
+    let _ = kernel.stop_session_run(agent_id, s3.id);
+    drop(rt);
+    kernel.shutdown();
+}
+
+#[test]
+fn list_agent_sessions_idle_agent_marks_all_inactive() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "idle");
+
+    for label in ["a", "b", "c", "d", "e"] {
+        kernel
+            .memory
+            .create_session_with_label(agent_id, Some(label))
+            .unwrap();
+    }
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 5);
+    for row in &listed {
+        assert_eq!(
+            row.get("active").and_then(|v| v.as_bool()),
+            Some(false),
+            "no running tasks → every row inactive; row = {row}"
+        );
+    }
+    kernel.shutdown();
+}
+
+#[test]
+fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
+    let kernel = boot_kernel_for_display_tests();
+    let agent_id = register_test_agent(&kernel, "both");
+
+    let s = kernel
+        .memory
+        .create_session_with_label(agent_id, Some("only"))
+        .unwrap();
+    kernel.registry.update_session_id(agent_id, s.id).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let h = rt.spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    kernel.running_tasks.insert(
+        (agent_id, s.id),
+        RunningTask {
+            abort: h.abort_handle(),
+            started_at: chrono::Utc::now(),
+            task_id: uuid::Uuid::new_v4(),
+        },
+    );
+
+    let listed = kernel.list_agent_sessions(agent_id).expect("list ok");
+    assert_eq!(listed.len(), 1);
+    let row = &listed[0];
+    assert_eq!(row.get("active").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(
+        row.get("is_canonical").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    let _ = kernel.stop_session_run(agent_id, s.id);
+    drop(rt);
+    kernel.shutdown();
+}
