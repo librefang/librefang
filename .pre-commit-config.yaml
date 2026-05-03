@@ -1,13 +1,14 @@
 # Slim pre-commit config (#3303).
 #
 # Philosophy: hooks must not block the dev loop. Pre-commit is fast and
-# cheap; heavy verification (clippy, codegen drift) runs at pre-push or
-# in CI. Pre-commit must average < 2s on a typical commit.
+# cheap; heavy verification (clippy, openapi/SDK drift, security audit,
+# tests) runs in CI. Pre-commit must average < 2s on a typical commit;
+# pre-push is intentionally bare (in `scripts/hooks/pre-push` it only
+# refuses direct pushes to protected branches).
 #
 # Setup:
 #   pipx install pre-commit detect-secrets
 #   pre-commit install --install-hooks               # commit stage
-#   pre-commit install --install-hooks -t pre-push   # push stage
 #
 # Re-baseline on legitimate findings:
 #   detect-secrets scan --baseline .secrets.baseline
@@ -23,14 +24,6 @@ repos:
         language: script
         types: [rust]
         stages: [pre-commit]
-
-      # Heavy lint runs at push time, not commit time.
-      - id: cargo-clippy
-        name: cargo clippy --workspace
-        entry: cargo clippy --workspace --all-targets -- -D warnings
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
 
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
