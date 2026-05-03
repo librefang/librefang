@@ -2680,4 +2680,175 @@ mod tests {
         assert_eq!(tier_label(ModelTier::Local), "local");
         assert_eq!(tier_label(ModelTier::Custom), "custom");
     }
+
+    // ── #3582: reducer-style coverage for handle_routing_key ────────────────
+    //
+    // The maintainer asked for an `Event → State → State` table-test on the
+    // wizard's reducer. `handle_routing_key` is the closest the codebase has
+    // to a pure reducer today (the migration handler has thread-spawning side
+    // effects, the api-key handler does file I/O). We exercise navigation
+    // arms only: `Enter` arms call `save_config`, which writes
+    // `~/.librefang/config.toml` and would touch the user's filesystem
+    // outside a tempdir, so they're deliberately out of scope here.
+
+    /// Construct a minimal `State` for routing-step navigation tests.
+    /// Pre-loads three fake model entries so `PickTier` arrow-key cycling
+    /// has something to wrap around.
+    fn routing_state_with_models(entries: usize) -> State {
+        let mut s = State::new();
+        s.step = Step::Routing;
+        s.routing_phase = RoutingPhase::Choice;
+        s.routing_choice_list.select(Some(0));
+        s.routing_tier_list.select(Some(0));
+        s.model_entries.clear();
+        for i in 0..entries {
+            s.model_entries.push(ModelEntry {
+                id: format!("model-{i}"),
+                display_name: format!("Model {i}"),
+                tier: "fast",
+                cost: String::new(),
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn routing_choice_down_toggles_to_no() {
+        let mut s = routing_state_with_models(3);
+        // Selection starts at 0 (Yes); Down/j flips to 1 (No).
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+    }
+
+    #[test]
+    fn routing_choice_up_toggles_back_to_yes() {
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(1));
+        handle_routing_key(&mut s, KeyCode::Up);
+        assert_eq!(s.routing_choice_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn routing_choice_j_and_k_match_arrow_keys() {
+        // Vim-style bindings must mirror the arrow keys exactly — a regression
+        // here would create a confusing two-modes-of-input UX.
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(0));
+        handle_routing_key(&mut s, KeyCode::Char('j'));
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+        handle_routing_key(&mut s, KeyCode::Char('k'));
+        assert_eq!(s.routing_choice_list.selected(), Some(0));
+    }
+
+    #[test]
+    fn routing_choice_esc_returns_to_model_step() {
+        // Esc on the first routing screen should let the user back out into
+        // the model-picker step, not silently swallow the input.
+        let mut s = routing_state_with_models(3);
+        s.step = Step::Routing;
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(
+            matches!(s.step, Step::Model),
+            "Esc on routing/Choice must go back to Model step"
+        );
+    }
+
+    #[test]
+    fn routing_choice_ignores_unrelated_keys() {
+        // Random keys must NOT auto-advance or reset selection.
+        let mut s = routing_state_with_models(3);
+        s.routing_choice_list.select(Some(1));
+        handle_routing_key(&mut s, KeyCode::Char('z'));
+        handle_routing_key(&mut s, KeyCode::Tab);
+        assert_eq!(s.routing_choice_list.selected(), Some(1));
+        assert!(matches!(s.step, Step::Routing));
+        assert!(matches!(s.routing_phase, RoutingPhase::Choice));
+    }
+
+    #[test]
+    fn routing_pick_tier0_esc_returns_to_choice() {
+        // Esc on the first tier rolls all the way back to the Yes/No screen.
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::Choice));
+    }
+
+    #[test]
+    fn routing_pick_tier1_esc_returns_to_tier0() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(1);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::PickTier(0)));
+    }
+
+    #[test]
+    fn routing_pick_tier2_esc_returns_to_tier1() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(2);
+        handle_routing_key(&mut s, KeyCode::Esc);
+        assert!(matches!(s.routing_phase, RoutingPhase::PickTier(1)));
+    }
+
+    #[test]
+    fn routing_pick_tier_down_cycles_through_models() {
+        // Down/j must wrap from the last entry back to 0, otherwise users on
+        // small model lists get stuck at the bottom with no way around.
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        s.routing_tier_list.select(Some(0));
+
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(1));
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(2));
+        handle_routing_key(&mut s, KeyCode::Down);
+        assert_eq!(s.routing_tier_list.selected(), Some(0), "must wrap");
+    }
+
+    #[test]
+    fn routing_pick_tier_up_wraps_from_zero_to_last() {
+        let mut s = routing_state_with_models(3);
+        s.routing_phase = RoutingPhase::PickTier(0);
+        s.routing_tier_list.select(Some(0));
+
+        handle_routing_key(&mut s, KeyCode::Up);
+        assert_eq!(
+            s.routing_tier_list.selected(),
+            Some(2),
+            "up at index 0 must wrap to the last entry"
+        );
+    }
+
+    // ── #3582: step_label / step_index lock-in ──────────────────────────────
+
+    #[test]
+    fn step_label_matches_step_index_progression() {
+        // The header shows "N of 7"; index and label must stay aligned. A
+        // mismatch means the user sees a wrong-step indicator without any
+        // compile-time signal.
+        let pairs: [(Step, &str, usize, &str); 7] = [
+            (Step::Welcome, "1 of 7", 0, "Welcome"),
+            (Step::Migration, "2 of 7", 1, "Migration"),
+            (Step::Provider, "3 of 7", 2, "Provider"),
+            (Step::ApiKey, "4 of 7", 3, "ApiKey"),
+            (Step::Model, "5 of 7", 4, "Model"),
+            (Step::Routing, "6 of 7", 5, "Routing"),
+            (Step::Complete, "7 of 7", 6, "Complete"),
+        ];
+        for (step, label, idx, name) in pairs {
+            let mut s = State::new();
+            s.step = step;
+            assert_eq!(s.step_label(), label, "label drift for {name}");
+            assert_eq!(s.step_index(), idx, "index drift for {name}");
+        }
+    }
+
+    #[test]
+    fn routing_tier_constants_are_three_wide() {
+        // The PickTier sub-state is indexed 0..=2; the parallel display
+        // arrays must match that or `draw_routing_pick` panics on indexing.
+        assert_eq!(ROUTING_TIER_NAMES.len(), 3);
+        assert_eq!(ROUTING_TIER_DESC.len(), 3);
+    }
 }

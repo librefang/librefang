@@ -792,3 +792,268 @@ pub fn launch_desktop_app() {
         desktop_install::launch(&installed);
     }
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! #3582: `launcher.rs` previously had 0 tests. The file is largely
+    //! ratatui-based draw + event-loop code (untestable without spawning a
+    //! real terminal), but the menu structure, layout sizing, ANSI stripping,
+    //! and first-run detection are all pure helpers that drive user-visible
+    //! behaviour and *can* be locked down here.
+
+    use super::*;
+    use ratatui::layout::Rect;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// Tests in this file mutate process-global env vars (`LIBREFANG_HOME`,
+    /// `HOME`). Cargo runs tests within a single binary in parallel, so we
+    /// serialize anything that touches those vars through one mutex.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ── strip_ansi ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_passes_through_plain_text() {
+        assert_eq!(strip_ansi("hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        // \x1b[31mRED\x1b[0m — the SGR sequences must vanish, payload kept.
+        let input = "\x1b[31mRED\x1b[0m";
+        assert_eq!(strip_ansi(input), "RED");
+    }
+
+    #[test]
+    fn strip_ansi_handles_bold_and_reset() {
+        let input = "\x1b[1mbold\x1b[0m normal";
+        assert_eq!(strip_ansi(input), "bold normal");
+    }
+
+    #[test]
+    fn strip_ansi_handles_multiple_sequences() {
+        let input = "\x1b[31m\x1b[1mboth\x1b[0m";
+        assert_eq!(strip_ansi(input), "both");
+    }
+
+    // ── content_area ────────────────────────────────────────────────────────
+
+    #[test]
+    fn content_area_returns_full_area_when_terminal_too_small() {
+        // The function explicitly bails on tiny terminals to avoid clipping.
+        let tiny = Rect {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 3,
+        };
+        let out = content_area(tiny);
+        assert_eq!(out, tiny);
+    }
+
+    #[test]
+    fn content_area_caps_width_at_80_on_wide_terminal() {
+        let wide = Rect {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 50,
+        };
+        let out = content_area(wide);
+        // Width is capped at 80 columns — content should never sprawl across
+        // the entire terminal on an ultrawide monitor.
+        assert_eq!(out.width, 80);
+        // Left margin is applied (MARGIN_LEFT = 3).
+        assert_eq!(out.x, MARGIN_LEFT);
+        // Y / height are unchanged (vertical layout is the caller's job).
+        assert_eq!(out.y, wide.y);
+        assert_eq!(out.height, wide.height);
+    }
+
+    #[test]
+    fn content_area_shrinks_margin_on_narrow_terminal() {
+        // Width 12: margin must shrink so it doesn't eat the readable area.
+        let narrow = Rect {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: 20,
+        };
+        let out = content_area(narrow);
+        assert!(
+            out.x + out.width <= narrow.width,
+            "content area must fit inside the parent rect: x={} w={} parent_w={}",
+            out.x,
+            out.width,
+            narrow.width
+        );
+        // Must leave at least 10 visible columns (the function's reserved minimum).
+        assert!(out.width >= 10, "expected >=10 cols, got {}", out.width);
+    }
+
+    // ── Menu invariants (first-run vs returning) ────────────────────────────
+
+    #[test]
+    fn first_run_menu_starts_with_get_started() {
+        // First-run users land on "Get started" by design — regression here
+        // would silently demote onboarding behind less-relevant entries.
+        let first = MENU_FIRST_RUN
+            .first()
+            .expect("first-run menu must not be empty");
+        assert!(
+            matches!(first.choice, LauncherChoice::GetStarted),
+            "first entry must be GetStarted"
+        );
+    }
+
+    #[test]
+    fn returning_menu_starts_with_chat_not_setup() {
+        // Returning users shouldn't have to scroll past setup to chat.
+        let first = MENU_RETURNING
+            .first()
+            .expect("returning menu must not be empty");
+        assert!(
+            matches!(first.choice, LauncherChoice::Chat),
+            "first entry must be Chat"
+        );
+    }
+
+    #[test]
+    fn both_menus_offer_show_help_and_no_quit_entry() {
+        // ShowHelp must be reachable from both menus (it's the discoverability
+        // hatch). Quit is keyboard-only (`q`/`Esc`) — never a list item.
+        for menu in [MENU_FIRST_RUN, MENU_RETURNING] {
+            assert!(menu.iter().any(|m| m.choice == LauncherChoice::ShowHelp));
+            assert!(menu.iter().all(|m| m.choice != LauncherChoice::Quit));
+        }
+    }
+
+    #[test]
+    fn both_menus_fit_number_shortcuts() {
+        // The key handler binds digits 1-9 to the first nine entries; an
+        // overlong menu would silently lose entries to keyboard navigation.
+        assert!(
+            MENU_FIRST_RUN.len() <= 9,
+            "first-run menu has {} entries, exceeds 1-9 shortcut range",
+            MENU_FIRST_RUN.len()
+        );
+        assert!(
+            MENU_RETURNING.len() <= 9,
+            "returning menu has {} entries, exceeds 1-9 shortcut range",
+            MENU_RETURNING.len()
+        );
+    }
+
+    #[test]
+    fn both_menus_have_chat_and_dashboard() {
+        // Smoke test that the headline actions are present in both menus.
+        for menu in [MENU_FIRST_RUN, MENU_RETURNING] {
+            assert!(menu.iter().any(|m| m.choice == LauncherChoice::Chat));
+            assert!(menu.iter().any(|m| m.choice == LauncherChoice::Dashboard));
+            assert!(
+                menu.iter()
+                    .any(|m| m.choice == LauncherChoice::TerminalUI)
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_state_menu_picks_first_run_variant() {
+        // Direct-construct so we don't have to mock env detection.
+        let mut list = ListState::default();
+        list.select(Some(0));
+        let s = LauncherState {
+            list,
+            daemon_url: None,
+            daemon_agents: 0,
+            detecting: false,
+            tick: 0,
+            first_run: true,
+            openclaw_detected: false,
+            openfang_detected: false,
+            screen: Screen::Menu,
+        };
+        // Same slice (compare by length+head choice — slices are 'static).
+        assert_eq!(s.menu().len(), MENU_FIRST_RUN.len());
+        assert!(
+            matches!(s.menu()[0].choice, LauncherChoice::GetStarted),
+            "first-run menu head must be GetStarted"
+        );
+    }
+
+    #[test]
+    fn launcher_state_menu_picks_returning_variant() {
+        let mut list = ListState::default();
+        list.select(Some(0));
+        let s = LauncherState {
+            list,
+            daemon_url: None,
+            daemon_agents: 0,
+            detecting: false,
+            tick: 0,
+            first_run: false,
+            openclaw_detected: false,
+            openfang_detected: false,
+            screen: Screen::Menu,
+        };
+        assert_eq!(s.menu().len(), MENU_RETURNING.len());
+        assert!(
+            matches!(s.menu()[0].choice, LauncherChoice::Chat),
+            "returning menu head must be Chat"
+        );
+    }
+
+    // ── is_first_run ────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_first_run_true_when_config_missing() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().expect("tempdir");
+        let prev = std::env::var_os("LIBREFANG_HOME");
+
+        // SAFETY: env mutation is serialized through ENV_LOCK; restored in the
+        // same scope before the lock is released at end of test.
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", tmp.path());
+        }
+        let result = is_first_run();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+
+        assert!(
+            result,
+            "empty LIBREFANG_HOME (no config.toml) must report first run"
+        );
+    }
+
+    #[test]
+    fn is_first_run_false_once_config_exists() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("config.toml"), "# fake config\n").unwrap();
+        let prev = std::env::var_os("LIBREFANG_HOME");
+
+        unsafe {
+            std::env::set_var("LIBREFANG_HOME", tmp.path());
+        }
+        let result = is_first_run();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("LIBREFANG_HOME", v),
+                None => std::env::remove_var("LIBREFANG_HOME"),
+            }
+        }
+
+        assert!(
+            !result,
+            "presence of config.toml under LIBREFANG_HOME must clear first-run flag"
+        );
+    }
+}
