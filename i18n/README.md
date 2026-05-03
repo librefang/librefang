@@ -1,19 +1,41 @@
 # i18n — Internationalization Guide
 
-This directory contains translated versions of the project README for different languages.
+This directory contains translated versions of the project README and a small number of legacy translated long-form guides.
+
+## Content surfaces and ownership
+
+LibreFang has two surfaces for non-English content. **Pick the right one before you start a translation.**
+
+| Content type | Source of truth | Translated copies live in |
+|---|---|---|
+| Project README (root `README.md`) | English at repo root | `i18n/README.<lang>.md` |
+| Long-form guides (getting started, tutorials, deep dives, architecture) | Next.js docs site under `docs/src/app/` | Same Next.js route tree under `docs/src/app/<locale>/...` |
+| Legacy long-form sidecars (e.g. `getting-started.fr.md`, `skill-development.zh.md`) | Historic | Already in `i18n/` — being migrated into the Next.js route tree |
+
+**Rules of thumb:**
+
+- New translated **README** content → drop a file at `i18n/README.<lang>.md` and update the language switcher in every existing README (root + every `i18n/README.*.md`). That switcher is the only way readers discover translations.
+- New translated **long-form guide** → add it under `docs/src/app/<locale>/<slug>/` in the Next.js docs site, **not** as a sidecar `.<lang>.md` in `i18n/`. The `i18n/` sidecar layout is legacy and being phased out.
+- Existing sidecars in `i18n/` (e.g. `getting-started.fr.md`, `skill-development.zh.md`) remain reachable via links from the corresponding `i18n/README.<lang>.md` until they are migrated into the docs site.
 
 ## Current Structure
 
 ```
 i18n/
   README.de.md   # German (Deutsch)
-  README.es.md   # Spanish (Espanol)
+  README.es.md   # Spanish (Español)
+  README.fr.md   # French (Français)
   README.ja.md   # Japanese (日本語)
   README.ko.md   # Korean (한국어)
+  README.pl.md   # Polish (Polski)
   README.zh.md   # Chinese (中文)
+
+  # Legacy long-form sidecars — slated to migrate into docs/src/app/<locale>/...
+  getting-started.fr.md   # linked from README.fr.md
+  skill-development.zh.md # linked from README.zh.md
 ```
 
-Each file is a full translation of the root `README.md`. All translations follow the same structure and sections as the English original.
+Each `README.<lang>.md` is a translation of the root `README.md`. All translations follow the same structure and sections as the English original.
 
 ## How to Add a New Language
 
