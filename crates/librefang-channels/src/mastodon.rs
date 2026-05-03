@@ -564,6 +564,83 @@ impl ChannelAdapter for MastodonAdapter {
 mod tests {
     use super::*;
 
+    // ----- send() path tests (issue #3820) -----
+    //
+    // `MastodonAdapter::instance_url` is the injectable base URL (passed via
+    // `new()`), so no extra field is needed. Tests stand up a wiremock server,
+    // pass its URI as the instance URL, then assert that `send()` issues
+    // `POST /api/v1/statuses` with the correct form fields and Bearer auth.
+
+    use wiremock::matchers::{bearer_token, body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(instance_url: String) -> MastodonAdapter {
+        MastodonAdapter::new(instance_url, "test-access-token".to_string())
+    }
+
+    fn dummy_user() -> ChannelUser {
+        ChannelUser {
+            platform_id: "acct-123".to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mastodon_send_posts_status_with_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/statuses"))
+            .and(bearer_token("test-access-token"))
+            .and(body_string_contains("hello+from+librefang"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "status-001",
+                "content": "hello from librefang",
+                "visibility": "unlisted"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn mastodon_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/statuses"))
+            .and(bearer_token("test-access-token"))
+            .and(body_string_contains("Unsupported+content+type"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "status-002",
+                "content": "(Unsupported content type)",
+                "visibility": "unlisted"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
     #[test]
     fn test_mastodon_adapter_creation() {
         let adapter = MastodonAdapter::new(
