@@ -135,7 +135,12 @@ async fn skills_list_starts_empty() {
 async fn skills_list_returns_installed_skill_metadata() {
     let h = boot().await;
     install_skill(h.home(), "alpha", &["data"]);
-    install_skill(h.home(), "beta", &["linux", "writing"]);
+    // Use only non-platform tags. `librefang_skills::registry::skill_matches_platform`
+    // (`registry.rs:68`) filters out skills whose tags include a platform hint
+    // (`"macos"` / `"linux"` / `"windows"`) when running on a different OS, so
+    // a tag set like `["linux", "writing"]` would silently drop "beta" on
+    // macOS and Windows runners and the test would observe `total = 1`.
+    install_skill(h.home(), "beta", &["writing"]);
     h._state.kernel.reload_skills();
 
     let (status, body) = json_request(&h, Method::GET, "/api/skills", None).await;
@@ -242,12 +247,16 @@ async fn skills_detail_returns_full_manifest() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "detail-skill_tool");
     // `path` must be the absolute on-disk skill dir — dashboards use it
-    // to surface a "open in editor" affordance.
+    // to surface a "open in editor" affordance. Normalize the platform
+    // separator (Windows reports `...\skills\detail-skill`, sometimes with
+    // a `\\?\` UNC prefix) before comparing against the cross-platform
+    // forward-slash suffix.
+    let normalized_path = body["path"]
+        .as_str()
+        .unwrap_or("")
+        .replace('\\', "/");
     assert!(
-        body["path"]
-            .as_str()
-            .unwrap_or("")
-            .ends_with("skills/detail-skill"),
+        normalized_path.ends_with("skills/detail-skill"),
         "path should point at the skill dir: {body:?}"
     );
     // Evolution metadata block is always present, even for fresh installs.
