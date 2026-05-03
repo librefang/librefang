@@ -195,6 +195,12 @@ const REGISTERED_GET_ROUTES: &[RouteEntry] = &[
     re("/api/pairing/complete", Expect::AlwaysPublic),
     re("/a2a/agents", Expect::AlwaysPublic),
     re("/dashboard/assets/main.js", Expect::AlwaysPublic),
+    // PWA static files — fetched by the browser before/around login. The manifest
+    // request in particular omits credentials per spec, so it MUST stay public.
+    re("/dashboard/icon-192.png", Expect::AlwaysPublic),
+    re("/dashboard/icon-512.png", Expect::AlwaysPublic),
+    re("/dashboard/manifest.json", Expect::AlwaysPublic),
+    re("/dashboard/sw.js", Expect::AlwaysPublic),
     re("/locales/en.json", Expect::AlwaysPublic),
     re(
         "/api/providers/github-copilot/oauth/start",

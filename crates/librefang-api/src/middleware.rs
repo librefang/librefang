@@ -542,6 +542,16 @@ pub const PUBLIC_ROUTES_GET_ONLY: &[PublicRoute] = &[
     PublicRoute::exact_get("/api/config/schema"),
     // Dashboard assets (JS/CSS/fonts) — always public, SPA needs them for login page
     PublicRoute::prefix_get("/dashboard/assets/"),
+    // PWA static files baked into the binary — non-sensitive, identical for every
+    // user, and fetched by the browser BEFORE login (e.g. `<link rel="manifest">`
+    // and the service-worker registration). The manifest in particular is fetched
+    // by spec with `credentials="omit"` unless the link element carries
+    // `crossorigin="use-credentials"`, so the session cookie is intentionally not
+    // sent and the request would otherwise 401-storm post-login.
+    PublicRoute::exact_get("/dashboard/icon-192.png"),
+    PublicRoute::exact_get("/dashboard/icon-512.png"),
+    PublicRoute::exact_get("/dashboard/manifest.json"),
+    PublicRoute::exact_get("/dashboard/sw.js"),
     // i18n locale bundles — static, fetched before auth flow
     PublicRoute::prefix_get("/locales/"),
 ];
