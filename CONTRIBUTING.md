@@ -169,13 +169,22 @@ cargo build
 - Runs `cargo fetch` to warm up the dependency cache.
 - Runs `pnpm install` in the dashboard / web / docs sub-projects.
 
-The hooks are split by cost (#3303), so the dev loop stays fast:
+Hooks are scoped to fast, staged-only checks. CI is the authoritative
+gate (clippy, openapi/SDK drift, security audit, full test matrix).
 
 | Hook        | Runs                                                                  | Target time |
 |-------------|-----------------------------------------------------------------------|-------------|
 | `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard, `detect-secrets` (if installed) | < 2s |
-| `pre-push`  | `cargo clippy --workspace --all-targets -- -D warnings`, OpenAPI / SDK drift regen | 30-90s |
+| `pre-push`  | Refuses direct push to `main` / `master`. Nothing else.                | < 100ms |
 | `commit-msg`| Reject Claude / Anthropic attribution                                  | < 50ms |
+
+Want to lint locally before pushing? Run `just lint` (or
+`cargo clippy --workspace --all-targets -- -D warnings`) on demand.
+That belongs in your loop when you want it, not gating every push.
+
+Skip the pre-push branch guard with
+`LIBREFANG_PREPUSH_SKIP=1 git push` (or `--no-verify`) when the
+maintainers have agreed to a release / hotfix push to `main`.
 
 For secret scanning, install `detect-secrets` once (`pipx install detect-secrets`). False positives are managed via `.secrets.baseline`:
 
@@ -184,11 +193,10 @@ detect-secrets scan --baseline .secrets.baseline   # update findings
 detect-secrets audit .secrets.baseline             # mark each as real / false-positive
 ```
 
-If you also use the `pre-commit` framework (`pipx install pre-commit`), the equivalent staged-only fmt + secret scan + push-stage clippy is wired in `.pre-commit-config.yaml`:
+If you also use the `pre-commit` framework (`pipx install pre-commit`), the equivalent staged-only fmt + secret scan is wired in `.pre-commit-config.yaml`. The framework's `pre-push` stage is intentionally not wired — CI is the gate, no need to duplicate locally:
 
 ```bash
 pre-commit install --install-hooks                 # commit stage
-pre-commit install --install-hooks -t pre-push     # push stage
 ```
 
 You only need to run it once per clone — `git pull` keeps the hooks current automatically because they live in `scripts/hooks/` rather than being copied into `.git/hooks/`.
