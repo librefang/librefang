@@ -412,13 +412,15 @@ impl SessionStore {
         )
         .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
 
-        if !content.is_empty() {
-            tx.execute(
-                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
-                rusqlite::params![session_id_str, agent_id_str, content],
-            )
-            .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
-        }
+        // Always insert a FTS row, even when content is empty. The v33 migration
+        // backfills a placeholder row for every session so it remains visible to
+        // the index; skipping the INSERT here for empty-content sessions would
+        // silently remove that placeholder and break the "at least visible" invariant.
+        tx.execute(
+            "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+            rusqlite::params![session_id_str, agent_id_str, content],
+        )
+        .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
 
         tx.commit()
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -2559,6 +2561,57 @@ mod tests {
             hits.len(),
             1,
             "post-backfill save_session must populate searchable content"
+        );
+    }
+
+    /// Regression for the HIGH issue identified in code review (#4515):
+    /// save_session previously skipped the FTS INSERT when content was empty,
+    /// which silently removed the v33 backfill placeholder for sessions whose
+    /// messages have no extractable text (e.g. pure tool-call flows).
+    #[test]
+    fn test_fts_v33_backfill_placeholder_survives_empty_content_save() {
+        let agent_id = AgentId::new();
+        let session_id = SessionId::new();
+        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        {
+            let c = conn.lock().unwrap();
+            run_migrations(&c).unwrap();
+            // Empty messages vec → extract_text_content returns "".
+            let messages_blob = rmp_serde::to_vec_named(&Vec::<Message>::new()).unwrap();
+            c.execute(
+                "INSERT INTO sessions (id, agent_id, messages, context_window_tokens, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                rusqlite::params![session_id.0.to_string(), agent_id.0.to_string(), messages_blob],
+            )
+            .unwrap();
+            c.execute("DELETE FROM sessions_fts", []).unwrap();
+            crate::migration::__test_only_run_v33(&c);
+            let count: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                    rusqlite::params![session_id.0.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "v33 backfill must produce a placeholder FTS row");
+        }
+
+        let store = SessionStore::new(Arc::clone(&conn));
+        let session = store.get_session(session_id).unwrap().unwrap();
+        store.save_session(&session).unwrap();
+
+        let count_after: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions_fts WHERE session_id = ?1",
+                rusqlite::params![session_id.0.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_after, 1,
+            "save_session with empty content must preserve the FTS placeholder row"
         );
     }
 
