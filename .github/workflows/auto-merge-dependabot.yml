@@ -1,28 +1,190 @@
 name: Auto Merge Dependabot
 
+# Gate dependabot auto-merge on three independent signals (issue #3555):
+#   1. The CI workflow has actually completed successfully on the PR head SHA
+#      — `gh pr merge --auto` only blocks on required-status-checks branch
+#      protection, which is a single toggle away from disappearing.  Listening
+#      on `workflow_run: CI completed` makes the green-CI gate explicit in
+#      this file so it survives a branch-protection misconfig.
+#   2. The PR has aged at least 24 hours.  Dependabot routinely opens patch
+#      bumps that get yanked upstream within a few hours; the soak window
+#      gives us time to react before a yanked release hits main.  Security
+#      advisories (CVE-/GHSA- in the body) bypass the soak — we want those
+#      to land fast.
+#   3. The bump still classifies as patch or minor (preserved from the prior
+#      #3938 hardening — major bumps stay manual).  Update-type is parsed
+#      from the PR title (`bump <dep> from X.Y.Z to A.B.C`) which dependabot
+#      generates in a stable format across all ecosystems we use.
+#
+# `workflow_run` triggers fire in the context of the default branch and
+# don't carry pull_request context, so we resolve the PR number from the
+# head SHA via the REST commits→pulls endpoint.  This also means
+# `dependabot/fetch-metadata` (which requires `pull_request` event payload)
+# isn't usable here — we parse the version range from the PR title instead.
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
+# Tightened from `contents: write` — auto-merge only needs PR write access;
+# the squash itself is performed by GitHub on the PR's behalf.
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    # Only run when CI succeeded on a dependabot-authored pull_request run.
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      # Inspect the dependabot PR's metadata so we can gate auto-merge
-      # on update-type.  Without this gate, a malicious major-version
-      # release in any watched ecosystem auto-lands on green CI — the
-      # supply-chain blast radius the post-merge audit of #3938 flagged
-      # (npm + pip ecosystems newly added by that PR widened the surface).
-      - name: Fetch Dependabot metadata
+      # Resolve the PR number from the workflow_run head SHA.  The commits
+      # → pulls endpoint returns every PR whose head matches; in practice
+      # dependabot opens one PR per branch, so .[0] is unambiguous.
+      - name: Find PR for head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          pr_number=$(gh api "/repos/${REPO}/commits/${HEAD_SHA}/pulls" --jq '.[0].number // empty')
+          if [ -z "$pr_number" ]; then
+            echo "No open PR found for ${HEAD_SHA} — skipping."
+            exit 0
+          fi
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          # Capture metadata once so later steps don't re-hit the API.
+          gh pr view "$pr_number" --repo "$REPO" \
+            --json createdAt,labels,body,author,title,headRefName \
+            > /tmp/pr.json
+
+      # Parse the bump's update-type from the PR title.  Dependabot's title
+      # format is stable across cargo / github-actions / npm / pip:
+      #   "Bump <dep> from <oldver> to <newver>"  (or "chore(deps): bump …")
+      # We compare the major components of the two versions to classify as
+      # major / minor / patch.  This intentionally replaces the
+      # `dependabot/fetch-metadata` action because that action requires a
+      # `pull_request` event payload and we're in `workflow_run` context.
+      #
+      # Without this gate, a malicious major-version release in any watched
+      # ecosystem auto-lands on green CI — the supply-chain blast radius the
+      # post-merge audit of #3938 flagged (npm + pip ecosystems newly added
+      # by that PR widened the surface).
+      - name: Classify update-type from PR title
         id: meta
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        if: steps.pr.outputs.pr_number != ''
+        run: |
+          set -euo pipefail
+          title=$(jq -r .title /tmp/pr.json)
+          echo "PR title: ${title}"
+
+          # Grouped PRs: dependabot.yml configures groups suffixed
+          # `-minor-patch` that ONLY include `update-types: [minor, patch]`,
+          # so a group PR with that suffix is by-construction safe to
+          # auto-merge — we don't have to parse individual versions out of
+          # the title (which lists N updates).  Any other group name is
+          # treated as `unknown` and falls through to manual review.
+          if [[ "$title" =~ [Bb]ump[[:space:]]+the[[:space:]]+([a-zA-Z0-9_-]+)[[:space:]]+group ]]; then
+            group_name="${BASH_REMATCH[1]}"
+            echo "Grouped update: ${group_name}"
+            if [[ "$group_name" == *-minor-patch ]]; then
+              echo "Group is restricted to minor+patch in dependabot.yml — classifying as minor."
+              echo "update_type=version-update:semver-minor" >> "$GITHUB_OUTPUT"
+              echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
+            else
+              echo "Unrecognized group — refusing to auto-merge."
+              echo "update_type=unknown" >> "$GITHUB_OUTPUT"
+              echo "dep_name=$group_name" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Single-dep PR: match "bump <dep> from X to Y" anywhere in the
+          # title (case-insensitive).  Captures: dep name, old, new version.
+          if [[ ! "$title" =~ [Bb]ump[[:space:]]+([^[:space:]]+)[[:space:]]+from[[:space:]]+([^[:space:]]+)[[:space:]]+to[[:space:]]+([^[:space:]]+) ]]; then
+            echo "Could not parse dependabot update from title — refusing to auto-merge."
+            echo "update_type=unknown" >> "$GITHUB_OUTPUT"
+            echo "dep_name=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dep_name="${BASH_REMATCH[1]}"
+          old_ver="${BASH_REMATCH[2]}"
+          new_ver="${BASH_REMATCH[3]}"
+          echo "Parsed: ${dep_name} ${old_ver} -> ${new_ver}"
+
+          # Strip leading 'v' (github-actions tags are e.g. v3.1.0).
+          old_ver="${old_ver#v}"
+          new_ver="${new_ver#v}"
+
+          # Split on '.', take the first three numeric components; default
+          # missing parts to 0 so "1" -> 1.0.0 still classifies sensibly.
+          IFS='.' read -r o_maj o_min o_pat _ <<< "$old_ver"
+          IFS='.' read -r n_maj n_min n_pat _ <<< "$new_ver"
+          o_maj="${o_maj:-0}"; o_min="${o_min:-0}"; o_pat="${o_pat:-0}"
+          n_maj="${n_maj:-0}"; n_min="${n_min:-0}"; n_pat="${n_pat:-0}"
+
+          # Numeric-only check; if anything's non-numeric (e.g., commit SHA
+          # bumps from a `replace` directive) refuse and let a human review.
+          for v in "$o_maj" "$o_min" "$o_pat" "$n_maj" "$n_min" "$n_pat"; do
+            if ! [[ "$v" =~ ^[0-9]+$ ]]; then
+              echo "Non-numeric version component (${v}) — refusing to auto-merge."
+              echo "update_type=unknown" >> "$GITHUB_OUTPUT"
+              echo "dep_name=$dep_name" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          if [ "$n_maj" -gt "$o_maj" ]; then
+            update_type="version-update:semver-major"
+          elif [ "$n_min" -gt "$o_min" ]; then
+            update_type="version-update:semver-minor"
+          else
+            # Includes patch bumps and same-version (no-op, shouldn't happen).
+            update_type="version-update:semver-patch"
+          fi
+          echo "Update type: ${update_type}"
+          echo "update_type=$update_type" >> "$GITHUB_OUTPUT"
+          echo "dep_name=$dep_name" >> "$GITHUB_OUTPUT"
+
+      # 24-hour soak gate.  Yanked-upstream releases (npm/pypi/cargo) usually
+      # surface within a few hours; the soak gives time for the upstream
+      # advisory or yank to propagate before we squash the bump into main.
+      # Security advisories (CVE-####-/GHSA-) bypass the soak — for those,
+      # delay = exposure window.
+      - name: Check PR age (24h soak, security advisories bypass)
+        id: age
+        if: steps.pr.outputs.pr_number != ''
+        run: |
+          set -euo pipefail
+          created_at=$(jq -r .createdAt /tmp/pr.json)
+          body=$(jq -r '.body // ""' /tmp/pr.json)
+
+          # Security advisory fast-path.  Dependabot annotates security PRs
+          # with CVE / GHSA identifiers in the body, and labels them
+          # `security` — match either signal.
+          has_security_label=$(jq -r '[.labels[].name] | map(ascii_downcase) | any(. == "security")' /tmp/pr.json)
+          if [ "$has_security_label" = "true" ] || \
+             echo "$body" | grep -qiE 'security advisory|cve-[0-9]{4}-|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}'; then
+            echo "Security advisory detected — bypassing 24h soak."
+            echo "merge_now=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ubuntu-latest runners are GNU coreutils, so `date -d` is fine.
+          age_seconds=$(( $(date -u +%s) - $(date -u -d "$created_at" +%s) ))
+          if [ "$age_seconds" -lt 86400 ]; then
+            hours=$(( age_seconds / 3600 ))
+            echo "PR is only ${hours}h old (< 24h soak window) — skipping merge for now."
+            echo "Next CI completion after the soak window will retry."
+            exit 0
+          fi
+          echo "PR aged ${age_seconds}s — soak window cleared."
+          echo "merge_now=true" >> "$GITHUB_OUTPUT"
 
       # Auto-merge only patch + minor bumps.  Major bumps still open
       # the PR for review.  Pass values via env so the gh command
@@ -30,24 +192,26 @@ jobs:
       # block (consistent with the #3938 hardening pattern and #4046).
       - name: Enable auto-merge for safe Dependabot bumps
         if: |
-          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          steps.meta.outputs.update-type == 'version-update:semver-minor'
+          steps.age.outputs.merge_now == 'true' &&
+          (steps.meta.outputs.update_type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update_type == 'version-update:semver-minor')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           REPO: ${{ github.repository }}
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
-          DEP_NAME: ${{ steps.meta.outputs.dependency-names }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update_type }}
+          DEP_NAME: ${{ steps.meta.outputs.dep_name }}
         run: |
-          echo "Auto-merging $DEP_NAME ($UPDATE_TYPE)"
+          echo "Auto-merging $DEP_NAME ($UPDATE_TYPE) — CI green, soak cleared."
           gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash
 
-      - name: Skip auto-merge for major bumps
+      - name: Skip auto-merge for major / unparseable bumps
         if: |
-          steps.meta.outputs.update-type != 'version-update:semver-patch' &&
-          steps.meta.outputs.update-type != 'version-update:semver-minor'
+          steps.age.outputs.merge_now == 'true' &&
+          steps.meta.outputs.update_type != 'version-update:semver-patch' &&
+          steps.meta.outputs.update_type != 'version-update:semver-minor'
         env:
-          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
-          DEP_NAME: ${{ steps.meta.outputs.dependency-names }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update_type }}
+          DEP_NAME: ${{ steps.meta.outputs.dep_name }}
         run: |
           echo "Refusing to auto-merge $DEP_NAME ($UPDATE_TYPE) — manual review required."
