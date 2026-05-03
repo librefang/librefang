@@ -835,6 +835,29 @@ pub struct LibreFangKernel {
     /// first request has written the updated list can redeem the same code
     /// twice.
     vault_recovery_codes_mutex: std::sync::Mutex<()>,
+    /// Process-lifetime cache of the unlocked credential vault (#3598).
+    ///
+    /// Without this cache, every `vault_get` / `vault_set` rebuilt a fresh
+    /// `CredentialVault`, re-read `vault.enc` from disk, and re-ran the
+    /// Argon2id KDF inside `unlock()` — which is intentionally slow.
+    /// `dashboard_login` reads two keys (`dashboard_user`, `dashboard_password`)
+    /// per request and so paid two full KDF runs every login attempt.
+    ///
+    /// Lazy-initialised on first `vault_handle()` call so kernels that never
+    /// touch the vault do no I/O. Subsequent reads hit the in-memory
+    /// `HashMap<String, Zeroizing<String>>` directly. Writes still call
+    /// `CredentialVault::set` which re-derives a fresh per-write KDF inside
+    /// `save()` (that path is unchanged — at-rest security is not
+    /// regressed). The vault's `Drop` impl still zeroises entries when the
+    /// kernel is dropped.
+    ///
+    /// `OnceLock<Arc<RwLock<…>>>` because:
+    /// - lazy init must be one-shot and race-safe (`OnceLock`),
+    /// - the cached vault is shared by &-borrowing kernel methods (`Arc`),
+    /// - reads dominate writes (`RwLock`).
+    vault_cache: std::sync::OnceLock<
+        std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
+    >,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1689,36 +1712,92 @@ impl LibreFangKernel {
         &self.approval_manager
     }
 
-    /// Read a secret from the encrypted vault.
+    /// Lazily open and unlock the credential vault, caching the result for
+    /// the lifetime of this kernel (#3598).
     ///
-    /// Opens and unlocks the vault on each call (stateless). Returns `None` if
-    /// the vault does not exist, cannot be unlocked, or the key is missing.
-    pub fn vault_get(&self, key: &str) -> Option<String> {
-        let vault_path = self.home_dir_boot.join("vault.enc");
-        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
-        if vault.unlock().is_err() {
-            return None;
+    /// The first call pays a single Argon2id KDF (inside `unlock()`) and
+    /// reads `vault.enc` from disk; every subsequent call returns the cached
+    /// `Arc<RwLock<…>>` with no I/O and no KDF. `vault_set` writes through
+    /// the same handle and persists via `CredentialVault::set` →
+    /// `save()` (that path still re-derives a per-write key — at-rest
+    /// security is unchanged).
+    ///
+    /// Returns `Err(_)` only when the vault file exists but cannot be
+    /// unlocked (bad master key, corrupt file, missing keyring entry).
+    /// A missing vault file is **not** an error: the cache is populated
+    /// with an unopened vault and the first `set()` call will `init()` it.
+    fn vault_handle(
+        &self,
+    ) -> Result<
+        std::sync::Arc<std::sync::RwLock<librefang_extensions::vault::CredentialVault>>,
+        String,
+    > {
+        // Fast path: cache already populated.
+        if let Some(handle) = self.vault_cache.get() {
+            return Ok(std::sync::Arc::clone(handle));
         }
-        vault.get(key).map(|s| s.to_string())
-    }
 
-    /// Write a secret to the encrypted vault.
-    ///
-    /// Opens and unlocks the vault on each call (stateless). Creates the vault
-    /// if it does not exist.
-    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+        // Slow path: build the vault, unlock if it exists, install once.
+        // OnceLock::set() losing a race is fine — both racers built an
+        // equivalent unlocked vault; we just discard ours and use the
+        // installed one. Argon2id runs at most a small bounded number of
+        // times during the brief race window (in practice ≤ 2).
         let vault_path = self.home_dir_boot.join("vault.enc");
         let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
-        if !vault.exists() {
-            vault
-                .init()
-                .map_err(|e| format!("Vault init failed: {e}"))?;
-        } else {
+        if vault.exists() {
             vault
                 .unlock()
                 .map_err(|e| format!("Vault unlock failed: {e}"))?;
         }
-        vault
+        let handle = std::sync::Arc::new(std::sync::RwLock::new(vault));
+        match self.vault_cache.set(std::sync::Arc::clone(&handle)) {
+            Ok(()) => Ok(handle),
+            Err(_) => Ok(std::sync::Arc::clone(self.vault_cache.get().expect(
+                "OnceLock::set() returned Err; another thread must have installed a value",
+            ))),
+        }
+    }
+
+    /// Read a secret from the encrypted vault.
+    ///
+    /// First call lazily unlocks the vault (one Argon2id KDF + one disk
+    /// read) and caches the result on the kernel; subsequent calls — for
+    /// any key — are pure in-memory `HashMap` lookups. See `vault_handle`
+    /// and #3598.
+    ///
+    /// Returns `None` if the vault does not exist, cannot be unlocked, or
+    /// the key is missing.
+    pub fn vault_get(&self, key: &str) -> Option<String> {
+        let handle = match self.vault_handle() {
+            Ok(h) => h,
+            Err(_) => return None,
+        };
+        let guard = handle.read().unwrap_or_else(|e| e.into_inner());
+        if !guard.is_unlocked() {
+            // Vault file did not exist when the cache was populated and no
+            // `set()` has initialised it yet — nothing to read.
+            return None;
+        }
+        guard.get(key).map(|s| s.to_string())
+    }
+
+    /// Write a secret to the encrypted vault.
+    ///
+    /// Uses the cached, already-unlocked vault when available (#3598) so
+    /// the unlock-time Argon2id KDF runs at most once per kernel lifetime
+    /// instead of once per call. The save-time KDF inside
+    /// `CredentialVault::set` still runs on every write — at-rest
+    /// security is unchanged. Creates the vault if it does not exist.
+    pub fn vault_set(&self, key: &str, value: &str) -> Result<(), String> {
+        let handle = self.vault_handle()?;
+        let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
+        if !guard.is_unlocked() {
+            // Vault did not exist at cache-population time; create it now.
+            guard
+                .init()
+                .map_err(|e| format!("Vault init failed: {e}"))?;
+        }
+        guard
             .set(key.to_string(), zeroize::Zeroizing::new(value.to_string()))
             .map_err(|e| format!("Vault write failed: {e}"))
     }
@@ -3542,6 +3621,7 @@ impl LibreFangKernel {
             taint_rules_swap: initial_taint_rules,
             log_reloader: OnceLock::new(),
             vault_recovery_codes_mutex: std::sync::Mutex::new(()),
+            vault_cache: std::sync::OnceLock::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.

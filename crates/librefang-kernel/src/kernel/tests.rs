@@ -5990,3 +5990,97 @@ async fn config_reload_lock_not_held_across_long_await_3564() {
     long_reader.await.unwrap();
     kernel.shutdown();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// vault cache (#3598)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Regression test for #3598: `vault_handle()` must reuse the same
+/// `Arc<RwLock<CredentialVault>>` across calls so we run Argon2id at most
+/// once per kernel lifetime instead of once per `vault_get` / `vault_set`.
+///
+/// Direct CPU-time / Argon2-call-count assertions would be flaky on shared
+/// CI runners; instead we assert the structural invariant that produces the
+/// perf win:
+///
+///   1. The cached `Arc` returned by two consecutive `vault_handle()`
+///      calls is the same allocation (`Arc::ptr_eq`), proving we're
+///      reading from the in-memory cache rather than rebuilding a fresh
+///      `CredentialVault` and re-running KDF inside `unlock()`.
+///   2. Round-tripping a value (`vault_set` → `vault_get` → `vault_get`)
+///      returns the written value on every read, proving the cache stays
+///      coherent across writes that go through the same handle.
+///
+/// Serialised because `LIBREFANG_VAULT_KEY` and `LIBREFANG_VAULT_NO_KEYRING`
+/// are process-global; `mcp_oauth_provider` tests in this same crate also
+/// poke `LIBREFANG_VAULT_KEY` without serialisation, so we use the
+/// unnamed `serial` group to gate against any concurrent env-var mutation.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn vault_cache_reuses_unlocked_handle_across_calls() {
+    // 44-char standard base64 of 32 deterministic bytes — produced offline
+    // so this test does not pull a new `base64` dev-dep just to construct
+    // a key. CLAUDE.md gotcha: `LIBREFANG_VAULT_KEY` must base64-decode to
+    // exactly 32 bytes (44 base64 chars). Decoded value is irrelevant; we
+    // just need a stable valid key for the duration of this test.
+    const TEST_VAULT_KEY_B64: &str =
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let _vault_key = set_test_env("LIBREFANG_VAULT_KEY", TEST_VAULT_KEY_B64);
+    // Force the file-based keyring backend off too — we don't want the
+    // unlock path probing the keyring during this test.
+    let _no_keyring = set_test_env("LIBREFANG_VAULT_NO_KEYRING", "1");
+
+    let dir = tempfile::tempdir().unwrap();
+    let home_dir = dir.path().to_path_buf();
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+    // First write — initialises vault (init() runs KDF once) and populates
+    // the cache. Subsequent reads/writes must hit the cached handle.
+    kernel
+        .vault_set("dashboard_user", "alice")
+        .expect("first vault_set should succeed");
+
+    // Two reads back-to-back — the perf win we're protecting.
+    let first = kernel.vault_get("dashboard_user");
+    let second = kernel.vault_get("dashboard_user");
+    assert_eq!(first.as_deref(), Some("alice"));
+    assert_eq!(second.as_deref(), Some("alice"));
+
+    // Structural invariant: the cache slot is shared, not rebuilt per call.
+    let h1 = kernel
+        .vault_handle()
+        .expect("vault_handle should not error after a successful set");
+    let h2 = kernel
+        .vault_handle()
+        .expect("vault_handle should not error on repeat call");
+    assert!(
+        std::sync::Arc::ptr_eq(&h1, &h2),
+        "vault_handle must return the SAME Arc on repeat calls — \
+         otherwise we'd rebuild CredentialVault and re-run Argon2id KDF \
+         on every vault_get / vault_set (#3598)",
+    );
+
+    // Cache coherence across a write through the handle: read-back sees
+    // the new value with no re-unlock.
+    kernel
+        .vault_set("dashboard_password", "s3cret")
+        .expect("second vault_set should succeed via cached handle");
+    assert_eq!(
+        kernel.vault_get("dashboard_password").as_deref(),
+        Some("s3cret"),
+    );
+    assert_eq!(
+        kernel.vault_get("dashboard_user").as_deref(),
+        Some("alice"),
+        "earlier-written keys must still be readable after a subsequent set",
+    );
+
+    kernel.shutdown();
+}
