@@ -151,11 +151,13 @@ async fn activate_prompt_version(
     }
     // Read back the activated version so the caller can patch caches in place
     // without an extra round-trip. If the version vanished between write and
-    // read (narrow race — concurrent delete), fall back to the legacy ack
+    // read (narrow race — concurrent delete) or the kernel implementation
+    // doesn't expose it (e.g. mock kernels in tests, or stores that accept
+    // activate without persisting versions), fall back to the legacy ack
     // envelope so the activation still appears successful.
     match state.kernel.get_prompt_version(&id) {
-        Ok(version) => Json(version).into_response(),
-        Err(_) => Json(serde_json::json!({"success": true})).into_response(),
+        Ok(Some(version)) => Json(version).into_response(),
+        Ok(None) | Err(_) => Json(serde_json::json!({"success": true})).into_response(),
     }
 }
 
