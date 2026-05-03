@@ -55,6 +55,9 @@ fn verify_teams_signature(key_bytes: &[u8], body: &[u8], auth_header: &str) -> b
 const OAUTH_TOKEN_URL: &str =
     "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token";
 
+/// Default Bot Framework service URL used when no per-conversation URL is available.
+const DEFAULT_SERVICE_URL: &str = "https://smba.trafficmanager.net/teams/";
+
 /// Maximum Teams message length (characters).
 const MAX_MESSAGE_LEN: usize = 4096;
 
@@ -88,6 +91,12 @@ pub struct TeamsAdapter {
     account_id: Option<String>,
     /// Cached OAuth2 bearer token and its expiry instant.
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
+    /// OAuth2 token endpoint. Defaults to the Bot Framework Microsoft login URL.
+    /// Overridable in tests via `with_oauth_token_url()` to point at a wiremock server.
+    oauth_token_url: String,
+    /// Bot Framework service URL used for outbound API calls when no per-conversation
+    /// URL is available. Overridable in tests via `with_service_url()`.
+    service_url: String,
 }
 
 impl TeamsAdapter {
@@ -134,11 +143,30 @@ impl TeamsAdapter {
             client: crate::http_client::new_client(),
             account_id: None,
             cached_token: Arc::new(RwLock::new(None)),
+            oauth_token_url: OAUTH_TOKEN_URL.to_string(),
+            service_url: DEFAULT_SERVICE_URL.to_string(),
         }
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the OAuth2 token endpoint URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of the Microsoft login endpoint.
+    #[cfg(test)]
+    pub fn with_oauth_token_url(mut self, url: String) -> Self {
+        self.oauth_token_url = url;
+        self
+    }
+
+    /// Override the Bot Framework service URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of the default trafficmanager endpoint.
+    #[cfg(test)]
+    pub fn with_service_url(mut self, url: String) -> Self {
+        self.service_url = url;
         self
     }
 
@@ -164,7 +192,7 @@ impl TeamsAdapter {
 
         let resp = self
             .client
-            .post(OAUTH_TOKEN_URL)
+            .post(&self.oauth_token_url)
             .form(&params)
             .send()
             .await?;
@@ -443,18 +471,16 @@ impl ChannelAdapter for TeamsAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // We need the serviceUrl from metadata; fall back to the default Bot Framework URL
-        let default_service_url = "https://smba.trafficmanager.net/teams/".to_string();
         let conversation_id = &user.platform_id;
 
         match content {
             ChannelContent::Text(text) => {
-                self.api_send_message(&default_service_url, conversation_id, &text)
+                self.api_send_message(&self.service_url, conversation_id, &text)
                     .await?;
             }
             _ => {
                 self.api_send_message(
-                    &default_service_url,
+                    &self.service_url,
                     conversation_id,
                     "(Unsupported content type)",
                 )
@@ -469,10 +495,9 @@ impl ChannelAdapter for TeamsAdapter {
         user: &ChannelUser,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
-        let default_service_url = "https://smba.trafficmanager.net/teams/";
         let url = format!(
             "{}/v3/conversations/{}/activities",
-            default_service_url.trim_end_matches('/'),
+            self.service_url.trim_end_matches('/'),
             user.platform_id
         );
 
@@ -499,6 +524,159 @@ impl ChannelAdapter for TeamsAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server. The adapter is pointed at
+    // the mock via `with_oauth_token_url()` (so the client-credentials token
+    // fetch goes to wiremock) and `with_service_url()` (so the Bot Framework
+    // activities POST goes to wiremock). This mirrors the pattern used for the
+    // gotify slice (PR #4447) and the slack slice (PR #4545).
+
+    use wiremock::matchers::{body_json, body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Returns a `TeamsAdapter` configured to talk to `server` for both OAuth
+    /// token acquisition and Bot Framework API calls.
+    async fn make_adapter(server: &MockServer) -> TeamsAdapter {
+        TeamsAdapter::new(
+            "test-app-id".to_string(),
+            "test-app-password".to_string(),
+            "".to_string(), // no signature verification in tests
+            0,
+            vec![],
+        )
+        .with_oauth_token_url(format!("{}/oauth2/token", server.uri()))
+        .with_service_url(server.uri())
+    }
+
+    /// Mount a mock that returns a synthetic OAuth2 token. Every test that
+    /// exercises `send()` must call `get_token()` first, so this must be
+    /// mounted before the activities mock.
+    async fn mount_token_mock(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token"))
+            .and(body_string_contains("client_credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "test-bearer-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn dummy_user(conversation_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: conversation_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn teams_send_text_posts_message_activity() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/v3/conversations/conv-abc/activities"))
+            .and(header("Authorization", "Bearer test-bearer-token"))
+            .and(body_json(serde_json::json!({
+                "type": "message",
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "activity-1",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(&server).await;
+        adapter
+            .send(
+                &dummy_user("conv-abc"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn teams_send_non_text_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        mount_token_mock(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/v3/conversations/conv-xyz/activities"))
+            .and(header("Authorization", "Bearer test-bearer-token"))
+            .and(body_json(serde_json::json!({
+                "type": "message",
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "activity-2",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(&server).await;
+        adapter
+            .send(
+                &dummy_user("conv-xyz"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
+    }
+
+    #[tokio::test]
+    async fn teams_send_reuses_cached_oauth_token() {
+        let server = MockServer::start().await;
+
+        // Token endpoint should only be called once even though we send twice.
+        Mock::given(method("POST"))
+            .and(path("/oauth2/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "cached-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            })))
+            .expect(1) // exactly one token fetch for two send() calls
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v3/conversations/conv-cache/activities"))
+            .and(header("Authorization", "Bearer cached-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "activity-3",
+            })))
+            .expect(2) // two messages sent
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(&server).await;
+        adapter
+            .send(
+                &dummy_user("conv-cache"),
+                ChannelContent::Text("first".into()),
+            )
+            .await
+            .expect("first send must succeed");
+        adapter
+            .send(
+                &dummy_user("conv-cache"),
+                ChannelContent::Text("second".into()),
+            )
+            .await
+            .expect("second send must succeed");
+    }
 
     #[test]
     fn test_teams_adapter_creation() {
