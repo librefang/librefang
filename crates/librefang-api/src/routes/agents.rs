@@ -1666,17 +1666,22 @@ pub async fn send_message(
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
     if req.message.len() > MAX_MESSAGE_SIZE {
-        return ApiErrorResponse::bad_request(err_too_large)
-            .with_code("message_too_large")
-            .with_status(StatusCode::PAYLOAD_TOO_LARGE)
-            .into_response();
+        // #3511: tag every response for which `agent_id` is known so
+        // request_logging middleware can emit it as a structured field.
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::bad_request(err_too_large)
+                .with_code("message_too_large")
+                .with_status(StatusCode::PAYLOAD_TOO_LARGE),
+        );
     }
 
     // Check agent exists before processing
     if state.kernel.agent_registry().get(agent_id).is_none() {
-        return ApiErrorResponse::not_found(err_not_found)
-            .with_code("agent_not_found")
-            .into_response();
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::not_found(err_not_found).with_code("agent_not_found"),
+        );
     }
 
     // Reject messages when the agent's provider has no API key configured
@@ -1704,14 +1709,19 @@ pub async fn send_message(
             if let Some(catalog) = state.kernel.model_catalog_ref().read().ok().as_ref() {
                 if let Some(p) = catalog.get_provider(provider) {
                     if !p.auth_status.is_available() {
-                        return ApiErrorResponse {
-                            error: format!("{} (provider: {})", err_auth_missing, provider),
-                            code: Some("provider_auth_missing".to_string()),
-                            r#type: Some("provider_auth_missing".to_string()),
-                            details: None,
-                            status: StatusCode::PRECONDITION_FAILED,
-                        }
-                        .into_response();
+                        return crate::extensions::with_agent_id(
+                            agent_id,
+                            ApiErrorResponse {
+                                error: format!(
+                                    "{} (provider: {})",
+                                    err_auth_missing, provider
+                                ),
+                                code: Some("provider_auth_missing".to_string()),
+                                r#type: Some("provider_auth_missing".to_string()),
+                                details: None,
+                                status: StatusCode::PRECONDITION_FAILED,
+                            },
+                        );
                     }
                 }
             }
@@ -2249,7 +2259,7 @@ pub async fn kill_agent(
         }
     }
 
-    match state.kernel.kill_agent(agent_id) {
+    let body = match state.kernel.kill_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "killed", "agent_id": id})),
@@ -2277,7 +2287,10 @@ pub async fn kill_agent(
                 .with_code("agent_kill_failed")
                 .into_response()
         }
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit
+    // `agent_id` as a structured field on the access-log line.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// PUT /api/agents/:id/suspend — Suspend an agent (stops cron, keeps in registry).
@@ -2294,7 +2307,7 @@ pub async fn suspend_agent(
                 .into_response();
         }
     };
-    match state.kernel.suspend_agent(agent_id) {
+    let body = match state.kernel.suspend_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "suspended", "agent_id": id})),
@@ -2303,7 +2316,8 @@ pub async fn suspend_agent(
         Err(e) => ApiErrorResponse::not_found(e.to_string())
             .with_code("agent_not_found")
             .into_response(),
-    }
+    };
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// PUT /api/agents/:id/resume — Resume a suspended agent.
@@ -2320,7 +2334,7 @@ pub async fn resume_agent(
                 .into_response();
         }
     };
-    match state.kernel.resume_agent(agent_id) {
+    let body = match state.kernel.resume_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "running", "agent_id": id})),
@@ -2329,7 +2343,8 @@ pub async fn resume_agent(
         Err(e) => ApiErrorResponse::not_found(e.to_string())
             .with_code("agent_not_found")
             .into_response(),
-    }
+    };
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// PUT /api/agents/:id/mode — Change an agent's operational mode.
@@ -2359,7 +2374,7 @@ pub async fn set_agent_mode(
         }
     };
 
-    match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
+    let body = match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -2372,7 +2387,8 @@ pub async fn set_agent_mode(
         Err(_) => ApiErrorResponse::not_found(t.t("api-error-agent-not-found"))
             .with_code("agent_not_found")
             .into_response(),
-    }
+    };
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 // ---------------------------------------------------------------------------

@@ -107,6 +107,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, content: &[u8]) -> std::io::R
 }
 
 pub mod channel_bridge;
+pub mod extensions;
 pub mod extractors;
 pub mod mcp_oauth;
 pub mod middleware;
