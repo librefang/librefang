@@ -21,6 +21,7 @@
 //! `media_transcribe` out of band, and decoding them inline would just
 //! waste tokens on binary noise.
 
+use std::io::Read;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
@@ -59,7 +60,7 @@ pub fn enrich_saved_file(saved_path: &Path, media_type: &str, filename: &str) ->
     let mt = media_type.trim().to_ascii_lowercase();
     let mt_base = mt.split(';').next().unwrap_or(&mt).trim();
 
-    if mt_base == "application/pdf" {
+    if mt_base == "application/pdf" || looks_like_pdf(saved_path, filename, mt_base) {
         return enrich_pdf(saved_path, filename);
     }
 
@@ -68,6 +69,34 @@ pub fn enrich_saved_file(saved_path: &Path, media_type: &str, filename: &str) ->
     }
 
     Vec::new()
+}
+
+/// PDF detection for senders that don't supply `application/pdf` —
+/// Telegram, for example, uploads many documents as
+/// `application/octet-stream`. Only consulted when the caller-supplied
+/// MIME is empty or generic so we never override an authoritative type
+/// (e.g. `image/png`) on a filename guess.
+fn looks_like_pdf(path: &Path, filename: &str, mt_base: &str) -> bool {
+    let ambiguous_mime = mt_base.is_empty()
+        || mt_base == "application/octet-stream"
+        || mt_base == "application/binary"
+        || mt_base == "binary/octet-stream";
+    if !ambiguous_mime {
+        return false;
+    }
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".pdf") {
+        return true;
+    }
+    has_pdf_magic_bytes(path)
+}
+
+fn has_pdf_magic_bytes(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 5];
+    matches!(f.read(&mut buf), Ok(5) if &buf == b"%PDF-")
 }
 
 fn enrich_pdf(path: &Path, filename: &str) -> Vec<ContentBlock> {
@@ -382,6 +411,70 @@ mod tests {
             }
             _ => panic!("expected Text block"),
         }
+    }
+
+    #[test]
+    fn pdf_inlined_when_mime_is_octet_stream_with_pdf_extension() {
+        // Telegram (and several other channels) upload PDFs as
+        // `application/octet-stream` rather than `application/pdf`. The
+        // sender-supplied filename is the only signal — we must trust it
+        // for ambiguous MIMEs and route to `enrich_pdf`, otherwise the
+        // LLM falls back to the path-only block (#4448 regression).
+        let f = write_tmp(b"%PDF-1.4\n%fake-but-claims-pdf\n");
+        let out = enrich_saved_file(
+            f.path(),
+            "application/octet-stream",
+            "Fee receipt 03-05-2026.pdf",
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "PDF must be enriched even without proper MIME"
+        );
+        match &out[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.starts_with("[Attached PDF: Fee receipt 03-05-2026.pdf"));
+            }
+            _ => panic!("expected Text block"),
+        }
+    }
+
+    #[test]
+    fn pdf_inlined_when_detected_by_magic_bytes_only() {
+        // Sender renamed a PDF to a generic extension. We still recognize
+        // it from the `%PDF-` magic header when the MIME is ambiguous.
+        let f = write_tmp(b"%PDF-1.5\nminimal\n");
+        let out = enrich_saved_file(f.path(), "application/octet-stream", "scan.bin");
+        assert_eq!(out.len(), 1, "magic-byte sniff must catch unlabelled PDFs");
+        match &out[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.starts_with("[Attached PDF: scan.bin"));
+            }
+            _ => panic!("expected Text block"),
+        }
+    }
+
+    #[test]
+    fn pdf_extension_ignored_when_caller_asserts_image_mime() {
+        // If the caller is confident the file is an image, don't override
+        // their decision based on filename — they already emit a richer
+        // ContentBlock::ImageFile and double-encoding wastes tokens.
+        let f = write_tmp(b"\x89PNG\r\n\x1a\nfake png with .pdf name");
+        let out = enrich_saved_file(f.path(), "image/png", "weird.pdf");
+        assert!(
+            out.is_empty(),
+            "explicit image MIME wins over filename heuristic"
+        );
+    }
+
+    #[test]
+    fn unknown_binary_with_octet_stream_still_returns_empty() {
+        // Regression guard for the new octet-stream PDF heuristic: random
+        // binary that is neither named .pdf nor has the magic bytes must
+        // still fall through to the empty result.
+        let f = write_tmp(b"\x00\x01\x02 truly random bytes");
+        let out = enrich_saved_file(f.path(), "application/octet-stream", "data.dat");
+        assert!(out.is_empty());
     }
 
     #[test]
