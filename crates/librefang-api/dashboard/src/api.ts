@@ -376,9 +376,73 @@ export interface AgentFileUploadResult {
   transcription?: string;
 }
 
+/** Mirrors `ContentBlock` in `crates/librefang-types/src/message.rs` —
+ *  serde-tagged on `type`. Keep variants in sync with the Rust enum;
+ *  unknown server-side variants land in `ContentBlockUnknown` so the
+ *  client never throws on a forward-compatible payload. */
+export interface ContentBlockText {
+  type: "text";
+  text: string;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockThinking {
+  type: "thinking";
+  thinking: string;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockToolUse {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: unknown;
+  provider_metadata?: unknown;
+}
+
+export interface ContentBlockToolResult {
+  type: "tool_result";
+  tool_use_id: string;
+  tool_name?: string;
+  content: string;
+  is_error: boolean;
+  status?: unknown;
+  approval_request_id?: string;
+}
+
+export interface ContentBlockImage {
+  type: "image";
+  media_type: string;
+  data: string;
+}
+
+export interface ContentBlockImageFile {
+  type: "image_file";
+  media_type: string;
+  path: string;
+}
+
+/** Forward-compat fallback for variants the Rust enum may add later. */
+export interface ContentBlockUnknown {
+  type: string;
+  [key: string]: unknown;
+}
+
+export type ContentBlock =
+  | ContentBlockText
+  | ContentBlockThinking
+  | ContentBlockToolUse
+  | ContentBlockToolResult
+  | ContentBlockImage
+  | ContentBlockImageFile
+  | ContentBlockUnknown;
+
 export interface AgentSessionMessage {
   role?: string;
-  content?: unknown;
+  /** Either a plain string (legacy `MessageContent::Text`) or an array
+   *  of structured blocks (`MessageContent::Blocks`) — the Rust enum is
+   *  `#[serde(untagged)]` so both shapes appear on the wire. */
+  content?: string | ContentBlock[];
   tools?: AgentTool[];
   images?: AgentSessionImage[];
   /** RFC 3339 timestamp from the server; may be absent for messages
