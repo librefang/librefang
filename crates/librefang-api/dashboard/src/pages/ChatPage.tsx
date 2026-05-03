@@ -2465,8 +2465,18 @@ export function ChatPage() {
     setSelectedAgentId(id);
     setVisibleCount(50);
     setMobileSheetOpen(false);
-    navigate({ to: "/chat", search: { agentId: id }, replace: true });
-  }, [navigate]);
+    // Preserve sessionId only when the URL already targets the same agent —
+    // otherwise the session is invalid for the new agent and would 404. This
+    // is the last line of defense against the bootstrap race in issue #4296
+    // (Bug C): without it, auto-select clobbers a URL-pinned sessionId via
+    // `replace: true`, and the back button can't recover it.
+    const keepSession = search?.agentId === id ? search?.sessionId : undefined;
+    navigate({
+      to: "/chat",
+      search: keepSession ? { agentId: id, sessionId: keepSession } : { agentId: id },
+      replace: true,
+    });
+  }, [navigate, search]);
 
   // Check TTS provider availability
   const mediaProvidersQuery = useMediaProviders();
@@ -2750,6 +2760,10 @@ export function ChatPage() {
   useEffect(() => {
     if (!selectedAgentId) return;
     if (agentsQuery.data === undefined) return;
+    // Wait for the hands query too when hand agents are visible — otherwise
+    // `agents` is missing every is_hand entry mid-bootstrap and we'd clear a
+    // URL-pinned hand-agent selection on a stale list (issue #4296 Bug B).
+    if (showHandAgents && handsQuery.data === undefined) return;
     if (agents.some(a => a.id === selectedAgentId)) return;
     // Not in the current list — before clearing, try expanding the query
     // to include hand-spawned agents. The URL may point at a hand agent
@@ -2760,7 +2774,7 @@ export function ChatPage() {
       return;
     }
     setSelectedAgentId("");
-  }, [agents, selectedAgentId, agentsQuery.data, showHandAgents]);
+  }, [agents, selectedAgentId, agentsQuery.data, handsQuery.data, showHandAgents]);
 
   useEffect(() => {
     // Auto-select first running agent

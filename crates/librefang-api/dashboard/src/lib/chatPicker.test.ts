@@ -72,6 +72,35 @@ describe("groupedPicker", () => {
     expect(result.handGroups).toEqual([]);
   });
 
+  // Issue #4296 Bug A: while the hands query is still loading
+  // (`handInstances === undefined`), is_hand agents must remain visible so
+  // a URL-pinned hand-agent selection isn't silently dropped during the
+  // bootstrap window. Once the query resolves with `[]` (paused / no active
+  // hands), the existing semantics still drop them.
+  it("keeps is_hand agents visible while handInstances is loading (undefined)", () => {
+    const agents = [
+      agent("a1", "general"),
+      agent("hand-main", "main", { is_hand: true }),
+    ];
+
+    const result = groupedPicker(agents, undefined, true);
+
+    expect(result.standalone.map((a) => a.id)).toEqual(["a1", "hand-main"]);
+    expect(result.handGroups).toEqual([]);
+  });
+
+  it("drops is_hand agents once handInstances resolves to [] (paused hands)", () => {
+    const agents = [
+      agent("a1", "general"),
+      agent("hand-main", "main", { is_hand: true }),
+    ];
+
+    const result = groupedPicker(agents, [], true);
+
+    expect(result.standalone.map((a) => a.id)).toEqual(["a1"]);
+    expect(result.handGroups).toEqual([]);
+  });
+
   it("groups a single-agent hand under one header", () => {
     const agents = [
       agent("a1", "general"),
