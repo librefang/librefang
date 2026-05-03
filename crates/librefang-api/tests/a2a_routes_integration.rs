@@ -123,9 +123,10 @@ async fn send(
 // GET /api/a2a/agents
 // ---------------------------------------------------------------------------
 
-/// Empty kernel → empty trusted+pending list, 200 with shape
-/// `{ "agents": [], "total": 0 }`. Confirms the route is wired and the
-/// dashboard-reads middleware lets it through without auth.
+/// Empty kernel → empty trusted+pending list, 200 with the canonical
+/// `PaginatedResponse{items,total,offset,limit}` envelope per #3842.
+/// Confirms the route is wired and the dashboard-reads middleware lets it
+/// through without auth.
 #[tokio::test(flavor = "multi_thread")]
 async fn list_external_agents_empty_returns_envelope() {
     let h = boot("").await;
@@ -133,8 +134,10 @@ async fn list_external_agents_empty_returns_envelope() {
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["total"], serde_json::json!(0));
-    assert!(body["agents"].is_array());
-    assert_eq!(body["agents"].as_array().unwrap().len(), 0);
+    assert_eq!(body["offset"], serde_json::json!(0));
+    assert!(body.get("limit").is_some(), "limit field present (null ok)");
+    assert!(body["items"].is_array());
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
 /// In default dev mode (no api_key configured), /api/a2a/agents must be

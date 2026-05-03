@@ -321,7 +321,7 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
     let agents = state.kernel.agent_registry().list();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
-    let cards: Vec<serde_json::Value> = agents
+    let items: Vec<serde_json::Value> = agents
         .iter()
         .map(|entry| {
             let card = librefang_runtime::a2a::build_agent_card(&entry.manifest, &base_url);
@@ -329,13 +329,16 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
         })
         .collect();
 
-    let total = cards.len();
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    let total = items.len();
     (
         StatusCode::OK,
-        Json(serde_json::json!({
-            "agents": cards,
-            "total": total,
-        })),
+        Json(crate::types::PaginatedResponse {
+            items,
+            total,
+            offset: 0,
+            limit: None,
+        }),
     )
 }
 
@@ -590,7 +593,14 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
             "status": "pending",
         }));
     }
-    Json(serde_json::json!({"agents": items, "total": items.len()}))
+    // #3842: canonical `PaginatedResponse{items,total,offset,limit}` envelope.
+    let total = items.len();
+    Json(crate::types::PaginatedResponse {
+        items,
+        total,
+        offset: 0,
+        limit: None,
+    })
 }
 
 /// Check whether a URL is safe to fetch (not targeting internal/private networks).
