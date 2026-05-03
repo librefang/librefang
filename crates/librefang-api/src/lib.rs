@@ -128,6 +128,7 @@ pub mod types;
 pub mod validation;
 pub mod versioning;
 pub mod webchat;
+pub mod workflow;
 pub mod webhook_store;
 pub mod ws;
 

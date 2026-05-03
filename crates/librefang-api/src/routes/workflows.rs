@@ -100,7 +100,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::workflow::{
+use crate::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
 };
 use librefang_runtime::kernel_handle::KernelHandle;
