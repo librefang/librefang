@@ -2399,6 +2399,22 @@ impl WorkflowEngine {
     /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
     /// unique variable found.
     pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
+        workflow.to_template()
+    }
+}
+
+impl Workflow {
+    /// Convert this workflow into a reusable [`WorkflowTemplate`].
+    ///
+    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. Parameters
+    /// are auto-detected by scanning `prompt_template` fields for `{{var}}`
+    /// placeholders, with one [`TemplateParameter`] created per unique name.
+    ///
+    /// Exposed as an inherent method so callers outside the kernel (e.g. the
+    /// API crate) can perform the conversion without importing
+    /// `WorkflowEngine` directly.
+    pub fn to_template(&self) -> WorkflowTemplate {
+        let workflow = self;
         // Slugify workflow name -> template ID
         let id = workflow
             .name
