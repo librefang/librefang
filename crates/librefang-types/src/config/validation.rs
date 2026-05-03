@@ -101,6 +101,7 @@ impl KernelConfig {
             "auto_dream",
             "max_history_messages",
             "default_routing",
+            "runtime",
         ]
     }
 

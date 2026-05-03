@@ -5176,6 +5176,9 @@ system_prompt = "You are a helpful assistant."
                 max_iterations: self.config.load().agent_max_iterations,
                 max_history_messages: self.config.load().max_history_messages,
                 aux_client: Some(self.aux_client.load_full()),
+                tool_result_max_bytes_per_turn: Some(
+                    self.config.load().runtime.tool_results.max_bytes_per_turn,
+                ),
             },
         )
         .await
@@ -6022,6 +6025,9 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            tool_result_max_bytes_per_turn: Some(
+                self.config.load().runtime.tool_results.max_bytes_per_turn,
+            ),
         };
         // INVARIANT: forks must use the canonical session so the parent turn's
         // prompt-cache prefix is reused. Do NOT pass a `session_id_override`
@@ -6093,6 +6099,9 @@ system_prompt = "You are a helpful assistant."
             max_iterations: self.config.load().agent_max_iterations,
             max_history_messages: self.config.load().max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            tool_result_max_bytes_per_turn: Some(
+                self.config.load().runtime.tool_results.max_bytes_per_turn,
+            ),
         };
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
@@ -8413,6 +8422,7 @@ system_prompt = "You are a helpful assistant."
             max_iterations: cfg.agent_max_iterations,
             max_history_messages: cfg.max_history_messages,
             aux_client: Some(self.aux_client.load_full()),
+            tool_result_max_bytes_per_turn: Some(cfg.runtime.tool_results.max_bytes_per_turn),
         };
 
         // Build a per-execution MCP pool that includes the agent workspace as

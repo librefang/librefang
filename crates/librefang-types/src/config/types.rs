@@ -2999,6 +2999,70 @@ pub struct KernelConfig {
     /// Default: `60` minutes.
     #[serde(default = "default_workflow_stale_timeout_minutes")]
     pub workflow_stale_timeout_minutes: u64,
+    /// Runtime knobs (`[runtime]`) — currently carries the
+    /// per-turn tool-result byte budget. See [`RuntimeConfig`].
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+}
+
+/// `[runtime]` configuration block — knobs that govern the runtime
+/// tool-execution loop.
+///
+/// Currently exposes only [`RuntimeConfig::tool_results`]. Add new sub-blocks
+/// here rather than creating new top-level config sections so operators can
+/// keep all runtime tunables together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Per-turn tool-result byte budget. See [`ToolResultsConfig`].
+    #[serde(default)]
+    pub tool_results: ToolResultsConfig,
+}
+
+/// `[runtime.tool_results]` configuration — per-turn cumulative byte cap for
+/// tool-result content the runtime sends back to the LLM.
+///
+/// Each individual tool already self-truncates its output; this cap is an
+/// outer safety net that bounds the **sum** of all tool-result content
+/// committed to the model in a single assistant turn (one `agent_loop`
+/// iteration's worth of `ContentBlock::ToolResult` blocks).
+///
+/// Mechanism: when the cumulative size of tool-result blocks in a turn would
+/// exceed [`Self::max_bytes_per_turn`], the oldest results in the turn are
+/// shrunk first via UTF-8-safe tail truncation (preserving the
+/// `... [truncated, N total bytes]` marker existing tools already use) until
+/// the aggregate fits under the cap.
+///
+/// Defaults to a conservative `50_000` bytes — large enough to keep typical
+/// shell/web/agent_send results intact, small enough to leave room for the
+/// system prompt + history at provider context limits below 16 KB
+/// completions. Set higher for long-context models (Claude 3.5 Sonnet,
+/// GPT-4o) when you want the model to see more raw output; set lower for
+/// cheap-tier models with tight contexts.
+///
+/// Tracked in issue #3347 as mechanism (1) of three composable mechanisms.
+/// Mechanisms (2) "artifact spill" and (3) "history fold" are not yet
+/// shipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ToolResultsConfig {
+    /// Maximum cumulative tool-result bytes committed to the model in one
+    /// assistant turn. Default: `50_000`. Set to `0` to disable the cap
+    /// entirely (existing per-result truncation still applies).
+    #[serde(default = "default_max_bytes_per_turn")]
+    pub max_bytes_per_turn: usize,
+}
+
+fn default_max_bytes_per_turn() -> usize {
+    50_000
+}
+
+impl Default for ToolResultsConfig {
+    fn default() -> Self {
+        Self {
+            max_bytes_per_turn: default_max_bytes_per_turn(),
+        }
+    }
 }
 
 /// Input sanitization mode for channel messages.
@@ -4851,6 +4915,7 @@ impl Default for KernelConfig {
             tool_invoke: ToolInvokeConfig::default(),
             parallel_tools: ParallelToolsConfig::default(),
             workflow_stale_timeout_minutes: default_workflow_stale_timeout_minutes(),
+            runtime: RuntimeConfig::default(),
         }
     }
 }
@@ -7874,6 +7939,66 @@ max_tokens_per_hour = 500000
         assert_eq!(c.max_concurrent, 4);
         assert_eq!(c.mcp_default_safety, "write_shared");
         assert!(c.mcp_readonly_allowlist.is_empty());
+    }
+
+    // ── Issue #3347: per-turn cumulative tool-result byte cap ──────────────
+
+    #[test]
+    fn tool_results_default_max_bytes_per_turn_is_50k() {
+        let c = ToolResultsConfig::default();
+        assert_eq!(c.max_bytes_per_turn, 50_000);
+
+        // KernelConfig::default() must wire the field through.
+        let cfg = KernelConfig::default();
+        assert_eq!(cfg.runtime, RuntimeConfig::default());
+        assert_eq!(cfg.runtime.tool_results.max_bytes_per_turn, 50_000);
+    }
+
+    #[test]
+    fn runtime_tool_results_toml_roundtrip() {
+        let toml_str = r#"
+            [runtime.tool_results]
+            max_bytes_per_turn = 12345
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.runtime.tool_results.max_bytes_per_turn, 12345);
+
+        // Serialise back, reparse, value must survive.
+        let back = toml::to_string(&cfg).unwrap();
+        let again: KernelConfig = toml::from_str(&back).unwrap();
+        assert_eq!(again.runtime.tool_results.max_bytes_per_turn, 12345);
+    }
+
+    #[test]
+    fn runtime_section_missing_uses_defaults() {
+        // Old config.toml predating issue #3347 has no [runtime] section.
+        // KernelConfig deserialisation must hydrate the field with Default.
+        let toml_str = r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#;
+        let cfg: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.runtime, RuntimeConfig::default());
+        assert_eq!(cfg.runtime.tool_results.max_bytes_per_turn, 50_000);
+    }
+
+    #[test]
+    fn runtime_field_is_known_top_level_for_strict_mode() {
+        // Operators running `strict_config = true` with the new
+        // [runtime.tool_results] section must NOT see an "unknown field"
+        // warning — the strict-mode allowlist must include `runtime`.
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [runtime.tool_results]
+            max_bytes_per_turn = 25_000
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(
+            unknown.is_empty(),
+            "runtime must be allowlisted: {unknown:?}"
+        );
     }
 
     // ── Issue #3050: granular MCP taint policy ─────────────────────────────

@@ -89,6 +89,13 @@
     "ApprovalPolicy": {
       "description": "Configurable approval policy.",
       "properties": {
+        "audit_retention_days": {
+          "default": 90,
+          "description": "How many days to retain `approval_audit` rows before the periodic retention sweep hard-deletes them. Independent of `audit_entries` Merkle retention (see #3383); the approval log is a flat audit table that would otherwise grow forever (#3468). Default: 90. Set to 0 to disable pruning.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "auto_approve": {
           "default": false,
           "description": "Alias: if `auto_approve = true`, clears the require list at boot.",
@@ -4871,6 +4878,13 @@
             "null"
           ]
         },
+        "soft_delete_retention_days": {
+          "default": 30,
+          "description": "How many days to keep soft-deleted memories (`deleted = 1`) before the periodic retention sweep hard-deletes them and reclaims their embedding BLOB. Default: 30. Set to 0 to disable hard-delete (rows stay forever, leaking embedding storage — see #3467).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "sqlite_path": {
           "default": null,
           "description": "Path to SQLite database file.",
@@ -5005,6 +5019,41 @@
           "default": 8452,
           "description": "Port for the incoming webhook.",
           "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "ModelRoutingConfig": {
+      "description": "Model routing configuration — auto-selects cheap/mid/expensive models by complexity.",
+      "properties": {
+        "complex_model": {
+          "default": "claude-sonnet-4-20250514",
+          "description": "Model to use for complex queries.",
+          "type": "string"
+        },
+        "complex_threshold": {
+          "default": 500,
+          "description": "Token count threshold: above this = complex.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "medium_model": {
+          "default": "claude-sonnet-4-20250514",
+          "description": "Model to use for medium-complexity queries.",
+          "type": "string"
+        },
+        "simple_model": {
+          "default": "claude-haiku-4-5-20251001",
+          "description": "Model to use for simple queries.",
+          "type": "string"
+        },
+        "simple_threshold": {
+          "default": 100,
+          "description": "Token count threshold: below this = simple.",
+          "format": "uint32",
           "minimum": 0.0,
           "type": "integer"
         }
@@ -10430,6 +10479,13 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "trigger_fire_timeout_secs": {
+          "default": 300,
+          "description": "Per-fire timeout (seconds) for trigger dispatches. Bounds the duration a single fire holds its `Lane::Trigger` and per-agent permits, preventing one stuck LLM call from starving every other agent's triggers kernel-wide (issue #3446). `0` is rewritten to the default by validation.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "trigger_lane": {
           "default": 8,
           "description": "Trigger lane concurrent limit — global cap on event-trigger (`TaskPosted`, `MessageReceived`, …) dispatches in flight at the same time, across all agents. Acquired BEFORE the per-agent semaphore so a single hot agent cannot starve the kernel. Default `8`. `0` is rewritten to `1` by validation.",
@@ -10454,6 +10510,7 @@
             "default_per_agent": 1,
             "main_lane": 3,
             "subagent_lane": 3,
+            "trigger_fire_timeout_secs": 300,
             "trigger_lane": 8
           },
           "description": "Per-lane concurrency limits."
@@ -10469,6 +10526,13 @@
           "default": 0,
           "description": "Max queue depth per agent (0 = unlimited).",
           "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "task_queue_retention_days": {
+          "default": 7,
+          "description": "How many days to keep `completed` / `failed` / `cancelled` rows in `task_queue` before the periodic retention sweep hard-deletes them. Default: 7. Set to 0 to disable pruning (queue grows forever — #3466).",
+          "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
         },
@@ -10871,6 +10935,23 @@
           "default": "",
           "description": "User ID for the bot.",
           "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "description": "`[runtime]` configuration block — knobs that govern the runtime tool-execution loop.\n\nCurrently exposes only [`RuntimeConfig::tool_results`]. Add new sub-blocks here rather than creating new top-level config sections so operators can keep all runtime tunables together.",
+      "properties": {
+        "tool_results": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ToolResultsConfig"
+            }
+          ],
+          "default": {
+            "max_bytes_per_turn": 50000
+          },
+          "description": "Per-turn tool-result byte budget. See [`ToolResultsConfig`]."
         }
       },
       "type": "object"
@@ -12184,6 +12265,19 @@
       ],
       "type": "object"
     },
+    "ToolResultsConfig": {
+      "description": "`[runtime.tool_results]` configuration — per-turn cumulative byte cap for tool-result content the runtime sends back to the LLM.\n\nEach individual tool already self-truncates its output; this cap is an outer safety net that bounds the **sum** of all tool-result content committed to the model in a single assistant turn (one `agent_loop` iteration's worth of `ContentBlock::ToolResult` blocks).\n\nMechanism: when the cumulative size of tool-result blocks in a turn would exceed [`Self::max_bytes_per_turn`], the oldest results in the turn are shrunk first via UTF-8-safe tail truncation (preserving the `... [truncated, N total bytes]` marker existing tools already use) until the aggregate fits under the cap.\n\nDefaults to a conservative `50_000` bytes — large enough to keep typical shell/web/agent_send results intact, small enough to leave room for the system prompt + history at provider context limits below 16 KB completions. Set higher for long-context models (Claude 3.5 Sonnet, GPT-4o) when you want the model to see more raw output; set lower for cheap-tier models with tight contexts.\n\nTracked in issue #3347 as mechanism (1) of three composable mechanisms. Mechanisms (2) \"artifact spill\" and (3) \"history fold\" are not yet shipped.",
+      "properties": {
+        "max_bytes_per_turn": {
+          "default": 50000,
+          "description": "Maximum cumulative tool-result bytes committed to the model in one assistant turn. Default: `50_000`. Set to `0` to disable the cap entirely (existing per-result truncation still applies).",
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "TriggersConfig": {
       "description": "Event-driven trigger system configuration.",
       "properties": {
@@ -12820,6 +12914,14 @@
           "description": "Custom vault file path (default: ~/.librefang/vault.enc).",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "use_os_keyring": {
+          "default": null,
+          "description": "Whether to store the vault master key in the OS keyring (Linux Secret Service / macOS Keychain / Windows Credential Manager).\n\n`None` = use the platform default. macOS defaults to `false` because the Keychain ACL is per-binary signature: every `cargo build` produces a new signature and triggers a fresh \"allow\" prompt on daemon restart. Linux and Windows default to `true`.\n\nThe env var `LIBREFANG_VAULT_NO_KEYRING=1` overrides this setting and forces the file-based fallback regardless of the config or platform default. The fallback path is resolved via `dirs::data_local_dir()`: - macOS: `~/Library/Application Support/librefang/.keyring` - Linux: `~/.local/share/librefang/.keyring` - Windows: `%LOCALAPPDATA%\\librefang\\.keyring`\n\nThe file is AES-256-GCM-wrapped with an Argon2id-derived machine-fingerprint key and stored mode 0600.",
+          "type": [
+            "boolean",
             "null"
           ]
         }
@@ -13905,6 +14007,7 @@
         }
       ],
       "default": {
+        "audit_retention_days": 90,
         "auto_approve": false,
         "auto_approve_autonomous": false,
         "channel_rules": [],
@@ -13948,7 +14051,7 @@
         "type": "array"
       },
       "default": {},
-      "description": "Auth profiles for key rotation (provider name → profiles).",
+      "description": "Auth profiles for key rotation (provider name → profiles). Uses `BTreeMap` for deterministic serialisation order (avoids prompt-cache invalidation when the same providers are configured across restarts; see #3757).",
       "type": "object"
     },
     "auto_dream": {
@@ -14086,7 +14189,7 @@
         "email": null,
         "feishu": null,
         "file_download_dir": null,
-        "file_download_max_bytes": 0,
+        "file_download_max_bytes": 52428800,
         "flock": null,
         "gitter": null,
         "google_chat": null,
@@ -14267,6 +14370,17 @@
         "provider": "auto"
       },
       "description": "Default LLM provider configuration."
+    },
+    "default_routing": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ModelRoutingConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Kernel-wide Smart Model Router defaults applied to any agent whose `agent.toml` does not set its own `[routing]` block. The `init` wizard writes user-selected tier models here under `[default_routing]` so the chosen routing actually reaches the kernel — see issue #4466. Per-agent `routing` always wins when present."
     },
     "docker": {
       "allOf": [
@@ -14573,6 +14687,7 @@
         "embedding_model": "text-embedding-3-small",
         "embedding_provider": null,
         "fts_only": null,
+        "soft_delete_retention_days": 30,
         "sqlite_path": null,
         "vector_backend": null,
         "vector_store_url": null
@@ -14744,7 +14859,7 @@
         "type": "string"
       },
       "default": {},
-      "description": "Provider API key env var overrides (provider ID → env var name). For custom/unknown providers, maps the provider name to the environment variable holding the API key. e.g. `nvidia = \"NVIDIA_API_KEY\"`. If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.",
+      "description": "Provider API key env var overrides (provider ID → env var name). For custom/unknown providers, maps the provider name to the environment variable holding the API key. e.g. `nvidia = \"NVIDIA_API_KEY\"`. If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "type": "object"
     },
     "provider_proxy_urls": {
@@ -14752,7 +14867,7 @@
         "type": "string"
       },
       "default": {},
-      "description": "Per-provider proxy URL overrides (provider ID → proxy URL). Allows routing specific providers through a proxy while others connect directly. e.g. `openai = \"http://proxy.corp:8080\"`, `ollama = \"\"` (direct)",
+      "description": "Per-provider proxy URL overrides (provider ID → proxy URL). Allows routing specific providers through a proxy while others connect directly. e.g. `openai = \"http://proxy.corp:8080\"`, `ollama = \"\"` (direct) Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "type": "object"
     },
     "provider_regions": {
@@ -14760,7 +14875,7 @@
         "type": "string"
       },
       "default": {},
-      "description": "Provider region selection (provider ID → region name). Selects a regional endpoint from the provider's `[provider.regions]` map. e.g. `qwen = \"us\"` to use the US endpoint instead of China mainland.",
+      "description": "Provider region selection (provider ID → region name). Selects a regional endpoint from the provider's `[provider.regions]` map. e.g. `qwen = \"us\"` to use the US endpoint instead of China mainland. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "type": "object"
     },
     "provider_request_timeout_secs": {
@@ -14770,7 +14885,7 @@
         "type": "integer"
       },
       "default": {},
-      "description": "Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).\n\nOverrides the HTTP client's default read timeout for LLM API requests to the specified provider. Useful for slower providers or long-context workloads. e.g. `ollama = 300`, `anthropic = 120`\n\nOnly applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.). CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`.",
+      "description": "Per-provider HTTP request timeout overrides in seconds (provider ID → seconds).\n\nOverrides the HTTP client's default read timeout for LLM API requests to the specified provider. Useful for slower providers or long-context workloads. e.g. `ollama = 300`, `anthropic = 120`\n\nOnly applies to HTTP API drivers (OpenAI-compatible, Anthropic, Gemini, etc.). CLI-based providers (claude-code, qwen-code, etc.) use `message_timeout_secs`. Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "type": "object"
     },
     "provider_urls": {
@@ -14778,7 +14893,7 @@
         "type": "string"
       },
       "default": {},
-      "description": "Provider base URL overrides (provider ID → custom base URL). e.g. `ollama = \"http://192.168.1.100:11434/v1\"`",
+      "description": "Provider base URL overrides (provider ID → custom base URL). e.g. `ollama = \"http://192.168.1.100:11434/v1\"` Uses `BTreeMap` for deterministic serialisation order (see #3757).",
       "type": "object"
     },
     "proxy": {
@@ -14806,10 +14921,12 @@
           "default_per_agent": 1,
           "main_lane": 3,
           "subagent_lane": 3,
+          "trigger_fire_timeout_secs": 300,
           "trigger_lane": 8
         },
         "max_depth_global": 0,
         "max_depth_per_agent": 0,
+        "task_queue_retention_days": 7,
         "task_ttl_secs": 3600
       },
       "description": "Message queue configuration (depth limits, TTL, concurrency)."
@@ -14871,6 +14988,19 @@
         "boolean",
         "null"
       ]
+    },
+    "runtime": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/RuntimeConfig"
+        }
+      ],
+      "default": {
+        "tool_results": {
+          "max_bytes_per_turn": 50000
+        }
+      },
+      "description": "Runtime knobs (`[runtime]`) — currently carries the per-turn tool-result byte budget. See [`RuntimeConfig`]."
     },
     "sanitize": {
       "allOf": [
@@ -15150,7 +15280,8 @@
       ],
       "default": {
         "enabled": true,
-        "path": null
+        "path": null,
+        "use_os_keyring": null
       },
       "description": "Credential vault configuration."
     },

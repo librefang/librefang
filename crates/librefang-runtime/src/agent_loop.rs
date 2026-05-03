@@ -727,6 +727,12 @@ struct StagedToolUseTurn {
     /// Once `commit` runs this flips to true so a second commit call
     /// (or a drop-after-commit) is a no-op.
     committed: bool,
+    /// Per-turn cumulative tool-result byte cap (issue #3347 mechanism (1)).
+    /// `None` means "use the library default"
+    /// ([`crate::tool_budget::DEFAULT_PER_TURN_BYTE_CAP`]); `Some(0)` disables
+    /// the cap entirely; `Some(n)` enforces the cap. Set by
+    /// [`stage_tool_use_turn`] from `LoopOptions::tool_result_max_bytes_per_turn`.
+    tool_result_max_bytes_per_turn: Option<usize>,
 }
 
 impl StagedToolUseTurn {
@@ -805,7 +811,12 @@ impl StagedToolUseTurn {
         // Step 3: delegate the user{tool_result} push to the existing
         // `finalize_tool_use_results` helper so guidance-block append
         // behaviour stays centralized.
-        finalize_tool_use_results(session, messages, &mut self.tool_result_blocks)
+        finalize_tool_use_results(
+            session,
+            messages,
+            &mut self.tool_result_blocks,
+            self.tool_result_max_bytes_per_turn,
+        )
     }
 }
 
@@ -816,6 +827,7 @@ fn stage_tool_use_turn(
     response: &crate::llm_driver::CompletionResponse,
     session: &Session,
     available_tools: &[ToolDefinition],
+    tool_result_max_bytes_per_turn: Option<usize>,
 ) -> StagedToolUseTurn {
     let rationale_text = {
         let text = response.text();
@@ -847,6 +859,7 @@ fn stage_tool_use_turn(
         allowed_tool_names: available_tools.iter().map(|t| t.name.clone()).collect(),
         caller_id_str: session.agent_id.to_string(),
         committed: false,
+        tool_result_max_bytes_per_turn,
     }
 }
 
@@ -1360,6 +1373,7 @@ fn finalize_tool_use_results(
     session: &mut Session,
     messages: &mut Vec<Message>,
     tool_result_blocks: &mut Vec<ContentBlock>,
+    tool_result_max_bytes_per_turn: Option<usize>,
 ) -> ToolResultOutcomeSummary {
     if tool_result_blocks.is_empty() {
         return ToolResultOutcomeSummary::default();
@@ -1371,9 +1385,9 @@ fn finalize_tool_use_results(
     // This must happen before Layer 3 mutates the blocks.
     let outcome_summary = ToolResultOutcomeSummary::from_blocks(tool_result_blocks);
 
-    // Layer 3: per-turn aggregate budget enforcement.
-    // Convert ToolResult blocks into ToolResultEntry values, run the enforcer,
-    // then write back any content that was modified (persisted or truncated).
+    // Layer 3 (spill-to-disk) + Layer 4 (per-turn hard byte cap, issue #3347
+    // mechanism (1)). Convert ToolResult blocks into ToolResultEntry values,
+    // run both enforcers in order, then write back any modified content.
     {
         let enforcer = ToolBudgetEnforcer::default();
         let mut entries: Vec<ToolResultEntry> = tool_result_blocks
@@ -1396,6 +1410,14 @@ fn finalize_tool_use_results(
             .collect();
 
         enforcer.enforce_turn_budget(&mut entries);
+
+        // Layer 4: per-turn hard byte cap (oldest-first, inline tail
+        // truncation). Composes after Layer 3 so any spill-to-disk eviction
+        // has already shrunk the largest blobs; this final pass is the
+        // operator-tunable safety net.
+        let cap =
+            tool_result_max_bytes_per_turn.unwrap_or(crate::tool_budget::DEFAULT_PER_TURN_BYTE_CAP);
+        crate::tool_budget::enforce_per_turn_byte_cap(&mut entries, cap);
 
         // Write back potentially-modified content using the same index order
         // (only ToolResult blocks participate; Text guidance blocks are skipped).
@@ -1761,6 +1783,19 @@ pub struct LoopOptions {
     /// Kernel populates this from the boot-time-built [`AuxClient`].
     /// Tests typically leave it as `None`.
     pub aux_client: Option<std::sync::Arc<crate::aux_client::AuxClient>>,
+    /// Per-turn cumulative tool-result byte cap (issue #3347 mechanism (1)).
+    /// Sourced by the kernel from
+    /// `KernelConfig.runtime.tool_results.max_bytes_per_turn` (default
+    /// `50_000`). When the cumulative bytes of tool-result blocks committed
+    /// in one assistant turn would exceed this, the oldest results are
+    /// tail-truncated inline (UTF-8-safe) using the canonical
+    /// `... [truncated, N total bytes]` marker.
+    ///
+    /// `None` (the default for tests / direct runtime callers) means "use
+    /// the library default" — see
+    /// [`crate::tool_budget::DEFAULT_PER_TURN_BYTE_CAP`]. Set to `Some(0)` to
+    /// disable the cap entirely.
+    pub tool_result_max_bytes_per_turn: Option<usize>,
 }
 
 /// Result of an agent loop execution.
@@ -3901,7 +3936,12 @@ pub async fn run_agent_loop(
                 // the staged turn drops silently and session.messages is
                 // unchanged — by construction, no orphan ToolUse can
                 // reach the persistence layer. See #2381.
-                let mut staged = stage_tool_use_turn(&response, session, available_tools);
+                let mut staged = stage_tool_use_turn(
+                    &response,
+                    session,
+                    available_tools,
+                    opts.tool_result_max_bytes_per_turn,
+                );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
@@ -5354,7 +5394,12 @@ pub async fn run_agent_loop_streaming(
                 // See non-streaming branch above for the full rationale
                 // — this is the streaming twin of the #2381 staged-commit
                 // fix.
-                let mut staged = stage_tool_use_turn(&response, session, available_tools);
+                let mut staged = stage_tool_use_turn(
+                    &response,
+                    session,
+                    available_tools,
+                    opts.tool_result_max_bytes_per_turn,
+                );
 
                 // Execute each tool call with loop guard, timeout, and truncation.
                 let mut iteration_outcomes = ToolResultOutcomeSummary::default();
@@ -7028,12 +7073,161 @@ mod tests {
         let mut tool_result_blocks = Vec::new();
 
         let outcomes =
-            finalize_tool_use_results(&mut session, &mut messages, &mut tool_result_blocks);
+            finalize_tool_use_results(&mut session, &mut messages, &mut tool_result_blocks, None);
 
         assert_eq!(outcomes, ToolResultOutcomeSummary::default());
         assert!(session.messages.is_empty());
         assert!(messages.is_empty());
         assert!(tool_result_blocks.is_empty());
+    }
+
+    /// Issue #3347 mechanism (1) end-to-end: a turn with several medium
+    /// tool-result blocks must respect the per-turn byte cap once
+    /// `finalize_tool_use_results` runs, with the OLDEST result shrunk first.
+    #[test]
+    fn test_finalize_tool_use_results_enforces_per_turn_byte_cap() {
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let mut messages = Vec::new();
+
+        // 6 results × 4 KB each = 24 KB; cap = 10 KB. Final aggregate must
+        // fit, oldest must be marked truncated, newest preserved.
+        let mut tool_result_blocks: Vec<ContentBlock> = (0..6)
+            .map(|i| ContentBlock::ToolResult {
+                tool_use_id: format!("call-{i}"),
+                tool_name: "shell_exec".to_string(),
+                content: "X".repeat(4_000),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            })
+            .collect();
+        let before_total: usize = tool_result_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(before_total, 24_000);
+
+        let cap = 10_000;
+        let _outcomes = finalize_tool_use_results(
+            &mut session,
+            &mut messages,
+            &mut tool_result_blocks,
+            Some(cap),
+        );
+
+        // After finalize: cumulative tool-result bytes must fit under cap.
+        let after_total: usize = tool_result_blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.len()),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            after_total <= cap,
+            "after_total={after_total} must fit cap={cap}"
+        );
+        assert!(
+            before_total - after_total > 0,
+            "shrink should have happened (before={before_total}, after={after_total})"
+        );
+
+        // Oldest (call-0) must show the canonical truncation marker.
+        let oldest = tool_result_blocks
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "call-0" => Some(content.clone()),
+                _ => None,
+            })
+            .expect("oldest tool result must still be present");
+        assert!(
+            oldest.contains("[truncated,"),
+            "oldest result must carry tail-truncation marker, got: {:?}",
+            &oldest[..oldest.len().min(120)]
+        );
+
+        // Newest (call-5) must be untouched (4 000 bytes).
+        let newest_len = tool_result_blocks
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "call-5" => Some(content.len()),
+                _ => None,
+            })
+            .expect("newest tool result must still be present");
+        assert_eq!(newest_len, 4_000, "newest result must NOT be touched");
+    }
+
+    /// Issue #3347 regression: a small turn with one or two tiny results
+    /// MUST NOT trip the cap (no spurious truncation, no wasted format ops).
+    #[test]
+    fn test_finalize_tool_use_results_short_session_unaffected_by_cap() {
+        let agent_id = librefang_types::agent::AgentId::new();
+        let mut session = librefang_memory::session::Session {
+            id: librefang_types::agent::SessionId::new(),
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: None,
+            messages_generation: 0,
+            last_repaired_generation: None,
+        };
+        let mut messages = Vec::new();
+
+        let mut tool_result_blocks: Vec<ContentBlock> = vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "web_search".to_string(),
+                content: "small result A".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call-2".to_string(),
+                tool_name: "web_fetch".to_string(),
+                content: "small result B".to_string(),
+                is_error: false,
+                status: librefang_types::tool::ToolExecutionStatus::Completed,
+                approval_request_id: None,
+            },
+        ];
+
+        // Default cap (50_000) — neither result should be touched.
+        let _ = finalize_tool_use_results(
+            &mut session,
+            &mut messages,
+            &mut tool_result_blocks,
+            Some(crate::tool_budget::DEFAULT_PER_TURN_BYTE_CAP),
+        );
+
+        for block in &tool_result_blocks {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                assert!(
+                    !content.contains("[truncated,"),
+                    "small result must NOT be truncated: {content:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -7066,6 +7260,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7157,6 +7352,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::Message {
@@ -7297,6 +7493,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.try_send(AgentLoopSignal::ApprovalResolved {
@@ -7475,6 +7672,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session_b.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
 
         // Channel mimicking session B's injection_senders entry. The
@@ -7576,6 +7774,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session_a.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
 
         let (tx, rx) = mpsc::channel(1);
@@ -8115,6 +8314,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
         let (tx, rx) = mpsc::channel(1);
         tx.send(AgentLoopSignal::Message {
@@ -10647,6 +10847,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: agent_id_str,
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         }
     }
 
@@ -10905,6 +11106,7 @@ mod tests {
             allowed_tool_names: Vec::new(),
             caller_id_str: session.agent_id.to_string(),
             committed: false,
+            tool_result_max_bytes_per_turn: None,
         };
 
         // Simulate the batch executing end-to-end (no early break).

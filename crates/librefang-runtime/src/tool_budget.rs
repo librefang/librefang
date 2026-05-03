@@ -1,4 +1,4 @@
-//! Three-layer tool result budget enforcement.
+//! Multi-layer tool result budget enforcement.
 //!
 //! Defense against context-window overflow from large tool outputs:
 //!
@@ -12,11 +12,21 @@
 //!    block containing a file path and a short preview. Fallback: if the write
 //!    fails, the content is truncated inline and a notice is appended.
 //!
-//! 3. **Layer 3 (per-turn aggregate)**: After all tool results in a single
-//!    assistant turn have been collected, if their combined size exceeds
+//! 3. **Layer 3 (per-turn aggregate spill)**: After all tool results in a
+//!    single assistant turn have been collected, if their combined size exceeds
 //!    [`PER_TURN_BUDGET`] (default 200 KB), the largest non-persisted results
 //!    are spilled to disk in descending-size order until the aggregate is under
 //!    budget.
+//!
+//! 4. **Layer 4 (per-turn hard cap, issue #3347 mechanism (1))**: An outer
+//!    operator-tunable safety net configured via `[runtime.tool_results]
+//!    max_bytes_per_turn` (default 50 000 bytes). After Layer 3 has run, if the
+//!    cumulative size of tool-result content for the turn still exceeds the
+//!    cap, the **oldest** results are tail-truncated inline (UTF-8-safe) using
+//!    the same `... [truncated, N total bytes]` marker the per-result tools
+//!    already use. Operates entirely in-memory — no disk I/O — so it always
+//!    succeeds even on read-only filesystems. See
+//!    [`enforce_per_turn_byte_cap`].
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,6 +37,12 @@ pub const PER_RESULT_THRESHOLD: usize = 50 * 1024;
 
 /// Default per-turn aggregate budget (200 KB).
 pub const PER_TURN_BUDGET: usize = 200 * 1024;
+
+/// Default per-turn hard byte cap when no operator value is supplied
+/// (issue #3347 mechanism (1)). Matches the
+/// `[runtime.tool_results].max_bytes_per_turn` config default in
+/// `librefang-types::config::ToolResultsConfig`.
+pub const DEFAULT_PER_TURN_BYTE_CAP: usize = 50_000;
 
 /// Number of characters shown in the preview block.
 const PREVIEW_CHARS: usize = 500;
@@ -202,6 +218,133 @@ impl ToolBudgetEnforcer {
         fs::write(path, content.as_bytes())?;
         Ok(())
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Layer 4: per-turn hard byte cap (issue #3347 mechanism (1))
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Marker the inline-truncation pass leaves on shrunken results so a downstream
+/// pass can recognise them and avoid double-truncation. Matches the format
+/// already produced by individual tool implementations
+/// (`tool_runner.rs` web fetch, shell exec stdout/stderr, image preview).
+#[cfg(test)]
+const TRUNCATED_MARKER: &str = "[truncated,";
+
+/// Tail-truncate `content` to at most `keep_bytes` bytes (UTF-8 safe) and
+/// append the canonical `... [truncated, N total bytes]` suffix that the
+/// existing per-result truncation sites already use, so observers can rely on
+/// a single grep pattern.
+///
+/// Returns the original `content` unchanged when it already fits.
+fn tail_truncate_with_marker(content: &str, keep_bytes: usize) -> String {
+    if content.len() <= keep_bytes {
+        return content.to_string();
+    }
+    let original_len = content.len();
+    let truncated = crate::str_utils::safe_truncate_str(content, keep_bytes);
+    format!("{truncated}... [truncated, {original_len} total bytes]")
+}
+
+/// Apply the per-turn cumulative byte cap (Layer 4) to a slice of tool results.
+///
+/// Mechanism (1) of issue #3347: after each assistant turn the runtime sums
+/// the byte length of every `ToolResult.content` block produced this turn; if
+/// the sum exceeds `max_bytes_per_turn`, the **oldest** results in the slice
+/// are shrunk first via [`tail_truncate_with_marker`] until the running total
+/// fits under the cap.
+///
+/// Why oldest-first (vs Layer 3's largest-first): Layer 3 evicts to disk, so
+/// largest-first is rational — biggest payoff per write. Layer 4 is the
+/// in-context cap; oldest-first preserves the **most recent** tool outputs,
+/// which is what the model needs to keep reasoning. The two passes compose:
+/// Layer 3 spills oversized blobs first, Layer 4 then enforces the hard
+/// in-context cap on whatever remains.
+///
+/// Setting `max_bytes_per_turn = 0` is treated as "disabled" — the cap is
+/// skipped entirely (existing per-result truncation still applies).
+///
+/// Returns the number of bytes shrunk in total (sum over all modified
+/// results). `0` means no work was done.
+pub fn enforce_per_turn_byte_cap(
+    results: &mut [ToolResultEntry],
+    max_bytes_per_turn: usize,
+) -> usize {
+    if max_bytes_per_turn == 0 {
+        return 0;
+    }
+    let total: usize = results.iter().map(|r| r.content.len()).sum();
+    if total <= max_bytes_per_turn {
+        return 0;
+    }
+
+    debug!(
+        total_bytes = total,
+        cap = max_bytes_per_turn,
+        results = results.len(),
+        "tool_budget: per-turn byte cap exceeded, shrinking oldest results (Layer 4)"
+    );
+
+    let mut running_total = total;
+    let mut bytes_shrunk: usize = 0;
+
+    // Walk oldest → newest. Each oversized entry is tail-truncated to the
+    // largest size that, combined with the entries we have NOT yet visited
+    // (still at full size) and the entries we have ALREADY visited (now
+    // potentially shrunk), keeps the running total under the cap.
+    for entry in results.iter_mut() {
+        if running_total <= max_bytes_per_turn {
+            break;
+        }
+        let entry_len = entry.content.len();
+        // Bytes contributed by every other entry in its current state.
+        let other_bytes = running_total - entry_len;
+        // The most we can keep for this entry while still fitting the cap.
+        // Saturating sub: if `other_bytes >= max_bytes_per_turn` we must
+        // shrink to zero (well, to the marker-only string).
+        let allowed = max_bytes_per_turn.saturating_sub(other_bytes);
+        if allowed >= entry_len {
+            // Already small enough relative to this turn — nothing to do.
+            continue;
+        }
+        // `tail_truncate_with_marker` adds a suffix; reserve some slack so
+        // the *result* still fits under `allowed`. The marker grows with the
+        // original length but is bounded — clamp `keep` so the final string
+        // is at most `allowed` bytes. If `allowed` is too small to even hold
+        // the marker, keep zero content bytes; the marker overhead is
+        // accepted as the unavoidable floor.
+        let marker_overhead = format!("... [truncated, {entry_len} total bytes]").len();
+        let keep = allowed.saturating_sub(marker_overhead);
+        let new_content = tail_truncate_with_marker(&entry.content, keep);
+        let new_len = new_content.len();
+        let shrunk_by = entry_len.saturating_sub(new_len);
+        bytes_shrunk = bytes_shrunk.saturating_add(shrunk_by);
+        running_total = running_total - entry_len + new_len;
+        debug!(
+            tool_use_id = %entry.tool_use_id,
+            from_bytes = entry_len,
+            to_bytes = new_len,
+            "tool_budget: tail-truncated result for per-turn cap (Layer 4)"
+        );
+        entry.content = new_content;
+    }
+
+    if bytes_shrunk > 0 {
+        tracing::info!(
+            bytes_shrunk,
+            final_total = running_total,
+            cap = max_bytes_per_turn,
+            "tool_budget: per-turn byte cap enforced (mechanism (1) of issue #3347)"
+        );
+    }
+
+    bytes_shrunk
+}
+
+/// Visible for tests in this module; downstream code should never need this.
+#[cfg(test)]
+fn marker_str() -> &'static str {
+    TRUNCATED_MARKER
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -381,5 +524,148 @@ mod tests {
         let s = "日本語";
         let t = truncate_to_byte_boundary(s, 7);
         assert_eq!(t, "日本");
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Layer 4 (issue #3347 mechanism (1)) — per-turn byte cap
+    // ────────────────────────────────────────────────────────────────────────
+
+    fn make_entry(id: &str, n: usize, ch: char) -> ToolResultEntry {
+        ToolResultEntry {
+            tool_use_id: id.into(),
+            content: ch.to_string().repeat(n),
+        }
+    }
+
+    #[test]
+    fn layer4_short_session_is_unchanged() {
+        // Regression: small turn must NOT trip the cap (no spurious shrink).
+        let mut entries = vec![make_entry("a", 100, 'x'), make_entry("b", 200, 'y')];
+        let shrunk = enforce_per_turn_byte_cap(&mut entries, 50_000);
+        assert_eq!(
+            shrunk, 0,
+            "no shrink expected for 300-byte total under 50k cap"
+        );
+        assert_eq!(entries[0].content.len(), 100);
+        assert_eq!(entries[1].content.len(), 200);
+    }
+
+    #[test]
+    fn layer4_disabled_when_cap_zero() {
+        // max_bytes_per_turn = 0 means "disabled".
+        let mut entries = vec![make_entry("a", 1_000_000, 'x')];
+        let shrunk = enforce_per_turn_byte_cap(&mut entries, 0);
+        assert_eq!(shrunk, 0);
+        assert_eq!(entries[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn layer4_caps_ten_medium_results_under_max_bytes_per_turn() {
+        // Ten 8 KB results = 80 KB. Cap = 50 KB. Final aggregate must fit
+        // under (or at) the cap, and the OLDEST entries must be the ones
+        // shrunk. This is the canonical AC test from issue #3347.
+        let cap = 50_000;
+        let mut entries: Vec<ToolResultEntry> = (0..10)
+            .map(|i| make_entry(&format!("id-{i}"), 8_000, 'A'))
+            .collect();
+        let before_total: usize = entries.iter().map(|e| e.content.len()).sum();
+        assert_eq!(before_total, 80_000);
+
+        let shrunk = enforce_per_turn_byte_cap(&mut entries, cap);
+
+        let after_total: usize = entries.iter().map(|e| e.content.len()).sum();
+        assert!(after_total <= cap, "final total {after_total} > cap {cap}");
+        assert!(shrunk > 0, "expected some shrink for 80k > 50k cap");
+
+        // Oldest-first eviction: the FIRST entries must show the truncated
+        // marker; the LAST entries must remain at their original size (the
+        // model needs the most recent outputs).
+        assert!(
+            entries[0].content.contains(marker_str()),
+            "oldest entry should be truncated, got: {:?}",
+            &entries[0].content[..entries[0].content.len().min(80)]
+        );
+        assert_eq!(
+            entries.last().unwrap().content.len(),
+            8_000,
+            "newest entry must NOT be touched"
+        );
+    }
+
+    #[test]
+    fn layer4_byte_delta_observable() {
+        // The "before vs after byte delta" called out in the AC.
+        let cap = 5_000;
+        let mut entries: Vec<ToolResultEntry> = (0..5)
+            .map(|i| make_entry(&format!("id-{i}"), 4_000, 'B'))
+            .collect();
+        let before_total: usize = entries.iter().map(|e| e.content.len()).sum();
+        assert_eq!(before_total, 20_000);
+
+        let shrunk = enforce_per_turn_byte_cap(&mut entries, cap);
+        let after_total: usize = entries.iter().map(|e| e.content.len()).sum();
+
+        let delta = before_total.saturating_sub(after_total);
+        assert!(
+            delta >= shrunk,
+            "reported shrunk={shrunk} ≤ observed delta={delta}"
+        );
+        assert!(
+            after_total <= cap,
+            "after_total={after_total} must fit cap={cap}"
+        );
+    }
+
+    #[test]
+    fn layer4_marker_format_matches_existing_tools() {
+        // The cap reuses the exact "... [truncated, N total bytes]" suffix
+        // that web/shell tools already emit, so log scrapers see one format.
+        let mut entries = vec![make_entry("only", 10_000, 'C')];
+        let _ = enforce_per_turn_byte_cap(&mut entries, 1_000);
+        let s = &entries[0].content;
+        assert!(
+            s.contains("[truncated, 10000 total bytes]"),
+            "marker not found in: {s}"
+        );
+        assert!(
+            s.starts_with("CCC"),
+            "leading content preserved (tail-truncate)"
+        );
+    }
+
+    #[test]
+    fn layer4_handles_utf8_boundaries() {
+        // 1000 × 3-byte chars = 3000 bytes; must not panic on multi-byte.
+        let big: String = "日".repeat(1000);
+        let mut entries = vec![ToolResultEntry {
+            tool_use_id: "ja".into(),
+            content: big,
+        }];
+        let cap = 500;
+        let _ = enforce_per_turn_byte_cap(&mut entries, cap);
+        // Result must (a) fit under cap, (b) be valid UTF-8 (just not panic).
+        assert!(entries[0].content.len() <= cap.max(60));
+        assert!(entries[0]
+            .content
+            .is_char_boundary(entries[0].content.len()));
+    }
+
+    #[test]
+    fn layer4_preserves_already_small_newest_when_oldest_alone_overflows() {
+        // One huge oldest entry + one small newest. Only the oldest should
+        // be shrunk.
+        let cap = 1_000;
+        let mut entries = vec![
+            make_entry("oldest", 10_000, 'O'),
+            make_entry("newest", 200, 'N'),
+        ];
+        let _ = enforce_per_turn_byte_cap(&mut entries, cap);
+        assert!(entries[0].content.contains(marker_str()));
+        assert_eq!(entries[1].content.len(), 200, "newest must be untouched");
+        let total: usize = entries.iter().map(|e| e.content.len()).sum();
+        assert!(
+            total <= cap.max(100),
+            "total={total} must fit under cap+marker overhead"
+        );
     }
 }
