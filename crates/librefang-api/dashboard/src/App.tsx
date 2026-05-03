@@ -182,7 +182,7 @@ function AuthDialog({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated
               <>
                 <p className="text-sm text-text-dim text-center">{t("auth.totp_prompt")}</p>
                 <input
-                  type="password"
+                  type="text"
                   inputMode="numeric"
                   autoComplete="one-time-code"
                   pattern="[0-9]{6}"
