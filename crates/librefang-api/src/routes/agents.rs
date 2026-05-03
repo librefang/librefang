@@ -2221,7 +2221,8 @@ pub async fn kill_agent(
     // can respawn or produce stale instance state — require callers to
     // deactivate or uninstall the owning hand instead. The dashboard hides
     // Delete for hand agents already; this closes the direct-API loophole.
-    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+    let entry = state.kernel.agent_registry().get(agent_id);
+    if let Some(ref entry) = entry {
         if entry.is_hand {
             return ApiErrorResponse::conflict(
                 "Cannot delete a hand-spawned agent directly; deactivate or uninstall the owning hand instead.",
@@ -2231,6 +2232,15 @@ pub async fn kill_agent(
         }
     }
 
+    // Idempotent DELETE (RFC 9110, #3509): if the agent is already absent
+    // (concurrent delete, Terraform-style retry after a transient network
+    // failure, …) treat the desired state as already met and return
+    // 204 No Content rather than 404. Reserve 404 for cases where the
+    // path itself can't address an agent (handled above as 400 invalid_id).
+    if entry.is_none() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+
     match state.kernel.kill_agent(agent_id) {
         Ok(()) => (
             StatusCode::OK,
@@ -2238,6 +2248,12 @@ pub async fn kill_agent(
         )
             .into_response(),
         Err(e) => {
+            // Lost the race with another deleter between the get() above and
+            // the kill — still idempotent.
+            if format!("{e}").contains("not found") || format!("{e}").contains("AgentNotFound") {
+                tracing::debug!("kill_agent: agent {id} already gone (concurrent delete)");
+                return StatusCode::NO_CONTENT.into_response();
+            }
             tracing::warn!("kill_agent failed for {id}: {e}");
             ApiErrorResponse::not_found(t.t("api-error-agent-not-found-or-terminated"))
                 .with_code("agent_not_found")

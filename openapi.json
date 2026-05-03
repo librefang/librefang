@@ -4742,6 +4742,7 @@
           "workflows"
         ],
         "summary": "DELETE /api/cron/jobs/{id} — Delete a cron job.",
+        "description": "Idempotent (RFC 9110, #3509): deleting a cron job that is already absent\nreturns `204 No Content` instead of `404`. `400` is reserved for a\nmalformed job id (path-format error).",
         "operationId": "delete_cron_job",
         "parameters": [
           {
@@ -4757,6 +4758,9 @@
         "responses": {
           "200": {
             "description": "Cron job deleted"
+          },
+          "204": {
+            "description": "Cron job already absent (idempotent)"
           }
         }
       }
@@ -8419,6 +8423,7 @@
           "workflows"
         ],
         "summary": "DELETE /api/triggers/:id — Remove a trigger.",
+        "description": "Idempotent (RFC 9110, #3509): deleting a trigger that is already absent\nreturns `204 No Content` instead of `404`. Reserve `400` for a malformed\ntrigger id (path-format error) and `404` for never-existed cases that\ncallers genuinely need to distinguish — DELETE is not one of them.",
         "operationId": "delete_trigger",
         "parameters": [
           {
@@ -8434,6 +8439,9 @@
         "responses": {
           "200": {
             "description": "Trigger deleted"
+          },
+          "204": {
+            "description": "Trigger already absent (idempotent)"
           }
         }
       },

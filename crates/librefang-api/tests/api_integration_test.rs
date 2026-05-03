@@ -653,6 +653,93 @@ async fn test_spawn_list_kill_agent() {
     assert_eq!(agents[0]["name"], "assistant");
 }
 
+/// Regression test for #3509 — DELETE /api/agents/{id} must be idempotent.
+///
+/// Issue: a Terraform-style operator that retries DELETE after a transient
+/// network failure used to see the second call return 404, which marks the
+/// apply as failed even though the desired state (agent absent) is met.
+///
+/// Fix: first DELETE returns 200 + `{"status":"killed"}` (existing
+/// contract); subsequent DELETEs return 204 No Content. Both indicate
+/// success — RFC 9110 §9.2.2.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_agent_is_idempotent() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn an agent so we have a real target to delete.
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    // First DELETE — actual removal, 200 + body.
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "killed");
+
+    // Second DELETE — must NOT be 404. New behaviour: 204 No Content
+    // (idempotent success).
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        204,
+        "second DELETE should be 204 idempotent, was {}",
+        resp.status()
+    );
+    let bytes = resp.bytes().await.unwrap();
+    assert!(bytes.is_empty(), "204 must have empty body");
+
+    // Third DELETE — still 204.
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, agent_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "third DELETE should still be 204");
+
+    // DELETE of a never-existed (but well-formed) UUID is also 204.
+    let phantom_id = uuid::Uuid::new_v4().to_string();
+    let resp = client
+        .delete(format!("{}/api/agents/{}", server.base_url, phantom_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        204,
+        "DELETE on never-existed UUID should be 204 idempotent"
+    );
+
+    // Path-format errors still return 400 (the extractor rejects bad
+    // shape) — only the not-found-on-real-id path changed.
+    let resp = client
+        .delete(format!("{}/api/agents/not-a-uuid", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "malformed id should still be 400, was {}",
+        resp.status()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_agent_session_empty() {
     let server = start_test_server().await;
@@ -1212,8 +1299,12 @@ async fn test_invalid_agent_id_returns_400() {
     assert_eq!(resp.status(), 400);
 }
 
+/// DELETE /api/agents/{unknown-uuid} now returns 204 (idempotent) instead
+/// of 404 — see #3509 (`test_delete_agent_is_idempotent` is the canonical
+/// regression). 404 is still emitted for genuinely-different errors but
+/// "agent never existed" is treated as the desired-state-already-met case.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_kill_nonexistent_agent_returns_404() {
+async fn test_kill_nonexistent_agent_returns_204_idempotent() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
 
@@ -1223,7 +1314,7 @@ async fn test_kill_nonexistent_agent_returns_404() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 204);
 }
 
 #[tokio::test(flavor = "multi_thread")]

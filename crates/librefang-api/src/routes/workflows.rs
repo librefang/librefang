@@ -1203,15 +1203,20 @@ pub async fn get_trigger(
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
-#[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
+///
+/// Idempotent (RFC 9110, #3509): deleting a trigger that is already absent
+/// returns `204 No Content` instead of `404`. Reserve `400` for a malformed
+/// trigger id (path-format error) and `404` for never-existed cases that
+/// callers genuinely need to distinguish — DELETE is not one of them.
+#[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted"), (status = 204, description = "Trigger already absent (idempotent)")))]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let trigger_id = TriggerId(match id.parse() {
         Ok(u) => u,
         Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid trigger ID").into_json_tuple();
+            return ApiErrorResponse::bad_request("Invalid trigger ID").into_response();
         }
     });
 
@@ -1220,8 +1225,10 @@ pub async fn delete_trigger(
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "trigger_id": id})),
         )
+            .into_response()
     } else {
-        ApiErrorResponse::not_found("Trigger not found").into_json_tuple()
+        // Already-absent → idempotent success.
+        StatusCode::NO_CONTENT.into_response()
     }
 }
 
@@ -1941,11 +1948,15 @@ pub async fn create_cron_job(
 }
 
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
-#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted")))]
+///
+/// Idempotent (RFC 9110, #3509): deleting a cron job that is already absent
+/// returns `204 No Content` instead of `404`. `400` is reserved for a
+/// malformed job id (path-format error).
+#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted"), (status = 204, description = "Cron job already absent (idempotent)")))]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
@@ -1958,11 +1969,14 @@ pub async fn delete_cron_job(
                         StatusCode::OK,
                         Json(serde_json::json!({"status": "deleted"})),
                     )
+                        .into_response()
                 }
-                Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_json_tuple(),
+                // remove_job() only fails with "Cron job <id> not found" when
+                // the entry is absent — treat as idempotent success.
+                Err(_) => StatusCode::NO_CONTENT.into_response(),
             }
         }
-        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_json_tuple(),
+        Err(_) => ApiErrorResponse::bad_request("Invalid job ID").into_response(),
     }
 }
 

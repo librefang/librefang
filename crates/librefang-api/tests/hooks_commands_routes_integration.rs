@@ -71,6 +71,19 @@ async fn send(
     body: Option<serde_json::Value>,
     bearer: Option<&str>,
 ) -> (StatusCode, serde_json::Value) {
+    let (status, _hdrs, value) = send_full(h, method, path, body, bearer).await;
+    (status, value)
+}
+
+/// Variant of `send` that also returns the response headers, so tests can
+/// assert on `WWW-Authenticate` (#3509) without a separate request path.
+async fn send_full(
+    h: &Harness,
+    method: Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    bearer: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
     let mut builder = Request::builder().method(method).uri(path);
     if let Some(tok) = bearer {
         builder = builder.header("authorization", format!("Bearer {tok}"));
@@ -85,6 +98,7 @@ async fn send(
     let req = builder.body(Body::from(body_bytes)).unwrap();
     let resp = h.app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
+    let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
@@ -93,7 +107,7 @@ async fn send(
     } else {
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
-    (status, value)
+    (status, headers, value)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +153,13 @@ async fn hooks_wake_returns_404_when_webhook_triggers_disabled_explicitly() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// Missing Authorization header against an enabled hook = 400.
+/// Missing Authorization header against an enabled hook = 401 (#3509).
+///
+/// Was 400 before #3509; the new contract is 401 + `WWW-Authenticate: Bearer`
+/// so monitoring tools can route the alert as auth-failure rather than
+/// malformed-request, and HTTP clients see a proper auth challenge.
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_wake_rejects_missing_bearer() {
+async fn hooks_wake_rejects_missing_bearer_with_401_and_www_authenticate() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_MISSING_3571";
     // SAFETY: tests run with `--test-threads` but each test uses a unique
     // env-var name so concurrent reads/writes do not collide.
@@ -149,7 +167,7 @@ async fn hooks_wake_rejects_missing_bearer() {
         std::env::set_var(env_name, "x".repeat(40));
     }
     let h = boot_enabled(env_name).await;
-    let (status, body) = send(
+    let (status, headers, body) = send_full(
         &h,
         Method::POST,
         "/api/hooks/wake",
@@ -160,19 +178,31 @@ async fn hooks_wake_rejects_missing_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body:?}");
+    let www_auth = headers
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .expect("WWW-Authenticate header on 401");
+    assert!(
+        www_auth.starts_with("Bearer"),
+        "WWW-Authenticate must advertise Bearer scheme: {www_auth}"
+    );
+    assert!(
+        www_auth.contains(r#"realm="librefang""#),
+        "WWW-Authenticate should include realm=\"librefang\": {www_auth}"
+    );
 }
 
-/// Wrong bearer token against an enabled hook = 400 (constant-time mismatch).
+/// Wrong bearer token against an enabled hook = 401 (#3509).
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_wake_rejects_wrong_bearer() {
+async fn hooks_wake_rejects_wrong_bearer_with_401() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_WRONG_3571";
     let real = "a".repeat(40);
     unsafe {
         std::env::set_var(env_name, &real);
     }
     let h = boot_enabled(env_name).await;
-    let (status, _) = send(
+    let (status, headers, _) = send_full(
         &h,
         Method::POST,
         "/api/hooks/wake",
@@ -183,19 +213,28 @@ async fn hooks_wake_rejects_wrong_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("Bearer"),
+        "401 response must carry Bearer challenge"
+    );
 }
 
 /// A token shorter than 32 bytes is treated as "no token configured", so the
 /// auth gate fails closed even when the caller sends a matching string.
+/// 401 + `WWW-Authenticate` here too (#3509).
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_wake_rejects_short_configured_token() {
+async fn hooks_wake_rejects_short_configured_token_with_401() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_WAKE_SHORT_3571";
     unsafe {
         std::env::set_var(env_name, "tooshort"); // < 32 chars
     }
     let h = boot_enabled(env_name).await;
-    let (status, _) = send(
+    let (status, headers, _) = send_full(
         &h,
         Method::POST,
         "/api/hooks/wake",
@@ -206,7 +245,8 @@ async fn hooks_wake_rejects_short_configured_token() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.get("www-authenticate").is_some());
 }
 
 /// Auth passes, payload validation fails — empty `text` is rejected with
@@ -287,14 +327,17 @@ async fn hooks_agent_returns_404_when_webhook_triggers_not_enabled() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// `/api/hooks/agent` shares the bearer-validation path with `/hooks/wake`;
+/// after #3509 both return 401 + `WWW-Authenticate: Bearer` on auth failure
+/// instead of 400.
 #[tokio::test(flavor = "multi_thread")]
-async fn hooks_agent_rejects_missing_bearer() {
+async fn hooks_agent_rejects_missing_bearer_with_401() {
     let env_name = "LIBREFANG_TEST_WEBHOOK_TOKEN_AGENT_MISSING_3571";
     unsafe {
         std::env::set_var(env_name, "y".repeat(40));
     }
     let h = boot_enabled(env_name).await;
-    let (status, _) = send(
+    let (status, headers, _) = send_full(
         &h,
         Method::POST,
         "/api/hooks/agent",
@@ -305,7 +348,15 @@ async fn hooks_agent_rejects_missing_bearer() {
     unsafe {
         std::env::remove_var(env_name);
     }
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(
+        headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("Bearer"),
+        "401 must carry Bearer challenge"
+    );
 }
 
 /// Auth passes, payload validation fails — empty `message`.

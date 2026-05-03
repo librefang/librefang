@@ -391,6 +391,48 @@ async fn trigger_create_rejects_missing_pattern() {
     );
 }
 
+/// DELETE on a never-existed trigger is idempotent (#3509): returns 204,
+/// not 404. Reserves 404 for cases callers genuinely need to distinguish
+/// (read-by-id misses still 404).
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_delete_unknown_returns_204_idempotent() {
+    let h = boot().await;
+    let (status, body) = json_request(
+        &h,
+        Method::DELETE,
+        "/api/triggers/00000000-0000-0000-0000-000000000000",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+    assert!(body.is_null(), "expected empty body for 204: {body:?}");
+}
+
+/// Malformed trigger id keeps returning 400 — only path-format errors get
+/// 4xx now; not-found is success (204).
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_delete_invalid_id_still_returns_400() {
+    let h = boot().await;
+    let (status, body) = json_request(&h, Method::DELETE, "/api/triggers/not-a-uuid", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+/// Repeated DELETE of the same trigger id must return 204 every time.
+/// Regression test for #3509 (Terraform-style retry).
+#[tokio::test(flavor = "multi_thread")]
+async fn trigger_delete_is_idempotent_across_calls() {
+    let h = boot().await;
+    let path = "/api/triggers/22222222-2222-2222-2222-222222222222";
+    for n in 1..=3 {
+        let (status, body) = json_request(&h, Method::DELETE, path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "call #{n} should be 204: {body:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // /api/schedules  (cron-job-backed)
 // ---------------------------------------------------------------------------
@@ -526,8 +568,11 @@ async fn cron_job_delete_invalid_id_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// DELETE on an unknown cron job is now idempotent (#3509): returns 204
+/// instead of 404 so Terraform-style retries after a transient network
+/// failure don't surface as failed applies.
 #[tokio::test(flavor = "multi_thread")]
-async fn cron_job_delete_unknown_uuid_returns_404() {
+async fn cron_job_delete_unknown_uuid_returns_204_idempotent() {
     let h = boot().await;
     let (status, body) = json_request(
         &h,
@@ -536,7 +581,25 @@ async fn cron_job_delete_unknown_uuid_returns_404() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body:?}");
+    // 204 has no body — `body` is Null.
+    assert!(body.is_null(), "expected empty body for 204: {body:?}");
+}
+
+/// Repeatedly DELETE'ing the same unknown id must keep returning 204 — RFC
+/// 9110 idempotency. Pins the regression for #3509.
+#[tokio::test(flavor = "multi_thread")]
+async fn cron_job_delete_is_idempotent_across_calls() {
+    let h = boot().await;
+    let path = "/api/cron/jobs/11111111-1111-1111-1111-111111111111";
+    for n in 1..=3 {
+        let (status, body) = json_request(&h, Method::DELETE, path, None).await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "call #{n} should be 204: {body:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
