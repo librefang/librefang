@@ -73,13 +73,39 @@ jobs:
         env:
           RUST_TEST_THREADS: "1"
         run: |
+          # pipefail: tee always exits 0, so without this the cargo failure
+          # would be masked and the job would falsely succeed.
+          set -o pipefail
+          # Tee combined stdout+stderr to a log so a follow-up step can
+          # surface failing test names even when the run-log download API
+          # is admin-only (HTTP 403 for non-admin readers).
           cargo llvm-cov nextest \
             --workspace \
             --no-fail-fast \
             --lcov \
-            --output-path lcov.info
+            --output-path lcov.info 2>&1 | tee nextest-output.log
+
+      - name: Surface failing tests
+        if: failure()
+        run: |
+          {
+            echo "## Failing tests (nextest)"
+            echo ""
+            echo '```'
+            # nextest prints lines like "        FAIL [   0.123s] crate test::name"
+            # in the run summary; TIMEOUT and LEAK are the other terminal states.
+            grep -E '^\s+(FAIL|TIMEOUT|LEAK)\b' nextest-output.log \
+              || echo "(no FAIL/TIMEOUT/LEAK lines found — inspect the nextest-output artifact)"
+            echo '```'
+            echo ""
+            echo "### Last 200 lines of nextest output"
+            echo '```'
+            tail -n 200 nextest-output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate coverage summary
+        if: success()
         run: |
           cargo llvm-cov report --summary-only | tee coverage-summary.txt
           {
@@ -90,7 +116,17 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload nextest output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nextest-output
+          path: nextest-output.log
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload LCOV artifact
+        if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-lcov
