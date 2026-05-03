@@ -568,3 +568,93 @@ async fn audit_verify_surfaces_anchor_status_field() {
         "anchor_path must surface for the UI; body={body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn audit_verify_detects_chain_rewrite_via_anchor_mismatch() {
+    // #3339 acceptance criterion #2: simulate the canonical attack —
+    // someone with write access to the SQLite file (or any other path
+    // that lets them mutate the in-memory chain) rewrites the audit log
+    // from genesis forward. The Merkle chain is then **internally
+    // self-consistent** (every prev_hash matches the previous entry's
+    // hash, every entry's hash recomputes correctly) so the pre-Tier-1
+    // verifier had nothing to compare against and returned `valid: true`.
+    //
+    // The Tier-1 anchor file (`audit.anchor` next to the SQLite DB)
+    // closes that gap: every append mirrors `<seq> <tip-hash>` outside
+    // the database, and `verify_integrity()` cross-checks the in-DB tip
+    // against the on-disk anchor on every call. A rewrite attacker
+    // therefore has to forge **both** files in lockstep — and any
+    // divergence flips `valid` to false with `anchor_status: "diverged"`.
+    //
+    // We can't easily replay the SQL-level rewrite from a black-box
+    // integration test (the in-memory `entries` Vec is private and
+    // doesn't reload from SQLite mid-process), but the symmetric
+    // failure — anchor disagrees with the live in-DB tip — is exactly
+    // what `verify_integrity` checks and is the property that catches
+    // the rewrite. Forging a stale anchor here mirrors the cooperative
+    // attacker who rewrote the DB but couldn't update the anchor.
+    let h = build_audit_harness("", vec![]);
+    seed_audit_entries(&h.state);
+
+    // Sanity: clean state must verify, otherwise the `valid: false`
+    // assertion below would prove nothing.
+    let (_, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    let pre = body_json(&bytes);
+    assert_eq!(
+        pre["valid"],
+        serde_json::json!(true),
+        "harness must produce a valid chain before tampering; body={pre}"
+    );
+    assert_eq!(pre["anchor_status"], serde_json::json!("ok"));
+
+    // Locate the anchor file. Kernel boot resolves `audit.anchor_path`
+    // to `data_dir/audit.anchor` when no override is configured; the
+    // mock kernel sets `data_dir = tmp/data`. We read the live path
+    // off the AuditLog rather than reconstructing it so a future
+    // default change here doesn't silently turn this test into a no-op.
+    let anchor_path = h
+        .state
+        .kernel
+        .audit()
+        .anchor_path()
+        .expect("harness wires an anchored AuditLog")
+        .to_path_buf();
+    assert!(
+        anchor_path.exists(),
+        "audit.anchor must have been seeded by the first append; path={anchor_path:?}"
+    );
+
+    // Tamper. Overwrite the anchor with a syntactically valid but
+    // wrong (seq, hash) pair — this is the divergence an attacker
+    // would create if they rewrote the DB without forging the anchor.
+    // The format is `<seq> <hex-hash>\n` (see `format_anchor_line` in
+    // librefang_runtime::audit). 64 hex chars of `a` is well-formed
+    // but cannot match any real SHA-256 tip we'd produce.
+    let bogus = format!("{} {}\n", 999_999_u64, "a".repeat(64));
+    std::fs::write(&anchor_path, bogus).expect("overwrite anchor file");
+
+    // Verify must now flip — the chain is still self-consistent in
+    // memory but the external witness disagrees, so `verify_integrity`
+    // returns Err and the handler reports `valid: false` with
+    // `anchor_status: "diverged"`.
+    let (status, bytes) = send_get(h.app.clone(), "/api/audit/verify", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body_json(&bytes);
+    assert_eq!(
+        body["valid"],
+        serde_json::json!(false),
+        "anchor mismatch MUST flip valid to false (this is the whole \
+         point of #3339); body={body}"
+    );
+    assert_eq!(
+        body["anchor_status"],
+        serde_json::json!("diverged"),
+        "diverged anchor MUST be distinguishable from chain break / \
+         no-anchor; body={body}"
+    );
+    assert!(
+        body["error"].as_str().is_some_and(|s| s.contains("anchor")),
+        "error message must mention the anchor so operators can \
+         diagnose without grepping logs; body={body}"
+    );
+}

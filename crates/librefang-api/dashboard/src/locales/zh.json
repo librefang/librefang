@@ -2825,7 +2825,10 @@
     "detail_copy_hash": "复制 hash",
     "detail_copy_link": "复制永久链接",
     "detail_copied": "已复制",
-    "open_detail": "查看详情"
+    "open_detail": "查看详情",
+    "chain_valid": "链：有效",
+    "chain_broken": "链：损坏",
+    "anchor_pill": "锚点"
   },
   "users": {
     "title": "用户与权限",

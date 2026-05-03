@@ -2859,7 +2859,10 @@
     "detail_copy_hash": "Copy hash",
     "detail_copy_link": "Copy permalink",
     "detail_copied": "Copied",
-    "open_detail": "Open details"
+    "open_detail": "Open details",
+    "chain_valid": "chain: valid",
+    "chain_broken": "chain: broken",
+    "anchor_pill": "anchor"
   },
   "users": {
     "title": "Users & RBAC",

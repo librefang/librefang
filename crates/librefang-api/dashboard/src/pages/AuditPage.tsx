@@ -54,6 +54,7 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { Modal } from "../components/ui/Modal";
 import { DrawerPanel } from "../components/ui/DrawerPanel";
 import { useAuditQuery } from "../lib/queries/audit";
+import { useAuditVerify } from "../lib/queries/runtime";
 import { useChannels } from "../lib/queries/channels";
 import { ApiError } from "../lib/http/errors";
 import { formatRelativeTime } from "../lib/datetime";
@@ -436,6 +437,20 @@ export function AuditPage() {
   // a TDZ ReferenceError if `query` were declared below them.
   const query = useAuditQuery(normaliseFilters(active));
 
+  // Chain + external tip-anchor status (#3339). The verify endpoint
+  // returns `valid` (chain self-consistency) AND `anchor_status` —
+  // "ok" when the on-disk anchor matches the in-DB tip, "diverged"
+  // when an attacker rewrote one without forging the other, and
+  // "none" when no anchor is configured (chain is self-consistent
+  // only — see SECURITY.md "Audit"). We surface both pills here so an
+  // operator landing on the audit page sees integrity status without
+  // hopping to Runtime first. `refetchInterval: false` matches the
+  // Runtime page — the walk is expensive; refetch on mount/focus only.
+  const verifyQuery = useAuditVerify({ refetchInterval: false });
+  const verifyValid = verifyQuery.data?.valid;
+  const verifyAnchorStatus = verifyQuery.data?.anchor_status;
+  const verifyAnchorPath = verifyQuery.data?.anchor_path ?? undefined;
+
   // Action options for the Select — the empty-value "(any)" gets the
   // localised label; the rest are pinned to their server-side enum
   // names. Memo'd because Select shallow-compares its `options` prop
@@ -659,6 +674,35 @@ export function AuditPage() {
         helpText={t("audit.help")}
         actions={
           <div className="flex items-center gap-2">
+            {/* Chain-validity pill (#3339). Reads off /api/audit/verify
+                so operators don't have to hop to Runtime to know
+                whether the log they're inspecting is intact. The
+                anchor pill below distinguishes a forged-DB attack
+                ("diverged") from a clean log ("ok") and from a
+                deployment without an external anchor ("none"). Both
+                pills hide until the verify query has produced data
+                so we don't show stale or speculative status. */}
+            {verifyValid !== undefined && (
+              <Badge variant={verifyValid ? "success" : "error"}>
+                {verifyValid
+                  ? t("audit.chain_valid", { defaultValue: "chain: valid" })
+                  : t("audit.chain_broken", { defaultValue: "chain: broken" })}
+              </Badge>
+            )}
+            {verifyAnchorStatus && (
+              <Badge
+                variant={
+                  verifyAnchorStatus === "ok"
+                    ? "success"
+                    : verifyAnchorStatus === "diverged"
+                      ? "error"
+                      : "warning"
+                }
+                title={verifyAnchorPath ?? undefined}
+              >
+                {t("audit.anchor_pill", { defaultValue: "anchor" })}: {verifyAnchorStatus}
+              </Badge>
+            )}
             {query.data && (
               <Badge variant="brand" dot>
                 {totalCount} / {totalLimit}
