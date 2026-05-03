@@ -58,10 +58,12 @@ fn sanitize_channel_error(err: &str) -> String {
 fn looks_like_tool_call(text: &str) -> bool {
     let t = text.trim();
     // Start-of-text patterns: safe regardless of length — a response that
-    // literally begins with a JSON tool call array is always a leak.
+    // literally begins with a JSON tool call array/object is always a leak.
     if t.starts_with("[{")
         || t.starts_with("functions.")
         || t.starts_with("{\"type\":\"function\"")
+        || t.starts_with("{\"tool_calls\":")
+        || t.starts_with("{\"tool_calls\" :")
         || (t.starts_with('[') && t.contains("'type': 'text'"))
     {
         return true;
@@ -3790,6 +3792,57 @@ mod tests {
         // agent_send tool call emitted as bare JSON by some providers (#2379)
         let text = r#"{"name": "agent_send", "parameters": {"agent_id": "AgentB", "message": "Hello from AgentA"}}"#;
         assert!(looks_like_tool_call(text));
+    }
+
+    /// Short text containing a `<tool_call>` tag should still be flagged —
+    /// the contains()-based heuristic must keep firing under the length
+    /// threshold so genuine compact tool-call leaks are caught (#4028).
+    #[test]
+    fn test_looks_like_tool_call_short_text_with_tool_call_tag_is_flagged() {
+        let text = "Sure, here it is: <tool_call>web_search {\"q\":\"x\"}</tool_call>";
+        assert!(text.len() <= 2000);
+        assert!(looks_like_tool_call(text));
+    }
+
+    /// A long natural-language response (>2000 chars) that merely mentions
+    /// the words "tool_call" / "function_call" must NOT be filtered. Only
+    /// start-of-text patterns apply at this length, so the contains()
+    /// heuristic is suppressed and the legitimate answer survives (#4028).
+    #[test]
+    fn test_looks_like_tool_call_long_natural_language_not_flagged() {
+        let mut text = String::from(
+            "Let me explain how tool_call dispatch works in this system. \
+             A <tool_call> tag is one possible serialization, and providers \
+             may also emit [TOOL_CALL] markers or <function= attributes. ",
+        );
+        // Pad with natural language until the length exceeds the heuristic
+        // cap so that only start-of-text patterns are evaluated.
+        while text.len() <= 2000 {
+            text.push_str(
+                "This sentence discusses how tool calls and function calls \
+                 are represented internally without actually being one. ",
+            );
+        }
+        assert!(text.len() > 2000);
+        assert!(!text.trim_start().starts_with('['));
+        assert!(!text.trim_start().starts_with('{'));
+        assert!(!looks_like_tool_call(&text));
+    }
+
+    /// A long response that *starts* with a raw `{"tool_calls":` JSON
+    /// payload is unambiguously a leaked tool call and must be flagged
+    /// regardless of length (#4028).
+    #[test]
+    fn test_looks_like_tool_call_long_text_starting_with_tool_calls_json_is_flagged() {
+        let mut text = String::from(r#"{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#);
+        while text.len() <= 5000 {
+            text.push_str(
+                r#",{"id":"call_n","type":"function","function":{"name":"web_search","arguments":"{\"q\":\"rust\"}"}}"#,
+            );
+        }
+        text.push_str("]}");
+        assert!(text.len() > 5000);
+        assert!(looks_like_tool_call(&text));
     }
 
     /// Verify that tool call JSON emitted as text (without ToolUseStart) is
