@@ -164,6 +164,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         // Backup / restore (extracted to routes::backup, #3749)
         .merge(crate::routes::backup::router())
 }
+use crate::extractors::AgentIdPath;
 use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
 use axum::extract::{Path, Query, State};
@@ -200,18 +201,11 @@ pub(super) fn librefang_home() -> PathBuf {
 #[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
     lang: Option<axum::Extension<RequestLanguage>>,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(aid) => aid,
-        Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
-        }
-    };
     // Owner-scoping: non-admins can only read the KV store of agents
     // they authored. Without this, anyone authenticated could pull
     // user.preferences / oncall.contact / api.tokens out of any agent.
@@ -347,17 +341,10 @@ pub async fn delete_agent_kv_key(
 #[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = crate::types::JsonObject)))]
 pub async fn export_agent_memory(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(aid) => aid,
-        Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
-        }
-    };
 
     // Verify agent exists
     if state.kernel.agent_registry().get(agent_id).is_none() {
@@ -390,18 +377,11 @@ pub async fn export_agent_memory(
 #[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Memory imported", body = crate::types::JsonObject)))]
 pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let agent_id: AgentId = match id.parse() {
-        Ok(aid) => aid,
-        Err(_) => {
-            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
-                .into_json_tuple();
-        }
-    };
 
     // Verify agent exists
     if state.kernel.agent_registry().get(agent_id).is_none() {

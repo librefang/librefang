@@ -32,12 +32,13 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
                 .delete(delete_user_budget),
         )
 }
+use crate::extractors::AgentIdPath;
 use crate::middleware::UserRole;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use librefang_types::agent::{AgentId, UserId};
+use librefang_types::agent::UserId;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -404,15 +405,8 @@ pub async fn update_budget(
 )]
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
-        }
-    };
-
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
@@ -520,17 +514,11 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 )]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    AgentIdPath(agent_id): AgentIdPath,
     api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let api_user_ref = api_user.as_ref().map(|e| &e.0);
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return ApiErrorResponse::bad_request("Invalid agent ID").into_response();
-        }
-    };
 
     let hourly = body["max_cost_per_hour_usd"].as_f64();
     let daily = body["max_cost_per_day_usd"].as_f64();
