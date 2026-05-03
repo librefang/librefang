@@ -3479,13 +3479,15 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
     // Strip existing [integrity] block (from "[integrity]" to next bare "[" section)
     let stripped = strip_toml_section(&original, "integrity");
 
-    // Append new [integrity] block
+    // Append new [integrity] block.  Iterate via sorted keys so the on-disk
+    // order is deterministic across processes and OS file iteration quirks.
     let mut new_content = stripped.trim_end().to_string();
     new_content.push_str("\n\n[integrity]\n");
-    for (path, hash) in &hashes {
+    let mut entries: Vec<(&String, &String)> = hashes.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (path, hash) in entries {
         new_content.push_str(&format!("\"{}\" = \"{}\"\n", path, hash));
     }
-    new_content.push('\n');
 
     std::fs::write(&manifest_path, &new_content)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
@@ -3494,6 +3496,168 @@ pub fn sign_plugin(name: &str) -> Result<std::collections::HashMap<String, Strin
         plugin = name,
         hooks = hook_paths.len(),
         "Plugin signed — integrity hashes written"
+    );
+    Ok(hashes)
+}
+
+/// Collect every hook script path declared in `[hooks]` of the given manifest.
+///
+/// Returns a flat `Vec` of relative paths (e.g. `"hooks/ingest.py"`) in the
+/// canonical declaration order: ingest, after_turn, bootstrap, assemble,
+/// compact, prepare_subagent, merge_subagent.  Hooks that aren't declared
+/// produce no entry.
+fn declared_hook_paths(manifest: &PluginManifest) -> Vec<String> {
+    [
+        manifest.hooks.ingest.as_deref(),
+        manifest.hooks.after_turn.as_deref(),
+        manifest.hooks.bootstrap.as_deref(),
+        manifest.hooks.assemble.as_deref(),
+        manifest.hooks.compact.as_deref(),
+        manifest.hooks.prepare_subagent.as_deref(),
+        manifest.hooks.merge_subagent.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Validate that a plugin directory is ready to be published to a registry.
+///
+/// Returns `Ok(())` when every script declared under `[hooks]` has a matching
+/// entry under `[integrity]`.  Returns `Err(message)` listing the offending
+/// hook scripts otherwise.
+///
+/// This is the publish-time backstop introduced for issue #4036: the official
+/// `context-decay` plugin shipped without `[integrity]` because its publish
+/// pipeline never enforced the rule.  Registry CI / `pack_plugin_for_publish`
+/// call this so an unsigned manifest cannot reach end users in the first
+/// place — `load_plugin_manifest` already enforces it on the install side.
+pub fn validate_publish_ready(plugin_dir: &Path) -> Result<(), String> {
+    let manifest_path = plugin_dir.join("plugin.toml");
+    if !manifest_path.exists() {
+        return Err(format!(
+            "plugin.toml not found at {}",
+            manifest_path.display()
+        ));
+    }
+
+    let raw = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: PluginManifest =
+        toml::from_str(&raw).map_err(|e| format!("Invalid plugin.toml: {e}"))?;
+
+    // Reuse the install-side / lint-side source of truth so all three
+    // call sites (install_from_registry, lint_plugin, validate_publish_ready)
+    // agree on what counts as missing.
+    let mut missing = manifest_missing_integrity_hooks(&manifest);
+    missing.sort();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Plugin '{}' is missing [integrity] hashes for hook script(s): {}. \
+             Registry-published plugins must include SHA-256 checksums for every \
+             hook script declared in [hooks]. Re-run the publish packer (which \
+             auto-computes hashes via pack_plugin_for_publish) before uploading.",
+            manifest.name,
+            missing.join(", ")
+        ))
+    }
+}
+
+/// Auto-compute SHA-256 hashes for every hook script declared in a plugin
+/// directory and write them into `plugin.toml`'s `[integrity]` section.
+///
+/// This is the publish-pipeline entry point that fixes issue #4036: registry
+/// authors call it (via CI / `librefang-registry` automation) before uploading
+/// an artifact.  It guarantees the resulting `plugin.toml` will satisfy
+/// [`load_plugin_manifest`]'s integrity check at install time.
+///
+/// Behaviour:
+/// - Reads `plugin_dir/plugin.toml`,
+/// - For every hook script declared in `[hooks]`, computes the SHA-256 of the
+///   on-disk file and inserts it into `[integrity]`,
+/// - Rewrites `plugin.toml` with a fresh `[integrity]` block (any pre-existing
+///   `[integrity]` block is replaced verbatim — stale entries are dropped),
+/// - Calls [`validate_publish_ready`] so a missing hook script (declared but
+///   not on disk) becomes a hard error before the artifact is shipped.
+///
+/// Returns the `relative_path → sha256_hex` map that was written.
+///
+/// # Errors
+/// - `plugin.toml` missing or unparseable
+/// - A declared hook script does not exist on disk (typo / packager bug)
+/// - The rewritten `plugin.toml` cannot be persisted (filesystem error)
+pub fn pack_plugin_for_publish(
+    plugin_dir: &Path,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let manifest_path = plugin_dir.join("plugin.toml");
+    if !manifest_path.exists() {
+        return Err(format!(
+            "plugin.toml not found at {}",
+            manifest_path.display()
+        ));
+    }
+
+    let original = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: PluginManifest =
+        toml::from_str(&original).map_err(|e| format!("Invalid plugin.toml: {e}"))?;
+
+    let hook_paths = declared_hook_paths(&manifest);
+    if hook_paths.is_empty() {
+        // Nothing to sign — but still validate so a partial / malformed
+        // [integrity] block doesn't slip through.
+        validate_publish_ready(plugin_dir)?;
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // Hash every declared hook script.  A missing file is a packaging bug
+    // (the manifest references a script that isn't being shipped), so fail
+    // loudly rather than emitting a hash for an empty / nonexistent file.
+    let mut hashes: std::collections::HashMap<String, String> =
+        std::collections::HashMap::with_capacity(hook_paths.len());
+    for rel_path in &hook_paths {
+        let abs_path = plugin_dir.join(rel_path);
+        let bytes = std::fs::read(&abs_path).map_err(|e| {
+            format!(
+                "Plugin '{}': cannot read hook '{}' for SHA-256 computation: {e}. \
+                 Did you forget to include it in the artifact?",
+                manifest.name,
+                abs_path.display()
+            )
+        })?;
+        hashes.insert(rel_path.clone(), sha256_hex(&bytes));
+    }
+
+    // Rewrite plugin.toml: strip any existing [integrity] block, then append
+    // a fresh one with deterministic key ordering so byte-identical inputs
+    // produce byte-identical artifacts (important for archive checksums and
+    // reproducible-build verifiers).
+    let stripped = strip_toml_section(&original, "integrity");
+    let mut new_content = stripped.trim_end().to_string();
+    new_content.push_str("\n\n[integrity]\n");
+    let mut entries: Vec<(&String, &String)> = hashes.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (path, hash) in entries {
+        new_content.push_str(&format!("\"{}\" = \"{}\"\n", path, hash));
+    }
+
+    std::fs::write(&manifest_path, &new_content)
+        .map_err(|e| format!("Failed to write {}: {e}", manifest_path.display()))?;
+
+    // Defense in depth: re-read the rewritten file and confirm every declared
+    // hook is now covered.  Catches any corner case where the writer dropped
+    // an entry (e.g. shell-quote oddities in a hook path).
+    validate_publish_ready(plugin_dir)?;
+
+    info!(
+        plugin = manifest.name,
+        hooks = hook_paths.len(),
+        path = %plugin_dir.display(),
+        "Plugin packed for publish — [integrity] hashes auto-injected"
     );
     Ok(hashes)
 }
@@ -4675,6 +4839,264 @@ description = "Spanish description"
             missing,
             vec!["hooks/compact.py", "hooks/merge_subagent.py"],
             "compact and merge_subagent must be flagged"
+        );
+    }
+
+    // ── Bug #4036 — registry publish pipeline must auto-inject integrity ──
+
+    /// Helper: write a minimal plugin layout into `dir` with the requested
+    /// hook scripts and the requested raw `plugin.toml` body.  Returns the
+    /// directory path so the caller can keep ownership of the tempdir.
+    fn write_fake_plugin(
+        dir: &Path,
+        manifest_toml: &str,
+        scripts: &[(&str, &[u8])],
+    ) -> std::path::PathBuf {
+        std::fs::write(dir.join("plugin.toml"), manifest_toml).unwrap();
+        for (rel, body) in scripts {
+            let abs = dir.join(rel);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&abs, body).unwrap();
+        }
+        dir.to_path_buf()
+    }
+
+    /// pack_plugin_for_publish must write [integrity] entries with the
+    /// correct SHA-256 of every declared hook.  Mirrors the real
+    /// `context-decay` regression: declares two hooks, no [integrity].
+    #[test]
+    fn pack_plugin_for_publish_auto_injects_hashes_for_context_decay_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("context-decay");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "context-decay"
+version = "0.1.0"
+description = "Decay older context entries"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+"#;
+        let ingest_body = b"# ingest hook\nprint('ingest')\n";
+        let after_turn_body = b"# after_turn hook\nprint('after')\n";
+        let plugin_dir = write_fake_plugin(
+            &plugin_dir,
+            manifest,
+            &[
+                ("hooks/ingest.py", ingest_body),
+                ("hooks/after_turn.py", after_turn_body),
+            ],
+        );
+
+        // Sanity: the unsigned manifest must fail validation up-front,
+        // matching the user-visible error in the bug report.
+        let pre = validate_publish_ready(&plugin_dir).expect_err("unsigned must fail");
+        assert!(
+            pre.contains("hooks/ingest.py") && pre.contains("hooks/after_turn.py"),
+            "validate_publish_ready must list every missing hook, got: {pre}"
+        );
+
+        // Run the publish packer.
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert_eq!(written.len(), 2, "both hooks must be hashed");
+        assert_eq!(written["hooks/ingest.py"], sha256_hex(ingest_body));
+        assert_eq!(written["hooks/after_turn.py"], sha256_hex(after_turn_body));
+
+        // Re-read the manifest and confirm the [integrity] block is present
+        // and matches the expected hashes.
+        let rewritten = std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap();
+        let parsed: PluginManifest = toml::from_str(&rewritten).expect("rewritten manifest valid");
+        assert_eq!(
+            parsed.integrity.get("hooks/ingest.py").map(String::as_str),
+            Some(sha256_hex(ingest_body).as_str())
+        );
+        assert_eq!(
+            parsed
+                .integrity
+                .get("hooks/after_turn.py")
+                .map(String::as_str),
+            Some(sha256_hex(after_turn_body).as_str())
+        );
+
+        // The packed plugin must now satisfy the publish-readiness check.
+        validate_publish_ready(&plugin_dir).expect("packed plugin must validate");
+
+        // And the install-time loader must accept it without complaint.
+        let loaded = load_plugin_manifest(&plugin_dir).expect("install-time load must accept");
+        assert_eq!(loaded.name, "context-decay");
+        assert_eq!(loaded.integrity.len(), 2);
+    }
+
+    /// pack_plugin_for_publish must replace a stale [integrity] block — not
+    /// duplicate it — when authors re-pack after editing a hook script.
+    #[test]
+    fn pack_plugin_for_publish_replaces_stale_integrity_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("stale-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "stale-test"
+version = "0.1.0"
+description = "Replace stale integrity"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+
+[integrity]
+"hooks/ingest.py" = "deadbeef_stale_hash_must_be_replaced"
+"hooks/removed.py" = "0000_orphan_hash_must_be_dropped"
+"#;
+        let ingest_body = b"# fresh content\n";
+        write_fake_plugin(&plugin_dir, manifest, &[("hooks/ingest.py", ingest_body)]);
+
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert_eq!(written.len(), 1);
+
+        let rewritten = std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap();
+        // Only one [integrity] header — no duplicates from the stale block.
+        assert_eq!(
+            rewritten.matches("[integrity]").count(),
+            1,
+            "stale [integrity] block must be replaced, not appended:\n{rewritten}"
+        );
+        // Stale entry for a hook that no longer exists must be gone.
+        assert!(
+            !rewritten.contains("hooks/removed.py"),
+            "orphan integrity entry must be dropped:\n{rewritten}"
+        );
+
+        let parsed: PluginManifest = toml::from_str(&rewritten).unwrap();
+        assert_eq!(
+            parsed.integrity.get("hooks/ingest.py").map(String::as_str),
+            Some(sha256_hex(ingest_body).as_str())
+        );
+        assert!(parsed.integrity.get("hooks/removed.py").is_none());
+    }
+
+    /// pack_plugin_for_publish must fail loudly when a manifest references
+    /// a hook script that isn't on disk — that's a packaging bug and
+    /// emitting the SHA-256 of empty bytes would silently mask it.
+    #[test]
+    fn pack_plugin_for_publish_rejects_missing_hook_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("missing-hook");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "missing-hook"
+version = "0.1.0"
+description = "Hook file is not shipped"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+"#;
+        // Note: deliberately do NOT write hooks/ingest.py.
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        let err = pack_plugin_for_publish(&plugin_dir).expect_err("missing hook must fail");
+        assert!(
+            err.contains("hooks/ingest.py"),
+            "error must name the missing hook, got: {err}"
+        );
+    }
+
+    /// A plugin that declares no hooks at all is publish-ready by definition
+    /// — pack returns an empty map, validate accepts.
+    #[test]
+    fn pack_plugin_for_publish_accepts_no_hooks_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("metadata-only");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "metadata-only"
+version = "0.1.0"
+description = "No hooks, just metadata"
+author = "Test"
+"#;
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        validate_publish_ready(&plugin_dir).expect("no-hooks plugin is publish-ready");
+        let written = pack_plugin_for_publish(&plugin_dir).expect("pack must succeed");
+        assert!(written.is_empty(), "no hooks → no hashes written");
+    }
+
+    /// validate_publish_ready must accept a partially-signed manifest only
+    /// when EVERY declared hook is covered.  A plugin that ships
+    /// `[integrity]` for some but not all hooks is still rejected — this is
+    /// the defense-in-depth backstop for issue #4036.
+    #[test]
+    fn validate_publish_ready_rejects_partial_integrity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("partial");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        let manifest = r#"name = "partial"
+version = "0.1.0"
+description = "Half-signed"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+
+[integrity]
+"hooks/ingest.py" = "abc"
+"#;
+        std::fs::write(plugin_dir.join("plugin.toml"), manifest).unwrap();
+
+        let err = validate_publish_ready(&plugin_dir).expect_err("partial must fail");
+        assert!(
+            err.contains("hooks/after_turn.py"),
+            "after_turn must be flagged as missing, got: {err}"
+        );
+        assert!(
+            !err.contains("hooks/ingest.py"),
+            "ingest is signed and must NOT be flagged, got: {err}"
+        );
+    }
+
+    /// pack_plugin_for_publish must produce byte-identical output across
+    /// repeated invocations on identical inputs — a property the registry
+    /// archive checksum and any reproducible-build verifier depend on.
+    #[test]
+    fn pack_plugin_for_publish_is_deterministic() {
+        fn pack_once(seed: &[u8]) -> String {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin_dir = tmp.path().join("det");
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            let manifest = r#"name = "det"
+version = "0.1.0"
+description = "Determinism test"
+author = "Test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+after_turn = "hooks/after_turn.py"
+bootstrap = "hooks/bootstrap.py"
+"#;
+            write_fake_plugin(
+                &plugin_dir,
+                manifest,
+                &[
+                    ("hooks/ingest.py", seed),
+                    ("hooks/after_turn.py", seed),
+                    ("hooks/bootstrap.py", seed),
+                ],
+            );
+            pack_plugin_for_publish(&plugin_dir).unwrap();
+            std::fs::read_to_string(plugin_dir.join("plugin.toml")).unwrap()
+        }
+
+        let a = pack_once(b"identical seed");
+        let b = pack_once(b"identical seed");
+        assert_eq!(
+            a, b,
+            "pack output must be byte-identical for identical inputs"
         );
     }
 }
