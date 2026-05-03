@@ -6,7 +6,6 @@
 //!
 //! Device pairing (`/pairing/*`) was extracted to [`super::pairing`] per #3749.
 
-use super::skills::write_secret_env;
 use super::AppState;
 
 /// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).
