@@ -38,15 +38,21 @@ async fn test_discover_fails_without_any_source() {
 // `connect_mcp_servers`, silently disabling the entire OAuth flow.
 // ---------------------------------------------------------------------------
 
-/// Mock provider that records whether `load_token` was called.
+/// Mock provider that records whether `load_token` and `store_oauth_metadata`
+/// were called. The `store_oauth_metadata` tracking exists so future tests
+/// can assert the bridge from the per-flow staging namespace to the durable
+/// per-server namespace was actually invoked — silent no-ops here are how
+/// the refresh-bug regression slips back in.
 struct TrackingOAuthProvider {
     load_token_called: AtomicBool,
+    store_oauth_metadata_called: AtomicBool,
 }
 
 impl TrackingOAuthProvider {
     fn new() -> Self {
         Self {
             load_token_called: AtomicBool::new(false),
+            store_oauth_metadata_called: AtomicBool::new(false),
         }
     }
 }
@@ -66,6 +72,17 @@ impl McpOAuthProvider for TrackingOAuthProvider {
         _server_url: &str,
         _tokens: OAuthTokens,
     ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+        Ok(())
+    }
+
+    async fn store_oauth_metadata(
+        &self,
+        _server_url: &str,
+        _token_endpoint: &str,
+        _client_id: Option<&str>,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+        self.store_oauth_metadata_called
+            .store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -151,6 +168,17 @@ impl McpOAuthProvider for InMemoryOAuthProvider {
             .lock()
             .await
             .insert(server_url.to_string(), tokens);
+        Ok(())
+    }
+
+    async fn store_oauth_metadata(
+        &self,
+        _server_url: &str,
+        _token_endpoint: &str,
+        _client_id: Option<&str>,
+    ) -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+        // No-op: this in-memory provider only tracks tokens; metadata
+        // promotion isn't needed for the lifecycle tests below.
         Ok(())
     }
 
