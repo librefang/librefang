@@ -21,7 +21,7 @@ const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 // Mirror of REGISTRY_PUBLIC_KEY in web/workers/{registry,marketplace}-worker/
 // wrangler.toml. Rotation: regenerate keypair via web/workers/keygen.mjs,
 // update both wrangler.toml files AND this constant in lockstep.
-const REGISTRY_PUBLIC_KEY = 'NEoveGRjRazzoiRFqozw0VEtF9N9elfwIAOqKzt4Ue4=';
+const REGISTRY_PUBLIC_KEY = 'ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=';
 
 function addHeaders(response, url) {
   const headers = new Headers(response.headers);

@@ -331,6 +331,28 @@ async function handlePublishVersion(slug, request, env) {
   const { version, bundle_url, bundle_sha256, changelog } = body
   if (!version || !bundle_url || !bundle_sha256) return json({ error: 'version, bundle_url, bundle_sha256 required' }, 400)
 
+  // PR review CRITICAL #2 — without an allowlist, an author can publish
+  // `bundle_url=https://attacker.example/payload.tgz` with any sha256
+  // and get a registry-signed signature back. The daemon's verification
+  // then reduces to "the registry confirmed this author claimed this
+  // URL". Restrict to known hosts that hold immutable, content-addressed
+  // artefacts so the signature actually attests to what users install.
+  if (!isAllowedBundleHost(bundle_url)) {
+    return json({
+      error:
+        'bundle_url must be hosted on an approved CDN: GitHub Releases ' +
+        '(github.com/.../releases/download/), or the marketplace R2 bucket ' +
+        '(marketplace.librefang.ai/bundles/). Self-hosted URLs are not ' +
+        'eligible for registry signing — the signature would attest to ' +
+        'host control rather than artefact identity.',
+    }, 400)
+  }
+  // Stronger sanity check on the sha256 too — 64 lower-hex chars,
+  // matches what `sha256sum` emits.
+  if (!/^[0-9a-f]{64}$/.test(bundle_sha256)) {
+    return json({ error: 'bundle_sha256 must be 64 lower-hex chars' }, 400)
+  }
+
   const versionId = `${slug}@${version}`
   const now = Math.floor(Date.now() / 1000)
 
@@ -572,6 +594,30 @@ function b64FromBytes(bytes) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Hosts that publish immutable, content-addressed artefacts and are
+// reasonable trust roots for marketplace bundles (PR review CRITICAL #2).
+// Adding entries here means accepting that the worker will sign anything
+// stored at that host — keep the list short and well-motivated.
+const ALLOWED_BUNDLE_HOST_PREFIXES = [
+  'https://github.com/',                    // .../<owner>/<repo>/releases/download/...
+  'https://objects.githubusercontent.com/', // GitHub release-asset CDN (download redirects)
+  'https://marketplace.librefang.ai/',      // marketplace's own R2 bucket
+]
+
+function isAllowedBundleHost(url) {
+  if (typeof url !== 'string' || url.length === 0 || url.length > 2048) return false
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch (_) {
+    return false
+  }
+  if (parsed.protocol !== 'https:') return false
+  // Reject URLs with credentials embedded (https://attacker@github.com/...).
+  if (parsed.username || parsed.password) return false
+  return ALLOWED_BUNDLE_HOST_PREFIXES.some(prefix => url.startsWith(prefix))
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS })

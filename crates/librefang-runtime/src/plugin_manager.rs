@@ -35,14 +35,18 @@ use tracing::{debug, info, warn};
 /// Rotation is deliberately disruptive: a new daemon release ships with
 /// the new constant; in-flight installs against the old key fail closed.
 /// See `docs/architecture/plugin-signing.md` § "Rotation".
-const EMBEDDED_REGISTRY_PUBKEY: &str = "NEoveGRjRazzoiRFqozw0VEtF9N9elfwIAOqKzt4Ue4=";
+const EMBEDDED_REGISTRY_PUBKEY: &str = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=";
 
 /// Default URL for self-hosted registries that opt into HTTP pubkey
 /// resolution (operators of `acme/private-registry` style forks who don't
 /// want to rebuild the daemon to ship a key constant). Off the official
 /// trust path — never consulted for the official registry, which uses
 /// [`EMBEDDED_REGISTRY_PUBKEY`].
-const OFFICIAL_PUBKEY_URL: &str = "https://stats.librefang.ai/.well-known/registry-pubkey";
+///
+/// Uses the `/api/registry/pubkey` form because the official custom
+/// domain routes only `/api/*` to the worker; the `.well-known/...`
+/// alias only resolves on the workers.dev hostname.
+const OFFICIAL_PUBKEY_URL: &str = "https://stats.librefang.ai/api/registry/pubkey";
 
 /// `owner/repo` of the official LibreFang plugin registry on GitHub.
 ///

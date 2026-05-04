@@ -2,20 +2,35 @@
 // Proxies librefang-registry (GitHub) with Cache API for HTTP responses.
 // Storage: D1 (registry_clicks, kv_store, ui_errors). No KV dependency.
 //
-// Plugin signing (#3805): when REGISTRY_PRIVATE_KEY (PKCS#8 base64) is set as
-// a Worker secret and REGISTRY_PUBLIC_KEY (raw 32-byte base64) is set as a
-// var, the cron refresh signs the daemon-shaped plugins index (a flat
-// JSON array of {name, version, description, needs}) with Ed25519. The
-// daemon (librefang-runtime/plugin_manager.rs::fetch_verified_index) fetches:
+// Plugin signing (#3805 + PR #4600 hardening):
+//
+// The Ed25519 private key lives ONLY in the librefang-registry GitHub
+// Actions secret, never in this worker. The CI workflow there
+// (.github/workflows/refresh-cache.yml) builds plugins-index.json,
+// signs it locally, and commits both `plugins-index.json` and
+// `plugins-index.json.sig` to the repo root before poking the worker.
+// This handler is now a pure transport: it fetches the committed
+// bytes (3 raw subrequests — plugins json + sig + registry json) and
+// stores them in D1 verbatim. No bytes get re-signed by anything
+// holding registry-controlled key material.
+//
+// Daemon contract (unchanged):
 //   GET /api/registry/index.json     — canonical bytes that were signed
-//                                      (a JSON array of plugin entries)
+//                                      (flat JSON array of plugin entries)
 //   GET /api/registry/index.json.sig — base64 Ed25519 signature
 //   GET /.well-known/registry-pubkey — base64 raw 32-byte Ed25519 pubkey
 //
-// The dashboard's /api/registry endpoint continues to return the dict-shaped
-// payload (hands/channels/plugins/skills/...) for the marketplace UI. The
-// two formats are stored separately in D1 (registry_data vs plugins_index).
-// See web/workers/SIGNING.md for keygen + deploy.
+// The dashboard's /api/registry endpoint continues to return the
+// dict-shaped payload (hands/channels/plugins/skills/...) for the
+// marketplace UI. The two formats are stored separately in D1
+// (registry_data vs plugins_index). See web/workers/SIGNING.md.
+//
+// Why moved out of the worker (PR review CRITICAL #1): the previous
+// design treated the worker as a sign-anything oracle reachable via
+// REGISTRY_REFRESH_TOKEN — anyone with that token could push arbitrary
+// bytes to `main` and have them signed. The new flow ties signing to
+// the registry repo's CI identity, so the trust root is the repo's
+// branch protection + Actions secret rather than the worker.
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -74,7 +89,13 @@ export default {
     if (path === '/api/registry/index.json.sig' && request.method === 'GET')
       return handleSignedIndexSig(env)
 
-    if (path === '/.well-known/registry-pubkey' && request.method === 'GET')
+    // Both paths return the same bytes. The custom domain (stats.librefang.ai)
+    // routes only /api/* to the worker, so the daemon's HTTP-rotation
+    // probe needs an /api/* alias when the embedded constant is absent
+    // (self-hosted forks). The /.well-known/ form stays for direct
+    // workers.dev clients.
+    if ((path === '/.well-known/registry-pubkey' || path === '/api/registry/pubkey')
+        && request.method === 'GET')
       return handlePubkey(env)
 
     // Operator-only path used by the librefang-registry GitHub Action to
@@ -89,8 +110,12 @@ export default {
     return new Response('Not Found', { status: 404 })
   },
 
+  // Cron is now a backstop for the GH Action — the registry repo's CI
+  // is the primary path, this just guards against CI outages by
+  // re-pulling the same in-repo files daily. Auth-free because the
+  // worker invokes itself.
   async scheduled(_event, env) {
-    await refreshRegistryCache(env)
+    await doSyncFromRepo(env, { requireAuth: false })
   },
 }
 
@@ -301,231 +326,13 @@ async function handleErrorList(env) {
   })
 }
 
-// ---------------------------------------------------------------------------
-// Registry cache refresh (cron + inline)
-// ---------------------------------------------------------------------------
-
-async function refreshRegistryCache(env) {
-  const headers = ghHeaders(env)
-
-  async function fetchDir(path) {
-    const res = await fetch(`${REGISTRY_API}/${path}`, { headers })
-    if (!res.ok) return []
-    const items = await res.json()
-    return items.filter(f => f.type === 'dir' || (f.name.endsWith('.toml') && f.name !== 'README.md'))
-  }
-
-  function parseStringArray(text, key) {
-    const m = text.match(new RegExp(`^${key}\\s*=\\s*\\[([^\\]]*)\\]`, 'm'))
-    if (!m) return undefined
-    const items = m[1].match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, ''))
-    return items?.length ? items : undefined
-  }
-
-  async function fetchToml(path) {
-    const res = await fetch(`${REGISTRY_RAW}/${path}`)
-    if (!res.ok) return null
-    const text = await res.text()
-    const get = key => { const m = text.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, 'm')); return m ? m[1] : '' }
-
-    const i18n = {}
-    const i18nRe = /\[i18n\.([a-zA-Z-]+)\]\s*\n(?:([^[]*?)(?=\n\[|\n*$))/g
-    let m
-    while ((m = i18nRe.exec(text)) !== null) {
-      const descM = (m[2] || '').match(/description\s*=\s*"([^"]*)"/)
-      if (descM) i18n[m[1]] = { description: descM[1] }
-    }
-
-    const tags = parseStringArray(text, 'tags')
-    const needs = parseStringArray(text, 'needs')
-
-    const result = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
-    const version = get('version')
-    if (version) result.version = version
-    if (tags?.length) result.tags = tags
-    if (needs?.length) result.needs = needs
-    if (Object.keys(i18n).length) result.i18n = i18n
-    return result
-  }
-
-  async function fetchSkillMd(path, fallbackId) {
-    const res = await fetch(`${REGISTRY_RAW}/${path}`)
-    if (!res.ok) return null
-    const text = await res.text()
-    const fm = text.match(/^---\s*\n([\s\S]*?)\n---/)
-    if (!fm) return null
-    const get = key => { const m = fm[1].match(new RegExp(`^${key}\\s*:\\s*"?([^"\\n]*?)"?\\s*$`, 'm')); return m ? m[1].trim() : '' }
-    return { id: get('id') || fallbackId, name: get('name') || fallbackId, description: get('description'), category: 'skills', icon: '' }
-  }
-
-  async function fetchBatch(items, pathFn, fetcher = p => fetchToml(p)) {
-    const results = []
-    for (let i = 0; i < items.length; i += 10) {
-      const batch = await Promise.all(items.slice(i, i + 10).map(item => fetcher(pathFn(item), item.name)))
-      results.push(...batch)
-    }
-    return results.filter(Boolean)
-  }
-
-  try {
-    const dirs = await Promise.all(
-      ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp'].map(fetchDir),
-    )
-    const [hands, channels, providers, workflows, agents, plugins, skills, mcp] =
-      dirs.map(items => items.filter(f => f.name !== 'README.md'))
-
-    const sigOf = items => items.map(i => `${i.name}@${i.sha || ''}`).sort().join(',')
-    const signature = ['hands', 'channels', 'providers', 'workflows', 'agents', 'plugins', 'skills', 'mcp']
-      .map((cat, i) => `${cat}=${sigOf(dirs[i].filter(f => f.name !== 'README.md'))}`)
-      .join('|')
-
-    const existing = await env.DB.prepare(
-      `SELECT value FROM kv_store WHERE key = 'registry_data'`,
-    ).first()
-    const pluginsIndexExists = await env.DB.prepare(
-      `SELECT 1 AS present FROM kv_store WHERE key = 'plugins_index'`,
-    ).first()
-    if (existing && pluginsIndexExists) {
-      try {
-        if (JSON.parse(existing.value).signature === signature) {
-          await env.DB.prepare(
-            `UPDATE kv_store SET updated_at = ? WHERE key = 'registry_data'`,
-          ).bind(Math.floor(Date.now() / 1000)).run()
-          console.log('Registry unchanged, skipping manifest fetch')
-          return
-        }
-      } catch (_) { /* refetch */ }
-    }
-
-    const [handDetails, agentDetails, skillDetails, channelDetails, providerDetails, workflowDetails, pluginDetails, mcpDetails] = await Promise.all([
-      fetchBatch(hands,     h => `hands/${h.name}/HAND.toml`),
-      fetchBatch(agents,    a => `agents/${a.name}/agent.toml`),
-      fetchBatch(skills,    s => `skills/${s.name}/SKILL.md`, fetchSkillMd),
-      fetchBatch(channels,  c => `channels/${c.name}`),
-      fetchBatch(providers, p => `providers/${p.name}`),
-      fetchBatch(workflows, w => `workflows/${w.name}`),
-      fetchBatch(plugins,   p => `plugins/${p.name}/plugin.toml`),
-      fetchBatch(mcp,       m => m.name.endsWith('.toml') ? `mcp/${m.name}` : `mcp/${m.name}/MCP.toml`),
-    ])
-
-    const result = {
-      hands: handDetails, channels: channelDetails, providers: providerDetails,
-      workflows: workflowDetails, agents: agentDetails, plugins: pluginDetails,
-      skills: skillDetails, mcp: mcpDetails,
-      handsCount: hands.length, channelsCount: channels.length, providersCount: providers.length,
-      workflowsCount: workflows.length, agentsCount: agents.length, pluginsCount: plugins.length,
-      skillsCount: skills.length, mcpCount: mcp.length,
-      fetchedAt: new Date().toISOString(),
-      signature,
-    }
-
-    const indexJson = JSON.stringify(result)
-    const now = Math.floor(Date.now() / 1000)
-
-    await env.DB.prepare(
-      `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(indexJson, now).run()
-
-    // Build the daemon-shaped flat plugins array (sorted by name for byte
-    // determinism — the signature is over these exact bytes so any reordering
-    // would break verification). Only the fields the daemon actually uses are
-    // included: name, version, description, needs.
-    const pluginsIndex = pluginDetails
-      .map(p => {
-        const out = { name: p.name }
-        if (p.version) out.version = p.version
-        if (p.description) out.description = p.description
-        if (p.needs?.length) out.needs = p.needs
-        return out
-      })
-      .filter(p => p.name)
-      .sort((a, b) => a.name.localeCompare(b.name))
-    const pluginsIndexJson = JSON.stringify(pluginsIndex)
-
-    await env.DB.prepare(
-      `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(pluginsIndexJson, now).run()
-
-    // Sign the daemon-shaped plugins index if a private key is configured.
-    // Signing is best-effort — if the secret is missing we skip (the daemon
-    // can still fetch the index but signature verification will fail closed
-    // at its end).
-    try {
-      const sig = await signWithRegistryKey(env, new TextEncoder().encode(pluginsIndexJson))
-      if (sig) {
-        await env.DB.prepare(
-          `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-        ).bind(sig, now).run()
-      }
-    } catch (e) {
-      console.error('Plugins index signing failed:', e.message)
-    }
-
-    console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels,',
-      agents.length, 'agents,', skills.length, 'skills,', mcp.length, 'mcp')
-  } catch (e) {
-    console.error('Registry refresh failed:', e.message)
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Signed-index endpoints (Ed25519)
 // ---------------------------------------------------------------------------
 
-// Lazy-build `plugins_index` from the cron-built `registry_data` if it's
-// missing (e.g. on first deploy after the signing routes shipped, before
-// the next cron tick). The flat array we write here is byte-identical to
-// what `refreshRegistryCache` would have produced, so the daemon's
-// signature verification stays consistent across both build paths.
-async function ensurePluginsIndex(env) {
-  const present = await env.DB.prepare(
-    `SELECT 1 AS p FROM kv_store WHERE key = 'plugins_index'`,
-  ).first()
-  if (present) return
-  const dataRow = await env.DB.prepare(
-    `SELECT value FROM kv_store WHERE key = 'registry_data'`,
-  ).first()
-  if (!dataRow) return
-  let parsed
-  try {
-    parsed = JSON.parse(dataRow.value)
-  } catch (_) {
-    return
-  }
-  const flat = (parsed.plugins || [])
-    .map(p => {
-      const out = { name: p.name }
-      if (p.version) out.version = p.version
-      if (p.description) out.description = p.description
-      if (p.needs?.length) out.needs = p.needs
-      return out
-    })
-    .filter(p => p.name)
-    .sort((a, b) => a.name.localeCompare(b.name))
-  const flatJson = JSON.stringify(flat)
-  const now = Math.floor(Date.now() / 1000)
-  await env.DB.prepare(
-    `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-  ).bind(flatJson, now).run()
-  try {
-    const sig = await signWithRegistryKey(env, new TextEncoder().encode(flatJson))
-    if (sig) {
-      await env.DB.prepare(
-        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      ).bind(sig, now).run()
-    }
-  } catch (e) {
-    console.error('Lazy plugins_index signing failed:', e.message)
-  }
-}
 
 async function handleSignedIndex(env) {
-  await ensurePluginsIndex(env)
   const row = await env.DB.prepare(
     `SELECT value FROM kv_store WHERE key = 'plugins_index'`,
   ).first()
@@ -540,7 +347,6 @@ async function handleSignedIndex(env) {
 }
 
 async function handleSignedIndexSig(env) {
-  await ensurePluginsIndex(env)
   const row = await env.DB.prepare(
     `SELECT value FROM kv_store WHERE key = 'plugins_index_sig'`,
   ).first()
@@ -554,47 +360,55 @@ async function handleSignedIndexSig(env) {
   })
 }
 
-// Forced refresh — invoked by the librefang-registry GitHub Action after
-// a push that touched plugins/. Constant-time auth against
-// `REGISTRY_REFRESH_TOKEN` (worker secret); 503 until set so the endpoint
-// can't be probed.
+// Forced refresh — invoked by the librefang-registry GitHub Action after a
+// push that touched any registry content. Constant-time bearer-token auth
+// against `REGISTRY_REFRESH_TOKEN`; 503 until set so the endpoint can't
+// be probed.
 //
-// Architecture: the daemon-shaped flat plugins index is built **inside
-// the registry repo** by `scripts/build-plugins-index.mjs` and committed
-// to `plugins-index.json` at the repo root. This handler fetches that
-// single file (1 subrequest, regardless of registry size — important on
-// Workers Free where refreshRegistryCache's ~40+ Contents API calls
-// blow the per-invocation budget), re-signs it with the worker's
-// Ed25519 private key, and persists both bytes + signature in D1.
-//
-// The dict-shaped `registry_data` cache used by the dashboard is
-// **untouched** here — it stays on the daily cron path. This handler
-// only owns the daemon's signed-install lane.
+// PURE TRANSPORT: this handler does NOT sign anything. It fetches three
+// files from raw.githubusercontent.com (committed by the registry repo's
+// CI, which holds the Ed25519 private key) and writes them to D1
+// verbatim. The bytes the daemon eventually verifies are byte-identical
+// to the bytes the CI signed. Any byte-mutation between sign and serve
+// would be detectable.
 async function handleForcedRefresh(request, env) {
-  const expected = (env.REGISTRY_REFRESH_TOKEN || '').trim()
-  if (!expected) return errorResponse('refresh endpoint not configured', 503)
+  return doSyncFromRepo(env, { requireAuth: true, request })
+}
 
-  const auth = request.headers.get('authorization') || ''
-  const m = auth.match(/^Bearer\s+(.+)$/i)
-  const provided = m ? m[1].trim() : ''
-  if (!constantTimeEqual(provided, expected)) {
-    return errorResponse('unauthorized', 401)
+async function doSyncFromRepo(env, { requireAuth, request }) {
+  if (requireAuth) {
+    const expected = (env.REGISTRY_REFRESH_TOKEN || '').trim()
+    if (!expected) return errorResponse('refresh endpoint not configured', 503)
+    const auth = request.headers.get('authorization') || ''
+    const m = auth.match(/^Bearer\s+(.+)$/i)
+    const provided = m ? m[1].trim() : ''
+    if (!constantTimeEqual(provided, expected)) {
+      return errorResponse('unauthorized', 401)
+    }
   }
 
   const RAW_BASE =
     'https://raw.githubusercontent.com/librefang/librefang-registry/main'
   const pluginsUrl = `${RAW_BASE}/plugins-index.json`
+  const pluginsSigUrl = `${RAW_BASE}/plugins-index.json.sig`
   const registryUrl = `${RAW_BASE}/registry-index.json`
 
-  // Fetch both in parallel — 2 subrequests, regardless of how many
-  // plugins / agents / skills the registry contains.
-  const [pluginsResp, registryResp] = await Promise.all([
+  // Fetch all three in parallel — 3 subrequests, constant in registry size.
+  const [pluginsResp, pluginsSigResp, registryResp] = await Promise.all([
     fetch(pluginsUrl, { cf: { cacheTtl: 0 } }),
+    fetch(pluginsSigUrl, { cf: { cacheTtl: 0 } }),
     fetch(registryUrl, { cf: { cacheTtl: 0 } }),
   ])
   if (!pluginsResp.ok) {
     return errorResponse(
       `failed to fetch plugins-index.json: HTTP ${pluginsResp.status}`,
+      502,
+    )
+  }
+  if (!pluginsSigResp.ok) {
+    return errorResponse(
+      `failed to fetch plugins-index.json.sig: HTTP ${pluginsSigResp.status} ` +
+      `— registry CI must commit the signature alongside the index`,
       502,
     )
   }
@@ -605,9 +419,12 @@ async function handleForcedRefresh(request, env) {
     )
   }
   const pluginsText = await pluginsResp.text()
+  const pluginsSigText = (await pluginsSigResp.text()).trim()
   const registryText = await registryResp.text()
 
-  // Validate JSON shapes — refuse to ingest unparseable bytes.
+  // Validate shapes / sig length. We refuse to ingest unparseable bytes
+  // or a sig that's the wrong length, since the daemon would just
+  // hard-fail on those anyway and we'd rather catch it here.
   try {
     const parsed = JSON.parse(pluginsText)
     if (!Array.isArray(parsed)) throw new Error('plugins-index.json is not an array')
@@ -621,6 +438,11 @@ async function handleForcedRefresh(request, env) {
   } catch (e) {
     return errorResponse(`registry-index.json invalid: ${e.message}`, 502)
   }
+  // Ed25519 sig is 64 bytes → 88 base64 chars (incl. padding) or 86 chars
+  // unpadded. Allow either.
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(pluginsSigText) || pluginsSigText.length < 86) {
+    return errorResponse(`plugins-index.json.sig is not valid base64`, 502)
+  }
 
   const now = Math.floor(Date.now() / 1000)
   await env.DB.batch([
@@ -632,48 +454,50 @@ async function handleForcedRefresh(request, env) {
       .bind(pluginsText, now),
     env.DB
       .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(pluginsSigText, now),
+    env.DB
+      .prepare(
         `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .bind(registryText, now),
   ])
 
-  // Purge the Cache-API entry the dashboard hits — without this, /api/registry
-  // serves the previous (now-superseded) cached payload for up to 1h.
+  // Purge the Cache-API entry the dashboard hits — without this,
+  // /api/registry serves the previous cached payload for up to 1h.
   try {
     await caches.default.delete(new Request('https://internal/registry_data'))
   } catch (_) { /* best-effort */ }
-
-  let signed = false
-  try {
-    const sig = await signWithRegistryKey(env, new TextEncoder().encode(pluginsText))
-    if (sig) {
-      await env.DB.prepare(
-        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      ).bind(sig, now).run()
-      signed = true
-    }
-  } catch (e) {
-    console.error('plugins_index signing failed:', e.message)
-  }
 
   return new Response(
     JSON.stringify({
       ok: true,
       refreshed_at: now,
-      signed,
       plugins_bytes: pluginsText.length,
+      sig_bytes: pluginsSigText.length,
       registry_bytes: registryText.length,
     }),
     { headers: { 'Content-Type': 'application/json', ...CORS } },
   )
 }
 
+// Constant-time string comparison hardened against length leak via early
+// return (PR review MEDIUM #11). Iterates up to max(a.length, b.length)
+// and folds the length delta into the mismatch accumulator so timing
+// reveals at most "they're not the same" — not "yours is shorter than
+// mine". Multi-byte chars are handled via charCodeAt (no throw on
+// surrogate halves; XOR semantics are still well-defined).
 function constantTimeEqual(a, b) {
-  if (a.length !== b.length) return false
-  let mismatch = 0
-  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  const len = Math.max(a.length, b.length)
+  let mismatch = a.length ^ b.length
+  for (let i = 0; i < len; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0
+    const cb = i < b.length ? b.charCodeAt(i) : 0
+    mismatch |= ca ^ cb
+  }
   return mismatch === 0
 }
 
@@ -689,31 +513,6 @@ function handlePubkey(env) {
   })
 }
 
-// Sign `bytes` with the configured PKCS#8 private key. Returns base64
-// signature, or null when no key is configured. Throws on malformed key.
-async function signWithRegistryKey(env, bytes) {
-  const pkcs8B64 = (env.REGISTRY_PRIVATE_KEY || '').trim()
-  if (!pkcs8B64) return null
-  const pkcs8 = bytesFromB64(pkcs8B64)
-  const key = await crypto.subtle.importKey(
-    'pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign'],
-  )
-  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, key, bytes)
-  return b64FromBytes(new Uint8Array(sig))
-}
-
-function b64FromBytes(bytes) {
-  let s = ''
-  for (const b of bytes) s += String.fromCharCode(b)
-  return btoa(s)
-}
-
-function bytesFromB64(b64) {
-  const bin = atob(b64.replace(/\s+/g, ''))
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
