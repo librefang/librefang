@@ -422,7 +422,13 @@ export interface ContentBlockImageFile {
   path: string;
 }
 
-/** Forward-compat fallback for variants the Rust enum may add later. */
+/** Forward-compat fallback for variants the Rust enum may add later.
+ *  Intentionally NOT part of the `ContentBlock` discriminated union below:
+ *  if `type: string` were a member, TypeScript could not narrow
+ *  `block.type === "text"` to `ContentBlockText` (the `string` literal
+ *  overlap collapses every variant). Walkers that need to tolerate
+ *  unknown shapes do so at runtime via `"type" in block`, which keeps
+ *  forward-compat without losing narrowing in the typed branches. */
 export interface ContentBlockUnknown {
   type: string;
   [key: string]: unknown;
@@ -434,8 +440,7 @@ export type ContentBlock =
   | ContentBlockToolUse
   | ContentBlockToolResult
   | ContentBlockImage
-  | ContentBlockImageFile
-  | ContentBlockUnknown;
+  | ContentBlockImageFile;
 
 export interface AgentSessionMessage {
   role?: string;

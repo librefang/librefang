@@ -19,7 +19,7 @@ import { useSessionStream } from "../lib/queries/sessions";
 import { useActiveHandsWhen } from "../lib/queries/hands";
 import { agentKeys, approvalKeys } from "../lib/queries/keys";
 import { groupedPicker } from "../lib/chatPicker";
-import { extractAssistantHistoryParts, normalizeToolOutput } from "../lib/chat";
+import { normalizeToolOutput } from "../lib/chat";
 import { useTtsManager } from "../lib/tts";
 import { MessageCircle, Send, Square, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, ArrowLeft, Zap, ShieldAlert, CheckCircle, XCircle, Clock, Plus, Trash2, ChevronDown, Loader2, Copy, Volume2, Pause, Download, Brain, Eye, EyeOff, Mic, MicOff, Globe, Paperclip, FileText, Menu } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
@@ -540,14 +540,16 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
       .then(session => {
         if (session.messages?.length) {
           const historical: ChatMessage[] = session.messages.flatMap((msg, idx) => {
-            const { text, thinking: extractedThinking } = extractAssistantHistoryParts(msg.content);
             // The agent-scoped session endpoint (which this page uses)
-            // flattens content to a string server-side and surfaces thinking
-            // via a separate `thinking` field — prefer that. The helper's
-            // own thinking extraction stays as a fallback for any future
-            // consumer of the raw-blocks endpoint (`/api/sessions/{id}`)
-            // where content is a `ContentBlock[]` and no flat field exists.
-            const thinking = msg.thinking ?? extractedThinking;
+            // flattens `MessageContent::Blocks` server-side: visible text
+            // joins via `\n`, thinking is surfaced through a separate
+            // `thinking` field, tool_use lands in `tools`, and images in
+            // `images`. So `msg.content` is always a string here. The
+            // `extractAssistantHistoryParts` helper in `lib/chat.ts`
+            // exists for the raw-blocks endpoint (`/api/sessions/{id}`,
+            // unused on this page).
+            const text = typeof msg.content === "string" ? msg.content : "";
+            const thinking = msg.thinking ?? "";
 
             const hasTools = msg.tools && msg.tools.length > 0;
             const hasImages = msg.images && msg.images.length > 0;
@@ -581,8 +583,9 @@ function useChatMessages(agentId: string | null, agents: AgentItem[] = [], sessi
               // Collapsed by default on history reload — long sessions with
               // many reasoning turns would otherwise be a wall of text. Live
               // streaming keeps its expanded default so the user can watch
-              // reasoning happen in real time.
-              thinkingCollapsed: hasThinking ? true : undefined,
+              // reasoning happen in real time. `|| undefined` keeps the
+              // field absent when there's nothing to collapse.
+              thinkingCollapsed: hasThinking || undefined,
             }];
           });
           // Refresh the cache unconditionally — the data is still correct

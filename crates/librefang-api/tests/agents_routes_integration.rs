@@ -445,7 +445,6 @@ async fn test_agent_session_endpoint_surfaces_thinking_blocks() {
         .memory_substrate()
         .create_session(id)
         .expect("create_session");
-    session.agent_id = id;
     session.push_message(Message {
         role: Role::User,
         content: MessageContent::Text("hi".to_string()),
@@ -522,7 +521,6 @@ async fn test_agent_session_endpoint_omits_thinking_when_none_present() {
         .memory_substrate()
         .create_session(id)
         .expect("create_session");
-    session.agent_id = id;
     session.push_message(Message {
         role: Role::Assistant,
         content: MessageContent::Blocks(vec![ContentBlock::Text {
@@ -557,5 +555,76 @@ async fn test_agent_session_endpoint_omits_thinking_when_none_present() {
     assert!(
         assistant.get("thinking").is_none(),
         "thinking field should be absent — body={body:?}",
+    );
+}
+
+/// A turn whose `MessageContent::Blocks` contains ONLY `Thinking`
+/// (e.g. an aborted/cancelled response, or a server filter that
+/// stripped the visible text) MUST still surface to the dashboard so
+/// the collapsible thinking drawer renders. Pre-fix the route's
+/// `if content.is_empty() && tools.is_empty()` early-skip dropped the
+/// turn before the `thinking` field was attached, contradicting the
+/// dashboard's `hasThinking` render branch which is explicitly
+/// designed for thinking-only turns.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_agent_session_endpoint_surfaces_thinking_only_turns() {
+    use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
+
+    let h = boot(TEST_TOKEN).await;
+    let id = spawn_named(&h.state, "thinking-only-target");
+
+    let mut session = h
+        .state
+        .kernel
+        .memory_substrate()
+        .create_session(id)
+        .expect("create_session");
+    // Seed a user prompt followed by an assistant turn with NO text /
+    // tool_use — only Thinking. Mirrors a cancelled-mid-stream
+    // response that produced reasoning before the visible answer
+    // started.
+    session.push_message(Message {
+        role: Role::User,
+        content: MessageContent::Text("hi".to_string()),
+        pinned: false,
+        timestamp: None,
+    });
+    session.push_message(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::Thinking {
+            thinking: "reasoning that never reached an answer".to_string(),
+            provider_metadata: None,
+        }]),
+        pinned: false,
+        timestamp: None,
+    });
+    let session_id = session.id.0;
+    h.state
+        .kernel
+        .memory_substrate()
+        .save_session(&session)
+        .expect("save_session");
+
+    let (status, body) = send(
+        h.app.clone(),
+        get(&format!(
+            "/api/agents/{}/session?session_id={}",
+            id, session_id
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    let messages = body["messages"].as_array().expect("messages array").clone();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "Assistant")
+        .expect("thinking-only assistant turn must NOT be dropped — body={body:?}");
+    assert_eq!(
+        assistant["content"], "",
+        "thinking-only turn has no visible text — body={body:?}",
+    );
+    assert_eq!(
+        assistant["thinking"], "reasoning that never reached an answer",
+        "thinking field must surface so the dashboard's hasThinking branch can render — body={body:?}",
     );
 }

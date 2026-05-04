@@ -2107,8 +2107,13 @@ pub async fn get_agent_session(
                         texts.join("\n")
                     }
                 };
-                // Skip messages that are purely tool results (User role with only ToolResult blocks)
-                if content.is_empty() && tools.is_empty() {
+                // Skip messages that are purely tool results (User role with only ToolResult blocks).
+                // A turn whose `MessageContent::Blocks` contains ONLY `Thinking` (e.g. an
+                // aborted/cancelled response, or a server filter that stripped the visible
+                // text) must NOT be dropped here — the dashboard's `hasThinking` branch
+                // explicitly renders thinking-only turns. Gating on `thinkings.is_empty()`
+                // keeps the original tool-result-only skip semantics intact.
+                if content.is_empty() && tools.is_empty() && thinkings.is_empty() {
                     continue;
                 }
                 let msg_idx = built_messages.len();

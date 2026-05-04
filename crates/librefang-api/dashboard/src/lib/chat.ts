@@ -70,16 +70,29 @@ export function normalizeToolOutput(event: {
  *
  *  Mirrors the live-streaming model where `ChatMessage.thinking` is a
  *  flat string accumulated from `thinking_delta` events. Multiple
- *  thinking blocks in one turn are joined with a blank line so the
- *  collapsible drawer reads naturally.
+ *  thinking / text blocks in one turn are joined with a blank line so
+ *  the collapsible drawer (and the markdown renderer for the visible
+ *  body) read naturally — markdown needs a blank line between adjacent
+ *  blocks to produce a paragraph break, otherwise two blocks fuse into
+ *  one paragraph.
+ *
+ *  Block ordering: a turn ordered `[thinking A, text X, thinking B,
+ *  text Y]` collapses into `text: "X\n\nY"` and `thinking: "A\n\nB"`,
+ *  losing the original interleave. This is intentional and matches the
+ *  live-streaming path, where `text_delta` and `thinking_delta` are
+ *  accumulated into independent strings in real time. The chat UI
+ *  renders thinking in a separate collapsible drawer above the visible
+ *  body, so per-turn interleave isn't observable to the user on either
+ *  path; reload-time and live-time presentation stay consistent.
  *
  *  `tool_use` / `tool_result` blocks are intentionally ignored here —
  *  the mapper at `ChatPage.tsx:542-579` reads tool data from the
  *  separate `msg.tools` field instead.
  *
  *  `redacted_thinking` blocks (if/when the backend emits them) are
- *  silently skipped via the unknown-variant fallback. A follow-up will
- *  add a placeholder UI; until then, the plaintext-thinking path
+ *  silently skipped by the runtime "type" check below — they fall
+ *  through neither the `text` nor the `thinking` branch. A follow-up
+ *  will add a placeholder UI; until then, the plaintext-thinking path
  *  matches the live-streaming behavior. */
 export interface AssistantHistoryParts {
   text: string;
@@ -96,21 +109,25 @@ export function extractAssistantHistoryParts(
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
   for (const block of content) {
-    if (block && typeof block === "object" && "type" in block) {
-      if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
-        textParts.push((block as { text: string }).text);
-      } else if (
-        block.type === "thinking" &&
-        typeof (block as { thinking?: unknown }).thinking === "string"
-      ) {
-        thinkingParts.push((block as { thinking: string }).thinking);
-      }
-      // tool_use / tool_result / image / image_file / redacted_thinking /
-      // unknown future variants — skipped intentionally.
+    // Runtime guard tolerates forward-compat unknown variants without
+    // collapsing the union's narrowing (see `ContentBlockUnknown` in
+    // `api.ts` for the rationale).
+    if (!block || typeof block !== "object" || !("type" in block)) continue;
+    // `block.type` narrows cleanly now that `ContentBlock` is a tight
+    // discriminated union — no `as` casts needed in the typed branches.
+    if (block.type === "text") {
+      textParts.push(block.text);
+    } else if (block.type === "thinking") {
+      thinkingParts.push(block.thinking);
     }
+    // tool_use / tool_result / image / image_file / redacted_thinking /
+    // unknown future variants — skipped intentionally.
   }
   return {
-    text: textParts.join("\n"),
+    // Both buckets join with `\n\n` (paragraph break for markdown);
+    // a single `\n` between adjacent blocks would render as one
+    // paragraph in react-markdown, fusing distinct chunks.
+    text: textParts.join("\n\n"),
     thinking: thinkingParts.join("\n\n"),
   };
 }

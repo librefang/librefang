@@ -73,13 +73,16 @@ describe("extractAssistantHistoryParts", () => {
     expect(extractAssistantHistoryParts(undefined)).toEqual({ text: "", thinking: "" });
   });
 
-  it("extracts text blocks and concatenates them with newlines", () => {
+  it("extracts text blocks and joins them with a blank-line paragraph break", () => {
+    // Adjacent text blocks separated by a single `\n` would render as
+    // one paragraph in react-markdown — we use `\n\n` so distinct
+    // chunks don't fuse visually.
     const blocks: ContentBlock[] = [
       { type: "text", text: "first" },
       { type: "text", text: "second" },
     ];
     expect(extractAssistantHistoryParts(blocks)).toEqual({
-      text: "first\nsecond",
+      text: "first\n\nsecond",
       thinking: "",
     });
   });
@@ -104,8 +107,26 @@ describe("extractAssistantHistoryParts", () => {
       { type: "text", text: "final answer" },
     ];
     expect(extractAssistantHistoryParts(blocks)).toEqual({
-      text: "here is the result\nfinal answer",
+      text: "here is the result\n\nfinal answer",
       thinking: "let me think\n\nmore thinking",
+    });
+  });
+
+  it("collapses interleaved thinking/text into independent buckets (matches live-streaming)", () => {
+    // `[thinking A, text X, thinking B, text Y]` → text and thinking
+    // each accumulate in order but the cross-bucket interleave is
+    // intentionally lost (see JSDoc on extractAssistantHistoryParts).
+    // Locking this here so a future "preserve interleave" change comes
+    // with a deliberate review of the live-streaming parity.
+    const blocks: ContentBlock[] = [
+      { type: "thinking", thinking: "A" },
+      { type: "text", text: "X" },
+      { type: "thinking", thinking: "B" },
+      { type: "text", text: "Y" },
+    ];
+    expect(extractAssistantHistoryParts(blocks)).toEqual({
+      text: "X\n\nY",
+      thinking: "A\n\nB",
     });
   });
 
@@ -132,6 +153,21 @@ describe("extractAssistantHistoryParts", () => {
     // should not throw and we should not corrupt the chat transcript.
     expect(extractAssistantHistoryParts(42 as unknown as string)).toEqual({
       text: "42",
+      thinking: "",
+    });
+  });
+
+  it("falls back to String(value) for an object that is not wrapped in an array", () => {
+    // Defensive: a single block sent unwrapped is a server contract
+    // violation. The fallback `String(value)` produces the unhelpful
+    // `"[object Object]"`, but the explicit assertion locks the
+    // behavior so a future "auto-wrap into a single-block array"
+    // refactor doesn't change this code path silently. The transcript
+    // remains uncorrupted by structured blocks bleeding into the text
+    // path.
+    const stray = { type: "text", text: "x" };
+    expect(extractAssistantHistoryParts(stray as unknown as string)).toEqual({
+      text: "[object Object]",
       thinking: "",
     });
   });
