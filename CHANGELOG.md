@@ -386,6 +386,7 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 ### Added
 
+- `cargo xtask check-changed` — local mirror of the `changes` job in `.github/workflows/ci.yml`. Computes which CI lanes a branch's diff would trigger (rust / docs / ci / install / workspace_cargo / xtask_src), the `full_run` and `full_test` decisions, and the affected crate set (with the schema-mirror rule that pulls `librefang-api` in for any `librefang-types` change). `--json` for tooling, `--run check,clippy,test` actually invokes scoped cargo commands. (#3296) (@houko)
 - Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
 - **Real-client-IP resolution for proxied deployments** via two new top-level config fields, `trusted_proxies` and `trust_forwarded_for`. When both are set and the TCP peer matches the allowlist, the GCRA + auth-login rate limiters and the WebSocket per-IP connection cap key on the IP from forwarding headers (`CF-Connecting-IP` → `X-Real-IP` → `Forwarded` (RFC 7239) → rightmost-untrusted hop in `X-Forwarded-For`) instead of the proxy's own address. Without both flags set, behaviour is unchanged: TCP peer only, headers ignored. Forged forwarding headers from peers outside the allowlist are still ignored, so a rotating `X-Forwarded-For` from the open internet can never bypass per-IP limits. Closes the long-standing TODO referenced in `rate_limiter::resolve_client_ip` (now retired).
 
