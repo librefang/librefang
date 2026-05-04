@@ -72,7 +72,7 @@ pub fn init_prometheus() -> PrometheusHandle {
     PROMETHEUS_HANDLE
         .get_or_init(|| {
             let builder = PrometheusBuilder::new();
-            match builder.install_recorder() {
+            let handle = match builder.install_recorder() {
                 Ok(handle) => handle,
                 Err(e) => {
                     tracing::warn!(
@@ -84,7 +84,12 @@ pub fn init_prometheus() -> PrometheusHandle {
                     // the `/api/metrics` scrape endpoint remains functional.
                     PrometheusBuilder::new().build_recorder().handle()
                 }
-            }
+            };
+            // Emit `# HELP` / `# TYPE` for every metric we own (#3495). Safe
+            // to run unconditionally — `describe_*` against an unrelated
+            // global recorder is a no-op, and against ours it dedupes.
+            librefang_telemetry::metrics::describe_observability_metrics();
+            handle
         })
         .clone()
 }

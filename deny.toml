@@ -1,0 +1,169 @@
+# cargo-deny configuration — supply-chain audit for the LibreFang workspace.
+#
+# Schema reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# Run locally with:
+#   cargo deny check advisories
+#   cargo deny check bans licenses sources
+#
+# CI runs the same checks on every PR and main push that touches Cargo.toml,
+# Cargo.lock, deny.toml, or the workflow itself — see
+# .github/workflows/cargo-deny.yml. See CONTRIBUTING.md (§ Dependency policy)
+# for the review expectations behind every entry below.
+
+[graph]
+# Resolve the dependency graph for every platform we ship to. A crate that
+# only compiles on a single target (e.g. windows-only or wasm-only) will
+# otherwise be skipped silently and we'd miss license/advisory hits on the
+# platforms our users actually run.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[output]
+feature-depth = 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisories — RustSec database, blocks yanked / vulnerable crates.
+# ─────────────────────────────────────────────────────────────────────────────
+[advisories]
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+# Each ignore entry links to the upstream advisory and (when applicable) is
+# scoped to the exact crate@version pulling it in, so a fresh occurrence in
+# a different dependency path will still fail the audit.
+ignore = [
+    # ── gtk-rs GTK3 bindings, unmaintained ─────────────────────────────────
+    # Transitive via tauri-runtime-wry on Linux only. Cannot upgrade until
+    # tauri migrates to GTK4 — track upstream: https://github.com/tauri-apps/tauri/issues/9220
+    { id = "RUSTSEC-2024-0411", reason = "gtk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0411" },
+    { id = "RUSTSEC-2024-0412", reason = "gtk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0412" },
+    { id = "RUSTSEC-2024-0413", reason = "atk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0413" },
+    { id = "RUSTSEC-2024-0414", reason = "atk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0414" },
+    { id = "RUSTSEC-2024-0415", reason = "gdk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0415" },
+    { id = "RUSTSEC-2024-0416", reason = "gdk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0416" },
+    { id = "RUSTSEC-2024-0417", reason = "gdkx11 unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0417" },
+    { id = "RUSTSEC-2024-0418", reason = "gdkx11-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0418" },
+    { id = "RUSTSEC-2024-0419", reason = "gdkwayland-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0419" },
+    { id = "RUSTSEC-2024-0420", reason = "gdk-pixbuf unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0420" },
+
+    # ── Other unmaintained transitive crates ───────────────────────────────
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; transitive, no upstream fix yet. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0057" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0075" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0080" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0081" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0098" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0134" },
+
+    # ── rustls-webpki 0.102.x vulnerabilities (transitive via rumqttc) ─────
+    # rumqttc 0.25.1 (latest published) pins rustls-webpki 0.102.8. Workspace
+    # also resolves rustls-webpki 0.103.13 elsewhere where the patched code
+    # paths run. These 4 IDs are unfortunately blanket-ignored because the
+    # cargo-deny version on EmbarkStudios/cargo-deny-action@v2 does not
+    # support the per-crate-version `crate = "..."` ignore field yet — until
+    # that lands (or rumqttc bumps), a fresh occurrence in another crate
+    # WILL slip through. Track: https://github.com/bytebeamio/rumqtt/issues
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 CRL distribution-point handling (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0049" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8 name-constraint URI handling (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8 wildcard name-constraint bypass (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0099" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8 CRL parser DoS panic (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0104" },
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Licenses — explicit allow-list. Anything not listed fails the check.
+# ─────────────────────────────────────────────────────────────────────────────
+[licenses]
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+confidence-threshold = 0.8
+# Permissive licenses compatible with our own Apache-2.0 / MIT distribution.
+# Strong copyleft (GPL, AGPL, LGPL) is intentionally absent — adding one
+# requires a maintainer-level decision documented in CONTRIBUTING.md.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    # CDLA-Permissive-2.0 is used by webpki-roots; OSI-approved permissive
+    # license compatible with our distribution model.
+    "CDLA-Permissive-2.0",
+]
+# Per-crate license clarifications go here. Add only when SPDX detection is
+# ambiguous AND the upstream LICENSE file has been read manually.
+exceptions = []
+
+# `ring` ships a hand-rolled license file rather than a single SPDX ID;
+# this clarification matches the upstream reality (MIT + ISC + OpenSSL).
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bans — duplicate-version, wildcard, and explicit deny / allow lists.
+# ─────────────────────────────────────────────────────────────────────────────
+[bans]
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+# Workspace currently has many dependencies that legitimately pull in
+# different minor versions of shared crates (e.g. tokio-util, hashbrown).
+# `warn` flags them in CI logs without failing the build; we revisit the
+# duplicate count as part of routine dependency review rather than blocking
+# unrelated PRs on a transitive bump. Promote to "deny" once the workspace
+# is consolidated.
+multiple-versions = "warn"
+# Wildcard version requirements (`*`) cannot be reproducibly resolved and
+# are always a mistake in a published crate. Workspace-internal crates
+# however depend on each other via `path = "..."` only, which cargo-deny
+# treats as `*` — those are safe and explicitly allowed.
+# Workspace-internal crates depend on each other via `path = "..."` only.
+# cargo-deny treats those as wildcard requirements (`*`). The
+# `allow-wildcard-paths = true` knob is meant to cover this, but the
+# action's cargo-deny version still flags every internal crate because
+# they declare a `version = "..."` field (which makes them "public" from
+# its perspective even though they're never published to crates.io).
+# Downgrade to `warn` so wildcards are visible in the log without
+# breaking CI; tighten back to `deny` once cargo-deny grows a "private
+# workspace" exception or we drop internal version pins.
+wildcards = "warn"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = [
+    # `zip` 4.x is pulled in by tauri-plugin-updater (transitive) while our
+    # own code uses 8.x. Allow the duplicate until tauri upstream catches up.
+    { name = "zip" },
+]
+skip-tree = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sources — restrict where crates may come from.
+# ─────────────────────────────────────────────────────────────────────────────
+[sources]
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+# Anything outside crates.io must be explicitly allow-listed. The workspace
+# currently has zero git dependencies (verified by `rg 'git\s*=\s*"'` over
+# every Cargo.toml at the time of writing); if that ever changes, add the
+# repository to `allow-git` together with a comment linking to the upstream
+# issue / PR explaining why a published version is not yet usable.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

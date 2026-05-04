@@ -9,11 +9,11 @@ use librefang_types::agent::{PromptExperiment, PromptVersion};
 use sha2::{Digest, Sha256};
 
 use super::AppState;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/agents/{agent_id}/prompts/versions",
@@ -62,7 +62,7 @@ async fn list_prompt_versions(
                 .into_response()
         }
     };
-    match state.kernel.list_prompt_versions(agent_id) {
+    let body = match state.kernel.list_prompt_versions(agent_id) {
         Ok(versions) => {
             let total = versions.len();
             Json(crate::types::PaginatedResponse {
@@ -76,7 +76,9 @@ async fn list_prompt_versions(
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn create_prompt_version(
@@ -99,12 +101,14 @@ async fn create_prompt_version(
     let mut hasher = Sha256::new();
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
-    match state.kernel.create_prompt_version(&version) {
+    let body = match state.kernel.create_prompt_version(&version) {
         Ok(_) => Json(version).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn get_prompt_version(
@@ -173,7 +177,7 @@ async fn list_experiments(
                 .into_response()
         }
     };
-    match state.kernel.list_experiments(agent_id) {
+    let body = match state.kernel.list_experiments(agent_id) {
         Ok(experiments) => {
             let total = experiments.len();
             Json(crate::types::PaginatedResponse {
@@ -187,7 +191,9 @@ async fn list_experiments(
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn create_experiment(
@@ -210,12 +216,14 @@ async fn create_experiment(
     for variant in &mut experiment.variants {
         variant.id = uuid::Uuid::new_v4();
     }
-    match state.kernel.create_experiment(&experiment) {
+    let body = match state.kernel.create_experiment(&experiment) {
         Ok(_) => Json(experiment).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 async fn get_experiment(
