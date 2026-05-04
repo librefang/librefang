@@ -1531,7 +1531,7 @@ pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 
     // Peer message edges from event bus history
-    let events = state.kernel.event_bus_ref().history(500).await;
+    let events = state.kernel.event_bus_ref().history(500);
     let mut peer_pairs = std::collections::HashSet::new();
     for event in &events {
         if let librefang_types::event::EventPayload::Message(_) = &event.payload {
@@ -1803,7 +1803,7 @@ pub async fn comms_events(
     let agents = state.kernel.agent_registry().list();
 
     // Primary source: event bus (has full source/target context)
-    let bus_events = state.kernel.event_bus_ref().history(500).await;
+    let bus_events = state.kernel.event_bus_ref().history(500);
     let mut comms_events: Vec<librefang_types::comms::CommsEvent> = bus_events
         .iter()
         .filter_map(|e| filter_to_comms_event(e, &agents))

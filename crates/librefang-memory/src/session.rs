@@ -253,7 +253,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT agent_id, messages, context_window_tokens, label FROM sessions WHERE id = ?1")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
             let agent_str: String = row.get(0)?;
@@ -267,9 +267,9 @@ impl SessionStore {
             Ok((agent_str, messages_blob, tokens, label)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
@@ -281,7 +281,7 @@ impl SessionStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -296,7 +296,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
             let agent_str: String = row.get(0)?;
@@ -311,9 +311,9 @@ impl SessionStore {
             Ok((agent_str, messages_blob, tokens, label, created_at)) => {
                 let agent_id = uuid::Uuid::parse_str(&agent_str)
                     .map(AgentId)
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
                 Ok(Some((
                     Session {
                         id: session_id,
@@ -328,7 +328,7 @@ impl SessionStore {
                 )))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -359,8 +359,8 @@ impl SessionStore {
             } else {
                 &session.messages
             };
-        let messages_blob = rmp_serde::to_vec_named(messages_to_persist)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let messages_blob =
+            rmp_serde::to_vec_named(messages_to_persist).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
 
         // Extract FTS content before acquiring the transaction so we don't hold
@@ -375,7 +375,7 @@ impl SessionStore {
         // the Mutex exclusively (no other thread can access this Connection).
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         // `message_count` is denormalised here so `list_sessions()` can
         // render the count column without deserialising the messages blob
@@ -398,7 +398,7 @@ impl SessionStore {
                 now,
             ],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
 
         // Delete the existing FTS row and insert the fresh content. Failures
         // here MUST abort the transaction — previously they were logged and
@@ -410,7 +410,7 @@ impl SessionStore {
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![session_id_str],
         )
-        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
 
         // Always insert a FTS row, even when content is empty. The v33 migration
         // backfills a placeholder row for every session so it remains visible to
@@ -420,10 +420,9 @@ impl SessionStore {
             "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
             rusqlite::params![session_id_str, agent_id_str, content],
         )
-        .map_err(|e| LibreFangError::Memory(format!("FTS insert failed: {e}")))?;
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS insert failed: {e}")))?;
 
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -455,19 +454,18 @@ impl SessionStore {
         let id_str = session_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         tx.execute(
             "DELETE FROM sessions WHERE id = ?1",
             rusqlite::params![id_str],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         tx.execute(
             "DELETE FROM sessions_fts WHERE session_id = ?1",
             rusqlite::params![id_str],
         )
-        .map_err(|e| LibreFangError::Memory(format!("FTS delete failed: {e}")))?;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(|e| LibreFangError::memory_msg(format!("FTS delete failed: {e}")))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -479,13 +477,13 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let id_str: String = row.get(0)?;
                 Ok(id_str)
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut ids = Vec::new();
         for id_str in rows.flatten() {
             if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
@@ -539,14 +537,14 @@ impl SessionStore {
                     rusqlite::params![agent_id.0.to_string(), since_rfc3339, sid.0.to_string()],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+                .map_err(LibreFangError::memory)?,
             None => conn
                 .query_row(
                     "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1 AND updated_at > ?2",
                     rusqlite::params![agent_id.0.to_string(), since_rfc3339],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?,
+                .map_err(LibreFangError::memory)?,
         };
         Ok(count.max(0) as u32)
     }
@@ -586,7 +584,7 @@ impl SessionStore {
                          WHERE agent_id = ?1 AND updated_at > ?2 AND id != ?3 \
                          ORDER BY updated_at DESC LIMIT ?4",
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let mapped = stmt
                     .query_map(
                         rusqlite::params![
@@ -597,10 +595,10 @@ impl SessionStore {
                         ],
                         |row| row.get::<_, String>(0),
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let mut ids = Vec::new();
                 for row in mapped {
-                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                    ids.push(row.map_err(LibreFangError::memory)?);
                 }
                 ids
             }
@@ -610,16 +608,16 @@ impl SessionStore {
                         "SELECT id FROM sessions WHERE agent_id = ?1 AND updated_at > ?2 \
                          ORDER BY updated_at DESC LIMIT ?3",
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let mapped = stmt
                     .query_map(
                         rusqlite::params![agent_id.0.to_string(), since_rfc3339, limit as i64],
                         |row| row.get::<_, String>(0),
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 let mut ids = Vec::new();
                 for row in mapped {
-                    ids.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                    ids.push(row.map_err(LibreFangError::memory)?);
                 }
                 ids
             }
@@ -642,12 +640,9 @@ impl SessionStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let agent_id_str = agent_id.0.to_string();
-        let tx = conn
-            .transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let tx = conn.transaction().map_err(LibreFangError::memory)?;
         execute_session_agent_deletes(&tx, &agent_id_str)?;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -661,7 +656,7 @@ impl SessionStore {
             "DELETE FROM canonical_sessions WHERE agent_id = ?1",
             rusqlite::params![agent_id.0.to_string()],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -698,7 +693,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let total: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(total.max(0) as usize)
     }
 
@@ -735,7 +730,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let prev_sessions_24h: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions
@@ -743,7 +738,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let active_now: i64 = conn
             .query_row(
@@ -751,7 +746,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_active],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         // usage_events.cost_usd and latency_ms are present from migration v4/v14.
         let cost_24h: f64 = conn
@@ -761,7 +756,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let prev_cost_24h: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM usage_events
@@ -769,7 +764,7 @@ impl SessionStore {
                 rusqlite::params![agent_id, cutoff_48h, cutoff_24h],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         // Pull latencies for both windows. Two prepared statements keep
         // the index hits clean (agent_id, timestamp) and let us return
@@ -782,14 +777,14 @@ impl SessionStore {
                      WHERE agent_id = ?1 AND timestamp >= ?2 AND latency_ms > 0
                      ORDER BY latency_ms ASC",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let rows = stmt
                 .query_map(rusqlite::params![agent_id, cutoff_24h], |row| {
                     row.get::<_, i64>(0)
                 })
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             for row in rows {
-                cur_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                cur_lat.push(row.map_err(LibreFangError::memory)?);
             }
         }
         let mut prev_lat: Vec<i64> = Vec::new();
@@ -800,14 +795,14 @@ impl SessionStore {
                      WHERE agent_id = ?1 AND timestamp >= ?2 AND timestamp < ?3 AND latency_ms > 0
                      ORDER BY latency_ms ASC",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let rows = stmt
                 .query_map(rusqlite::params![agent_id, cutoff_48h, cutoff_24h], |row| {
                     row.get::<_, i64>(0)
                 })
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             for row in rows {
-                prev_lat.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                prev_lat.push(row.map_err(LibreFangError::memory)?);
             }
         }
 
@@ -862,14 +857,14 @@ impl SessionStore {
                  FROM sessions WHERE created_at >= ?1
                  GROUP BY agent_id",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows_s = stmt_s
             .query_map(rusqlite::params![cutoff_24h], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         for row in rows_s {
-            let (id, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (id, n) = row.map_err(LibreFangError::memory)?;
             out.entry(id).or_insert((0, 0.0)).0 = n.max(0) as u64;
         }
 
@@ -880,14 +875,14 @@ impl SessionStore {
                  FROM usage_events WHERE timestamp >= ?1
                  GROUP BY agent_id",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows_c = stmt_c
             .query_map(rusqlite::params![cutoff_24h], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         for row in rows_c {
-            let (id, c) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (id, c) = row.map_err(LibreFangError::memory)?;
             out.entry(id).or_insert((0, 0.0)).1 = c;
         }
 
@@ -925,7 +920,7 @@ impl SessionStore {
                  ) u ON u.session_id = s.id
                  ORDER BY s.created_at DESC LIMIT ?1 OFFSET ?2",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows = stmt
             .query_map(rusqlite::params![lim_sql, off_sql], |row| {
@@ -982,11 +977,11 @@ impl SessionStore {
                     "total_tokens": total_tokens.max(0),
                 }))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            sessions.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(sessions)
     }
@@ -1020,7 +1015,7 @@ impl SessionStore {
             "UPDATE sessions SET label = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![label, Utc::now().to_rfc3339(), session_id.0.to_string()],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -1039,7 +1034,7 @@ impl SessionStore {
                 "SELECT id, messages, context_window_tokens, label FROM sessions \
                  WHERE agent_id = ?1 AND label = ?2 LIMIT 1",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string(), label], |row| {
             let id_str: String = row.get(0)?;
@@ -1053,9 +1048,9 @@ impl SessionStore {
             Ok((id_str, messages_blob, tokens, lbl)) => {
                 let session_id = uuid::Uuid::parse_str(&id_str)
                     .map(SessionId)
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
+                let messages: Vec<Message> =
+                    rmp_serde::from_slice(&messages_blob).map_err(LibreFangError::serialization)?;
                 Ok(Some(Session {
                     id: session_id,
                     agent_id,
@@ -1067,7 +1062,7 @@ impl SessionStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 }
@@ -1103,7 +1098,7 @@ impl SessionStore {
                 "SELECT id, message_count, created_at, label \
                  FROM sessions WHERE agent_id = ?1 ORDER BY created_at DESC",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
@@ -1118,11 +1113,11 @@ impl SessionStore {
                     "label": label,
                 }))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut sessions = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            sessions.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(sessions)
     }
@@ -1191,7 +1186,7 @@ impl SessionStore {
                 "DELETE FROM sessions WHERE updated_at < ?1",
                 rusqlite::params![cutoff_str],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(deleted as u64)
     }
 
@@ -1222,7 +1217,7 @@ impl SessionStore {
                 )",
                 rusqlite::params![max_per_agent],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -1246,9 +1241,7 @@ impl SessionStore {
             .collect();
         let in_clause = placeholders.join(",");
         let sql = format!("DELETE FROM sessions WHERE agent_id NOT IN ({in_clause})");
-        let deleted = conn
-            .execute(&sql, [])
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let deleted = conn.execute(&sql, []).map_err(LibreFangError::memory)?;
 
         Ok(deleted as u64)
     }
@@ -1344,7 +1337,7 @@ impl SessionStore {
                      ORDER BY rank, session_id
                      LIMIT ?3 OFFSET ?4",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             let rows = stmt
                 .query_map(
@@ -1358,7 +1351,7 @@ impl SessionStore {
                         })
                     },
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             rows.filter_map(|r| r.ok()).collect()
         } else {
@@ -1370,7 +1363,7 @@ impl SessionStore {
                      ORDER BY rank, session_id
                      LIMIT ?2 OFFSET ?3",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             let rows = stmt
                 .query_map(
@@ -1384,7 +1377,7 @@ impl SessionStore {
                         })
                     },
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             rows.filter_map(|r| r.ok()).collect()
         };
@@ -1459,7 +1452,7 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut canonical = load_canonical_in_tx(&tx, agent_id)?;
         canonical
@@ -1520,8 +1513,7 @@ impl SessionStore {
 
         canonical.updated_at = Utc::now().to_rfc3339();
         save_canonical_in_tx(&tx, &canonical)?;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(canonical)
     }
 
@@ -1570,7 +1562,7 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
             "SELECT messages, compaction_cursor, compacted_summary, updated_at \
              FROM canonical_sessions WHERE agent_id = ?1",
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
 
     let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
         let messages_blob: Vec<u8> = row.get(0)?;
@@ -1588,7 +1580,7 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                     Ok(entries) => entries,
                     Err(_) => {
                         let legacy: Vec<Message> = rmp_serde::from_slice(&messages_blob)
-                            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                            .map_err(LibreFangError::serialization)?;
                         legacy
                             .into_iter()
                             .map(|message| CanonicalEntry {
@@ -1616,14 +1608,14 @@ fn load_canonical_in_tx(conn: &Connection, agent_id: AgentId) -> LibreFangResult
                 updated_at: now,
             })
         }
-        Err(e) => Err(LibreFangError::Memory(e.to_string())),
+        Err(e) => Err(LibreFangError::memory(e)),
     }
 }
 
 /// Persist a canonical session using an already-acquired connection.
 fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> LibreFangResult<()> {
-    let messages_blob = rmp_serde::to_vec(&canonical.messages)
-        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+    let messages_blob =
+        rmp_serde::to_vec(&canonical.messages).map_err(LibreFangError::serialization)?;
     conn.execute(
         "INSERT INTO canonical_sessions (agent_id, messages, compaction_cursor, compacted_summary, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1636,7 +1628,7 @@ fn save_canonical_in_tx(conn: &Connection, canonical: &CanonicalSession) -> Libr
             canonical.updated_at,
         ],
     )
-    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    .map_err(LibreFangError::memory)?;
     Ok(())
 }
 
@@ -1761,12 +1753,12 @@ pub(crate) fn execute_session_agent_deletes(
         "DELETE FROM sessions WHERE agent_id = ?1",
         rusqlite::params![agent_id],
     )
-    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    .map_err(LibreFangError::memory)?;
     tx.execute(
         "DELETE FROM sessions_fts WHERE agent_id = ?1",
         rusqlite::params![agent_id],
     )
-    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+    .map_err(LibreFangError::memory)?;
     Ok(())
 }
 

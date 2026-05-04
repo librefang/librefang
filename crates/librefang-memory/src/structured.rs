@@ -26,19 +26,19 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT value FROM kv_store WHERE agent_id = ?1 AND key = ?2")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string(), key], |row| {
             let blob: Vec<u8> = row.get(0)?;
             Ok(blob)
         });
         match result {
             Ok(blob) => {
-                let value: serde_json::Value = serde_json::from_slice(&blob)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                let value: serde_json::Value =
+                    serde_json::from_slice(&blob).map_err(LibreFangError::serialization)?;
                 Ok(Some(value))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -53,15 +53,14 @@ impl StructuredStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let blob =
-            serde_json::to_vec(&value).map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let blob = serde_json::to_vec(&value).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO kv_store (agent_id, key, value, version, updated_at) VALUES (?1, ?2, ?3, 1, ?4)
              ON CONFLICT(agent_id, key) DO UPDATE SET value = ?3, version = version + 1, updated_at = ?4",
             rusqlite::params![agent_id.0.to_string(), key, blob, now],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -75,7 +74,7 @@ impl StructuredStore {
             "DELETE FROM kv_store WHERE agent_id = ?1 AND key = ?2",
             rusqlite::params![agent_id.0.to_string(), key],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -133,18 +132,18 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT key, value FROM kv_store WHERE agent_id = ?1 ORDER BY key")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let key: String = row.get(0)?;
                 let blob: Vec<u8> = row.get(1)?;
                 Ok((key, blob))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut pairs = Vec::new();
         for row in rows {
-            let (key, blob) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (key, blob) = row.map_err(LibreFangError::memory)?;
             let value: serde_json::Value = serde_json::from_slice(&blob).unwrap_or_else(|_| {
                 // Fallback: try as UTF-8 string
                 String::from_utf8(blob)
@@ -164,17 +163,17 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT key FROM kv_store WHERE agent_id = ?1 ORDER BY key")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(rusqlite::params![agent_id.0.to_string()], |row| {
                 let key: String = row.get(0)?;
                 Ok(key)
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut keys = Vec::new();
         for row in rows {
-            let key = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let key = row.map_err(LibreFangError::memory)?;
             keys.push(key);
         }
         Ok(keys)
@@ -188,10 +187,10 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         // Use named-field encoding so new fields with #[serde(default)] are
         // handled gracefully when the struct evolves between versions.
-        let manifest_blob = rmp_serde::to_vec_named(&entry.manifest)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-        let state_str = serde_json::to_string(&entry.state)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let manifest_blob =
+            rmp_serde::to_vec_named(&entry.manifest).map_err(LibreFangError::serialization)?;
+        let state_str =
+            serde_json::to_string(&entry.state).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
 
         // Add session_id column if it doesn't exist yet (migration compat)
@@ -210,8 +209,8 @@ impl StructuredStore {
             [],
         );
 
-        let identity_json = serde_json::to_string(&entry.identity)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let identity_json =
+            serde_json::to_string(&entry.identity).map_err(LibreFangError::serialization)?;
         let source_toml_path = entry
             .source_toml_path
             .as_ref()
@@ -233,7 +232,7 @@ impl StructuredStore {
                 source_toml_path,
             ],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -256,7 +255,7 @@ impl StructuredStore {
                         conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents WHERE id = ?1")
                     })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let col_count = stmt.column_count();
         let result = stmt.query_row(rusqlite::params![agent_id.0.to_string()], |row| {
@@ -301,8 +300,7 @@ impl StructuredStore {
                 source_toml_path,
             )) => {
                 let mut manifest: librefang_types::agent::AgentManifest =
-                    rmp_serde::from_slice(&manifest_blob)
-                        .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                    rmp_serde::from_slice(&manifest_blob).map_err(LibreFangError::serialization)?;
                 // Migrate legacy hand agents: if manifest.is_hand is not set but
                 // the agent looks like a hand (tags or name convention), fix it now.
                 if !manifest.is_hand {
@@ -315,8 +313,8 @@ impl StructuredStore {
                         manifest.is_hand = true;
                     }
                 }
-                let state = serde_json::from_str(&state_str)
-                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                let state =
+                    serde_json::from_str(&state_str).map_err(LibreFangError::serialization)?;
                 let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -349,7 +347,7 @@ impl StructuredStore {
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+            Err(e) => Err(LibreFangError::memory(e)),
         }
     }
 
@@ -378,10 +376,9 @@ impl StructuredStore {
         let id = agent_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         execute_structured_agent_deletes(&tx, &id)?;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -411,7 +408,7 @@ impl StructuredStore {
             .or_else(|_| {
                 conn.prepare("SELECT id, name, manifest, state, created_at, updated_at FROM agents")
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let col_count = stmt.column_count();
         let rows = stmt
@@ -447,7 +444,7 @@ impl StructuredStore {
                     source_toml_path,
                 ))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut agents = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
@@ -516,8 +513,8 @@ impl StructuredStore {
 
             // Auto-repair: re-serialize with current schema and queue for update.
             // This upgrades the stored blob so future boots don't hit lenient paths.
-            let new_blob = rmp_serde::to_vec_named(&manifest)
-                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+            let new_blob =
+                rmp_serde::to_vec_named(&manifest).map_err(LibreFangError::serialization)?;
             if new_blob != manifest_blob {
                 tracing::debug!(
                     agent = %name, id = %id_str,
@@ -588,7 +585,7 @@ impl StructuredStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let mut stmt = conn
             .prepare("SELECT id, name, state FROM agents")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -597,10 +594,10 @@ impl StructuredStore {
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut agents = Vec::new();
         for row in rows {
-            agents.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            agents.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(agents)
     }
@@ -639,7 +636,7 @@ pub(crate) fn execute_structured_agent_deletes(
         "DELETE FROM agents WHERE id = ?1",
     ] {
         tx.execute(stmt, rusqlite::params![agent_id])
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
     }
     Ok(())
 }

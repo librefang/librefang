@@ -101,6 +101,40 @@ pub(crate) fn resolve_cron_max_tokens(raw: Option<u64>) -> Option<u64> {
     }
 }
 
+/// Resolve the cron session-size warn threshold (#3693).
+///
+/// Pure function so it can be unit-tested without a kernel.  Returns
+/// the absolute token count at which the kernel should emit a
+/// `tracing::warn!` after pruning — or `None` to skip warning.
+///
+/// Inputs:
+/// - `max_tokens`     — already-resolved `cron_session_max_tokens`
+///   (post `resolve_cron_max_tokens`).
+/// - `warn_fallback`  — `cron_session_warn_total_tokens`, used when
+///   `max_tokens` is `None`.
+/// - `fraction`       — `cron_session_warn_fraction`. Must be in
+///   `(0.0, 1.0]`; out-of-range or non-finite values disable the
+///   warn.
+pub(crate) fn resolve_cron_warn_threshold(
+    max_tokens: Option<u64>,
+    warn_fallback: Option<u64>,
+    fraction: Option<f64>,
+) -> Option<u64> {
+    let frac = fraction?;
+    if !frac.is_finite() || frac <= 0.0 || frac > 1.0 {
+        return None;
+    }
+    let budget = max_tokens.or(warn_fallback)?;
+    if budget == 0 {
+        return None;
+    }
+    // ceil so a near-budget estimate still trips the warn before the
+    // hard cap; saturate to budget so callers can compare with `>=`.
+    let raw = (budget as f64) * frac;
+    let threshold = raw.ceil() as u64;
+    Some(threshold.min(budget))
+}
+
 // ---------------------------------------------------------------------------
 // Per-task trigger recursion depth (bug #3780)
 // ---------------------------------------------------------------------------
@@ -14005,15 +14039,28 @@ system_prompt = "You are a helpful assistant."
                                     };
 
                                     // Prune the persistent cron session before firing
-                                    // if the user has configured a size cap.
+                                    // if the user has configured a size cap, and emit
+                                    // a tracing::warn! when the post-prune size is
+                                    // approaching the provider context window (#3693).
                                     if !wants_new_session {
                                         let cfg_snap = kernel_job.config.load();
-                                        let max_tokens = cfg_snap.cron_session_max_tokens;
-                                        let max_messages = cfg_snap.cron_session_max_messages;
+                                        let max_tokens_raw = cfg_snap.cron_session_max_tokens;
+                                        let max_messages_raw = cfg_snap.cron_session_max_messages;
+                                        let warn_fraction = cfg_snap.cron_session_warn_fraction;
+                                        let warn_fallback = cfg_snap.cron_session_warn_total_tokens;
                                         drop(cfg_snap);
-                                        let max_messages = resolve_cron_max_messages(max_messages);
-                                        let max_tokens = resolve_cron_max_tokens(max_tokens);
-                                        if max_tokens.is_some() || max_messages.is_some() {
+                                        let max_messages =
+                                            resolve_cron_max_messages(max_messages_raw);
+                                        let max_tokens = resolve_cron_max_tokens(max_tokens_raw);
+                                        let warn_threshold = resolve_cron_warn_threshold(
+                                            max_tokens,
+                                            warn_fallback,
+                                            warn_fraction,
+                                        );
+                                        if max_tokens.is_some()
+                                            || max_messages.is_some()
+                                            || warn_threshold.is_some()
+                                        {
                                             let cron_sid = SessionId::for_channel(agent_id, "cron");
                                             // #3443: serialize prune through the
                                             // per-session mutex so two cron fires
@@ -14034,16 +14081,18 @@ system_prompt = "You are a helpful assistant."
                                             if let Ok(Some(mut session)) =
                                                 kernel_job.memory.get_session(cron_sid)
                                             {
+                                                use librefang_runtime::compactor::estimate_token_count;
+                                                let mut mutated = false;
                                                 if let Some(max_msgs) = max_messages {
                                                     if session.messages.len() > max_msgs {
                                                         let excess =
                                                             session.messages.len() - max_msgs;
                                                         session.messages.drain(0..excess);
                                                         session.mark_messages_mutated();
+                                                        mutated = true;
                                                     }
                                                 }
                                                 if let Some(max_tok) = max_tokens {
-                                                    use librefang_runtime::compactor::estimate_token_count;
                                                     loop {
                                                         let est = estimate_token_count(
                                                             &session.messages,
@@ -14057,12 +14106,47 @@ system_prompt = "You are a helpful assistant."
                                                         }
                                                         session.messages.remove(0);
                                                         session.mark_messages_mutated();
+                                                        mutated = true;
                                                     }
                                                 }
-                                                let _ = kernel_job
-                                                    .memory
-                                                    .save_session_async(&session)
-                                                    .await;
+                                                // Post-prune approach-warn (#3693):
+                                                // estimate once after any drains so
+                                                // operators see the trend before the
+                                                // provider returns 400. Estimate
+                                                // omits system_prompt / tools — those
+                                                // are added inside send_message_full
+                                                // — which slightly under-counts; the
+                                                // warn is intentionally conservative.
+                                                if let Some(threshold) = warn_threshold {
+                                                    let estimated = estimate_token_count(
+                                                        &session.messages,
+                                                        None,
+                                                        None,
+                                                    )
+                                                        as u64;
+                                                    if estimated >= threshold {
+                                                        let budget = max_tokens.or(warn_fallback);
+                                                        tracing::warn!(
+                                                            agent_id = %agent_id,
+                                                            session_id = %cron_sid,
+                                                            job = %job_name,
+                                                            tokens = estimated,
+                                                            threshold = threshold,
+                                                            budget = ?budget,
+                                                            messages = session.messages.len(),
+                                                            "cron session approaching context budget — \
+                                                             consider lowering cron_session_max_tokens, \
+                                                             enabling cron_session_max_messages, or \
+                                                             setting session_mode = \"new\" on this job"
+                                                        );
+                                                    }
+                                                }
+                                                if mutated {
+                                                    let _ = kernel_job
+                                                        .memory
+                                                        .save_session_async(&session)
+                                                        .await;
+                                                }
                                             }
                                         }
                                     }
