@@ -4015,21 +4015,21 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
             Some(agents) => {
-                println!(
-                    "{:<38} {:<16} {:<10} {:<12} MODEL",
-                    "ID", "NAME", "STATE", "PROVIDER"
-                );
-                println!("{}", "-".repeat(95));
+                // Render via the shared Table builder so column widths
+                // self-size to the actual content (instead of hard-coded
+                // {:<38} which truncates / over-pads), and so piped output
+                // automatically falls back to ASCII (#3306).
+                let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "PROVIDER", "MODEL"]);
                 for a in agents {
-                    println!(
-                        "{:<38} {:<16} {:<10} {:<12} {}",
+                    t.add_row(&[
                         a["id"].as_str().unwrap_or("?"),
                         a["name"].as_str().unwrap_or("?"),
                         a["state"].as_str().unwrap_or("?"),
                         a["model_provider"].as_str().unwrap_or("?"),
                         a["model_name"].as_str().unwrap_or("?"),
-                    );
+                    ]);
                 }
+                t.print();
             }
             None => println!("{}", i18n::t("agent-no-agents")),
         }
@@ -4061,17 +4061,19 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        println!("{:<38} {:<20} {:<12} CREATED", "ID", "NAME", "STATE");
-        println!("{}", "-".repeat(85));
+        let mut t = crate::table::Table::new(&["ID", "NAME", "STATE", "CREATED"]);
         for entry in agents {
-            println!(
-                "{:<38} {:<20} {:<12} {}",
-                entry.id,
-                entry.name,
-                format!("{:?}", entry.state),
-                entry.created_at.format("%Y-%m-%d %H:%M")
-            );
+            let id = entry.id.to_string();
+            let state = format!("{:?}", entry.state);
+            let created = entry.created_at.format("%Y-%m-%d %H:%M").to_string();
+            t.add_row(&[
+                id.as_str(),
+                entry.name.as_str(),
+                state.as_str(),
+                created.as_str(),
+            ]);
         }
+        t.print();
     }
 }
 
@@ -4827,64 +4829,36 @@ fn render_detail_section(body: &serde_json::Value) {
 /// Render the agent list as a column-aligned table. Empty input is a no-op
 /// so the caller can unconditionally call this after a non-empty check.
 fn render_agents_table(agents: &[serde_json::Value]) {
-    // Compute per-column widths so names and ids line up even when one entry
-    // is much longer than the others. Keep a minimum width so a single-row
-    // table doesn't look squashed against the header.
-    let mut rows: Vec<[String; 4]> = Vec::with_capacity(agents.len());
+    // Cap ID column at 12 so we don't push the model column off the screen
+    // — users rarely need more than a handful of id bytes for correlation.
+    const ID_TRIM: usize = 12;
+    let id_trim = |s: &str| -> String {
+        if s.len() <= ID_TRIM {
+            s.to_string()
+        } else {
+            s.chars().take(ID_TRIM).collect()
+        }
+    };
+
+    // Migrated to crate::table::Table (#3306) — keeps content layout stable
+    // while removing 30+ lines of manual width math and giving us automatic
+    // ASCII fallback when stdout is piped.
+    let mut t = crate::table::Table::new(&["NAME", "ID", "STATE", "MODEL"]);
     for a in agents {
-        let name = a["name"].as_str().unwrap_or("?").to_string();
-        let id = a["id"].as_str().unwrap_or("?").to_string();
-        let state = a["state"].as_str().unwrap_or("?").to_string();
+        let id = id_trim(a["id"].as_str().unwrap_or("?"));
         let model = format!(
             "{}:{}",
             a["model_provider"].as_str().unwrap_or("?"),
             a["model_name"].as_str().unwrap_or("?"),
         );
-        rows.push([name, id, state, model]);
+        t.add_row(&[
+            a["name"].as_str().unwrap_or("?"),
+            id.as_str(),
+            a["state"].as_str().unwrap_or("?"),
+            model.as_str(),
+        ]);
     }
-    let headers = ["NAME", "ID", "STATE", "MODEL"];
-    let mut widths = [0usize; 4];
-    for (i, h) in headers.iter().enumerate() {
-        widths[i] = h.len();
-    }
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
-        }
-    }
-    // Cap ID column at 12 so we don't push the model column off the screen
-    // — users rarely need more than a handful of id bytes for correlation.
-    widths[1] = widths[1].min(12);
-    let id_trim = |s: &str| -> String {
-        if s.len() <= widths[1] {
-            s.to_string()
-        } else {
-            s.chars().take(widths[1]).collect()
-        }
-    };
-    let header_line = format!(
-        "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-        headers[0],
-        headers[1],
-        headers[2],
-        headers[3],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
-    );
-    println!("{}", header_line.dimmed());
-    for row in &rows {
-        println!(
-            "    {:<w0$}  {:<w1$}  {:<w2$}  {}",
-            row[0],
-            id_trim(&row[1]),
-            row[2],
-            row[3],
-            w0 = widths[0],
-            w1 = widths[1],
-            w2 = widths[2],
-        );
-    }
+    t.print();
 }
 
 fn render_status_inprocess(config: Option<PathBuf>, json: bool, quiet: bool) -> i32 {

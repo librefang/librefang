@@ -136,10 +136,20 @@ impl CommandQueue {
         F: std::future::Future<Output = T>,
     {
         let sem = self.semaphore_for_lane(lane);
+        let wait_start = std::time::Instant::now();
         let _permit = sem
             .acquire()
             .await
             .map_err(|_| format!("Lane {} is closed", lane))?;
+
+        // Observe queue wait time (#3495). `lane.to_string()` returns one of
+        // four fixed values (main/cron/subagent/trigger), so cardinality is
+        // bounded.
+        metrics::histogram!(
+            "librefang_queue_wait_seconds",
+            "lane" => lane.to_string(),
+        )
+        .record(wait_start.elapsed().as_secs_f64());
 
         Ok(work.await)
     }
@@ -320,6 +330,56 @@ mod tests {
         assert_eq!(occ[1].capacity, 4);
         assert_eq!(occ[2].capacity, 6);
         assert_eq!(occ[3].capacity, 5);
+    }
+
+    /// Regression for #3495 — every successful `submit` must record a
+    /// `librefang_queue_wait_seconds{lane}` histogram sample so operators
+    /// can alert on queue starvation. Uses `metrics::with_local_recorder`
+    /// and a single-threaded runtime so the metric routes to our debugging
+    /// recorder without touching any global state other tests share.
+    #[test]
+    fn test_submit_records_queue_wait_histogram() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        // current_thread runtime keeps the future on the same OS thread, so
+        // the thread-local recorder set by `with_local_recorder` is visible
+        // for the entire `block_on` body.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            rt.block_on(async {
+                let queue = CommandQueue::with_capacities(1, 1, 1, 1);
+                queue
+                    .submit(Lane::Trigger, async { 7 })
+                    .await
+                    .expect("submit succeeds");
+            });
+        });
+
+        // At least one histogram sample on the trigger lane.
+        let snap = snapshotter.snapshot().into_vec();
+        let trigger_hist = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_queue_wait_seconds"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "lane" && l.value() == "trigger")
+                && matches!(val, DebugValue::Histogram(_))
+        });
+        let trigger_hist =
+            trigger_hist.expect("queue wait histogram for trigger lane must be recorded");
+        if let DebugValue::Histogram(samples) = &trigger_hist.3 {
+            assert!(
+                !samples.is_empty(),
+                "histogram must contain at least one sample"
+            );
+        }
     }
 
     /// Regression for #3628 — `queue.concurrency.*` was set once at boot

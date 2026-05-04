@@ -43,7 +43,8 @@ These run inside `git` itself (regardless of which tool invoked the commit),
 giving defense in depth on top of the Claude Code PreToolUse layer.
 
 - `pre-commit` — runs `cargo fmt --check` on staged Rust files; CHANGELOG
-  duplicate-`[Unreleased]` guard; `detect-secrets` scan against
+  duplicate-`[Unreleased]` guard; CHANGELOG `(@user)` attribution check on
+  staged additions to `[Unreleased]` (#3400); `detect-secrets` scan against
   `.secrets.baseline` (soft-warn if not installed). Target: < 2s.
 - `pre-push` — `cargo clippy --workspace --all-targets -- -D warnings`;
   OpenAPI / SDK drift detection — fails the push if `openapi.json` or

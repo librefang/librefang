@@ -1,0 +1,82 @@
+name: release-tag
+
+# Manual release-tag creator. Issue #3304 1/N (non-destructive split).
+#
+# This is a workflow_dispatch-only stub that mirrors the tag-creation
+# slice of release.yml's `tag_on_merge` + `create_release` jobs. It does
+# NOT replace those jobs — release.yml remains the canonical entrypoint
+# (auto-tagging via PR merge + release entry creation). This workflow is
+# the manual fallback for re-tagging or fixing a botched tag without
+# rerunning the full pipeline.
+#
+# Maintainer must configure the `release-tag` GitHub environment with
+# at least one required reviewer before this workflow becomes useful in
+# practice — see docs/operations/release.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: |
+          Tag to create on the current main branch (e.g. v2026.5.4 or v2026.5.4-beta.1).
+          Must match [workspace.package].version in Cargo.toml on main.
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-tag-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Create release tag
+    runs-on: ubuntu-latest
+    environment: release-tag
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Verify tag format
+        run: |
+          # CalVer YYYY.M.PATCH with optional -beta.N / -rc.N / -lts suffix
+          if ! echo "${{ inputs.version }}" | grep -qE '^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-(beta|rc)\.?[0-9]+|-lts)?$'; then
+            echo "::error::tag '${{ inputs.version }}' does not match expected CalVer pattern"
+            exit 1
+          fi
+
+      - name: Verify tag matches workspace version
+        run: |
+          # Same gate as release.yml `create_release` — the manifest
+          # section must match the tag the maintainer is requesting.
+          TAG="${{ inputs.version }}"
+          WS_VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/{ s/^version *= *"\([^"]*\)".*/\1/p }' Cargo.toml | head -1)
+          if [ "${TAG#v}" != "$WS_VERSION" ]; then
+            echo "::error::requested tag $TAG does not match [workspace.package].version $WS_VERSION"
+            exit 1
+          fi
+          echo "Tag $TAG matches workspace version $WS_VERSION"
+
+      - name: Verify tag does not already exist
+        run: |
+          if git rev-parse "${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::tag '${{ inputs.version }}' already exists locally"
+            exit 1
+          fi
+          if git ls-remote --tags origin "refs/tags/${{ inputs.version }}" | grep -q "${{ inputs.version }}"; then
+            echo "::error::tag '${{ inputs.version }}' already exists on origin"
+            exit 1
+          fi
+
+      - name: Create + push tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag "${{ inputs.version }}"
+          git push origin "${{ inputs.version }}"
+          echo "✓ Pushed tag ${{ inputs.version }}"
+          echo "Note: this push will trigger release.yml on the tag — split workflows below are only needed if individual targets need to be re-run."

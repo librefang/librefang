@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::process::Command;
 use std::time::Instant;
@@ -34,6 +35,8 @@ fn run_step(name: &str, cmd: &mut Command) -> Result<(), Box<dyn std::error::Err
 }
 
 pub fn run(args: PreCommitArgs) -> Result<(), Box<dyn std::error::Error>> {
+    local_check_mode::apply_for_subcommand("pre-commit");
+
     let root = repo_root();
     let total_start = Instant::now();
 
