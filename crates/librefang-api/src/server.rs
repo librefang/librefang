@@ -1059,6 +1059,19 @@ pub async fn build_router(
     let rl_cfg_early = kernel.config_ref().rate_limit.clone();
     let gcra_limiter_arc = rate_limiter::create_rate_limiter(rl_cfg_early.api_requests_per_minute);
 
+    // Compile the trusted-proxies allowlist once at boot. Stored on
+    // `AppState` so the GCRA middleware, the auth-login middleware, and
+    // both WS upgrade handlers (`agent_ws`, `terminal_ws`) share one
+    // parsed instance — without this, each WS upgrade re-parsed the
+    // raw config strings and re-emitted any malformed-entry warning.
+    let trusted_proxies_arc = {
+        let cfg = kernel.config_ref();
+        Arc::new(crate::client_ip::TrustedProxies::compile(
+            &cfg.trusted_proxies,
+        ))
+    };
+    let trust_forwarded_for_cached = kernel.config_ref().trust_forwarded_for;
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -1083,6 +1096,8 @@ pub async fn build_router(
         pending_a2a_agents: dashmap::DashMap::new(),
         auth_login_limiter: auth_login_limiter.clone(),
         gcra_limiter: gcra_limiter_arc.clone(),
+        trusted_proxies: trusted_proxies_arc.clone(),
+        trust_forwarded_for: trust_forwarded_for_cached,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -1215,16 +1230,14 @@ pub async fn build_router(
         audit_log: Some(state.kernel.audit().clone()),
     };
     let rl_cfg = state.kernel.config_ref().rate_limit.clone();
-    // Compile the trusted-proxies allowlist once at boot so every
-    // request middleware reuses the same parsed entries. Empty list +
-    // trust_forwarded_for=false (the defaults) keep the conservative
-    // TCP-peer-only behaviour.
-    let proxy_cfg = state.kernel.config_ref();
-    let trusted_proxies = Arc::new(crate::client_ip::TrustedProxies::compile(
-        &proxy_cfg.trusted_proxies,
-    ));
-    let trust_forwarded_for = proxy_cfg.trust_forwarded_for;
-    drop(proxy_cfg);
+    // Reuse the boot-compiled allowlist + cached master switch from
+    // `AppState` — these are also shared with `ws::agent_ws` and the
+    // terminal WS handler so per-IP rate-limiter keying, the auth-login
+    // limiter, and the per-IP WS slot key all read from the same parsed
+    // entries (and any malformed-entry warning fires once at boot, not
+    // on every request).
+    let trusted_proxies = state.trusted_proxies.clone();
+    let trust_forwarded_for = state.trust_forwarded_for;
     // Reuse the limiter Arc already stored in AppState (created above before
     // the AppState constructor so the background GC task can share it for
     // periodic retain_recent() eviction — see #3668).
