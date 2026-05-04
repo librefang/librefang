@@ -927,7 +927,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path_regex(r"^/channels/123456789/messages$"))
             .and(header("Authorization", "Bot Bot-test-token"))
-            .and(body_json(serde_json::json!({ "content": "hello from librefang" })))
+            .and(body_json(
+                serde_json::json!({ "content": "hello from librefang" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "999",
                 "channel_id": "123456789",
@@ -952,7 +954,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"^/channels/987654321/messages$"))
-            .and(body_json(serde_json::json!({ "content": "(Unsupported content type)" })))
+            .and(body_json(
+                serde_json::json!({ "content": "(Unsupported content type)" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "998",
                 "channel_id": "987654321",

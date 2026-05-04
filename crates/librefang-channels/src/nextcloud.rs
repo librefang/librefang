@@ -487,7 +487,9 @@ mod tests {
             .and(path("/ocs/v2.php/apps/spreed/api/v1/chat/room-abc"))
             .and(header("Authorization", "Bearer test-nc-token"))
             .and(header("OCS-APIRequest", "true"))
-            .and(body_json(serde_json::json!({ "message": "hello from librefang" })))
+            .and(body_json(
+                serde_json::json!({ "message": "hello from librefang" }),
+            ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "ocs": { "meta": { "status": "ok", "statuscode": 201 }, "data": {} }
             })))

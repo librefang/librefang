@@ -269,12 +269,7 @@ impl ChannelAdapter for KeybaseAdapter {
                     }
                 });
 
-                let conversations = match client
-                    .post(&api_url)
-                    .json(&list_payload)
-                    .send()
-                    .await
-                {
+                let conversations = match client.post(&api_url).json(&list_payload).send().await {
                     Ok(resp) => {
                         let body: serde_json::Value = resp.json().await.unwrap_or_default();
                         body["result"]["conversations"]
@@ -321,12 +316,7 @@ impl ChannelAdapter for KeybaseAdapter {
                         }
                     });
 
-                    let messages = match client
-                        .post(&api_url)
-                        .json(&read_payload)
-                        .send()
-                        .await
-                    {
+                    let messages = match client.post(&api_url).json(&read_payload).send().await {
                         Ok(resp) => {
                             let body: serde_json::Value = resp.json().await.unwrap_or_default();
                             body["result"]["messages"]
@@ -505,12 +495,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_adapter(api_url: String) -> KeybaseAdapter {
-        KeybaseAdapter::new(
-            "testuser".to_string(),
-            "test-paper-key".to_string(),
-            vec![],
-        )
-        .with_api_url(api_url)
+        KeybaseAdapter::new("testuser".to_string(), "test-paper-key".to_string(), vec![])
+            .with_api_url(api_url)
     }
 
     fn dummy_user(platform_id: &str) -> ChannelUser {
