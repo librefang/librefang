@@ -151,11 +151,22 @@ fn append_rustflags(extra: &str) {
     let cur = env::var("RUSTFLAGS").unwrap_or_default();
     let new = if cur.is_empty() {
         extra.to_string()
-    } else if cur.split_whitespace().any(|tok| tok == extra) {
-        // Already present — don't duplicate.
-        cur
     } else {
-        format!("{cur} {extra}")
+        // `extra` may itself be multi-token (e.g. "-C codegen-units=1"),
+        // so token-by-token equality is wrong. Treat it as a contiguous
+        // sub-sequence of whitespace-separated tokens.
+        let cur_toks: Vec<&str> = cur.split_whitespace().collect();
+        let extra_toks: Vec<&str> = extra.split_whitespace().collect();
+        let already_present = !extra_toks.is_empty()
+            && extra_toks.len() <= cur_toks.len()
+            && cur_toks
+                .windows(extra_toks.len())
+                .any(|w| w == extra_toks.as_slice());
+        if already_present {
+            cur
+        } else {
+            format!("{cur} {extra}")
+        }
     };
     env::set_var("RUSTFLAGS", new);
 }
