@@ -230,7 +230,7 @@ impl UsageStore {
                 record.session_id.map(|s| s.0.to_string()),
             ],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -259,7 +259,7 @@ impl UsageStore {
         // exceeded), so every error path is safe.
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let agent_str = record.agent_id.0.to_string();
 
@@ -272,7 +272,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -290,7 +290,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -308,7 +308,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -320,8 +320,7 @@ impl UsageStore {
         // All checks passed — insert the record within the same transaction
         Self::insert_record(&tx, record)?;
 
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -342,7 +341,7 @@ impl UsageStore {
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         // Check global hourly budget
         if max_hourly > 0.0 {
@@ -353,7 +352,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -371,7 +370,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -389,7 +388,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -401,8 +400,7 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -426,7 +424,7 @@ impl UsageStore {
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let agent_str = record.agent_id.0.to_string();
 
@@ -439,7 +437,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= agent_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded hourly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -456,7 +454,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= agent_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded daily cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -473,7 +471,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= agent_max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Agent {} exceeded monthly cost quota: ${:.4} + ${:.4} / ${:.4}",
@@ -491,7 +489,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= global_max_hourly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global hourly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -508,7 +506,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= global_max_daily {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global daily budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -525,7 +523,7 @@ impl UsageStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             if cost + record.cost_usd >= global_max_monthly {
                 return Err(LibreFangError::QuotaExceeded(format!(
                     "Global monthly budget exceeded: ${:.4} + ${:.4} / ${:.4}",
@@ -537,8 +535,7 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -570,7 +567,7 @@ impl UsageStore {
 
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let agent_str = record.agent_id.0.to_string();
         let has_provider = !record.provider.is_empty();
@@ -602,7 +599,7 @@ impl UsageStore {
                     rusqlite::params![&agent_str, &record.provider],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             Ok(WindowCosts {
                 agent: row.0,
                 global: row.1,
@@ -704,7 +701,7 @@ impl UsageStore {
                     rusqlite::params![&record.provider],
                     |row| row.get(0),
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let current = tokens.max(0) as u64;
             let incoming = record.input_tokens.saturating_add(record.output_tokens);
             if current.saturating_add(incoming) >= provider_max_tokens_per_hour {
@@ -718,8 +715,7 @@ impl UsageStore {
         // All checks passed — insert the record
         Self::insert_record(&tx, record)?;
 
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -736,7 +732,7 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -753,7 +749,7 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -770,7 +766,7 @@ impl UsageStore {
                 rusqlite::params![agent_id.0.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -787,7 +783,7 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -804,7 +800,7 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -821,7 +817,7 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -838,7 +834,7 @@ impl UsageStore {
                 rusqlite::params![provider],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(tokens.max(0) as u64)
     }
 
@@ -875,7 +871,7 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -892,7 +888,7 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -909,7 +905,7 @@ impl UsageStore {
                 rusqlite::params![user_id.to_string()],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -949,9 +945,7 @@ impl UsageStore {
             None => -1,
         };
 
-        let mut stmt = conn
-            .prepare(RANKING_SQL)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(RANKING_SQL).map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(rusqlite::params![bound_limit], |row| {
                 Ok(UserSpendRanking {
@@ -962,7 +956,7 @@ impl UsageStore {
                     call_count: row.get::<_, i64>(4)?.max(0) as u64,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let out: Vec<UserSpendRanking> = rows.filter_map(|r| r.ok()).collect();
         Ok(out)
     }
@@ -980,7 +974,7 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -997,7 +991,7 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -1036,7 +1030,7 @@ impl UsageStore {
                     total_tool_calls: row.get::<_, i64>(4)? as u64,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         Ok(summary)
     }
@@ -1054,7 +1048,7 @@ impl UsageStore {
                         COALESCE(SUM(output_tokens), 0), COUNT(*)
                  FROM usage_events GROUP BY model ORDER BY SUM(cost_usd) DESC",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1066,11 +1060,11 @@ impl UsageStore {
                     call_count: row.get::<_, i64>(4)? as u64,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            results.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(results)
     }
@@ -1096,7 +1090,7 @@ impl UsageStore {
                  GROUP BY model 
                  ORDER BY SUM(cost_usd) DESC",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1121,11 +1115,11 @@ impl UsageStore {
                     avg_latency_per_call: avg_latency_ms,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            results.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(results)
     }
@@ -1148,7 +1142,7 @@ impl UsageStore {
                      GROUP BY day
                      ORDER BY day ASC"
             ))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let rows = stmt
             .query_map([], |row| {
@@ -1159,11 +1153,11 @@ impl UsageStore {
                     calls: row.get::<_, i64>(3)? as u64,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            results.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(results)
     }
@@ -1178,7 +1172,7 @@ impl UsageStore {
             .query_row("SELECT MIN(timestamp) FROM usage_events", [], |row| {
                 row.get(0)
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(result)
     }
 
@@ -1195,7 +1189,7 @@ impl UsageStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(cost)
     }
 
@@ -1218,17 +1212,17 @@ impl UsageStore {
                  GROUP BY agent_id
                  ORDER BY total_cost DESC",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map([], |row| {
                 let id_str: String = row.get(0)?;
                 let cost: f64 = row.get(1)?;
                 Ok((id_str, cost))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut results = Vec::new();
         for row in rows {
-            let (id_str, cost) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (id_str, cost) = row.map_err(LibreFangError::memory)?;
             if let Ok(agent_id) = id_str.parse::<AgentId>() {
                 results.push((agent_id, cost));
             }
@@ -1258,7 +1252,7 @@ impl UsageStore {
                  ORDER BY timestamp DESC
                  LIMIT ?2",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(
                 rusqlite::params![agent_id.0.to_string(), limit as i64],
@@ -1275,10 +1269,10 @@ impl UsageStore {
                     })
                 },
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut out = Vec::new();
         for row in rows {
-            out.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            out.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(out)
     }
@@ -1301,15 +1295,15 @@ impl UsageStore {
                  WHERE channel IS NOT NULL AND channel != '' AND timestamp >= ?1
                  GROUP BY channel",
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map(rusqlite::params![cutoff], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut out = std::collections::HashMap::new();
         for row in rows {
-            let (ch, n) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let (ch, n) = row.map_err(LibreFangError::memory)?;
             out.insert(ch, n.max(0) as u64);
         }
         Ok(out)
@@ -1328,7 +1322,7 @@ impl UsageStore {
                 ),
                 [],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(deleted)
     }
 }

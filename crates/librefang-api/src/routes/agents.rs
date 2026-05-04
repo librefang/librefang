@@ -3158,7 +3158,7 @@ pub async fn export_session_trajectory(
                 .into_response();
         }
         Err(librefang_kernel::error::KernelError::LibreFang(
-            librefang_types::error::LibreFangError::Memory(msg),
+            librefang_types::error::LibreFangError::Memory { message: msg, .. },
         )) if msg.contains("not found") || msg.contains("does not belong") => {
             return (
                 StatusCode::NOT_FOUND,

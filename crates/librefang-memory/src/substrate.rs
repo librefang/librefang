@@ -52,7 +52,7 @@ impl MemorySubstrate {
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
-        let conn = Connection::open(db_path).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = Connection::open(db_path).map_err(LibreFangError::memory)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; \
              PRAGMA busy_timeout=5000; \
@@ -61,8 +61,8 @@ impl MemorySubstrate {
              PRAGMA foreign_keys=ON; \
              PRAGMA synchronous=NORMAL;",
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
+        run_migrations(&conn).map_err(LibreFangError::memory)?;
         let shared = Arc::new(Mutex::new(conn));
 
         let sessions = SessionStore::new(Arc::clone(&shared));
@@ -93,14 +93,13 @@ impl MemorySubstrate {
         decay_rate: f32,
         chunk_config: ChunkConfig,
     ) -> LibreFangResult<Self> {
-        let conn =
-            Connection::open_in_memory().map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = Connection::open_in_memory().map_err(LibreFangError::memory)?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON; \
              PRAGMA synchronous=NORMAL;",
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
+        run_migrations(&conn).map_err(LibreFangError::memory)?;
         let shared = Arc::new(Mutex::new(conn));
 
         Ok(Self {
@@ -199,14 +198,13 @@ impl MemorySubstrate {
         let id = agent_id.0.to_string();
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         // Both helpers share their canonical DELETE list with the
         // standalone `*_agent` methods on the individual stores so a new
         // agent-scoped table only has to be added in one place.
         crate::session::execute_session_agent_deletes(&tx, &id)?;
         crate::structured::execute_structured_agent_deletes(&tx, &id)?;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -433,10 +431,7 @@ impl MemorySubstrate {
         if pruned_count == 0 {
             return Ok(());
         }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = self.conn.lock().map_err(LibreFangError::memory)?;
         // Flush WAL frames to the main DB file first so VACUUM has less work.
         if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
             tracing::warn!(error = %e, "WAL checkpoint before VACUUM failed; continuing");
@@ -532,13 +527,10 @@ impl MemorySubstrate {
 
     /// Load all paired devices from the database.
     pub fn load_paired_devices(&self) -> LibreFangResult<Vec<serde_json::Value>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = self.conn.lock().map_err(LibreFangError::memory)?;
         let mut stmt = conn.prepare(
             "SELECT device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash FROM paired_devices"
-        ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        ).map_err(LibreFangError::memory)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(serde_json::json!({
@@ -551,10 +543,10 @@ impl MemorySubstrate {
                     "api_key_hash": row.get::<_, String>(6)?,
                 }))
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let mut devices = Vec::new();
         for row in rows {
-            devices.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+            devices.push(row.map_err(LibreFangError::memory)?);
         }
         Ok(devices)
     }
@@ -571,28 +563,22 @@ impl MemorySubstrate {
         push_token: Option<&str>,
         api_key_hash: &str,
     ) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = self.conn.lock().map_err(LibreFangError::memory)?;
         conn.execute(
             "INSERT OR REPLACE INTO paired_devices (device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![device_id, display_name, platform, paired_at, last_seen, push_token, api_key_hash],
-        ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        ).map_err(LibreFangError::memory)?;
         Ok(())
     }
 
     /// Remove a paired device from the database.
     pub fn remove_paired_device(&self, device_id: &str) -> LibreFangResult<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let conn = self.conn.lock().map_err(LibreFangError::memory)?;
         conn.execute(
             "DELETE FROM paired_devices WHERE device_id = ?1",
             rusqlite::params![device_id],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(())
     }
 
@@ -812,7 +798,7 @@ impl MemorySubstrate {
                  VALUES (?1, ?2, ?3, ?4, 'pending', 0, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![id, &created_by, &title, b"", now, title, description, assigned_to, created_by],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
             Ok(id)
         })
         .await
@@ -846,7 +832,7 @@ impl MemorySubstrate {
                    AND (assigned_to = ?1 OR assigned_to = ?2 OR assigned_to = '')
                  ORDER BY priority DESC, created_at ASC
                  LIMIT 1"
-            ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            ).map_err(LibreFangError::memory)?;
 
             let result = stmt.query_row(rusqlite::params![agent_id, agent_name], |row| {
                 Ok((
@@ -867,7 +853,7 @@ impl MemorySubstrate {
                     db.execute(
                         "UPDATE task_queue SET status = 'in_progress', assigned_to = ?2, claimed_at = ?3 WHERE id = ?1",
                         rusqlite::params![id, agent_id, claimed_at],
-                    ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    ).map_err(LibreFangError::memory)?;
 
                     Ok(Some(serde_json::json!({
                         "id": id,
@@ -881,7 +867,7 @@ impl MemorySubstrate {
                     })))
                 }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(LibreFangError::Memory(e.to_string())),
+                Err(e) => Err(LibreFangError::memory(e)),
             }
         })
         .await
@@ -903,7 +889,7 @@ impl MemorySubstrate {
             let rows = db.execute(
                 "UPDATE task_queue SET status = 'completed', result = ?2, completed_at = ?3, finished_at = ?4, claimed_at = NULL WHERE id = ?1",
                 rusqlite::params![task_id, result, now, now_unix],
-            ).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            ).map_err(LibreFangError::memory)?;
             if rows == 0 {
                 return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
             }
@@ -927,7 +913,7 @@ impl MemorySubstrate {
                     "DELETE FROM task_queue WHERE id = ?1",
                     rusqlite::params![task_id],
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             Ok(rows > 0)
         })
         .await
@@ -953,7 +939,7 @@ impl MemorySubstrate {
                      WHERE id = ?1 AND status IN ('completed', 'failed')",
                     rusqlite::params![task_id],
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             Ok(rows > 0)
         })
         .await
@@ -978,7 +964,7 @@ impl MemorySubstrate {
                 ),
             };
 
-            let mut stmt = db.prepare(sql).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let mut stmt = db.prepare(sql).map_err(LibreFangError::memory)?;
             let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let rows = stmt.query_map(params_refs.as_slice(), |row| {
                 Ok(serde_json::json!({
@@ -993,11 +979,11 @@ impl MemorySubstrate {
                     "result": row.get::<_, Option<String>>(8).unwrap_or(None),
                     "claimed_at": row.get::<_, Option<String>>(9).unwrap_or(None),
                 }))
-            }).map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            }).map_err(LibreFangError::memory)?;
 
             let mut tasks = Vec::new();
             for row in rows {
-                tasks.push(row.map_err(|e| LibreFangError::Memory(e.to_string()))?);
+                tasks.push(row.map_err(LibreFangError::memory)?);
             }
             Ok(tasks)
         })
@@ -1038,13 +1024,13 @@ impl MemorySubstrate {
                        AND claimed_at IS NOT NULL \
                        AND claimed_at < ?1",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
 
             let stuck: Vec<(String, u32)> = stmt
                 .query_map(rusqlite::params![cutoff_str], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
                 })
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .map_err(LibreFangError::memory)?
                 .filter_map(|r| r.ok())
                 .collect();
 
@@ -1065,7 +1051,7 @@ impl MemorySubstrate {
                          WHERE id = ?1 AND status = 'in_progress'",
                         rusqlite::params![id, now_unix],
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 } else {
                     db.execute(
                         "UPDATE task_queue \
@@ -1074,7 +1060,7 @@ impl MemorySubstrate {
                          WHERE id = ?1 AND status = 'in_progress'",
                         rusqlite::params![id],
                     )
-                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                    .map_err(LibreFangError::memory)?;
                 }
                 reset_ids.push(id.clone());
             }
@@ -1100,7 +1086,7 @@ impl MemorySubstrate {
                      COALESCE(retry_count, 0) \
                      FROM task_queue WHERE id = ?1",
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             let mut rows = stmt
                 .query_map(rusqlite::params![task_id], |row| {
                     Ok(serde_json::json!({
@@ -1117,10 +1103,10 @@ impl MemorySubstrate {
                         "retry_count":  row.get::<_, u32>(10).unwrap_or(0),
                     }))
                 })
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             match rows.next() {
                 Some(Ok(v)) => Ok(Some(v)),
-                Some(Err(e)) => Err(LibreFangError::Memory(e.to_string())),
+                Some(Err(e)) => Err(LibreFangError::memory(e)),
                 None => Ok(None),
             }
         })
@@ -1176,7 +1162,7 @@ impl MemorySubstrate {
                     )))
                 }
             }
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
             Ok(rows > 0)
         })
         .await
@@ -1210,7 +1196,7 @@ impl MemorySubstrate {
                        AND finished_at IS NOT NULL AND finished_at < ?1",
                     rusqlite::params![cutoff],
                 )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                .map_err(LibreFangError::memory)?;
             Ok(rows)
         })
         .await
