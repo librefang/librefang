@@ -16,7 +16,6 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 /// parameters for filtering:
 ///   - `level`  — filter by classified level (info, warn, error)
 ///   - `filter` — text substring filter across action/detail/agent_id
-///   - `token`  — auth token (for EventSource clients that cannot set headers)
 ///
 /// A heartbeat ping is sent every 15 seconds to keep the connection alive.
 /// The endpoint polls the audit log every second and sends only new entries

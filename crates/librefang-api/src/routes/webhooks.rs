@@ -275,7 +275,13 @@ pub async fn webhook_agent(
     }
 }
 
-/// SECURITY: Validate webhook bearer token using constant-time comparison.
+/// Constant-time bearer-token check for webhook trigger endpoints.
+///
+/// The expected token is read from the env var named in the
+/// `[webhook_triggers]` config block (so secrets never live in
+/// `config.toml`); we require >= 32 bytes to avoid trivial brute-forcing.
+/// Comparison uses `subtle::ConstantTimeEq` after a length pre-check so a
+/// per-byte timing leak cannot reveal the expected token's contents.
 fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> bool {
     let expected = match std::env::var(token_env) {
         Ok(t) if t.len() >= 32 => t,
