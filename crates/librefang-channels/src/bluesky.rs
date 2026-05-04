@@ -612,13 +612,20 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Stub the createRecord call that api_create_post() makes
+        // Stub the createRecord call that api_create_post() makes.
+        // body_partial_json deep-matches, so we lock the message text and
+        // record `$type` here without conflicting with the dynamic
+        // `record.createdAt` timestamp the adapter stamps at send time.
         Mock::given(method("POST"))
             .and(path("/xrpc/com.atproto.repo.createRecord"))
             .and(bearer_token("test-access-jwt"))
             .and(body_partial_json(serde_json::json!({
                 "repo": "did:plc:testbot",
-                "collection": "app.bsky.feed.post"
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "hello from librefang",
+                },
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "uri": "at://did:plc:testbot/app.bsky.feed.post/abc123",
@@ -653,12 +660,19 @@ mod tests {
             .mount(&server)
             .await;
 
+        // Same partial-match shape as the happy path; locks the
+        // placeholder text so a future refactor that drops the
+        // unsupported-content fallback string would fail this test.
         Mock::given(method("POST"))
             .and(path("/xrpc/com.atproto.repo.createRecord"))
             .and(bearer_token("test-access-jwt"))
             .and(body_partial_json(serde_json::json!({
                 "repo": "did:plc:testbot",
-                "collection": "app.bsky.feed.post"
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "(Unsupported content type)",
+                },
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "uri": "at://did:plc:testbot/app.bsky.feed.post/def456",
