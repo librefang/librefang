@@ -800,9 +800,11 @@ pub struct LibreFangKernel {
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
     /// Hot-reloadable budget configuration. Initialised from `config.budget` at
-    /// boot and mutated safely via [`update_budget_config`] from the API layer,
-    /// replacing the previous `unsafe` raw-pointer mutation pattern.
-    budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
+    /// boot and mutated atomically via [`update_budget_config`] from the API
+    /// layer. Backed by `ArcSwap` so the LLM hot path (which reads it on every
+    /// turn for budget enforcement) never parks a tokio worker thread on a
+    /// blocking lock — see #3579.
+    budget_config: arc_swap::ArcSwap<librefang_types::config::BudgetConfig>,
     /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Checkpoint manager — takes automatic shadow-git snapshots before every
@@ -1045,36 +1047,27 @@ impl LibreFangKernel {
 
     /// Return a snapshot of the current budget configuration.
     ///
-    /// This reads from the `RwLock`-protected copy that can be updated at
-    /// runtime via [`update_budget_config`], so callers always see the
-    /// latest values set through the API.
+    /// Backed by `ArcSwap`, so this is a lock-free atomic load: no reader
+    /// can ever block an LLM turn even if a config write is concurrent.
+    /// Returns an owned `BudgetConfig` for API compatibility.
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        // Recover from poisoning instead of panicking — a panic here would
-        // kill every LLM turn that needs a budget check (#3447).
-        self.budget_config
-            .read()
-            .unwrap_or_else(|p| {
-                tracing::warn!(
-                    "budget_config read lock was poisoned, recovering with last-known state"
-                );
-                p.into_inner()
-            })
-            .clone()
+        // `load_full()` returns `Arc<BudgetConfig>` cheaply; we then clone
+        // the inner value to keep the existing owned-return contract.
+        (*self.budget_config.load_full()).clone()
     }
 
     /// Safely mutate the runtime budget configuration.
     ///
     /// The caller supplies a closure that receives `&mut BudgetConfig`.
-    /// All writes are serialised through an `RwLock` write-guard, which
-    /// eliminates the data-race hazard of the old raw-pointer approach.
+    /// Implementation: load the current snapshot, clone it, apply the
+    /// closure, then atomically `store` the result. Concurrent writers
+    /// race to be the last writer, but `BudgetConfig` updates always
+    /// arrive as a complete new state from the admin UI — no accumulation
+    /// semantics — so a lost-update on simultaneous writes is acceptable.
     pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut guard = self.budget_config.write().unwrap_or_else(|p| {
-            tracing::warn!(
-                "budget_config write lock was poisoned, recovering with last-known state"
-            );
-            p.into_inner()
-        });
-        f(&mut guard);
+        let mut next = (*self.budget_config.load_full()).clone();
+        f(&mut next);
+        self.budget_config.store(std::sync::Arc::new(next));
     }
 
     /// LibreFang home directory path (boot-time immutable).
@@ -3702,7 +3695,7 @@ impl LibreFangKernel {
             agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
-            budget_config: std::sync::RwLock::new(initial_budget),
+            budget_config: arc_swap::ArcSwap::from_pointee(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             task_board_sweep_started: AtomicBool::new(false),
             session_stream_hub_gc_started: AtomicBool::new(false),
@@ -5221,6 +5214,22 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn by default so external writers
+            // (cron jobs, integrations) reach the LLM on the next message.
+            // Opt out via `cache_context = true` on the manifest.
+            // Pre-loaded off the runtime worker (tokio::fs) so the struct
+            // literal below stays sync — see #3579.
+            let context_md = match manifest.workspace.as_ref() {
+                Some(w) => {
+                    librefang_runtime::agent_context::load_context_md_async(
+                        w,
+                        manifest.cache_context,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -5267,12 +5276,7 @@ system_prompt = "You are a helpful assistant."
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
                 is_group: false,
                 was_mentioned: false,
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =
@@ -6670,6 +6674,17 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn (cache_context=true to opt out).
+            // NOTE: this site is inside `send_message_streaming_with_sender_and_opts`,
+            // which is intentionally a non-async wrapper returning a JoinHandle, so
+            // we cannot use the async variant here. The sync read remains a known
+            // blocking site tracked under #3579 — async-ifying it requires lifting
+            // the streaming entry path itself to async, which is out of scope for
+            // this PR.
+            let context_md = manifest.workspace.as_ref().and_then(|w| {
+                librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+            });
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -6732,12 +6747,7 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =
@@ -8345,6 +8355,19 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn (cache_context=true to opt out).
+            // Pre-loaded off the runtime worker via tokio::fs — see #3579.
+            let context_md = match manifest.workspace.as_ref() {
+                Some(w) => {
+                    librefang_runtime::agent_context::load_context_md_async(
+                        w,
+                        manifest.cache_context,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -8407,12 +8430,7 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =

@@ -6480,3 +6480,56 @@ fn list_agent_sessions_canonical_and_active_can_coexist_on_same_row() {
     drop(rt);
     kernel.shutdown();
 }
+
+/// Verify the ArcSwap-backed `budget_config` (see #3579) is safe under
+/// heavy concurrent reads racing a single writer: every reader observes
+/// either the pre-update value or the post-update value (never a torn
+/// state), and the final stored value reflects the writer's mutation.
+///
+/// This pins the contract for the LLM hot path, which calls
+/// `kernel.budget_config()` on every turn for budget enforcement and
+/// must never park a tokio worker on a blocking lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_config_arcswap_concurrent_reads_consistent_with_writer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home_dir = tmp.path().join("librefang-budget-arcswap-test");
+    std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+    let mut config = KernelConfig {
+        home_dir: home_dir.clone(),
+        data_dir: home_dir.join("data"),
+        ..KernelConfig::default()
+    };
+    // Distinct sentinel so the "before" snapshot is identifiable.
+    config.budget.max_hourly_usd = 1.5;
+
+    let kernel =
+        std::sync::Arc::new(LibreFangKernel::boot_with_config(config).expect("Kernel should boot"));
+
+    let mut readers = Vec::with_capacity(64);
+    for _ in 0..64 {
+        let k = kernel.clone();
+        readers.push(tokio::spawn(async move {
+            for _ in 0..50 {
+                let snap = k.budget_config();
+                // Only ever the pre-update or post-update sentinel, never
+                // a torn / partial value.
+                let v = snap.max_hourly_usd;
+                assert!(v == 1.5 || v == 9.0, "torn read: max_hourly_usd = {v}");
+                tokio::task::yield_now().await;
+            }
+        }));
+    }
+
+    // Single writer: flip max_hourly_usd to a new sentinel.
+    kernel.update_budget_config(|b| b.max_hourly_usd = 9.0);
+
+    for h in readers {
+        h.await.expect("reader task panicked");
+    }
+
+    // After the writer completes, every subsequent read must see 9.0.
+    assert_eq!(kernel.budget_config().max_hourly_usd, 9.0);
+
+    kernel.shutdown();
+}

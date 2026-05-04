@@ -5290,7 +5290,9 @@ pub async fn get_agent_file(
         );
     }
 
-    let content = match std::fs::read_to_string(&canonical) {
+    // Off-runtime read so this axum handler never parks a tokio worker
+    // thread on a slow disk (#3579).
+    let content = match tokio::fs::read_to_string(&canonical).await {
         Ok(c) => c,
         Err(_) => {
             return (
