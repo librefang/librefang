@@ -20,7 +20,7 @@
 //!    unmatched path returns `404` with `Content-Type: text/plain` and
 //!    a literal body of `"Not Found"`. Every real handler in the
 //!    codebase returns JSON when it produces a 404 (`ApiErrorResponse`
-//!    + `application/json`). Only a `text/plain` "Not Found" counts as
+//!    and `application/json`). Only a `text/plain` "Not Found" counts as
 //!    a dead route. Anything else — `200`, `204`, `400`, `401`, `403`,
 //!    `405`, JSON `404`, `415`, `422`, `5xx`, … — means the route is
 //!    wired and the handler ran.
