@@ -1032,13 +1032,23 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
     let body: serde_json::Value = match serde_json::from_slice(body_bytes) {
         Ok(v) => v,
         Err(e) => {
-            return json_error_tuple(StatusCode::BAD_REQUEST, format!("Invalid JSON body: {e}"));
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_invalid_json",
+                format!("Invalid JSON body: {e}"),
+            );
         }
     };
 
     let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => return json_error_tuple(StatusCode::BAD_REQUEST, "Missing 'url' field"),
+        None => {
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_missing_url",
+                "Missing 'url' field",
+            )
+        }
     };
     // Canonicalize before any trust-list comparison so case / port /
     // trailing-slash variants all match the form stored at approve time.
@@ -1047,13 +1057,20 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
         None => {
             return json_error_tuple(
                 StatusCode::BAD_REQUEST,
+                "a2a_invalid_url",
                 "URL is not a valid http(s) URL with a host",
             );
         }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => return json_error_tuple(StatusCode::BAD_REQUEST, "Missing 'message' field"),
+        None => {
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "a2a_missing_message",
+                "Missing 'message' field",
+            )
+        }
     };
     let session_id = body["session_id"].as_str();
 
@@ -1061,6 +1078,7 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
     if state.pending_a2a_agents.contains_key(&url) {
         return json_error_tuple(
             StatusCode::BAD_REQUEST,
+            "a2a_agent_pending_approval",
             "This agent is pending operator approval and cannot receive tasks. \
              Use POST /api/a2a/agents/{url}/approve to trust it first.",
         );
@@ -1080,6 +1098,7 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
         if !trusted.iter().any(|(u, _)| u == &url) {
             return json_error_tuple(
                 StatusCode::BAD_REQUEST,
+                "a2a_agent_not_trusted",
                 "Target URL is not a trusted A2A agent. \
                  Discover and approve it first via POST /api/a2a/discover \
                  followed by POST /api/a2a/agents/{url}/approve.",
@@ -1096,7 +1115,7 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return json_error_tuple(StatusCode::BAD_REQUEST, reason);
+        return json_error_tuple(StatusCode::BAD_REQUEST, "a2a_ssrf_blocked", reason);
     }
 
     // Thread allowlist into client so redirects are re-validated against the same SSRF policy (#3782).
@@ -1106,18 +1125,23 @@ async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (St
             let body = serde_json::to_vec(&task).unwrap_or_else(|_| b"{}".to_vec());
             (StatusCode::OK, body)
         }
-        Err(e) => {
-            let body = serde_json::to_vec(&serde_json::json!({"error": e})).unwrap_or_default();
-            (StatusCode::BAD_GATEWAY, body)
-        }
+        Err(e) => json_error_tuple(StatusCode::BAD_GATEWAY, "a2a_upstream_error", e),
     }
 }
 
-/// Match the legacy `ApiErrorResponse::bad_request().into_json_tuple()`
-/// shape (`{ "error": "<msg>" }`) so callers see the same field they
-/// did before the handler split. Used only by `a2a_send_external_inner`.
-fn json_error_tuple(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Vec<u8>) {
-    let body = serde_json::json!({ "error": msg.into() });
+/// Mirror `ApiErrorResponse::into_json_tuple` shape (`{ error, code, type }`)
+/// so a2a_send error responses match the post-#3505 standardized envelope.
+/// `type` mirrors `code` per the convention used in `agents.rs::json_error`.
+fn json_error_tuple(
+    status: StatusCode,
+    code: &str,
+    msg: impl Into<String>,
+) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({
+        "error": msg.into(),
+        "code": code,
+        "type": code,
+    });
     (status, serde_json::to_vec(&body).unwrap_or_default())
 }
 
