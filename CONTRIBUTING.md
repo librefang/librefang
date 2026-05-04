@@ -302,7 +302,7 @@ LibreFang ships as a single binary that runs other people's agents on your hardw
 ### Adding a new crate
 
 1. **Justify it in the PR description.** Explain what it does, why a workspace crate or the standard library is not sufficient, and link to the upstream repo and license.
-2. **License must be on the allow-list** in [`deny.toml`](deny.toml). Anything outside `Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `MPL-2.0`, `Unicode-DFS-2016`, `Unicode-3.0`, `Zlib`, `CC0-1.0` requires a maintainer-level decision and an explicit `[[licenses.clarify]]` or `exceptions` entry with rationale.
+2. **License must be on the allow-list** in [`deny.toml`](deny.toml). Anything outside `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `0BSD`, `ISC`, `MPL-2.0`, `Unicode-DFS-2016`, `Unicode-3.0`, `Zlib`, `CC0-1.0`, `CDLA-Permissive-2.0` requires a maintainer-level decision and an explicit `[[licenses.clarify]]` or `exceptions` entry with rationale.
 3. **No git dependencies by default.** `unknown-git = "deny"` is set in `deny.toml`. If you absolutely need an unreleased upstream change, add the repo URL to `allow-git` with an inline comment linking to the upstream PR / issue and a target version where it can be removed.
 4. **Reuse the workspace dependency table** in the root `Cargo.toml` (`[workspace.dependencies]`) so version bumps stay coordinated across crates.
 

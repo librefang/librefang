@@ -34,38 +34,45 @@ feature-depth = 1
 db-path = "$CARGO_HOME/advisory-dbs"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
+# Each ignore entry links to the upstream advisory and (when applicable) is
+# scoped to the exact crate@version pulling it in, so a fresh occurrence in
+# a different dependency path will still fail the audit.
 ignore = [
-    # Each entry MUST link to the issue / PR documenting the justification.
-    # Format: "RUSTSEC-YYYY-NNNN", # <reason>; tracking: <issue url>
-    #
-    # gtk-rs GTK3 bindings — transitive via tauri-runtime-wry on Linux only.
-    # No safe upgrade is available until tauri migrates to GTK4. Tracking PR #4581.
-    "RUSTSEC-2024-0411",
-    "RUSTSEC-2024-0412",
-    "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0414",
-    "RUSTSEC-2024-0415",
-    "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0417",
-    "RUSTSEC-2024-0418",
-    "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420",
-    # Other unmaintained / advisory crates pulled in transitively (tauri,
-    # wasmtime, etc.) with no safe upgrade available at the time of adopting
-    # cargo-deny. Each will be revisited as upstream releases land. Tracking PR #4581.
-    "RUSTSEC-2023-0071", # rsa — Marvin attack; pulled transitively, no fix yet.
-    "RUSTSEC-2024-0370", # proc-macro-error — unmaintained; transitive.
-    "RUSTSEC-2025-0057", # fxhash — unmaintained; transitive.
-    "RUSTSEC-2025-0075",
-    "RUSTSEC-2025-0080",
-    "RUSTSEC-2025-0081",
-    "RUSTSEC-2025-0098",
-    "RUSTSEC-2025-0100",
-    "RUSTSEC-2025-0134",
-    "RUSTSEC-2026-0049",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-    "RUSTSEC-2026-0104",
+    # ── gtk-rs GTK3 bindings, unmaintained ─────────────────────────────────
+    # Transitive via tauri-runtime-wry on Linux only. Cannot upgrade until
+    # tauri migrates to GTK4 — track upstream: https://github.com/tauri-apps/tauri/issues/9220
+    { id = "RUSTSEC-2024-0411", reason = "gtk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0411" },
+    { id = "RUSTSEC-2024-0412", reason = "gtk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0412" },
+    { id = "RUSTSEC-2024-0413", reason = "atk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0413" },
+    { id = "RUSTSEC-2024-0414", reason = "atk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0414" },
+    { id = "RUSTSEC-2024-0415", reason = "gdk unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0415" },
+    { id = "RUSTSEC-2024-0416", reason = "gdk-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0416" },
+    { id = "RUSTSEC-2024-0417", reason = "gdkx11 unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0417" },
+    { id = "RUSTSEC-2024-0418", reason = "gdkx11-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0418" },
+    { id = "RUSTSEC-2024-0419", reason = "gdkwayland-sys unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0419" },
+    { id = "RUSTSEC-2024-0420", reason = "gdk-pixbuf unmaintained; transitive via tauri on Linux. https://rustsec.org/advisories/RUSTSEC-2024-0420" },
+
+    # ── Other unmaintained transitive crates ───────────────────────────────
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack; transitive, no upstream fix yet. https://rustsec.org/advisories/RUSTSEC-2023-0071" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2024-0370" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0057" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0075" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0080" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0081" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0098" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-* unmaintained (kuchikiki/selectors chain). https://rustsec.org/advisories/RUSTSEC-2025-0100" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0134" },
+
+    # ── rustls-webpki 0.102.x vulnerabilities (transitive via rumqttc) ─────
+    # rumqttc 0.25.1 (latest, no newer release) pins rustls-webpki 0.102.8.
+    # Workspace also resolves rustls-webpki 0.103.13 elsewhere — direct usage
+    # is on a fixed line. The scoped `crate = "rustls-webpki@0.102.8"` keys
+    # ensure that if anything pulls in a *new* vulnerable version these still
+    # fire. Tracking upstream MQTT crate: https://github.com/bytebeamio/rumqtt/issues
+    { id = "RUSTSEC-2026-0049", crate = "rustls-webpki@0.102.8", reason = "CRL distribution-point handling; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0049" },
+    { id = "RUSTSEC-2026-0098", crate = "rustls-webpki@0.102.8", reason = "name-constraint URI handling; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2026-0099", crate = "rustls-webpki@0.102.8", reason = "wildcard name-constraint bypass; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0099" },
+    { id = "RUSTSEC-2026-0104", crate = "rustls-webpki@0.102.8", reason = "CRL parser DoS panic; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0104" },
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────

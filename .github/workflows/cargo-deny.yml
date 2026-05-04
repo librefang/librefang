@@ -10,19 +10,15 @@ name: cargo-deny
 on:
   pull_request:
     paths:
-      - 'Cargo.toml'
+      - '**/Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - 'xtask/Cargo.toml'
       - 'deny.toml'
       - '.github/workflows/cargo-deny.yml'
   push:
     branches: [main]
     paths:
-      - 'Cargo.toml'
+      - '**/Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
-      - 'xtask/Cargo.toml'
       - 'deny.toml'
       - '.github/workflows/cargo-deny.yml'
   # Daily catch-all so a freshly published RustSec advisory against a
