@@ -499,6 +499,14 @@ mod tests {
             .with_api_url(api_url)
     }
 
+    /// The production const includes a `/api` path segment
+    /// (`http://127.0.0.1:5222/api`); the mock URI must mirror that so the
+    /// `path("/api")` matcher actually validates the request path the
+    /// adapter uses, instead of silently passing on `/`.
+    fn mock_api_url(server: &MockServer) -> String {
+        format!("{}/api", server.uri())
+    }
+
     fn dummy_user(platform_id: &str) -> ChannelUser {
         ChannelUser {
             platform_id: platform_id.to_string(),
@@ -511,7 +519,7 @@ mod tests {
     async fn keybase_send_posts_json_rpc_send_method() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/"))
+            .and(path("/api"))
             .and(body_partial_json(serde_json::json!({
                 "method": "send",
                 "params": {
@@ -532,7 +540,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = make_adapter(server.uri());
+        let adapter = make_adapter(mock_api_url(&server));
         adapter
             .send(
                 &dummy_user("myteam:general"),
@@ -546,7 +554,7 @@ mod tests {
     async fn keybase_send_non_text_content_falls_back_to_placeholder() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/"))
+            .and(path("/api"))
             .and(body_partial_json(serde_json::json!({
                 "method": "send",
                 "params": {
@@ -562,7 +570,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let adapter = make_adapter(server.uri());
+        let adapter = make_adapter(mock_api_url(&server));
         adapter
             .send(
                 &dummy_user("myteam:general"),
