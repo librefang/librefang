@@ -99,28 +99,28 @@ impl TaskQueue for CapturingKernel {
         _: &str,
         _: Option<&str>,
         _: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+    async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_delete(&self, _: &str) -> Result<bool, String> {
+    async fn task_delete(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_retry(&self, _: &str) -> Result<bool, String> {
+    async fn task_retry(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+    async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }

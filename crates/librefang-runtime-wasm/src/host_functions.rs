@@ -1233,16 +1233,16 @@ mod tests {
     #[async_trait::async_trait]
     impl librefang_kernel_handle::AgentControl for RecordingKernel {
         async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
-            Err("not implemented".to_string())
+            Err("not implemented".into())
         }
         async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
-            Err("not implemented".to_string())
+            Err("not implemented".into())
         }
         fn list_agents(&self) -> Vec<librefang_kernel_handle::AgentInfo> {
             vec![]
         }
         fn kill_agent(&self, _: &str) -> Result<(), String> {
-            Err("not implemented".to_string())
+            Err("not implemented".into())
         }
         fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
             vec![]
@@ -1280,28 +1280,28 @@ mod tests {
             _: &str,
             _: Option<&str>,
             _: Option<&str>,
-        ) -> Result<String, String> {
-            Err("not implemented".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not implemented".into())
         }
-        async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+        async fn task_claim(&self, _: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Ok(None)
         }
-        async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
-            Err("not implemented".to_string())
+        async fn task_complete(&self, _: &str, _: &str, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not implemented".into())
         }
-        async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+        async fn task_list(&self, _: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Ok(vec![])
         }
-        async fn task_delete(&self, _: &str) -> Result<bool, String> {
+        async fn task_delete(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
             Ok(false)
         }
-        async fn task_retry(&self, _: &str) -> Result<bool, String> {
+        async fn task_retry(&self, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
             Ok(false)
         }
-        async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
+        async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
             Ok(None)
         }
-        async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
+        async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
             Ok(false)
         }
     }
