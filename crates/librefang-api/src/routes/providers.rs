@@ -1656,6 +1656,7 @@ pub async fn set_provider_url(
     path = "/api/providers/{name}/default",
     tag = "models",
     params(("name" = String, Path, description = "Provider identifier")),
+    request_body(content = Option<crate::types::JsonObject>, content_type = "application/json", description = "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default"),
     responses(
         (status = 200, description = "Default provider updated", body = crate::types::JsonObject),
         (status = 400, description = "No model found for provider"),

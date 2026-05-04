@@ -626,7 +626,9 @@
           "description": "Partial agent fields to update",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1312,7 +1314,9 @@
             "description": "Recent agent execution log entries",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1377,7 +1381,9 @@
           "description": "Array of MCP server names",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonArray"
+              }
             }
           },
           "required": true
@@ -1584,7 +1590,9 @@
             "description": "Aggregated agent metrics",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -1661,7 +1669,9 @@
           "description": "Model name and optional provider",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -1714,7 +1724,9 @@
             "description": "Message pushed to channel",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -2009,7 +2021,9 @@
           "description": "Optional label for the new session",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2091,7 +2105,9 @@
           "description": "Exported session JSON",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -2384,7 +2400,9 @@
           "description": "Array of skill names",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonArray"
+              }
             }
           },
           "required": true
@@ -3125,7 +3143,9 @@
             "description": "Credentials updated and existing sessions invalidated",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3150,7 +3170,9 @@
             "description": "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3167,7 +3189,9 @@
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3177,7 +3201,9 @@
             "description": "Login outcome — returns session token on success or `requires_totp` when 2FA is needed",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           },
@@ -3271,7 +3297,9 @@
             "description": "Session invalidated and cookie cleared",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -3672,9 +3700,12 @@
         "summary": "PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).",
         "operationId": "update_budget",
         "requestBody": {
+          "description": "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -3764,9 +3795,12 @@
           }
         ],
         "requestBody": {
+          "description": "Partial ResourceQuota (max_cost_per_hour_usd / max_cost_per_day_usd / max_cost_per_month_usd / max_llm_tokens_per_hour)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -4189,9 +4223,19 @@
           }
         ],
         "requestBody": {
+          "description": "Optional target — `{ \"channel_id\": \"...\" }` for Discord/Slack or `{ \"chat_id\": \"...\" }` for Telegram",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
             }
           }
         },
@@ -4480,7 +4524,9 @@
             "description": "Recent inter-agent communication events",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/JsonObject"
+                }
               }
             }
           }
@@ -4665,9 +4711,12 @@
         "description": "Accepts JSON `{ \"path\": \"section.key\", \"value\": \"...\" }`.\nWrites the value to the TOML config file and triggers a reload.",
         "operationId": "config_set",
         "requestBody": {
+          "description": "`{ \"path\": \"section.key\", \"value\": ... }`",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -7478,9 +7527,19 @@
           }
         ],
         "requestBody": {
+          "description": "Optional `{ \"model\": \"model-id\" }` to override the auto-selected default",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/JsonObject"
+                  }
+                ]
+              }
             }
           }
         },
@@ -8529,9 +8588,12 @@
           }
         ],
         "requestBody": {
+          "description": "Partial trigger fields: pattern, prompt_template, enabled, max_fires, cooldown_secs, session_mode, target_agent_id",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true
@@ -9086,9 +9148,12 @@
           }
         ],
         "requestBody": {
+          "description": "Workflow input variables (free-form key/value object)",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "$ref": "#/components/schemas/JsonObject"
+              }
             }
           },
           "required": true

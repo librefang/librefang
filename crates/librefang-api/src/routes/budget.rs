@@ -335,6 +335,7 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
     put,
     path = "/api/budget",
     tag = "budget",
+    request_body(content = crate::types::JsonObject, description = "Partial budget config (max_hourly_usd / max_daily_usd / max_monthly_usd / alert_threshold / default_max_llm_tokens_per_hour)"),
     responses((status = 200, description = "Updated global budget status", body = crate::types::JsonObject))
 )]
 pub async fn update_budget(
@@ -525,6 +526,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
     path = "/api/budget/agents/{id}",
     tag = "budget",
     params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = crate::types::JsonObject, description = "Partial ResourceQuota (max_cost_per_hour_usd / max_cost_per_day_usd / max_cost_per_month_usd / max_llm_tokens_per_hour)"),
     responses((status = 200, description = "Updated agent ResourceQuota (max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour, …)", body = crate::types::JsonObject))
 )]
 pub async fn update_agent_budget(

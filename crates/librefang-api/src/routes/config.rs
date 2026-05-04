@@ -1984,6 +1984,7 @@ pub fn ui_options_overlay(
     post,
     path = "/api/config/set",
     tag = "system",
+    request_body(content = crate::types::JsonObject, description = "`{ \"path\": \"section.key\", \"value\": ... }`"),
     responses(
         (status = 200, description = "Set a single config value and persist", body = crate::types::JsonObject)
     )

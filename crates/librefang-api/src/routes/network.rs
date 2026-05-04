@@ -1787,7 +1787,7 @@ fn audit_to_comms_event(
         ("limit" = Option<usize>, Query, description = "Maximum number of results"),
     ),
     responses(
-        (status = 200, description = "Recent inter-agent communication events", body = serde_json::Value)
+        (status = 200, description = "Recent inter-agent communication events", body = crate::types::JsonObject)
     )
 )]
 pub async fn comms_events(

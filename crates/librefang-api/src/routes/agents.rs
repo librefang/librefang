@@ -2979,7 +2979,7 @@ pub async fn list_agent_sessions(
     path = "/api/agents/{id}/sessions",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Optional label for the new session"),
+    request_body(content = crate::types::JsonObject, description = "Optional label for the new session"),
     responses(
         (status = 200, description = "Create a new session for an agent", body = crate::types::JsonObject)
     )
@@ -3259,7 +3259,7 @@ pub async fn export_session_trajectory(
     path = "/api/agents/{id}/sessions/import",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Exported session JSON"),
+    request_body(content = crate::types::JsonObject, description = "Exported session JSON"),
     responses(
         (status = 200, description = "Session imported successfully", body = crate::types::JsonObject)
     )
@@ -3617,7 +3617,7 @@ pub async fn stop_session(
     path = "/api/agents/{id}/model",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Model name and optional provider"),
+    request_body(content = crate::types::JsonObject, description = "Model name and optional provider"),
     responses(
         (status = 200, description = "Change an agent's LLM model", body = crate::types::JsonObject)
     )
@@ -3939,7 +3939,7 @@ pub async fn get_agent_skills(
     path = "/api/agents/{id}/skills",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Array of skill names"),
+    request_body(content = crate::types::JsonArray, description = "Array of skill names"),
     responses(
         (status = 200, description = "Update an agent's skill allowlist", body = crate::types::JsonObject)
     )
@@ -4058,7 +4058,7 @@ pub async fn get_agent_mcp_servers(
     path = "/api/agents/{id}/mcp_servers",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Array of MCP server names"),
+    request_body(content = crate::types::JsonArray, description = "Array of MCP server names"),
     responses(
         (status = 200, description = "Update an agent's MCP server allowlist", body = crate::types::JsonObject)
     )
@@ -4117,7 +4117,7 @@ pub async fn set_agent_mcp_servers(
     path = "/api/agents/{id}",
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body(content = serde_json::Value, description = "Partial agent fields to update"),
+    request_body(content = crate::types::JsonObject, description = "Partial agent fields to update"),
     responses(
         (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = crate::types::JsonObject)
     )
@@ -6138,7 +6138,7 @@ pub async fn inject_message(
     params(("id" = String, Path, description = "Agent ID")),
     request_body = crate::types::PushMessageRequest,
     responses(
-        (status = 200, description = "Message pushed to channel", body = serde_json::Value),
+        (status = 200, description = "Message pushed to channel", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID or missing required fields"),
         (status = 404, description = "Agent not found"),
         (status = 502, description = "Channel adapter rejected the message")
@@ -6726,7 +6726,7 @@ mod tests {
     tag = "agents",
     params(("id" = String, Path, description = "Agent ID")),
     responses(
-        (status = 200, description = "Aggregated agent metrics", body = serde_json::Value),
+        (status = 200, description = "Aggregated agent metrics", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found")
     )
@@ -6859,7 +6859,7 @@ pub async fn agent_metrics(
         ("offset" = Option<usize>, Query, description = "Pagination offset over filtered entries")
     ),
     responses(
-        (status = 200, description = "Recent agent execution log entries", body = serde_json::Value),
+        (status = 200, description = "Recent agent execution log entries", body = crate::types::JsonObject),
         (status = 400, description = "Invalid agent ID"),
         (status = 404, description = "Agent not found")
     )
