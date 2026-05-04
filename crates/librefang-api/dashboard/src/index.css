@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;900&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @theme {
   /* Dynamic Semantic Palette */
@@ -28,9 +29,9 @@
 :root {
   color-scheme: light;
   
-  /* Light Mode Palette (Subtle & High Contrast) */
-  --brand-color: #0284c7;   /* Sky 600 */
-  --brand-muted: #f0f9ff;   /* Sky 50 */
+  /* Light Mode Palette — BossFang Ember */
+  --brand-color: #E04E28;   /* Muted Ember */
+  --brand-muted: #F2D6CF;   /* Ember blush */
   
   --success-color: #16a34a; /* Emerald 600 */
   --warning-color: #d97706; /* Amber 600 */
@@ -47,16 +48,16 @@
 :root.dark {
   color-scheme: dark;
   
-  /* Dark Mode Palette (Glowing & Soft Contrast) */
-  --brand-color: #38bdf8;   /* Sky 400 */
-  --brand-muted: rgba(14, 165, 233, 0.15);
-  
+  /* Dark Mode Palette — BossFang Bright Ember */
+  --brand-color: #FF6A3D;   /* Bright Ember */
+  --brand-muted: rgba(255, 106, 61, 0.15);
+
   --success-color: #34d399; /* Emerald 400 */
   --warning-color: #fbbf24; /* Amber 400 */
   --error-color: #fb7185;   /* Rose 400 */
   --accent-color: #a78bfa;  /* Violet 400 */
-  
-  --bg-main: #020617;
+
+  --bg-main: #0B0F14;       /* Deep Charcoal */
   --bg-surface: rgba(15, 23, 42, 0.92);
   --bg-surface-hover: rgba(30, 41, 59, 0.75);
   --border-color: rgba(51, 65, 85, 0.8);
@@ -72,8 +73,18 @@ body,
 }
 
 body {
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: 'Inter', 'Roboto', system-ui, sans-serif;
   @apply text-slate-900 dark:text-slate-100 transition-colors duration-300;
+}
+
+/* BossFang display font — Space Grotesk for headlines and wordmarks */
+.font-display {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
+
+/* BossFang mono font — JetBrains Mono for code and technical labels */
+.font-mono-brand {
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .katex-display {
@@ -89,8 +100,8 @@ body {
 
 .dark body {
   background:
-    radial-gradient(circle at top, rgba(30, 64, 175, 0.15) 0%, rgba(2, 6, 23, 1) 80%),
-    #020617;
+    radial-gradient(circle at top, rgba(224, 78, 40, 0.08) 0%, rgba(11, 15, 20, 1) 80%),
+    #0B0F14;
 }
 
 
@@ -112,7 +123,7 @@ body {
    variants). Only static (non-animated) helpers remain in this file — keep
    the easing CSS variables above so any inline transitions can reference them. */
 
-/* ── Card hover — depth + sky-blue glow signature ──────── */
+/* ── Card hover — depth + ember glow signature ──────── */
 .card-glow {
   transition: transform 0.24s var(--apple-spring),
               box-shadow 0.24s var(--apple-ease),
@@ -121,19 +132,19 @@ body {
 
 .card-glow:hover {
   transform: translateY(-1px);
-  border-color: rgba(2, 132, 199, 0.4);
+  border-color: rgba(224, 78, 40, 0.4);
   box-shadow:
-    0 0 0 1px rgba(2, 132, 199, 0.18),
-    0 8px 28px -12px rgba(2, 132, 199, 0.25),
-    0 0 36px -10px rgba(2, 132, 199, 0.18);
+    0 0 0 1px rgba(224, 78, 40, 0.18),
+    0 8px 28px -12px rgba(224, 78, 40, 0.25),
+    0 0 36px -10px rgba(224, 78, 40, 0.18);
 }
 
 .dark .card-glow:hover {
-  border-color: rgba(56, 189, 248, 0.4);
+  border-color: rgba(255, 106, 61, 0.4);
   box-shadow:
-    0 0 0 1px rgba(56, 189, 248, 0.18),
-    0 8px 28px -12px rgba(56, 189, 248, 0.25),
-    0 0 36px -10px rgba(56, 189, 248, 0.18);
+    0 0 0 1px rgba(255, 106, 61, 0.18),
+    0 8px 28px -12px rgba(255, 106, 61, 0.25),
+    0 0 36px -10px rgba(255, 106, 61, 0.18);
 }
 
 /* ── Surface "lit" highlight — subtle inner top-light ─── */
@@ -148,7 +159,7 @@ body {
 }
 
 /* ── Glow text (KPI accent values) ─────────────────── */
-.glow-text { text-shadow: 0 0 24px rgba(56, 189, 248, 0.35); }
+.glow-text { text-shadow: 0 0 24px rgba(255, 106, 61, 0.35); }
 
 /* ── Status dot pulse — scale-based, tighter than animate-pulse ── */
 @keyframes pulse-soft {

@@ -992,23 +992,18 @@ export function App() {
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}
       `}>
-        {/* Brand block — 26px sky-gradient square with the LibreFang fang glyph,
-            "librefang" + "v{version} · prod" subtitle. Mirrors the design's
-            shell.jsx::Sidebar header. */}
+        {/* Brand block — BossFang logo + wordmark + version subtitle */}
         <div className={`flex h-14 items-center transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
           isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-3.5"
         }`}>
           <div className={`flex items-center gap-2.5 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
-            <div
-              className="flex h-[26px] w-[26px] items-center justify-center rounded-[7px] shrink-0 shadow-[0_0_16px_rgba(56,189,248,0.45),inset_0_1px_0_rgba(255,255,255,0.3)]"
-              style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" stroke="#0c1424" strokeWidth="0.5" strokeLinejoin="round" />
-              </svg>
-            </div>
+            <img
+              src="/boss-libre.png"
+              alt="BossFang"
+              className="h-[26px] w-[26px] rounded-[7px] object-contain shrink-0"
+            />
             <div className="flex flex-col min-w-0">
-              <strong className="text-[13.5px] font-semibold tracking-tight whitespace-nowrap leading-tight">librefang</strong>
+              <strong className="text-[13.5px] font-semibold tracking-tight whitespace-nowrap leading-tight font-display">BossFang</strong>
               <span className="text-[10px] font-mono text-text-dim/80 whitespace-nowrap leading-tight">
                 {appVersion ? `v${appVersion}` : "v0.0.0"} · prod
               </span>
@@ -1113,7 +1108,7 @@ export function App() {
         <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-border-subtle bg-surface px-3 sm:px-4">
           <div className="pointer-events-none absolute inset-x-0 top-0 hidden h-12 items-center justify-center lg:flex">
             <span className="font-mono text-[11px] text-text-dim">
-              librefang · {currentPageLabel}
+              BossFang · {currentPageLabel}
             </span>
           </div>
           <div className="flex items-center gap-2 min-w-0">
@@ -1126,15 +1121,12 @@ export function App() {
               <Menu className="h-4 w-4" />
             </button>
             <div className="flex items-center gap-2 lg:hidden">
-              <div
-                className="flex h-6 w-6 items-center justify-center rounded-md shrink-0 shadow-[0_0_12px_rgba(56,189,248,0.4)]"
-                style={{ background: "linear-gradient(135deg,#38bdf8,#0ea5e9)" }}
-              >
-                <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-                  <path d="M2 2 L7 12 L12 2 L9.5 4 L7 8 L4.5 4 Z" fill="#0c1424" />
-                </svg>
-              </div>
-              <strong className="text-[13px] font-semibold tracking-tight">librefang</strong>
+              <img
+                src="/boss-libre.png"
+                alt="BossFang"
+                className="h-6 w-6 rounded-md object-contain shrink-0"
+              />
+              <strong className="text-[13px] font-semibold tracking-tight font-display">BossFang</strong>
             </div>
             {/* Desktop: design-style breadcrumb. */}
             <div className="hidden lg:flex items-center gap-2 text-text-dim min-w-0">
