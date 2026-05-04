@@ -824,6 +824,7 @@ pub async fn execute_tool_raw(
         "task_claim" => tool_task_claim(*kernel, *caller_agent_id).await,
         "task_complete" => tool_task_complete(input, *kernel, *caller_agent_id).await,
         "task_list" => tool_task_list(input, *kernel).await,
+        "task_status" => tool_task_status(input, *kernel).await,
         "event_publish" => tool_event_publish(input, *kernel).await,
 
         // Scheduling tools (delegate to CronScheduler via kernel handle)
@@ -1710,6 +1711,17 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "status": { "type": "string", "description": "Filter by status: pending, in_progress, completed (optional)" }
                 }
+            }),
+        },
+        ToolDefinition {
+            name: "task_status".to_string(),
+            description: "Look up a single task on the shared queue by ID and return its status, result, title, assignee, created_at, and completed_at. Native counterpart of the comms_task_status MCP bridge tool — no MCP load required when polling for a delegated task's outcome. Any agent that knows the task_id can read it — task visibility is shared across all agents in the workspace, mirroring task_list / comms_task_status semantics.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "The task ID returned by task_post" }
+                },
+                "required": ["task_id"]
             }),
         },
         ToolDefinition {
@@ -3502,6 +3514,33 @@ async fn tool_task_list(
         return Ok("No tasks found.".to_string());
     }
     serde_json::to_string_pretty(&tasks).map_err(|e| format!("Serialize error: {e}"))
+}
+
+async fn tool_task_status(
+    input: &serde_json::Value,
+    kernel: Option<&Arc<dyn KernelHandle>>,
+) -> Result<String, String> {
+    let kh = require_kernel(kernel)?;
+    let task_id = input["task_id"]
+        .as_str()
+        .ok_or("Missing 'task_id' parameter")?;
+    match kh.task_get(task_id).await? {
+        Some(task) => {
+            // Project to the same six columns comms_task_status returns from
+            // the bridge SQL — keeps the native tool's contract tight even if
+            // task_get later grows additional fields.
+            let projected = serde_json::json!({
+                "status":       task.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "result":       task.get("result").cloned().unwrap_or(serde_json::Value::Null),
+                "title":        task.get("title").cloned().unwrap_or(serde_json::Value::Null),
+                "assigned_to":  task.get("assigned_to").cloned().unwrap_or(serde_json::Value::Null),
+                "created_at":   task.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+                "completed_at": task.get("completed_at").cloned().unwrap_or(serde_json::Value::Null),
+            });
+            serde_json::to_string_pretty(&projected).map_err(|e| format!("Serialize error: {e}"))
+        }
+        None => Ok(format!("Task '{task_id}' not found.")),
+    }
 }
 
 async fn tool_event_publish(
@@ -7001,12 +7040,13 @@ mod tests {
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_recall"));
         assert!(names.contains(&"memory_list"));
-        // 6 collaboration tools
+        // 7 collaboration tools
         assert!(names.contains(&"agent_find"));
         assert!(names.contains(&"task_post"));
         assert!(names.contains(&"task_claim"));
         assert!(names.contains(&"task_complete"));
         assert!(names.contains(&"task_list"));
+        assert!(names.contains(&"task_status"));
         assert!(names.contains(&"event_publish"));
         // 5 new Phase 3 tools
         assert!(names.contains(&"schedule_create"));
@@ -7066,6 +7106,7 @@ mod tests {
             "task_claim",
             "task_complete",
             "task_list",
+            "task_status",
             "event_publish",
         ];
         for name in &collab_tools {

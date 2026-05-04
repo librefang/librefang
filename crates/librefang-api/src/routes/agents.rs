@@ -884,7 +884,12 @@ pub async fn list_agents(
         )
     };
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
+    // #3569: dashboard hot path. Switch to `list_arcs()` so we share Arc
+    // pointers with the registry instead of deep-cloning every manifest
+    // (12+ Vecs/HashMaps) on each refresh — at 50 agents and a 20-30s
+    // dashboard poll that was the dominant allocator on this handler.
+    let mut agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> =
+        state.kernel.agent_registry().list_arcs();
 
     // -- Filtering --
     // Exclude hand agents by default; pass ?include_hands=true to include them.
@@ -957,7 +962,7 @@ pub async fn list_agents(
     // -- Pagination --
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.map(|l| l.min(500));
-    let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(lim) = limit {
+    let agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> = if let Some(lim) = limit {
         agents.into_iter().skip(offset).take(lim).collect()
     } else {
         agents.into_iter().skip(offset).collect()
@@ -968,9 +973,11 @@ pub async fn list_agents(
     // pagination-clipped).
     let bulk_stats = state.kernel.memory_substrate().agents_stats_24h_bulk().ok();
 
+    // `e` is &Arc<AgentEntry>; `as_ref()` on Arc yields the &AgentEntry the
+    // helper expects without forcing a manifest deep-clone (#3569).
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e, &dm, &catalog, bulk_stats.as_ref()))
+        .map(|e| enrich_agent_json(e.as_ref(), &dm, &catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {
@@ -5216,7 +5223,8 @@ pub async fn get_agent_file(
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let resolved_lang = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(resolved_lang);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -5290,7 +5298,14 @@ pub async fn get_agent_file(
         );
     }
 
-    let content = match std::fs::read_to_string(&canonical) {
+    // Off-runtime read so this axum handler never parks a tokio worker
+    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
+    // must be dropped before the `.await` and re-created afterwards or
+    // axum's `Handler` bound fails to compile.
+    drop(t);
+    let read_result = tokio::fs::read_to_string(&canonical).await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
         Ok(c) => c,
         Err(_) => {
             return (
@@ -6897,7 +6912,7 @@ mod monitoring_tests {
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use librefang_runtime::audit::AuditAction;
+    use librefang_kernel::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     fn monitoring_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {

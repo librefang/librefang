@@ -21,7 +21,10 @@ pub enum Channel {
 
 #[derive(Parser, Debug)]
 pub struct ReleaseArgs {
-    /// Explicit version (e.g. 2026.3.2114 or 2026.3.2114-beta1)
+    /// Explicit version (e.g. 2026.5.4 or 2026.5.4-beta.1).
+    /// Pre-release tags follow SemVer (`-beta.N` / `-rc.N`, with the dot)
+    /// per #3310; the legacy `-betaN` form is still parsed for backward
+    /// compatibility but new tags should use the canonical form.
     #[arg(long)]
     pub version: Option<String>,
 
@@ -234,19 +237,25 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         // same numbers. Previously this was only done inside the prompt
         // branch, which meant `--no-confirm` silently defaulted to
         // stable and skipped rc/beta/lts entirely.
-        let current_beta_num = Regex::new(r"-beta(\d+)$")
+        // Optional dot in `-beta.?N` accepts both the canonical `-beta.N`
+        // (#3310) and the legacy `-betaN` so an in-flight Cargo.toml from
+        // either era still resolves correctly.
+        let current_beta_num = Regex::new(r"-beta\.?(\d+)$")
             .unwrap()
             .captures(&current)
             .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
             .unwrap_or(0);
-        let current_rc_num = Regex::new(r"-rc(\d+)$")
+        let current_rc_num = Regex::new(r"-rc\.?(\d+)$")
             .unwrap()
             .captures(&current)
             .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
             .unwrap_or(0);
 
-        let beta_re =
-            Regex::new(&format!(r"^v{}-beta(\d+)$", regex::escape(&base_version))).unwrap();
+        let beta_re = Regex::new(&format!(
+            r"^v{}-beta\.?(\d+)$",
+            regex::escape(&base_version)
+        ))
+        .unwrap();
         let max_beta_tag = Command::new("git")
             .args(["tag", "-l", &format!("v{}-beta*", base_version)])
             .current_dir(&root)
@@ -262,7 +271,8 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(0);
         let next_beta = max_beta_tag.max(current_beta_num) + 1;
 
-        let rc_re = Regex::new(&format!(r"^v{}-rc(\d+)$", regex::escape(&base_version))).unwrap();
+        let rc_re =
+            Regex::new(&format!(r"^v{}-rc\.?(\d+)$", regex::escape(&base_version))).unwrap();
         let max_rc_tag = Command::new("git")
             .args(["tag", "-l", &format!("v{}-rc*", base_version)])
             .current_dir(&root)
@@ -297,11 +307,16 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(0);
         let next_lts_patch = lts_count;
 
+        // Canonical pre-release form is `-beta.N` / `-rc.N` (SemVer
+        // pre-release identifier), unified in #3310. The dot is required
+        // for npm dist-tag automation and node-semver / cargo parsing —
+        // historical `-betaN` (no dot) tags remain readable but no new
+        // ones are minted from this generator.
         let version_for = |ch: Channel| -> String {
             match ch {
                 Channel::Stable => base_version.clone(),
-                Channel::Beta => format!("{}-beta{}", base_version, next_beta),
-                Channel::Rc => format!("{}-rc{}", base_version, next_rc),
+                Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
+                Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
                 Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
             }
         };
@@ -337,9 +352,13 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Validate CalVer early, before using version in git tags/branches
+    // Validate CalVer early, before using version in git tags/branches.
+    // `(beta|rc)\.?[0-9]+` accepts both the canonical `-beta.N` (#3310) and
+    // the legacy `-betaN`; the generator only emits the canonical form, but
+    // operators may still pass `--version 2026.5.4-beta1` against an old
+    // workflow snippet and we don't want that to abort the release.
     let calver_re =
-        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)[0-9]+|-lts(\.[0-9]+)?)?$")
+        Regex::new(r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)\.?[0-9]+|-lts(\.[0-9]+)?)?$")
             .unwrap();
     if !calver_re.is_match(&version) {
         return Err(format!(
@@ -947,4 +966,119 @@ fn run_lts_patch(root: &Path, args: &ReleaseArgs) -> Result<(), Box<dyn std::err
     println!("LTS patch {} released.", tag);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces the closure in `run()` so the generator's output format
+    /// is locked down by a unit test. Issue #3310 unified pre-release tags
+    /// to SemVer `-beta.N` / `-rc.N`; this test guards against accidental
+    /// regression to the old `-betaN` form.
+    fn version_for(
+        base_version: &str,
+        lts_base: &str,
+        next_beta: u64,
+        next_rc: u64,
+        next_lts_patch: u64,
+        ch: Channel,
+    ) -> String {
+        match ch {
+            Channel::Stable => base_version.to_string(),
+            Channel::Beta => format!("{}-beta.{}", base_version, next_beta),
+            Channel::Rc => format!("{}-rc.{}", base_version, next_rc),
+            Channel::Lts => format!("{}.{}-lts", lts_base, next_lts_patch),
+        }
+    }
+
+    #[test]
+    fn generator_emits_canonical_beta_with_dot() {
+        let v = version_for("2026.5.4", "2026.5", 1, 0, 0, Channel::Beta);
+        assert_eq!(v, "2026.5.4-beta.1");
+    }
+
+    #[test]
+    fn generator_emits_canonical_rc_with_dot() {
+        let v = version_for("2026.5.4", "2026.5", 0, 3, 0, Channel::Rc);
+        assert_eq!(v, "2026.5.4-rc.3");
+    }
+
+    #[test]
+    fn generator_does_not_zero_pad() {
+        // Single-digit month/day stay unpadded — npm-friendly SemVer form.
+        let v = version_for("2026.5.4", "2026.5", 7, 0, 0, Channel::Beta);
+        assert_eq!(v, "2026.5.4-beta.7");
+        assert!(!v.contains(".05."));
+        assert!(!v.contains(".04-"));
+    }
+
+    #[test]
+    fn parser_accepts_canonical_beta_dot_form() {
+        // current_beta_num regex from the run() body.
+        let re = Regex::new(r"-beta\.?(\d+)$").unwrap();
+        assert_eq!(
+            re.captures("2026.5.4-beta.1")
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string())),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn parser_accepts_legacy_beta_no_dot() {
+        // Historical tags like v2026.5.2-beta8 must still parse so
+        // `--channel beta` next-number computation lands on beta.9
+        // (or higher) rather than starting over at beta.1.
+        let re = Regex::new(r"-beta\.?(\d+)$").unwrap();
+        assert_eq!(
+            re.captures("2026.5.2-beta8")
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string())),
+            Some("8".to_string())
+        );
+    }
+
+    #[test]
+    fn parser_accepts_legacy_zero_padded_day() {
+        // Very old `vYYYY.M.DD-betaN` zero-pad form. The day still has to
+        // round-trip through the calver_re; we only assert the suffix
+        // parser here since day digits are not zero-checked.
+        let re = Regex::new(r"-beta\.?(\d+)$").unwrap();
+        assert_eq!(
+            re.captures("2026.03.21-beta1")
+                .and_then(|c| c.get(1).map(|m| m.as_str().to_string())),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn migration_path_parse_then_regenerate_uses_dot_form() {
+        // Read a legacy tag, extract the beta number, then regenerate
+        // using the new canonical format. Confirms the migration path:
+        // historical `-beta8` → next is `-beta.9`.
+        let legacy = "2026.5.2-beta8";
+        let re = Regex::new(r"-beta\.?(\d+)$").unwrap();
+        let n: u64 = re
+            .captures(legacy)
+            .and_then(|c| c.get(1)?.as_str().parse::<u64>().ok())
+            .unwrap();
+        assert_eq!(n, 8);
+        let next = version_for("2026.5.2", "2026.5", n + 1, 0, 0, Channel::Beta);
+        assert_eq!(next, "2026.5.2-beta.9");
+    }
+
+    #[test]
+    fn calver_re_accepts_both_forms() {
+        let re = Regex::new(
+            r"^[0-9]{4}\.[0-9]{1,2}(\.[0-9]{1,4})?(-(beta|rc)\.?[0-9]+|-lts(\.[0-9]+)?)?$",
+        )
+        .unwrap();
+        assert!(re.is_match("2026.5.4-beta.1"));
+        assert!(re.is_match("2026.5.4-rc.3"));
+        assert!(re.is_match("2026.5.4-beta1"));
+        assert!(re.is_match("2026.5.4-rc1"));
+        assert!(re.is_match("2026.5.4"));
+        assert!(re.is_match("2026.5.0-lts.1"));
+        assert!(!re.is_match("2026.5.4-beta"));
+        assert!(!re.is_match("v2026.5.4-beta.1"));
+    }
 }

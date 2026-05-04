@@ -28,6 +28,7 @@ dashmap = { workspace = true }
 rusqlite = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }

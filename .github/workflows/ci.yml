@@ -222,6 +222,12 @@ jobs:
             patchelf
       - name: Check formatting
         run: cargo xtask fmt
+      - name: Check API error response shape (issue #3505)
+        # Pure text scan, ~milliseconds. Rejects new `{"detail": …}` or
+        # `{"status": "error", …}` constructions in `routes/`. Files
+        # that still carry legacy shapes are listed in the script's
+        # LEGACY_FILES allowlist with their cleanup follow-ups.
+        run: bash scripts/check-error-shape.sh
       - name: Ensure dashboard build dir exists
         run: mkdir -p crates/librefang-api/static/react
       - name: Build + clippy

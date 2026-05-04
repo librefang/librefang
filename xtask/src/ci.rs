@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::process::Command;
 use std::time::Instant;
@@ -38,6 +39,11 @@ fn run_step(name: &str, cmd: &mut Command) -> Result<(), Box<dyn std::error::Err
 }
 
 pub fn run(args: CiArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Apply LIBREFANG_LOCAL_CHECK_MODE before any cargo invocation (#3301).
+    // Auto-throttles cargo concurrency on low-spec hosts; CI=true preserves
+    // full parallelism. See `local_check_mode` for the behaviour matrix.
+    local_check_mode::apply_for_subcommand("ci");
+
     let root = repo_root();
     let total_start = Instant::now();
 
