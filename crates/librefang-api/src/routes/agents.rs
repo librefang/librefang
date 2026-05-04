@@ -6225,6 +6225,7 @@ pub async fn push_message(
                 .kernel
                 .send_channel_message(&req.channel, &req.recipient, &req.message, thread_id, None)
                 .await
+                .map_err(|e| e.to_string())
         }
     };
 

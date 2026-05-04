@@ -175,7 +175,7 @@ impl ChannelSender for CapturingFileKernel {
         _mime_type: &str,
         _thread_id: Option<&str>,
         _account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         *self.last_seen_addr.lock().unwrap() = Some(data.as_ptr() as usize);
         *self.last_seen_len.lock().unwrap() = data.len();
         Ok("captured".into())

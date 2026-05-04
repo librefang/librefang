@@ -539,7 +539,7 @@ pub async fn approve_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::bad_request(e.to_string()).into_json_tuple().into_response(),
     }
 }
 
@@ -578,7 +578,7 @@ pub async fn reject_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e.to_string()).into_json_tuple().into_response(),
     }
 }
 
@@ -635,7 +635,7 @@ pub async fn modify_request(
             ),
         )
             .into_response(),
-        Err(e) => ApiErrorResponse::not_found(e).into_json_tuple().into_response(),
+        Err(e) => ApiErrorResponse::not_found(e.to_string()).into_json_tuple().into_response(),
     }
 }
 
@@ -729,7 +729,7 @@ pub async fn batch_resolve(
                 "decided_at": resp.decided_at.to_rfc3339(),
             })),
             Err(e) => {
-                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e}))
+                result_json.push(serde_json::json!({"id": id, "status": "error", "message": e.to_string()}))
             }
         }
     }
