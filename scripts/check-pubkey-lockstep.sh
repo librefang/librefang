@@ -26,10 +26,18 @@ extract() {
   fi
   # Match the name then either '...' or "...", capture body.
   local body
-  # Match NAME ... = "..." or NAME ... : '...'  — anything between the name
-  # and the value-opener so Rust's `const NAME: &str = "..."` parses too.
-  body="$(perl -ne 'if (/'"$name"'\b[^=\n:]*[:=][^"\x27\n]*['\''"]([A-Za-z0-9+\/=]+)['\''"]/) { print $1; exit }' \
-    "$repo_root/$path" 2>/dev/null || true)"
+  # Anchor at start-of-line + word-boundary on $name so a future
+  # `LEGACY_REGISTRY_PUBLIC_KEY` doesn't false-positive (PR re-review
+  # HIGH-NEW-E). Allow `=` (TOML / JS) or `: ... =` (Rust const)
+  # between $name and the quoted value but no other quoted strings,
+  # which prevents picking up base64-shaped fragments inside comments.
+  # Length-check the captured value to exactly 44 chars (Ed25519 raw
+  # 32 bytes -> base64 with padding) — wrong length is wrong key.
+  body="$(perl -ne '
+    if (/^[ \t]*(?:const[ \t]+)?'"$name"'\b[^"\x27\n=]*=[ \t]*['\''"]([A-Za-z0-9+\/=]{44})['\''"]/) {
+      print $1; exit
+    }
+  ' "$repo_root/$path" 2>/dev/null || true)"
   if [ -z "$body" ]; then
     echo "::error file=$path::$name constant not found" >&2
     exit 1

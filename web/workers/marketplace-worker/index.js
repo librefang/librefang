@@ -596,13 +596,23 @@ function b64FromBytes(bytes) {
 // ---------------------------------------------------------------------------
 
 // Hosts that publish immutable, content-addressed artefacts and are
-// reasonable trust roots for marketplace bundles (PR review CRITICAL #2).
-// Adding entries here means accepting that the worker will sign anything
-// stored at that host — keep the list short and well-motivated.
-const ALLOWED_BUNDLE_HOST_PREFIXES = [
-  'https://github.com/',                    // .../<owner>/<repo>/releases/download/...
-  'https://objects.githubusercontent.com/', // GitHub release-asset CDN (download redirects)
-  'https://marketplace.librefang.ai/',      // marketplace's own R2 bucket
+// reasonable trust roots for marketplace bundles. PR re-review HIGH-NEW-D
+// closed two leaks here:
+//   1. raw-string startsWith() check was bypassable via WHATWG URL
+//      normalization (`https://github.com/../../attacker/x.tgz` parses
+//      to `https://attacker/x.tgz` but startsWith('https://github.com/')
+//      returns true on the unparsed input). Now matched on parsed
+//      (host, pathPrefix) tuples.
+//   2. `https://github.com/<owner>/<repo>/raw/main/x.tgz` matched the
+//      old `https://github.com/` prefix but is mutable (branch HEAD).
+//      Restrict to `/releases/download/` (release assets are immutable
+//      once tag-pinned) and the GitHub asset CDN, which is what
+//      `gh release download` redirects to.
+const ALLOWED_BUNDLE_LOCATIONS = [
+  // (host, pathPrefix) — both must match after URL parsing.
+  { host: 'github.com',                    pathRegex: /^\/[^/]+\/[^/]+\/releases\/download\// },
+  { host: 'objects.githubusercontent.com', pathRegex: /^\// },
+  { host: 'marketplace.librefang.ai',      pathRegex: /^\/bundles\// },
 ]
 
 function isAllowedBundleHost(url) {
@@ -614,9 +624,14 @@ function isAllowedBundleHost(url) {
     return false
   }
   if (parsed.protocol !== 'https:') return false
-  // Reject URLs with credentials embedded (https://attacker@github.com/...).
   if (parsed.username || parsed.password) return false
-  return ALLOWED_BUNDLE_HOST_PREFIXES.some(prefix => url.startsWith(prefix))
+  // Reject hash + query — bundle URLs should be plain immutable paths.
+  // (CDN-side cache busters via ?v= are an acceptable loss; signers can
+  //  drop them before publishing.)
+  if (parsed.hash) return false
+  return ALLOWED_BUNDLE_LOCATIONS.some(loc =>
+    parsed.host === loc.host && loc.pathRegex.test(parsed.pathname),
+  )
 }
 
 function json(data, status = 200) {

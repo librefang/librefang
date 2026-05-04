@@ -438,10 +438,19 @@ async function doSyncFromRepo(env, { requireAuth, request }) {
   } catch (e) {
     return errorResponse(`registry-index.json invalid: ${e.message}`, 502)
   }
-  // Ed25519 sig is 64 bytes → 88 base64 chars (incl. padding) or 86 chars
-  // unpadded. Allow either.
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(pluginsSigText) || pluginsSigText.length < 86) {
-    return errorResponse(`plugins-index.json.sig is not valid base64`, 502)
+  // Ed25519 sig is exactly 64 bytes → 88 base64 chars (with `==` padding)
+  // or 86 chars unpadded. Anything else is wrong-shape garbage that the
+  // daemon would reject; better to bounce here than poison D1 with it
+  // (PR re-review MEDIUM-NEW-F).
+  if (
+    (pluginsSigText.length !== 88 && pluginsSigText.length !== 86) ||
+    !/^[A-Za-z0-9+/]+(?:==)?$/.test(pluginsSigText)
+  ) {
+    return errorResponse(
+      `plugins-index.json.sig is not a valid Ed25519 signature ` +
+      `(expected 86 or 88 base64 chars; got ${pluginsSigText.length})`,
+      502,
+    )
   }
 
   const now = Math.floor(Date.now() / 1000)
@@ -467,10 +476,18 @@ async function doSyncFromRepo(env, { requireAuth, request }) {
   ])
 
   // Purge the Cache-API entry the dashboard hits — without this,
-  // /api/registry serves the previous cached payload for up to 1h.
+  // /api/registry serves the previous cached payload for up to 1h. PR
+  // re-review MEDIUM-NEW-G: surface the outcome so the GH Action can
+  // see partial-success runs (D1 stored, cache stale) instead of
+  // assuming fresh-everywhere on a 200.
+  let cachePurged = false
+  let cachePurgeError = null
   try {
-    await caches.default.delete(new Request('https://internal/registry_data'))
-  } catch (_) { /* best-effort */ }
+    cachePurged = await caches.default.delete(new Request('https://internal/registry_data'))
+  } catch (e) {
+    cachePurgeError = e?.message || String(e)
+    console.error('Cache purge failed:', cachePurgeError)
+  }
 
   return new Response(
     JSON.stringify({
@@ -479,6 +496,8 @@ async function doSyncFromRepo(env, { requireAuth, request }) {
       plugins_bytes: pluginsText.length,
       sig_bytes: pluginsSigText.length,
       registry_bytes: registryText.length,
+      cache_purged: cachePurged,
+      ...(cachePurgeError ? { cache_purge_error: cachePurgeError } : {}),
     }),
     { headers: { 'Content-Type': 'application/json', ...CORS } },
   )

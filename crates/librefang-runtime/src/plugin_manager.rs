@@ -15,33 +15,44 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Embedded raw 32-byte Ed25519 public key for the official LibreFang
-/// plugin registry, base64-encoded.
+/// Embedded raw 32-byte Ed25519 public keys for the official LibreFang
+/// plugin registry, base64-encoded. The first entry is the **current**
+/// production key; the slice may carry one or more **prior** keys during
+/// a rotation grace window so that daemons in the field don't hard-fail
+/// installs the moment ops rotates the worker side.
 ///
 /// This is the **primary trust root** for `librefang/librefang-registry`
 /// installs. The earlier TOFU-via-HTTP approach was vulnerable to a
 /// first-install MITM (cafe wifi, hostile DNS, subdomain takeover of the
 /// pubkey-serving host) silently pinning an attacker key forever — see PR
-/// review HIGH #5 / #16. By compiling the key into the daemon binary we
+/// review HIGH #5 / #16. By compiling the keys into the daemon binary we
 /// take HTTPS + the daemon release pipeline as the trust path instead.
 ///
-/// Must match `REGISTRY_PUBLIC_KEY` in:
+/// `EMBEDDED_REGISTRY_PUBKEYS[0]` (the first/active key) MUST match
+/// `REGISTRY_PUBLIC_KEY` in:
 ///   - `web/workers/registry-worker/wrangler.toml`
 ///   - `web/workers/marketplace-worker/wrangler.toml`
 ///   - `web/public/_worker.js`
 ///
-/// The `scripts/check-pubkey-lockstep.sh` CI guard fails if any drift.
+/// `scripts/check-pubkey-lockstep.sh` (CI guard) extracts and compares
+/// against the first entry only.
 ///
-/// Rotation is deliberately disruptive: a new daemon release ships with
-/// the new constant; in-flight installs against the old key fail closed.
-/// See `docs/architecture/plugin-signing.md` § "Rotation".
-const EMBEDDED_REGISTRY_PUBKEY: &str = "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=";
+/// Rotation procedure:
+///   1. Generate new keypair, publish private to registry CI.
+///   2. Land a daemon release that prepends the new key to this slice
+///      (old key remains in slot 1 as a fallback).
+///   3. Roll registry / worker side to the new key.
+///   4. After the deprecation window (4-6 weeks), drop the old key from
+///      this slice in a follow-up daemon release.
+const EMBEDDED_REGISTRY_PUBKEYS: &[&str] = &[
+    "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+];
 
 /// Default URL for self-hosted registries that opt into HTTP pubkey
 /// resolution (operators of `acme/private-registry` style forks who don't
 /// want to rebuild the daemon to ship a key constant). Off the official
 /// trust path — never consulted for the official registry, which uses
-/// [`EMBEDDED_REGISTRY_PUBKEY`].
+/// [`EMBEDDED_REGISTRY_PUBKEYS`].
 ///
 /// Uses the `/api/registry/pubkey` form because the official custom
 /// domain routes only `/api/*` to the worker; the `.well-known/...`
@@ -156,7 +167,7 @@ fn write_pubkey_cache_safely(path: &std::path::Path, value: &str) -> std::io::Re
 /// Resolve the registry pubkey using the layered chain:
 ///   1. `LIBREFANG_REGISTRY_PUBKEY` env var override (always wins — covers
 ///      self-hosted forks and operator-driven rotation).
-///   2. [`EMBEDDED_REGISTRY_PUBKEY`] compiled-in constant (the **primary
+///   2. [`EMBEDDED_REGISTRY_PUBKEYS`] compiled-in constant (the **primary
 ///      trust root** for the official `librefang/librefang-registry`
 ///      registry — no network call, no MITM surface).
 ///   3. `~/.librefang/registry.pub` TOFU cache + HTTP fetch from
@@ -180,12 +191,19 @@ async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, Str
         }
     }
 
-    if is_valid_registry_pubkey_b64(EMBEDDED_REGISTRY_PUBKEY) {
-        return Ok(EMBEDDED_REGISTRY_PUBKEY.to_string());
+    // Active embedded key (slot 0) is the primary trust anchor for the
+    // official registry. The full slice — including any rotation-window
+    // keys — is consulted at verification time via `verify_registry_index`.
+    if let Some(active) = EMBEDDED_REGISTRY_PUBKEYS
+        .first()
+        .copied()
+        .filter(|k| is_valid_registry_pubkey_b64(k))
+    {
+        return Ok(active.to_string());
     }
-    // Embedded key being malformed is a build-time mistake; warn but keep
-    // trying so the daemon stays usable for self-hosted forks.
-    warn!("EMBEDDED_REGISTRY_PUBKEY is malformed — falling through to TOFU/HTTP");
+    // No valid embedded key is a build-time mistake; warn but keep trying
+    // so the daemon stays usable for self-hosted forks.
+    warn!("EMBEDDED_REGISTRY_PUBKEYS slot 0 is malformed — falling through to TOFU/HTTP");
 
     let cache_path = registry_pubkey_cache_path()?;
     if let Some(cached) = read_pubkey_cache_safely(&cache_path) {
@@ -285,6 +303,40 @@ fn verify_registry_index(
     verifying_key
         .verify(index_bytes, &signature)
         .map_err(|e| format!("Signature verification failed: {e}"))
+}
+
+/// Verify the index signature against `resolved_pubkey` first, then fall
+/// back to any prior keys in [`EMBEDDED_REGISTRY_PUBKEYS`]. This gives a
+/// rotation grace window: when ops rotates the worker-side key but a
+/// daemon in the field is still on the previous release, the daemon
+/// keeps verifying installs as long as the previous key is still in the
+/// embedded slice. PR re-review LOW.
+fn verify_registry_index_multi(
+    index_bytes: &[u8],
+    sig_b64: &str,
+    resolved_pubkey: &str,
+) -> Result<(), String> {
+    let mut last_err = match verify_registry_index(index_bytes, sig_b64, resolved_pubkey) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    for &candidate in EMBEDDED_REGISTRY_PUBKEYS {
+        if candidate == resolved_pubkey {
+            continue; // already tried
+        }
+        match verify_registry_index(index_bytes, sig_b64, candidate) {
+            Ok(()) => {
+                warn!(
+                    "Registry index verified against a prior embedded pubkey \
+                     (rotation grace window). Update the daemon binary to \
+                     drop the prior key once the rollout is complete."
+                );
+                return Ok(());
+            }
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 // `verify_archive_signature` was removed in PR #4600 — it always fetched
@@ -443,44 +495,41 @@ pub async fn fetch_verified_index(
             )
         })?;
 
-        // For the official registry, a missing or unreachable .sig is a
-        // hard fail — we already enforce pubkey resolution above, so an
-        // attacker who can serve a doctored index.json and just delete the
-        // .sig (or return 404) must not be able to slip past with an
-        // unsigned payload (PR review HIGH #6). For self-hosted forks the
-        // soft path stays — they may not have signing infrastructure yet.
-        let require_sig = registry == OFFICIAL_REGISTRY_REPO;
+        // Hard-fail on missing or unreachable .sig — for ALL registries,
+        // not just the official one. The previous "soft for forks" path
+        // was bypassable: an attacker who could change the registry slug
+        // to anything other than "librefang/librefang-registry" flipped
+        // off the require_sig flag and then served an unsigned index that
+        // EMBEDDED pubkey couldn't verify but the warning path silently
+        // accepted. Closes PR re-review HIGH-NEW-B.
+        //
+        // Self-hosted forks that haven't deployed signing infrastructure
+        // yet must explicitly opt out via LIBREFANG_REGISTRY_VERIFY=0
+        // (gated above) — there is no implicit-by-slug downgrade path.
         match client.get(&sig_url).send().await {
             Ok(sig_resp) if sig_resp.status().is_success() => {
                 let sig_text = sig_resp
                     .text()
                     .await
                     .map_err(|e| format!("Failed to read signature: {e}"))?;
-                verify_registry_index(&index_bytes, sig_text.trim(), &pubkey)?;
+                verify_registry_index_multi(&index_bytes, sig_text.trim(), &pubkey)?;
                 info!(registry, "Registry index signature verified OK");
             }
-            Ok(sig_resp) if require_sig => {
+            Ok(sig_resp) => {
                 return Err(format!(
-                    "Registry index signature unavailable for official mirror \
-                     (HTTP {} from {sig_url}) — refusing to trust unsigned index. \
-                     If this is a self-hosted fork, point LIBREFANG_REGISTRY_INDEX_URL \
-                     at it so the official-mirror enforcement does not apply.",
+                    "Registry index signature unavailable (HTTP {} from {sig_url}) \
+                     — refusing to trust unsigned index. Set \
+                     LIBREFANG_REGISTRY_VERIFY=0 only if you are testing against an \
+                     unsigned development mirror.",
                     sig_resp.status()
                 ));
             }
-            Err(e) if require_sig => {
+            Err(e) => {
                 return Err(format!(
-                    "Registry index signature fetch failed for official mirror \
-                     ({sig_url}): {e}. Refusing to trust unsigned index — a network \
-                     downgrade attack must not silently bypass verification."
+                    "Registry index signature fetch failed ({sig_url}): {e}. \
+                     Refusing to trust unsigned index — a network downgrade \
+                     attack must not silently bypass verification."
                 ));
-            }
-            _ => {
-                warn!(
-                    registry,
-                    "No index.json.sig found — registry index not signature-verified \
-                     (self-hosted registry; official mirror would hard-fail here)"
-                );
             }
         }
     }
@@ -1076,39 +1125,29 @@ async fn install_from_registry(
         return Err(format!("Failed to download plugin '{name}': {e}"));
     }
 
-    // Verify checksum if available (non-fatal warning if no checksum file exists).
-    // checksum_verified gates the Ed25519 fallback below: when SHA-256 has
-    // confirmed the manifest, an unavailable Ed25519 pubkey downgrades to a
-    // warning instead of a hard failure (defense in depth, not single point).
-    let checksum_verified = match fetch_checksum(&client, &listing_url, name).await {
-        Some(expected) => {
-            // For registry plugins installed file-by-file, compute checksum over
-            // the serialised manifest as a representative integrity check.
-            let manifest_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
-                .await
-                .unwrap_or_default();
-            if let Err(e) = verify_checksum(&manifest_bytes, &expected) {
-                let _ = tokio::fs::remove_dir_all(&target_dir).await;
-                return Err(e);
-            }
-            info!(plugin = name, "Checksum verified OK");
-            true
+    // Verify checksum if a checksum file exists. This catches in-flight
+    // tampering of the manifest bytes between GitHub and the daemon, but
+    // does NOT serve as a fallback for the index-membership check below
+    // (PR re-review HIGH-NEW-C): the .sha256 file lives on the same
+    // GitHub repo as the plugin, so an attacker who controls the listing
+    // can forge a matching checksum trivially.
+    if let Some(expected) = fetch_checksum(&client, &listing_url, name).await {
+        let manifest_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
+            .await
+            .unwrap_or_default();
+        if let Err(e) = verify_checksum(&manifest_bytes, &expected) {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(e);
         }
-        None => {
-            warn!(
-                plugin = name,
-                "No checksum file found for this plugin release. \
-                 Install proceeds without SHA-256 verification — \
-                 Ed25519 signature will be REQUIRED."
-            );
-            false
-        }
-    };
+        info!(plugin = name, "Checksum verified OK");
+    } else {
+        debug!(
+            plugin = name,
+            "No checksum file alongside this plugin release — relying on \
+             signed index membership instead."
+        );
+    }
 
-    // Verify Ed25519 archive signature. The pubkey resolver tries env override,
-    // TOFU cache, then a worker fetch. When all paths fail:
-    //   * SHA-256 already verified → warn and proceed (we still have integrity)
-    //   * SHA-256 absent           → hard-fail (no integrity check would remain)
     // Per-plugin Ed25519 archive signatures are NOT served by the official
     // registry — the older code that fetched `{listing_url}.sig` was always
     // a 404 (PR review CRITICAL #3) and silently passed every install.
@@ -1117,41 +1156,62 @@ async fn install_from_registry(
     // `<name>` cannot also forge an entry for `<name>` in the worker's
     // Ed25519-signed flat index (the worker won't sign content it didn't
     // pull from the registry repo's committed `plugins-index.json`).
+    // Note that `checksum_verified` is now NOT a fallback for index-fetch
+    // failure (PR re-review HIGH-NEW-C). The SHA-256 checksum file lives
+    // on the same attacker-controlled GitHub repo as the plugin itself,
+    // so an attacker who can serve a doctored manifest with a matching
+    // checksum AND DoS stats.librefang.ai gets a free pass on the older
+    // logic. Refuse to install on any index-fetch failure: a real
+    // operational network issue should stop installs (which fail safe),
+    // not silently downgrade to a weaker integrity check.
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Index-membership verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
     } else {
-        match fetch_verified_index(&client, github_repo).await {
-            Ok(index_entries) => {
-                let in_index = index_entries.iter().any(|e| {
-                    e.get("name").and_then(|v| v.as_str()) == Some(name)
-                });
-                if !in_index {
-                    let _ = tokio::fs::remove_dir_all(&target_dir).await;
-                    return Err(format!(
-                        "Plugin '{name}' is not present in the signed registry index. \
-                         Refusing to install — the GitHub Contents listing alone is \
-                         not a sufficient trust root. If this is a brand-new plugin, \
-                         wait for the registry's CI to regenerate plugins-index.json \
-                         and re-sign before installing."
-                    ));
+        // Single retry with backoff catches transient network blips
+        // without papering over a sustained outage / active downgrade.
+        let mut last_err: Option<String> = None;
+        let mut entries: Option<Vec<serde_json::Value>> = None;
+        for attempt in 0..2 {
+            match fetch_verified_index(&client, github_repo).await {
+                Ok(es) => {
+                    entries = Some(es);
+                    break;
                 }
-                info!(plugin = name, "Plugin presence in signed index confirmed");
-            }
-            Err(e) if checksum_verified => {
-                warn!(
-                    plugin = name,
-                    "Index-membership check skipped: {e}. SHA-256 already verified — install proceeds."
-                );
-            }
-            Err(e) => {
-                let _ = tokio::fs::remove_dir_all(&target_dir).await;
-                return Err(format!(
-                    "Cannot verify plugin '{name}' integrity: SHA-256 checksum was unavailable \
-                     AND signed registry index could not be fetched. {e} \
-                     Refusing to install without any integrity check."
-                ));
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt == 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
             }
         }
+
+        let Some(index_entries) = entries else {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(format!(
+                "Cannot verify plugin '{name}' integrity: signed registry index \
+                 fetch failed after retry. {} Refusing to install — install must \
+                 fail safe when the trust root is unreachable, regardless of any \
+                 SHA-256 checksum on the GitHub repo (which an attacker who can \
+                 serve a doctored manifest can also forge).",
+                last_err.unwrap_or_default()
+            ));
+        };
+
+        let in_index = index_entries.iter().any(|e| {
+            e.get("name").and_then(|v| v.as_str()) == Some(name)
+        });
+        if !in_index {
+            let _ = tokio::fs::remove_dir_all(&target_dir).await;
+            return Err(format!(
+                "Plugin '{name}' is not present in the signed registry index. \
+                 Refusing to install — the GitHub Contents listing alone is not \
+                 a sufficient trust root. If this is a brand-new plugin, wait \
+                 for the registry's CI to regenerate plugins-index.json and \
+                 re-sign before installing."
+            ));
+        }
+        info!(plugin = name, "Plugin presence in signed index confirmed");
     }
 
     // Bug #3804 — verify hook script integrity after install.
