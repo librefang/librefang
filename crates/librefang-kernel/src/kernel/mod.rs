@@ -8216,7 +8216,7 @@ system_prompt = "You are a helpful assistant."
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
                     if let Some(updated) = self.registry.get(agent_id) {
-                        if let Err(e) = self.memory.save_agent(&updated) {
+                        if let Err(e) = self.memory.save_agent_async(&updated).await {
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 error = %e,
@@ -8867,12 +8867,16 @@ system_prompt = "You are a helpful assistant."
             let start = result.new_messages_start.min(session.messages.len());
             if start < session.messages.len() {
                 let new_messages = session.messages[start..].to_vec();
-                if let Err(e) = self.memory.append_canonical(
-                    agent_id,
-                    &new_messages,
-                    None,
-                    Some(effective_session_id),
-                ) {
+                if let Err(e) = self
+                    .memory
+                    .append_canonical_async(
+                        agent_id,
+                        &new_messages,
+                        None,
+                        Some(effective_session_id),
+                    )
+                    .await
+                {
                     warn!("Failed to update canonical session: {e}");
                 }
             }
@@ -13149,7 +13153,7 @@ system_prompt = "You are a helpful assistant."
                 .iter()
                 .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
                 .collect();
-            match self.memory.load_all_agents() {
+            match self.memory.load_all_agents_async().await {
                 Ok(all) => {
                     let mut removed = 0usize;
                     for entry in all {
@@ -13159,7 +13163,7 @@ system_prompt = "You are a helpful assistant."
                         if live_hand_agents.contains(&entry.id) {
                             continue;
                         }
-                        match self.memory.remove_agent(entry.id) {
+                        match self.memory.remove_agent_async(entry.id).await {
                             Ok(()) => {
                                 removed += 1;
                                 info!(
@@ -13629,7 +13633,11 @@ system_prompt = "You are a helpful assistant."
                         Err(e) => warn!("Startup session prune (excess) failed: {e}"),
                     }
                 }
-                if let Err(e) = self.memory.vacuum_if_shrank(pruned_total as usize) {
+                if let Err(e) = self
+                    .memory
+                    .vacuum_if_shrank_async(pruned_total as usize)
+                    .await
+                {
                     warn!("Startup VACUUM after session prune failed: {e}");
                 }
                 if pruned_total > 0 {
@@ -19878,7 +19886,7 @@ impl LibreFangKernel {
             }
         };
 
-        let mut session = match self.memory.get_session(session_id) {
+        let mut session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
@@ -19988,7 +19996,7 @@ impl LibreFangKernel {
             return;
         }
 
-        let persisted_session = match self.memory.get_session(session_id) {
+        let persisted_session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
