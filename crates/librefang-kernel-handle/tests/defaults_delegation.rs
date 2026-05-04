@@ -114,7 +114,7 @@ impl EventBus for TrackingSendHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 }
@@ -124,21 +124,21 @@ impl KnowledgeGraph for TrackingSendHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }
@@ -276,7 +276,7 @@ impl EventBus for TrackingSpawnHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 }
@@ -286,21 +286,21 @@ impl KnowledgeGraph for TrackingSpawnHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }
@@ -437,7 +437,7 @@ impl EventBus for TrackingApprovalHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 }
@@ -447,21 +447,21 @@ impl KnowledgeGraph for TrackingApprovalHandle {
     async fn knowledge_add_entity(
         &self,
         _entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("entity".into())
     }
 
     async fn knowledge_add_relation(
         &self,
         _relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("relation".into())
     }
 
     async fn knowledge_query(
         &self,
         _pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }

@@ -127,7 +127,7 @@ impl TaskQueue for CapturingKernel {
 
 #[async_trait]
 impl EventBus for CapturingKernel {
-    async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
+    async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
@@ -137,19 +137,19 @@ impl KnowledgeGraph for CapturingKernel {
     async fn knowledge_add_entity(
         &self,
         _: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     async fn knowledge_add_relation(
         &self,
         _: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     async fn knowledge_query(
         &self,
         _: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }

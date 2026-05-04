@@ -28,6 +28,96 @@
 //! atomically.
 
 use async_trait::async_trait;
+use thiserror::Error;
+
+// ============================================================================
+// Typed kernel-op errors (#3541 1/N)
+// ============================================================================
+//
+// Historically every method on the role traits returned `Result<_, String>`.
+// That destroyed structured error information at the most-trafficked seam
+// between runtime and kernel — callers resorted to substring-matching on the
+// formatted message (`.contains("not found")`) to map back to user-visible
+// categories. This enum is the typed replacement; new methods adopt it, and
+// existing ones migrate one role trait at a time.
+//
+// Variants are deliberately *categories*, not "one variant per call site":
+// callers should be able to do `match err { Unavailable { .. } => 503,
+// NotFound { .. } => 404, .. }` without having to enumerate every kernel
+// internal. `Other(String)` is the temporary catch-all for un-classified
+// failures from the kernel implementation; reduce its use as PRs migrate
+// individual paths.
+//
+// Display strings stay close to the original `format!` outputs so
+// log lines and translated UI messages don't drift on first migration.
+#[derive(Debug, Error)]
+pub enum KernelOpError {
+    /// The capability is wired off in this build / configuration. Maps to
+    /// HTTP 503 Service Unavailable. Replaces the historical
+    /// `Err("X not available".into())` pattern that role-trait default impls
+    /// emit.
+    #[error("{capability} not available")]
+    Unavailable {
+        capability: &'static str,
+    },
+
+    /// The targeted entity (agent, task, job, …) does not exist. Maps to
+    /// HTTP 404. Includes the entity *kind* and *id* so callers can surface
+    /// both without parsing the error message.
+    #[error("{kind} `{id}` not found")]
+    NotFound {
+        kind: &'static str,
+        id: String,
+    },
+
+    /// Caller-supplied input failed validation before the operation was
+    /// attempted. Maps to HTTP 400. The `field` is the *machine* name of
+    /// the field; `reason` is the human-readable cause.
+    #[error("invalid {field}: {reason}")]
+    Invalid {
+        field: &'static str,
+        reason: String,
+    },
+
+    /// JSON / TOML serialization failed. Distinct from `Invalid` because
+    /// these failures originate inside the kernel (re-encoding internal
+    /// state for the wire), not from caller input.
+    #[error("serialize failed: {0}")]
+    Serialize(#[from] serde_json::Error),
+
+    /// Catch-all for kernel-side failures that haven't been classified into
+    /// a typed variant yet. Each migration PR should reduce the population
+    /// of this variant by adding a more specific one above. **Not for
+    /// caller-input errors** — use `Invalid` for those.
+    #[error("{0}")]
+    Other(String),
+}
+
+impl KernelOpError {
+    /// Build the historical `"X not available"` payload as a typed
+    /// `Unavailable` variant. Used by role-trait default impls to keep the
+    /// "missing capability returns Err at first call" contract while
+    /// upgrading the error type. Callers can match on `Unavailable` instead
+    /// of substring-matching on `.to_string()`.
+    pub const fn unavailable(capability: &'static str) -> Self {
+        KernelOpError::Unavailable { capability }
+    }
+}
+
+// String → KernelOpError::Other for ergonomics during the migration window.
+// Kernel impls that still produce `String` errors can `.map_err(Into::into)`
+// without spelling out a variant. New code SHOULD prefer a typed variant.
+impl From<String> for KernelOpError {
+    fn from(s: String) -> Self {
+        KernelOpError::Other(s)
+    }
+}
+
+impl From<&str> for KernelOpError {
+    fn from(s: &str) -> Self {
+        KernelOpError::Other(s.to_string())
+    }
+}
 
 /// Agent info returned by list and discovery operations.
 #[derive(Debug, Clone)]
@@ -255,7 +345,7 @@ pub trait EventBus: Send + Sync {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-    ) -> Result<(), String>;
+    ) -> Result<(), KernelOpError>;
 }
 
 // ============================================================================
@@ -275,7 +365,7 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String>;
+    ) -> Result<String, KernelOpError>;
 
     /// Add a relation to the knowledge graph.
     ///
@@ -284,13 +374,13 @@ pub trait KnowledgeGraph: Send + Sync {
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String>;
+    ) -> Result<String, KernelOpError>;
 
     /// Query the knowledge graph with a pattern.
     async fn knowledge_query(
         &self,
         pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String>;
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, KernelOpError>;
 }
 
 // ============================================================================
@@ -304,21 +394,21 @@ pub trait CronControl: Send + Sync {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (agent_id, job_json);
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 
     /// List cron jobs for the calling agent.
-    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, KernelOpError> {
         let _ = agent_id;
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 
     /// Cancel a cron job by ID.
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
+    async fn cron_cancel(&self, job_id: &str) -> Result<(), KernelOpError> {
         let _ = job_id;
-        Err("Cron scheduler not available".to_string())
+        Err(KernelOpError::unavailable("Cron scheduler"))
     }
 }
 
@@ -1031,7 +1121,7 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::KernelOpError> {
             Ok(())
         }
     }
@@ -1041,19 +1131,19 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("stub".to_string())
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("stub".to_string())
+        ) -> Result<String, super::KernelOpError> {
+            Err("stub".into())
         }
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, super::KernelOpError> {
             Ok(vec![])
         }
     }

@@ -107,22 +107,22 @@ impl EventBus for NoopKernelHandle {
         &self,
         _event_type: &str,
         _payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }
 
 #[async_trait]
 impl KnowledgeGraph for NoopKernelHandle {
-    async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, String> {
+    async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn knowledge_add_relation(&self, _relation: &Relation) -> Result<String, String> {
+    async fn knowledge_add_relation(&self, _relation: &Relation) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 
-    async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, String> {
+    async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }

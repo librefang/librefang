@@ -1956,7 +1956,16 @@ pub async fn create_cron_job(
                 serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
             (StatusCode::CREATED, Json(parsed))
         }
-        Err(e) => ApiErrorResponse::bad_request(e).into_json_tuple(),
+        // Map structured KernelOpError to HTTP status (#3541): caller-input
+        // failures (Invalid) → 400, missing capability (Unavailable) → 503,
+        // everything else → 400 with the formatted message. The substring
+        // grep that the historical String error type required is gone.
+        Err(e) => match e {
+            librefang_kernel::kernel_handle::KernelOpError::Unavailable { .. } => {
+                ApiErrorResponse::internal(e.to_string()).into_json_tuple()
+            }
+            other => ApiErrorResponse::bad_request(other.to_string()).into_json_tuple(),
+        },
     }
 }
 

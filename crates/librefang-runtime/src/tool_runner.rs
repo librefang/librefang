@@ -3555,7 +3555,7 @@ async fn tool_event_publish(
         .get("payload")
         .cloned()
         .unwrap_or(serde_json::json!({}));
-    kh.publish_event(event_type, payload).await?;
+    kh.publish_event(event_type, payload).await.map_err(|e| e.to_string())?;
     Ok(format!("Event '{event_type}' published successfully."))
 }
 
@@ -3683,7 +3683,7 @@ async fn tool_knowledge_add_entity(
         updated_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_entity(&entity).await?;
+    let id = kh.knowledge_add_entity(&entity).await.map_err(|e| e.to_string())?;
     Ok(format!("Entity '{name}' added with ID: {id}"))
 }
 
@@ -3717,7 +3717,7 @@ async fn tool_knowledge_add_relation(
         created_at: chrono::Utc::now(),
     };
 
-    let id = kh.knowledge_add_relation(&relation).await?;
+    let id = kh.knowledge_add_relation(&relation).await.map_err(|e| e.to_string())?;
     Ok(format!(
         "Relation '{source}' --[{relation_str}]--> '{target}' added with ID: {id}"
     ))
@@ -3747,7 +3747,7 @@ async fn tool_knowledge_query(
         max_depth,
     };
 
-    let matches = kh.knowledge_query(pattern).await?;
+    let matches = kh.knowledge_query(pattern).await.map_err(|e| e.to_string())?;
     if matches.is_empty() {
         return Ok("No matching knowledge graph entries found.".to_string());
     }
@@ -3953,7 +3953,7 @@ async fn tool_schedule_create(
         }
     }
 
-    let result = kh.cron_create(agent_id, job_json).await?;
+    let result = kh.cron_create(agent_id, job_json).await.map_err(|e| e.to_string())?;
     Ok(format!(
         "Schedule created and will execute automatically.\n  Cron: {cron_expr}\n  Original: {schedule_str}\n  {result}"
     ))
@@ -3965,7 +3965,7 @@ async fn tool_schedule_list(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for schedule_list")?;
-    let jobs = kh.cron_list(agent_id).await?;
+    let jobs = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
 
     if jobs.is_empty() {
         return Ok("No scheduled tasks.".to_string());
@@ -4001,7 +4001,7 @@ async fn tool_schedule_delete(
         .as_str()
         .or_else(|| input["job_id"].as_str())
         .ok_or("Missing 'id' parameter")?;
-    kh.cron_cancel(id).await?;
+    kh.cron_cancel(id).await.map_err(|e| e.to_string())?;
     Ok(format!("Schedule '{id}' deleted."))
 }
 
@@ -4026,7 +4026,7 @@ async fn tool_cron_create(
             );
         }
     }
-    kh.cron_create(agent_id, job).await
+    kh.cron_create(agent_id, job).await.map_err(|e| e.to_string())
 }
 
 async fn tool_cron_list(
@@ -4035,7 +4035,7 @@ async fn tool_cron_list(
 ) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
     let agent_id = caller_agent_id.ok_or("Agent ID required for cron_list")?;
-    let jobs = kh.cron_list(agent_id).await?;
+    let jobs = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&jobs).map_err(|e| format!("Failed to serialize cron jobs: {e}"))
 }
 
@@ -4053,7 +4053,7 @@ async fn tool_cron_cancel(
     // Otherwise an agent with the cron_cancel tool could delete any other
     // agent's jobs as long as it learns their UUID (via side-channel or
     // social engineering).
-    let owned = kh.cron_list(agent_id).await?;
+    let owned = kh.cron_list(agent_id).await.map_err(|e| e.to_string())?;
     let owns_job = owned.iter().any(|job| {
         job.get("id")
             .and_then(|v| v.as_str())
@@ -4064,7 +4064,7 @@ async fn tool_cron_cancel(
             "Cron job '{job_id}' not found or not owned by this agent"
         ));
     }
-    kh.cron_cancel(job_id).await?;
+    kh.cron_cancel(job_id).await.map_err(|e| e.to_string())?;
     Ok(format!("Cron job '{job_id}' cancelled."))
 }
 
@@ -6551,11 +6551,11 @@ mod tests {
             _manifest_toml: &str,
             _parent_id: Option<&str>,
         ) -> Result<(String, String), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn list_agents(&self) -> Vec<AgentInfo> {
@@ -6563,7 +6563,7 @@ mod tests {
         }
 
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -6578,7 +6578,7 @@ mod tests {
             _value: serde_json::Value,
             _peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_recall(
@@ -6586,11 +6586,11 @@ mod tests {
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -6603,11 +6603,11 @@ mod tests {
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_complete(
@@ -6616,23 +6616,23 @@ mod tests {
             _task_id: &str,
             _result: &str,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_update_status(
@@ -6640,7 +6640,7 @@ mod tests {
             _task_id: &str,
             _new_status: &str,
         ) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -6650,8 +6650,8 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -6660,22 +6660,22 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -6743,11 +6743,11 @@ mod tests {
             _manifest_toml: &str,
             _parent_id: Option<&str>,
         ) -> Result<(String, String), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn list_agents(&self) -> Vec<AgentInfo> {
@@ -6755,7 +6755,7 @@ mod tests {
         }
 
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -6770,7 +6770,7 @@ mod tests {
             _value: serde_json::Value,
             _peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_recall(
@@ -6778,11 +6778,11 @@ mod tests {
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -6795,11 +6795,11 @@ mod tests {
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_complete(
@@ -6808,23 +6808,23 @@ mod tests {
             _task_id: &str,
             _result: &str,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_update_status(
@@ -6832,7 +6832,7 @@ mod tests {
             _task_id: &str,
             _new_status: &str,
         ) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -6842,8 +6842,8 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -6852,22 +6852,22 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -7303,11 +7303,11 @@ mod tests {
             _manifest_toml: &str,
             _parent_id: Option<&str>,
         ) -> Result<(String, String), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn list_agents(&self) -> Vec<AgentInfo> {
@@ -7315,7 +7315,7 @@ mod tests {
         }
 
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -7330,7 +7330,7 @@ mod tests {
             _value: serde_json::Value,
             _peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_recall(
@@ -7338,11 +7338,11 @@ mod tests {
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -7355,11 +7355,11 @@ mod tests {
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_complete(
@@ -7368,23 +7368,23 @@ mod tests {
             _task_id: &str,
             _result: &str,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_update_status(
@@ -7392,7 +7392,7 @@ mod tests {
             _task_id: &str,
             _new_status: &str,
         ) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -7402,8 +7402,8 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -7412,22 +7412,22 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -9971,7 +9971,7 @@ mod tests {
         }
 
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn list_agents(&self) -> Vec<AgentInfo> {
@@ -9979,7 +9979,7 @@ mod tests {
         }
 
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
@@ -9994,7 +9994,7 @@ mod tests {
             _value: serde_json::Value,
             _peer_id: Option<&str>,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_recall(
@@ -10002,11 +10002,11 @@ mod tests {
             _key: &str,
             _peer_id: Option<&str>,
         ) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -10019,11 +10019,11 @@ mod tests {
             _assigned_to: Option<&str>,
             _created_by: Option<&str>,
         ) -> Result<String, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_complete(
@@ -10032,23 +10032,23 @@ mod tests {
             _task_id: &str,
             _result: &str,
         ) -> Result<(), String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
 
         async fn task_update_status(
@@ -10056,7 +10056,7 @@ mod tests {
             _task_id: &str,
             _new_status: &str,
         ) -> Result<bool, String> {
-            Err("not used".to_string())
+            Err("not used".into())
         }
     }
 
@@ -10066,8 +10066,8 @@ mod tests {
             &self,
             _event_type: &str,
             _payload: serde_json::Value,
-        ) -> Result<(), String> {
-            Err("not used".to_string())
+        ) -> Result<(), librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 
@@ -10076,22 +10076,22 @@ mod tests {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
-        ) -> Result<String, String> {
-            Err("not used".to_string())
+        ) -> Result<String, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
 
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
-        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
-            Err("not used".to_string())
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, librefang_kernel_handle::KernelOpError> {
+            Err("not used".into())
         }
     }
 

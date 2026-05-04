@@ -18260,11 +18260,11 @@ impl kernel_handle::EventBus for LibreFangKernel {
         &self,
         event_type: &str,
         payload: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let system_agent = AgentId::new();
+        // `?` lifts via `From<serde_json::Error>` on KernelOpError.
         let payload_bytes =
-            serde_json::to_vec(&serde_json::json!({"type": event_type, "data": payload}))
-                .map_err(|e| format!("Serialize failed: {e}"))?;
+            serde_json::to_vec(&serde_json::json!({"type": event_type, "data": payload}))?;
         let event = Event::new(
             system_agent,
             EventTarget::Broadcast,
@@ -18280,34 +18280,34 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
     async fn knowledge_add_entity(
         &self,
         entity: &librefang_types::memory::Entity,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         // The substrate owns the value (it moves into spawn_blocking).
         // Clone here so the trait can take `&Entity` and avoid forcing
         // every caller to give up ownership. See #3553.
         self.memory
             .add_entity(entity.clone())
             .await
-            .map_err(|e| format!("Knowledge add entity failed: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Knowledge add entity failed: {e}")))
     }
 
     async fn knowledge_add_relation(
         &self,
         relation: &librefang_types::memory::Relation,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         self.memory
             .add_relation(relation.clone())
             .await
-            .map_err(|e| format!("Knowledge add relation failed: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Knowledge add relation failed: {e}")))
     }
 
     async fn knowledge_query(
         &self,
         pattern: librefang_types::memory::GraphPattern,
-    ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+    ) -> Result<Vec<librefang_types::memory::GraphMatch>, kernel_handle::KernelOpError> {
         self.memory
             .query_graph(pattern)
             .await
-            .map_err(|e| format!("Knowledge query failed: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Knowledge query failed: {e}")))
     }
 }
 
@@ -18317,22 +18317,37 @@ impl kernel_handle::CronControl for LibreFangKernel {
         &self,
         agent_id: &str,
         job_json: serde_json::Value,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         use librefang_types::scheduler::{
             CronAction, CronDelivery, CronDeliveryTarget, CronJob, CronJobId, CronSchedule,
         };
 
         let name = job_json["name"]
             .as_str()
-            .ok_or("Missing 'name' field")?
+            .ok_or_else(|| KernelOpError::Invalid {
+                field: "name",
+                reason: "missing or not a string".into(),
+            })?
             .to_string();
         let schedule: CronSchedule = serde_json::from_value(job_json["schedule"].clone())
-            .map_err(|e| format!("Invalid schedule: {e}"))?;
-        let action: CronAction = serde_json::from_value(job_json["action"].clone())
-            .map_err(|e| format!("Invalid action: {e}"))?;
+            .map_err(|e| KernelOpError::Invalid {
+                field: "schedule",
+                reason: e.to_string(),
+            })?;
+        let action: CronAction = serde_json::from_value(job_json["action"].clone()).map_err(
+            |e| KernelOpError::Invalid {
+                field: "action",
+                reason: e.to_string(),
+            },
+        )?;
         let delivery: CronDelivery = if job_json["delivery"].is_object() {
-            serde_json::from_value(job_json["delivery"].clone())
-                .map_err(|e| format!("Invalid delivery: {e}"))?
+            serde_json::from_value(job_json["delivery"].clone()).map_err(|e| {
+                KernelOpError::Invalid {
+                    field: "delivery",
+                    reason: e.to_string(),
+                }
+            })?
         } else {
             // Default to LastChannel so cron jobs created by an agent in
             // a channel context actually deliver their output back to
@@ -18348,13 +18363,20 @@ impl kernel_handle::CronControl for LibreFangKernel {
         let one_shot = job_json["one_shot"].as_bool().unwrap_or(is_at_schedule);
 
         let aid = librefang_types::agent::AgentId(
-            uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
+            uuid::Uuid::parse_str(agent_id).map_err(|e| KernelOpError::Invalid {
+                field: "agent_id",
+                reason: e.to_string(),
+            })?,
         );
 
         let session_mode: Option<librefang_types::agent::SessionMode> =
             if job_json["session_mode"].is_string() {
-                serde_json::from_value(job_json["session_mode"].clone())
-                    .map_err(|e| format!("Invalid session_mode: {e}"))?
+                serde_json::from_value(job_json["session_mode"].clone()).map_err(|e| {
+                    KernelOpError::Invalid {
+                        field: "session_mode",
+                        reason: e.to_string(),
+                    }
+                })?
             } else {
                 None
             };
@@ -18363,8 +18385,12 @@ impl kernel_handle::CronControl for LibreFangKernel {
         // Validate each entry up front so a bad shape produces a clear error
         // before the job is added (rather than failing silently at fire time).
         let delivery_targets: Vec<CronDeliveryTarget> = if job_json["delivery_targets"].is_array() {
-            serde_json::from_value(job_json["delivery_targets"].clone())
-                .map_err(|e| format!("Invalid delivery_targets: {e}"))?
+            serde_json::from_value(job_json["delivery_targets"].clone()).map_err(|e| {
+                KernelOpError::Invalid {
+                    field: "delivery_targets",
+                    reason: e.to_string(),
+                }
+            })?
         } else {
             Vec::new()
         };
@@ -18388,7 +18414,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
         let id = self
             .cron_scheduler
             .add_job(job, one_shot)
-            .map_err(|e| format!("{e}"))?;
+            .map_err(|e| KernelOpError::Other(e.to_string()))?;
 
         // Persist after adding
         if let Err(e) = self.cron_scheduler.persist() {
@@ -18402,9 +18428,16 @@ impl kernel_handle::CronControl for LibreFangKernel {
         .to_string())
     }
 
-    async fn cron_list(&self, agent_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    async fn cron_list(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let aid = librefang_types::agent::AgentId(
-            uuid::Uuid::parse_str(agent_id).map_err(|e| format!("Invalid agent ID: {e}"))?,
+            uuid::Uuid::parse_str(agent_id).map_err(|e| KernelOpError::Invalid {
+                field: "agent_id",
+                reason: e.to_string(),
+            })?,
         );
         let jobs = self.cron_scheduler.list_jobs(aid);
         let json_jobs: Vec<serde_json::Value> = jobs
@@ -18414,13 +18447,17 @@ impl kernel_handle::CronControl for LibreFangKernel {
         Ok(json_jobs)
     }
 
-    async fn cron_cancel(&self, job_id: &str) -> Result<(), String> {
+    async fn cron_cancel(&self, job_id: &str) -> Result<(), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let id = librefang_types::scheduler::CronJobId(
-            uuid::Uuid::parse_str(job_id).map_err(|e| format!("Invalid job ID: {e}"))?,
+            uuid::Uuid::parse_str(job_id).map_err(|e| KernelOpError::Invalid {
+                field: "job_id",
+                reason: e.to_string(),
+            })?,
         );
         self.cron_scheduler
             .remove_job(id)
-            .map_err(|e| format!("{e}"))?;
+            .map_err(|e| KernelOpError::Other(e.to_string()))?;
 
         // Persist after removal
         if let Err(e) = self.cron_scheduler.persist() {
