@@ -2462,9 +2462,9 @@ async fn send_to_agent_as_tolerates_unregistered_parent_uuid() {
     .expect_err("non-existent child must fail");
 
     assert!(
-        err.to_lowercase()
+        err.to_string().to_lowercase()
             .contains(&child_id.to_string().to_lowercase())
-            || err.to_lowercase().contains("not found"),
+            || err.to_string().to_lowercase().contains("not found"),
         "error must reference the missing child, not the missing parent: {err}"
     );
 
@@ -2489,7 +2489,7 @@ async fn send_to_agent_as_rejects_unparseable_parent_id() {
     .expect_err("garbage parent id must surface an error");
     // Either the resolver's "Agent not found" wording or the fallback
     // parse error is acceptable — the important thing is we don't panic.
-    assert!(!err.is_empty());
+    assert!(!err.to_string().is_empty());
 
     kernel.shutdown();
 }

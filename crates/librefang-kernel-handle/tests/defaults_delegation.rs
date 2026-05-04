@@ -17,11 +17,11 @@ impl AgentControl for TrackingSendHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
         self.send_called.store(true, Ordering::SeqCst);
         Ok("ok".into())
     }
@@ -30,7 +30,7 @@ impl AgentControl for TrackingSendHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 
@@ -162,7 +162,7 @@ async fn test_send_to_agent_as_delegates_to_send_to_agent() {
     let result = handle.send_to_agent_as("agent1", "msg", "parent1").await;
 
     assert!(handle.send_called.load(Ordering::SeqCst));
-    assert_eq!(result, Ok("ok".into()));
+    assert_eq!(result.unwrap(), "ok");
 }
 
 // ---------------------------------------------------------------------------
@@ -179,12 +179,12 @@ impl AgentControl for TrackingSpawnHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         self.spawn_called.store(true, Ordering::SeqCst);
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("ok".into())
     }
 
@@ -192,7 +192,7 @@ impl AgentControl for TrackingSpawnHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 
@@ -324,7 +324,9 @@ async fn test_spawn_agent_checked_delegates_to_spawn_agent() {
     let result = handle.spawn_agent_checked("toml", None, &[]).await;
 
     assert!(handle.spawn_called.load(Ordering::SeqCst));
-    assert_eq!(result, Ok(("id".into(), "name".into())));
+    let (id, name) = result.unwrap();
+    assert_eq!(id, "id");
+    assert_eq!(name, "name");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,11 +343,11 @@ impl AgentControl for TrackingApprovalHandle {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Ok(("id".into(), "name".into()))
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Ok("ok".into())
     }
 
@@ -353,7 +355,7 @@ impl AgentControl for TrackingApprovalHandle {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 

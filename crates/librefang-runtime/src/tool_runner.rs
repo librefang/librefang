@@ -3010,6 +3010,7 @@ async fn tool_agent_send(
             }
         })
         .await
+        .map_err(|e| e.to_string())
 }
 
 /// Build agent manifest TOML from parsed parameters.
@@ -3146,7 +3147,8 @@ async fn tool_agent_spawn(
 
     let (id, agent_name) = kh
         .spawn_agent_checked(&manifest_toml, parent_id, &parent_caps)
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(format!(
         "Agent spawned successfully.\n  ID: {id}\n  Name: {agent_name}"
     ))
@@ -3176,7 +3178,7 @@ fn tool_agent_kill(
     let agent_id = input["agent_id"]
         .as_str()
         .ok_or("Missing 'agent_id' parameter")?;
-    kh.kill_agent(agent_id)?;
+    kh.kill_agent(agent_id).map_err(|e| e.to_string())?;
     Ok(format!("Agent {agent_id} killed successfully."))
 }
 
@@ -6557,11 +6559,11 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -6569,7 +6571,7 @@ mod tests {
             vec![]
         }
 
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -6749,11 +6751,11 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -6761,7 +6763,7 @@ mod tests {
             vec![]
         }
 
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -7309,11 +7311,11 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -7321,7 +7323,7 @@ mod tests {
             vec![]
         }
 
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -9949,7 +9951,7 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             Ok(("test-id-123".to_string(), "test-agent".to_string()))
         }
 
@@ -9958,7 +9960,7 @@ mod tests {
             manifest_toml: &str,
             _parent_id: Option<&str>,
             parent_caps: &[librefang_types::capability::Capability],
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             if self.should_fail_escalation {
                 // Parse child manifest to extract capabilities, mimicking real kernel behavior
                 let manifest: librefang_types::agent::AgentManifest =
@@ -9977,7 +9979,7 @@ mod tests {
             Ok(("test-id-456".to_string(), "good-child".to_string()))
         }
 
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 
@@ -9985,7 +9987,7 @@ mod tests {
             vec![]
         }
 
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not used".into())
         }
 

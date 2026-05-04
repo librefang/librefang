@@ -899,7 +899,7 @@ fn host_agent_send(state: &GuestState, params: &serde_json::Value) -> serde_json
     let handle = state.tokio_handle.clone();
     match tokio::task::block_in_place(|| handle.block_on(kernel.send_to_agent(target, message))) {
         Ok(response) => json!({"ok": response}),
-        Err(e) => json!({"error": e}),
+        Err(e) => json!({"error": e.to_string()}),
     }
 }
 
@@ -927,7 +927,7 @@ fn host_agent_spawn(state: &GuestState, params: &serde_json::Value) -> serde_jso
         ))
     }) {
         Ok((id, name)) => json!({"ok": {"id": id, "name": name}}),
-        Err(e) => json!({"error": e}),
+        Err(e) => json!({"error": e.to_string()}),
     }
 }
 
@@ -1232,16 +1232,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl librefang_kernel_handle::AgentControl for RecordingKernel {
-        async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
+        async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
             Err("not implemented".into())
         }
-        async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
             Err("not implemented".into())
         }
         fn list_agents(&self) -> Vec<librefang_kernel_handle::AgentInfo> {
             vec![]
         }
-        fn kill_agent(&self, _: &str) -> Result<(), String> {
+        fn kill_agent(&self, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
             Err("not implemented".into())
         }
         fn find_agents(&self, _: &str) -> Vec<librefang_kernel_handle::AgentInfo> {
