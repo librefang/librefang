@@ -497,18 +497,17 @@ pub trait McpOAuthProvider: Send + Sync {
     /// succeeds and **before** the per-flow PKCE values are cleaned up — see
     /// `librefang-api/src/routes/mcp_auth.rs::auth_callback`.
     ///
-    /// Default implementation is a no-op so existing test doubles compile
-    /// unchanged; production providers (e.g. `KernelOAuthProvider`) override
-    /// it. Refresh failures with `No token_endpoint stored for refresh`
-    /// almost always indicate this method was not wired up.
+    /// Required (no default impl) so that any new provider must consciously
+    /// decide how it persists this metadata. A silent no-op default would
+    /// silently re-introduce the refresh bug this method exists to fix
+    /// (refresh fails on the first access-token expiry with
+    /// `No token_endpoint stored for refresh`).
     async fn store_oauth_metadata(
         &self,
-        _server_url: &str,
-        _token_endpoint: &str,
-        _client_id: Option<&str>,
-    ) -> Result<(), McpOAuthError> {
-        Ok(())
-    }
+        server_url: &str,
+        token_endpoint: &str,
+        client_id: Option<&str>,
+    ) -> Result<(), McpOAuthError>;
 
     /// Clear stored tokens for the given server URL.
     async fn clear_tokens(&self, server_url: &str) -> Result<(), McpOAuthError>;
