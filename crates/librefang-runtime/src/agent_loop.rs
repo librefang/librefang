@@ -9,7 +9,7 @@ use crate::context_budget::{apply_context_guard, truncate_tool_result_dynamic, C
 use crate::context_engine::ContextEngine;
 use crate::context_overflow::{recover_from_overflow, RecoveryStage};
 use crate::embedding::EmbeddingDriver;
-use crate::kernel_handle::KernelHandle;
+use crate::kernel_handle::prelude::*;
 use crate::llm_driver::{
     CompletionRequest, LlmDriver, LlmError, StreamEvent, PHASE_RESPONSE_COMPLETE,
 };

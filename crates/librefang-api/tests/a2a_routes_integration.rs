@@ -6,6 +6,7 @@
 //! and handler wiring are all exercised end-to-end via `tower::oneshot`.
 //!
 //! Routes covered:
+//!   - GET    /a2a/agents          (public federation listing)
 //!   - GET    /api/a2a/agents
 //!   - GET    /api/a2a/agents/{id}
 //!   - POST   /api/a2a/discover
@@ -123,9 +124,10 @@ async fn send(
 // GET /api/a2a/agents
 // ---------------------------------------------------------------------------
 
-/// Empty kernel → empty trusted+pending list, 200 with shape
-/// `{ "agents": [], "total": 0 }`. Confirms the route is wired and the
-/// dashboard-reads middleware lets it through without auth.
+/// Empty kernel → empty trusted+pending list, 200 with the canonical
+/// `PaginatedResponse{items,total,offset,limit}` envelope per #3842.
+/// Confirms the route is wired and the dashboard-reads middleware lets it
+/// through without auth.
 #[tokio::test(flavor = "multi_thread")]
 async fn list_external_agents_empty_returns_envelope() {
     let h = boot("").await;
@@ -133,8 +135,10 @@ async fn list_external_agents_empty_returns_envelope() {
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert_eq!(body["total"], serde_json::json!(0));
-    assert!(body["agents"].is_array());
-    assert_eq!(body["agents"].as_array().unwrap().len(), 0);
+    assert_eq!(body["offset"], serde_json::json!(0));
+    assert!(body.get("limit").is_some(), "limit field present (null ok)");
+    assert!(body["items"].is_array());
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
 /// In default dev mode (no api_key configured), /api/a2a/agents must be
@@ -148,6 +152,42 @@ async fn list_external_agents_open_in_no_auth_dev_mode() {
         status,
         StatusCode::UNAUTHORIZED,
         "/api/a2a/agents should be reachable in no-api-key dev mode"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GET /a2a/agents — public federation listing (no `/api/` prefix)
+// ---------------------------------------------------------------------------
+
+/// `/a2a/agents` is the AlwaysPublic capability-discovery endpoint third-party
+/// A2A peers hit to enumerate local agent cards. Pin the canonical
+/// `PaginatedResponse{items,total,offset,limit}` envelope per #3842 so the
+/// federation wire shape can't silently regress to the legacy `{agents,total}`
+/// form. Auth is intentionally omitted — even with an `api_key` configured,
+/// this route must remain reachable per `PUBLIC_ROUTES`.
+#[tokio::test(flavor = "multi_thread")]
+async fn federation_list_agents_returns_canonical_envelope() {
+    let h = boot("secret-key").await;
+    let (status, body) = send(&h, Method::GET, "/a2a/agents", None, false).await;
+
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let items = body["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("`items` not an array; body: {body}"));
+    let total = body["total"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("`total` not u64; body: {body}"));
+    assert_eq!(body["offset"], serde_json::json!(0));
+    assert!(body.get("limit").is_some(), "limit field present (null ok)");
+    assert_eq!(
+        items.len() as u64,
+        total,
+        "total must match items.len() while limit=None"
+    );
+    // Legacy field must be gone — guards against accidental dual-shape return.
+    assert!(
+        body.get("agents").is_none(),
+        "legacy `agents` field must not coexist with canonical envelope"
     );
 }
 
