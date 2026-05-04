@@ -2788,6 +2788,7 @@ pub struct KernelConfig {
     /// Applied against the effective limit:
     ///   1. `cron_session_max_tokens` if set, else
     ///   2. [`Self::cron_session_warn_total_tokens`] as a fallback ceiling.
+    ///
     /// Skipped entirely when both are `None`, or when this value is
     /// `None` / `<= 0.0` / `> 1.0`.
     ///

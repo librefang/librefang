@@ -1,6 +1,16 @@
 // Registry Worker
 // Proxies librefang-registry (GitHub) with Cache API for HTTP responses.
 // Storage: D1 (registry_clicks, kv_store, ui_errors). No KV dependency.
+//
+// Plugin signing (#3805): when REGISTRY_PRIVATE_KEY (PKCS#8 base64) is set as
+// a Worker secret and REGISTRY_PUBLIC_KEY (raw 32-byte base64) is set as a
+// var, the cron refresh signs the canonical index.json with Ed25519 and
+// stores the signature in kv_store('registry_data_sig'). The daemon
+// (librefang-runtime/plugin_manager.rs) fetches:
+//   GET /api/registry/index.json     — canonical bytes that were signed
+//   GET /api/registry/index.json.sig — base64 Ed25519 signature
+//   GET /.well-known/registry-pubkey — base64 raw 32-byte Ed25519 pubkey
+// See web/workers/SIGNING.md for keygen + deploy.
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -48,6 +58,19 @@ export default {
 
     if (path === '/api/errors' && request.method === 'GET')
       return handleErrorList(env)
+
+    // Signing endpoints (Ed25519). The daemon contract is:
+    //   index.json     — canonical bytes that were signed
+    //   index.json.sig — base64 Ed25519 signature over those bytes
+    //   .well-known/registry-pubkey — raw 32-byte base64 public key
+    if (path === '/api/registry/index.json' && request.method === 'GET')
+      return handleSignedIndex(env)
+
+    if (path === '/api/registry/index.json.sig' && request.method === 'GET')
+      return handleSignedIndexSig(env)
+
+    if (path === '/.well-known/registry-pubkey' && request.method === 'GET')
+      return handlePubkey(env)
 
     return new Response('Not Found', { status: 404 })
   },
@@ -364,16 +387,104 @@ async function refreshRegistryCache(env) {
       signature,
     }
 
+    const indexJson = JSON.stringify(result)
+    const now = Math.floor(Date.now() / 1000)
+
     await env.DB.prepare(
       `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    ).bind(JSON.stringify(result), Math.floor(Date.now() / 1000)).run()
+    ).bind(indexJson, now).run()
+
+    // Sign the canonical index bytes if a private key is configured. Signing
+    // is best-effort — if the secret is missing we skip (the daemon can still
+    // fetch the index but signature verification will fail closed at its end).
+    try {
+      const sig = await signWithRegistryKey(env, new TextEncoder().encode(indexJson))
+      if (sig) {
+        await env.DB.prepare(
+          `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data_sig', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        ).bind(sig, now).run()
+      }
+    } catch (e) {
+      console.error('Registry signing failed:', e.message)
+    }
 
     console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels,',
       agents.length, 'agents,', skills.length, 'skills,', mcp.length, 'mcp')
   } catch (e) {
     console.error('Registry refresh failed:', e.message)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Signed-index endpoints (Ed25519)
+// ---------------------------------------------------------------------------
+
+async function handleSignedIndex(env) {
+  const row = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'registry_data'`,
+  ).first()
+  if (!row) return errorResponse('index not yet built — try again after the next cron tick', 503)
+  return new Response(row.value, {
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': `public, max-age=${REGISTRY_CACHE_TTL}`,
+      ...CORS,
+    },
+  })
+}
+
+async function handleSignedIndexSig(env) {
+  const row = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'registry_data_sig'`,
+  ).first()
+  if (!row) return errorResponse('signature not available — REGISTRY_PRIVATE_KEY may be unset', 503)
+  return new Response(row.value, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': `public, max-age=${REGISTRY_CACHE_TTL}`,
+      ...CORS,
+    },
+  })
+}
+
+function handlePubkey(env) {
+  const pub = (env.REGISTRY_PUBLIC_KEY || '').trim()
+  if (!pub) return errorResponse('public key not configured', 503)
+  return new Response(pub, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+      ...CORS,
+    },
+  })
+}
+
+// Sign `bytes` with the configured PKCS#8 private key. Returns base64
+// signature, or null when no key is configured. Throws on malformed key.
+async function signWithRegistryKey(env, bytes) {
+  const pkcs8B64 = (env.REGISTRY_PRIVATE_KEY || '').trim()
+  if (!pkcs8B64) return null
+  const pkcs8 = bytesFromB64(pkcs8B64)
+  const key = await crypto.subtle.importKey(
+    'pkcs8', pkcs8, { name: 'Ed25519' }, false, ['sign'],
+  )
+  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, key, bytes)
+  return b64FromBytes(new Uint8Array(sig))
+}
+
+function b64FromBytes(bytes) {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s)
+}
+
+function bytesFromB64(b64) {
+  const bin = atob(b64.replace(/\s+/g, ''))
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
 }
 
 // ---------------------------------------------------------------------------

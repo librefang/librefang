@@ -15,20 +15,117 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-/// Well-known public key for the official LibreFang plugin registry.
+/// Default URL for the official LibreFang plugin-registry public key.
 ///
-/// This is an Ed25519 public key (32 bytes, base64url-encoded).
-/// Override via `LIBREFANG_REGISTRY_PUBKEY` env var for custom registries.
-/// Set to `LIBREFANG_REGISTRY_VERIFY=0` to skip verification entirely (development only).
+/// Served by the `registry-worker` Cloudflare Worker (see
+/// `web/workers/registry-worker/index.js`). The endpoint returns the raw
+/// 32-byte Ed25519 public key, base64-encoded — exactly what
+/// `ed25519_dalek::VerifyingKey::from_bytes` consumes.
 ///
-/// # Security note
-/// The placeholder value below (all-zero bytes once decoded) is intentionally
-/// detected at runtime. Any install attempt while this placeholder is in effect
-/// is rejected with a hard error — no plugin is accepted without a real key.
-/// To configure a real key, set the `LIBREFANG_REGISTRY_PUBKEY` environment
-/// variable to the base64-encoded 32-byte Ed25519 public key of your registry.
-const OFFICIAL_REGISTRY_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-// ^ all-zero placeholder — triggers hard error at runtime (see is_placeholder check)
+/// Operators of forks / self-hosted registries can point at their own URL
+/// via `LIBREFANG_REGISTRY_PUBKEY_URL`, or skip the network call entirely by
+/// setting `LIBREFANG_REGISTRY_PUBKEY` directly with the base64 key.
+///
+/// See `docs/architecture/plugin-signing.md` for the full trust model.
+const OFFICIAL_PUBKEY_URL: &str = "https://librefang.ai/.well-known/registry-pubkey";
+
+/// On-disk pin for the registry pubkey (TOFU cache).
+///
+/// First successful fetch is written here; later calls read this file
+/// instead of going to the network. Rotation requires deleting this file
+/// (operators or a daemon-side `librefang plugin rotate-pubkey` command).
+fn registry_pubkey_cache_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "Cannot determine home directory for pubkey cache".to_string())?;
+    Ok(PathBuf::from(home).join(".librefang").join("registry.pub"))
+}
+
+/// True iff `s` decodes to a valid 32-byte non-all-zero Ed25519 pubkey.
+fn is_valid_registry_pubkey_b64(s: &str) -> bool {
+    use base64::Engine as _;
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s.trim()) else {
+        return false;
+    };
+    bytes.len() == 32 && !bytes.iter().all(|&b| b == 0)
+}
+
+/// Resolve the registry pubkey using the layered chain:
+///   1. `LIBREFANG_REGISTRY_PUBKEY` env var override (always wins)
+///   2. `~/.librefang/registry.pub` TOFU cache
+///   3. HTTP fetch from `LIBREFANG_REGISTRY_PUBKEY_URL` (default
+///      [`OFFICIAL_PUBKEY_URL`]); on success, the value is pinned to the
+///      cache so subsequent calls bypass the network.
+///
+/// Returns `Err` only when all three sources are unavailable or invalid;
+/// callers may then choose to hard-fail (index verification) or fall back
+/// to weaker integrity checks (archive install with verified SHA-256).
+async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, String> {
+    if let Ok(env_key) = std::env::var("LIBREFANG_REGISTRY_PUBKEY") {
+        let trimmed = env_key.trim().to_string();
+        if !trimmed.is_empty() {
+            if is_valid_registry_pubkey_b64(&trimmed) {
+                return Ok(trimmed);
+            }
+            warn!("LIBREFANG_REGISTRY_PUBKEY is set but is not a valid 32-byte Ed25519 key");
+        }
+    }
+
+    let cache_path = registry_pubkey_cache_path()?;
+    if let Ok(cached) = std::fs::read_to_string(&cache_path) {
+        let trimmed = cached.trim().to_string();
+        if is_valid_registry_pubkey_b64(&trimmed) {
+            debug!("Using TOFU-pinned registry pubkey from {}", cache_path.display());
+            return Ok(trimmed);
+        }
+        warn!(
+            "Cached registry pubkey at {} is malformed; ignoring",
+            cache_path.display()
+        );
+    }
+
+    let url = std::env::var("LIBREFANG_REGISTRY_PUBKEY_URL")
+        .unwrap_or_else(|_| OFFICIAL_PUBKEY_URL.to_string());
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch registry pubkey from {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Registry pubkey endpoint {url} returned HTTP {}",
+            resp.status()
+        ));
+    }
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read registry pubkey response: {e}"))?;
+    let trimmed = body.trim().to_string();
+    if !is_valid_registry_pubkey_b64(&trimmed) {
+        return Err(format!(
+            "Registry pubkey from {url} is not a valid base64-encoded 32-byte Ed25519 key"
+        ));
+    }
+
+    if let Some(parent) = cache_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(&cache_path, &trimmed) {
+        Ok(()) => info!(
+            "Pinned registry pubkey to {} (TOFU); rotation requires deleting this file",
+            cache_path.display()
+        ),
+        Err(e) => warn!(
+            "Could not pin registry pubkey to {}: {} — pubkey will be re-fetched next install",
+            cache_path.display(),
+            e
+        ),
+    }
+
+    Ok(trimmed)
+}
 
 /// Verify an Ed25519 signature over registry index JSON bytes.
 ///
@@ -205,8 +302,6 @@ pub async fn fetch_verified_index(
     client: &reqwest::Client,
     registry: &str,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use base64::Engine as _;
-
     let cache_path = registry_cache_path(registry);
     let ttl = std::env::var("LIBREFANG_REGISTRY_CACHE_TTL_SECS")
         .ok()
@@ -250,31 +345,20 @@ pub async fn fetch_verified_index(
     if std::env::var("LIBREFANG_REGISTRY_VERIFY").as_deref() == Ok("0") {
         warn!("Registry signature verification disabled via LIBREFANG_REGISTRY_VERIFY=0");
     } else {
-        // Resolve which public key to use.
-        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
-            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
+        // Resolve the public key via env > TOFU cache > worker fetch. If none
+        // of the three paths produce a valid key we hard-fail: the registry
+        // index drives every subsequent install, so trusting an unverified
+        // index would mask a compromised or man-in-the-middle registry.
+        let pubkey = resolve_registry_pubkey(client).await.map_err(|e| {
+            format!(
+                "Plugin registry public key unavailable — refusing to fetch registry index. {e} \
+                 Configure LIBREFANG_REGISTRY_PUBKEY (base64), point \
+                 LIBREFANG_REGISTRY_PUBKEY_URL at a reachable endpoint, or set \
+                 LIBREFANG_REGISTRY_VERIFY=0 to disable verification (development use only)."
+            )
+        })?;
 
-        // Detect the all-zero placeholder key.  A placeholder means no real
-        // registry key has been configured, so we REFUSE rather than silently
-        // skip — accepting an unverified index would let a compromised or
-        // man-in-the-middle registry serve arbitrary plugin lists.
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(pubkey.trim())
-            .unwrap_or_default();
-        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
-
-        if is_placeholder {
-            return Err(
-                "Plugin registry public key is not configured — refusing to fetch registry \
-                 index without signature verification. \
-                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
-                 your registry, or set LIBREFANG_REGISTRY_VERIFY=0 to disable verification \
-                 (development use only)."
-                    .to_string(),
-            );
-        }
-
-        // Key is present and non-placeholder — try to verify the signature.
+        // Try to fetch and verify the index signature.
         match client.get(&sig_url).send().await {
             Ok(sig_resp) if sig_resp.status().is_success() => {
                 let sig_text = sig_resp
@@ -885,7 +969,10 @@ async fn install_from_registry(
     }
 
     // Verify checksum if available (non-fatal warning if no checksum file exists).
-    match fetch_checksum(&client, &listing_url, name).await {
+    // checksum_verified gates the Ed25519 fallback below: when SHA-256 has
+    // confirmed the manifest, an unavailable Ed25519 pubkey downgrades to a
+    // warning instead of a hard failure (defense in depth, not single point).
+    let checksum_verified = match fetch_checksum(&client, &listing_url, name).await {
         Some(expected) => {
             // For registry plugins installed file-by-file, compute checksum over
             // the serialised manifest as a representative integrity check.
@@ -897,50 +984,52 @@ async fn install_from_registry(
                 return Err(e);
             }
             info!(plugin = name, "Checksum verified OK");
+            true
         }
         None => {
             warn!(
                 plugin = name,
                 "No checksum file found for this plugin release. \
-                 Install proceeds without integrity verification."
+                 Install proceeds without SHA-256 verification — \
+                 Ed25519 signature will be REQUIRED."
             );
+            false
         }
-    }
+    };
 
-    // Verify Ed25519 archive signature.
-    // A placeholder (all-zero) public key means no real key is configured —
-    // refuse installation rather than silently skip.  An attacker who knows the
-    // key is all-zero bytes can trivially craft valid signatures, so accepting
-    // plugins while the placeholder is active is equivalent to no verification.
+    // Verify Ed25519 archive signature. The pubkey resolver tries env override,
+    // TOFU cache, then a worker fetch. When all paths fail:
+    //   * SHA-256 already verified → warn and proceed (we still have integrity)
+    //   * SHA-256 absent           → hard-fail (no integrity check would remain)
     let archive_bytes = tokio::fs::read(target_dir.join("plugin.toml"))
         .await
         .unwrap_or_default();
     if std::env::var("LIBREFANG_ARCHIVE_VERIFY").as_deref() == Ok("0") {
         debug!("Archive signature verification disabled via LIBREFANG_ARCHIVE_VERIFY=0");
     } else {
-        use base64::Engine as _;
-        let pubkey = std::env::var("LIBREFANG_REGISTRY_PUBKEY")
-            .unwrap_or_else(|_| OFFICIAL_REGISTRY_PUBKEY_B64.to_string());
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(pubkey.trim())
-            .unwrap_or_default();
-        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
-        if is_placeholder {
-            let _ = tokio::fs::remove_dir_all(&target_dir).await;
-            return Err(
-                "Plugin registry public key is not configured — refusing to install plugin \
-                 without signature verification. \
-                 Set LIBREFANG_REGISTRY_PUBKEY to the base64-encoded Ed25519 public key of \
-                 your registry, or set LIBREFANG_ARCHIVE_VERIFY=0 to disable verification \
-                 (development use only)."
-                    .to_string(),
-            );
-        }
-        if let Err(e) =
-            verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
-        {
-            let _ = tokio::fs::remove_dir_all(&target_dir).await;
-            return Err(e);
+        match resolve_registry_pubkey(&client).await {
+            Ok(pubkey) => {
+                if let Err(e) =
+                    verify_archive_signature(&client, &listing_url, &archive_bytes, &pubkey).await
+                {
+                    let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                    return Err(e);
+                }
+            }
+            Err(e) if checksum_verified => {
+                warn!(
+                    plugin = name,
+                    "Ed25519 verification skipped: {e}. SHA-256 already verified — install proceeds."
+                );
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&target_dir).await;
+                return Err(format!(
+                    "Cannot verify plugin '{name}' integrity: SHA-256 checksum was unavailable \
+                     AND Ed25519 pubkey could not be resolved. {e} \
+                     Refusing to install without any integrity check."
+                ));
+            }
         }
     }
 
@@ -4669,60 +4758,93 @@ description = "Spanish description"
         );
     }
 
-    // ── Bug #3799 — placeholder public key must be refused, not silently skipped ──
+    // ── #3805 — registry pubkey resolver (env > TOFU cache > worker fetch) ──
 
-    /// Decoding the built-in `OFFICIAL_REGISTRY_PUBKEY_B64` constant must
-    /// produce an all-zero 32-byte slice.  If someone replaces the placeholder
-    /// with a real key this test will fail, signalling that the is_placeholder
-    /// gate should also be re-evaluated.
+    /// Round-trip: a 32-byte non-zero key encodes/decodes through the
+    /// validator. This is the shape the resolver, the worker keygen script,
+    /// and ed25519_dalek all agree on.
     #[test]
-    fn official_registry_pubkey_is_placeholder_all_zeros() {
+    fn valid_registry_pubkey_b64_accepts_real_key() {
         use base64::Engine as _;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
-            .expect("OFFICIAL_REGISTRY_PUBKEY_B64 must be valid base64");
-        assert_eq!(
-            bytes.len(),
-            32,
-            "placeholder key must decode to exactly 32 bytes"
-        );
-        assert!(
-            bytes.iter().all(|&b| b == 0),
-            "placeholder key must be all zeros"
-        );
-    }
-
-    /// The is_placeholder detection used in fetch_verified_index and
-    /// install_from_registry must flag the built-in constant as a placeholder.
-    #[test]
-    fn is_placeholder_detects_built_in_constant() {
-        use base64::Engine as _;
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(OFFICIAL_REGISTRY_PUBKEY_B64)
-            .unwrap_or_default();
-        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
-        assert!(
-            is_placeholder,
-            "the built-in registry pubkey must be detected as a placeholder \
-             so installs fail loudly instead of silently skipping verification"
-        );
-    }
-
-    /// A non-zero 32-byte key must NOT be treated as a placeholder.
-    #[test]
-    fn is_placeholder_passes_real_key() {
-        use base64::Engine as _;
-        // Synthesise a fake non-zero key (not a real Ed25519 key — just for the
-        // placeholder-detection logic which only checks bytes, not curve validity).
         let real_key = [0xABu8; 32];
         let b64 = base64::engine::general_purpose::STANDARD.encode(real_key);
-        let key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64.trim())
-            .unwrap_or_default();
-        let is_placeholder = key_bytes.iter().all(|&b| b == 0) || key_bytes.len() != 32;
         assert!(
-            !is_placeholder,
-            "a non-zero 32-byte key must not be treated as a placeholder"
+            is_valid_registry_pubkey_b64(&b64),
+            "non-zero 32-byte key must validate"
+        );
+    }
+
+    /// The validator must reject the historical all-zero placeholder, garbage
+    /// base64, and wrong-length keys — the three failure modes that fall back
+    /// to the next link of the resolver chain.
+    #[test]
+    fn valid_registry_pubkey_b64_rejects_invalid_inputs() {
+        use base64::Engine as _;
+
+        // All-zero 32-byte key (legacy placeholder) — rejected.
+        let zero = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        assert!(
+            !is_valid_registry_pubkey_b64(&zero),
+            "all-zero placeholder must be rejected"
+        );
+
+        // Wrong length (16 bytes) — rejected.
+        let short = base64::engine::general_purpose::STANDARD.encode([0xAAu8; 16]);
+        assert!(
+            !is_valid_registry_pubkey_b64(&short),
+            "16-byte key must be rejected"
+        );
+
+        // Wrong length (64 bytes) — rejected.
+        let long = base64::engine::general_purpose::STANDARD.encode([0xAAu8; 64]);
+        assert!(
+            !is_valid_registry_pubkey_b64(&long),
+            "64-byte key must be rejected"
+        );
+
+        // Non-base64 garbage — rejected.
+        assert!(
+            !is_valid_registry_pubkey_b64("not-base64!!!"),
+            "garbage input must be rejected"
+        );
+
+        // Empty input — rejected.
+        assert!(!is_valid_registry_pubkey_b64(""), "empty must be rejected");
+
+        // Whitespace tolerated around a valid key.
+        let real_key = [0xABu8; 32];
+        let b64_padded = format!(
+            "  {}  ",
+            base64::engine::general_purpose::STANDARD.encode(real_key),
+        );
+        assert!(
+            is_valid_registry_pubkey_b64(&b64_padded),
+            "validator must trim whitespace"
+        );
+    }
+
+    /// The TOFU cache path is derived from $HOME — verify the directory layout
+    /// matches the conventional `~/.librefang/` location used elsewhere in the
+    /// runtime (config, plugins, agents).
+    #[test]
+    fn registry_pubkey_cache_path_lives_under_dotlibrefang() {
+        // Save and restore HOME to avoid leaking into other tests.
+        let original = std::env::var("HOME").ok();
+        // SAFETY: tests in this module are single-threaded for env mutation.
+        unsafe {
+            std::env::set_var("HOME", "/tmp/librefang-test-home-pubkey");
+        }
+        let path = registry_pubkey_cache_path().expect("path resolution");
+        // SAFETY: restoring the prior value of HOME.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/librefang-test-home-pubkey/.librefang/registry.pub"),
         );
     }
 
