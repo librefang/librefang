@@ -1,0 +1,58 @@
+name: cargo-deny
+
+# Supply-chain audit: advisories, licenses, bans, sources.
+# Configuration lives in deny.toml at the repo root.
+#
+# We split advisories from licenses+bans+sources into two matrix legs so a
+# brand-new RustSec advisory does not block a license / source PR (and vice
+# versa). Each leg fails independently and is required for merge.
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'xtask/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'xtask/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/cargo-deny.yml'
+  # Daily catch-all so a freshly published RustSec advisory against a
+  # currently-pinned dep is surfaced on main even if no Cargo.toml has
+  # changed in the meantime.
+  schedule:
+    - cron: '17 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - advisories
+          - bans licenses sources
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # Pin to a SHA after the first green run on main — see follow-up note
+      # in the umbrella issue (#3305). Tag-pinning is acceptable for the
+      # initial roll-out so the action's own auto-update path keeps working.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}

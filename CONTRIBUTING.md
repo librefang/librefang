@@ -15,6 +15,7 @@ This guide covers everything you need to get started, from setting up your devel
 - [Development Environment](#development-environment)
 - [Building and Testing](#building-and-testing)
 - [Code Style](#code-style)
+- [Dependency Policy](#dependency-policy)
 - [Architecture Overview](#architecture-overview)
 - [How to Add a New Agent Template](#how-to-add-a-new-agent-template)
 - [How to Add a New Skill](#how-to-add-a-new-skill)
@@ -291,6 +292,47 @@ cargo run -- doctor
 - **Dependencies**: Workspace dependencies are declared in the root `Cargo.toml`. Prefer reusing workspace deps over adding new ones. If you need a new dependency, justify it in the PR.
 - **Testing**: Every new feature must include tests. Use `tempfile::TempDir` for filesystem isolation and random port binding for network tests.
 - **Serde**: All config structs use `#[serde(default)]` for forward compatibility with partial TOML.
+
+---
+
+## Dependency Policy
+
+LibreFang ships as a single binary that runs other people's agents on your hardware, so every crate we pull in is part of the trust boundary. The rules below codify how we add, audit, and remove third-party code.
+
+### Adding a new crate
+
+1. **Justify it in the PR description.** Explain what it does, why a workspace crate or the standard library is not sufficient, and link to the upstream repo and license.
+2. **License must be on the allow-list** in [`deny.toml`](deny.toml). Anything outside `Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `MPL-2.0`, `Unicode-DFS-2016`, `Unicode-3.0`, `Zlib`, `CC0-1.0` requires a maintainer-level decision and an explicit `[[licenses.clarify]]` or `exceptions` entry with rationale.
+3. **No git dependencies by default.** `unknown-git = "deny"` is set in `deny.toml`. If you absolutely need an unreleased upstream change, add the repo URL to `allow-git` with an inline comment linking to the upstream PR / issue and a target version where it can be removed.
+4. **Reuse the workspace dependency table** in the root `Cargo.toml` (`[workspace.dependencies]`) so version bumps stay coordinated across crates.
+
+### Patching upstream crates
+
+Every entry under `[patch.crates-io]` (in the root `Cargo.toml`) MUST carry a comment block recording:
+
+- **Why** the patch exists — CVE ID, bug report, or unmerged feature.
+- **Upstream link** — the issue or PR we are waiting on.
+- **Pinned version** — the exact upstream tag / SHA we are tracking, so reviewers can diff against it.
+- **Removal trigger** — the upstream version that will let us drop the patch (e.g. "remove once foo ≥ 1.4 is published").
+
+A patch without an audit comment is rejected at review.
+
+### Advisories and CI enforcement
+
+The [`cargo-deny`](.github/workflows/cargo-deny.yml) workflow runs on every PR and main push that touches `Cargo.toml`, `Cargo.lock`, `crates/**/Cargo.toml`, `xtask/Cargo.toml`, or `deny.toml`. It executes two independent checks:
+
+- `cargo deny check advisories` — RustSec database, yanked crates, vulnerability hits.
+- `cargo deny check bans licenses sources` — duplicate / wildcard / banned crates, license allow-list, registry / git source allow-list.
+
+A `RUSTSEC-*` advisory that we cannot immediately fix may be temporarily ignored by adding it to `[advisories].ignore` in `deny.toml`, but **only with**:
+
+- A comment naming the upstream issue / PR being tracked.
+- An explicit reviewer sign-off in the PR that adds the ignore.
+- A scheduled re-evaluation (typically removed within one release cycle).
+
+### Daily catch-all
+
+`cargo-deny.yml` also runs on a `schedule:` cron so freshly published RustSec advisories against pinned dependencies are surfaced even when no `Cargo.toml` has changed. Treat a red scheduled run as a security ticket — open an issue and either bump the dep or document the ignore as above.
 
 ---
 

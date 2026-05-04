@@ -1,0 +1,111 @@
+# cargo-deny configuration — supply-chain audit for the LibreFang workspace.
+#
+# Schema reference: https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# Run locally with:
+#   cargo deny check advisories
+#   cargo deny check bans licenses sources
+#
+# CI runs the same checks on every PR and main push that touches Cargo.toml,
+# Cargo.lock, deny.toml, or the workflow itself — see
+# .github/workflows/cargo-deny.yml. See CONTRIBUTING.md (§ Dependency policy)
+# for the review expectations behind every entry below.
+
+[graph]
+# Resolve the dependency graph for every platform we ship to. A crate that
+# only compiles on a single target (e.g. windows-only or wasm-only) will
+# otherwise be skipped silently and we'd miss license/advisory hits on the
+# platforms our users actually run.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[output]
+feature-depth = 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Advisories — RustSec database, blocks yanked / vulnerable crates.
+# ─────────────────────────────────────────────────────────────────────────────
+[advisories]
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+ignore = [
+    # Each entry MUST link to the issue / PR documenting the justification.
+    # Format: "RUSTSEC-YYYY-NNNN", # <reason>; tracking: <issue url>
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Licenses — explicit allow-list. Anything not listed fails the check.
+# ─────────────────────────────────────────────────────────────────────────────
+[licenses]
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+confidence-threshold = 0.8
+# Permissive licenses compatible with our own Apache-2.0 / MIT distribution.
+# Strong copyleft (GPL, AGPL, LGPL) is intentionally absent — adding one
+# requires a maintainer-level decision documented in CONTRIBUTING.md.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+]
+# Per-crate license clarifications go here. Add only when SPDX detection is
+# ambiguous AND the upstream LICENSE file has been read manually.
+exceptions = []
+
+# `ring` ships a hand-rolled license file rather than a single SPDX ID;
+# this clarification matches the upstream reality (MIT + ISC + OpenSSL).
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bans — duplicate-version, wildcard, and explicit deny / allow lists.
+# ─────────────────────────────────────────────────────────────────────────────
+[bans]
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+# Workspace currently has many dependencies that legitimately pull in
+# different minor versions of shared crates (e.g. tokio-util, hashbrown).
+# `warn` flags them in CI logs without failing the build; we revisit the
+# duplicate count as part of routine dependency review rather than blocking
+# unrelated PRs on a transitive bump. Promote to "deny" once the workspace
+# is consolidated.
+multiple-versions = "warn"
+# Wildcard version requirements (`*`) cannot be reproducibly resolved and
+# are always a mistake in a published crate.
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sources — restrict where crates may come from.
+# ─────────────────────────────────────────────────────────────────────────────
+[sources]
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+# Anything outside crates.io must be explicitly allow-listed. The workspace
+# currently has zero git dependencies (verified by `rg 'git\s*=\s*"'` over
+# every Cargo.toml at the time of writing); if that ever changes, add the
+# repository to `allow-git` together with a comment linking to the upstream
+# issue / PR explaining why a published version is not yet usable.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
