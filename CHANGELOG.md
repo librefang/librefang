@@ -427,6 +427,10 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 
 - Wire `cargo xtask integration-test` into CI as a `live-integration-smoke` job — spawns a real `target/debug/librefang start` daemon on every PR touching Rust or CI files, hits `/api/health`, `/api/agents`, `/api/budget`, `/api/network/status`, and SIGTERMs. Catches the failure modes the in-process integration tests miss (route not registered in `server.rs`, daemon failing to bind, config fields not deserializing). Runs with `--skip-llm` to keep the gate hermetic; the live-LLM branch is reserved for the release/nightly workflow that has provider keys. (#3405) (@houko)
 
+### Documentation
+
+- Per-crate `AGENTS.md` for the six core crates (`librefang-{kernel,runtime,types,llm-driver,extensions,channels}`). Telegraph-style: scope, module map, lock strategy, taboos, common gotchas. Each one ships with a sibling `CLAUDE.md` symlink so AI tooling that walks up looking for `CLAUDE.md` (older Claude Code builds, Codex CLI variants) finds the same rules. New CI gate `agents-claude-pair` verifies the symlink remains in place via `scripts/check-agents-claude-pair.sh`. The dashboard's existing `AGENTS.md` also gains the symlink. (#3297) (@houko)
+
 ## [2026.4.28] - 2026-04-28
 
 _67 PRs from 4 contributors since v2026.4.27-beta6._

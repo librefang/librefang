@@ -517,6 +517,20 @@ jobs:
             lsof -ti :4545 | xargs -r kill -9 || true
           fi
 
+  # ── AGENTS.md / CLAUDE.md sibling-symlink check (#3297) ────────────────────────
+  # Every per-crate / per-subdir AGENTS.md must have a sibling CLAUDE.md
+  # symlink pointing at it, so AI tooling that doesn't recognise AGENTS.md
+  # (older Claude Code builds, Codex CLI variants) finds the rules under
+  # the conventional name. The repo-root pair is exempt — the two files
+  # there are intentionally distinct.
+  agents-claude-pair:
+    name: AGENTS.md ↔ CLAUDE.md pair
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Verify sibling CLAUDE.md symlink
+        run: sh scripts/check-agents-claude-pair.sh
+
   # ── Ubuntu tests: selective on PR, full on main ────────────────────────────────
   # Full-run lane (push to main, workspace Cargo.toml change) runs the full
   # workspace test matrix sharded 4 ways via `cargo nextest run --partition
