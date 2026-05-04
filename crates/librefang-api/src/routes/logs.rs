@@ -18,9 +18,11 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 ///   - `filter` — text substring filter across action/detail/agent_id
 ///
 /// A heartbeat ping is sent every 15 seconds to keep the connection alive.
-/// The endpoint polls the audit log every second and sends only new entries
-/// (tracked by sequence number). On first connect, existing entries are sent
-/// as a backfill so the client has immediate context.
+/// The endpoint polls the audit log every second. The first poll sends up
+/// to the most recent 200 entries as a bounded backfill (prevents a flood
+/// when subscribing against a long-running daemon); every subsequent poll
+/// uses a cursor (`since_seq`) so bursts faster than the previous
+/// `recent(200)` sliding window are no longer silently truncated.
 #[utoipa::path(get, path = "/api/logs/stream", tag = "system", responses((status = 200, description = "SSE log stream")))]
 pub async fn logs_stream(
     State(state): State<Arc<AppState>>,
@@ -40,21 +42,30 @@ pub async fn logs_stream(
     >(256);
 
     tokio::spawn(async move {
+        // Cursor-based polling: `last_seq == 0` triggers the bounded
+        // backfill on the very first iteration, then every subsequent
+        // poll asks for entries strictly newer than the last delivered
+        // seq. This is the fix for the dropped-burst bug — the previous
+        // implementation always called `recent(200)` and skipped via
+        // `entry.seq <= last_seq`, so a burst > 200 entries within one
+        // poll interval would silently drop the oldest entries in that
+        // burst when `recent`'s sliding window scrolled past them.
         let mut last_seq: u64 = 0;
         let mut first_poll = true;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit().recent(200);
+            let entries = if first_poll {
+                // First connect: cap the backfill so a long-running
+                // daemon's audit log doesn't dump megabytes onto a
+                // freshly-opened EventSource.
+                state.kernel.audit().recent(200)
+            } else {
+                state.kernel.audit().since_seq(last_seq)
+            };
 
             for entry in &entries {
-                // On first poll, send all existing entries as backfill.
-                // After that, only send entries newer than last_seq.
-                if !first_poll && entry.seq <= last_seq {
-                    continue;
-                }
-
                 let action_str = format!("{:?}", entry.action);
 
                 // Apply level filter
