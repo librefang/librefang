@@ -336,6 +336,20 @@ impl McpOAuthProvider for KernelOAuthProvider {
         Ok(())
     }
 
+    /// Persist the discovery-derived OAuth metadata under the durable
+    /// per-server vault namespace.
+    ///
+    /// **Writes are additive — passing `None` for `client_id` does NOT clear
+    /// an existing value.** A re-auth flow that legitimately drops Dynamic
+    /// Client Registration (e.g. server now ships a static `client_id`) will
+    /// leave the previous DCR `client_id` in the vault, and the next refresh
+    /// will continue to send it. To overwrite, pass the new `Some(cid)`
+    /// explicitly; to remove, callers must `vault_remove` the
+    /// `{server_url}/client_id` key directly.
+    ///
+    /// `token_endpoint` is unconditionally written — it has no semantic
+    /// "absent" state at this layer (the callback only invokes this method
+    /// after discovery succeeded, so the value is always meaningful).
     async fn store_oauth_metadata(
         &self,
         server_url: &str,
@@ -638,7 +652,11 @@ mod tests {
     }
 
     /// `client_id` is optional (servers with a pre-registered public client
-    /// won't run RFC 7591 DCR). Passing `None` must NOT write a bogus key.
+    /// won't run RFC 7591 DCR). Passing `None` must NOT write a bogus key,
+    /// and — critically — must NOT clear an existing value. `store_oauth_metadata`
+    /// is documented as additive; this locks that contract so a future
+    /// "helpful" cleanup of the kernel impl can't silently turn `None` into
+    /// a delete and leave production refreshes mid-flow without a client_id.
     #[tokio::test]
     #[serial_test::serial(librefang_vault_key)]
     async fn store_oauth_metadata_skips_client_id_when_none() {
@@ -652,19 +670,38 @@ mod tests {
         }
         let provider = KernelOAuthProvider::new(home);
         let server_url = "https://example.com/mcp";
+        let client_id_key = KernelOAuthProvider::vault_key(server_url, "client_id");
 
+        // Case 1: empty vault, None client_id → key must remain absent.
         provider
             .store_oauth_metadata(server_url, "https://example.com/token", None)
             .await
             .expect("store_oauth_metadata");
 
-        let client_id_key = KernelOAuthProvider::vault_key(server_url, "client_id");
         assert_eq!(
             provider
                 .vault_get(&client_id_key)
                 .expect("vault_get client_id"),
             None,
-            "client_id key must remain absent when None is passed"
+            "client_id key must remain absent when None is passed against an empty vault"
+        );
+
+        // Case 2: seed an existing client_id (simulates a prior DCR run),
+        // then call again with None → existing value MUST survive.
+        provider
+            .vault_set(&client_id_key, "preexisting-cid")
+            .expect("seed client_id");
+        provider
+            .store_oauth_metadata(server_url, "https://example.com/token", None)
+            .await
+            .expect("store_oauth_metadata (None against seeded client_id)");
+
+        assert_eq!(
+            provider
+                .vault_get(&client_id_key)
+                .expect("vault_get client_id after None call"),
+            Some("preexisting-cid".to_string()),
+            "writes are additive: passing None must NOT clear an existing client_id"
         );
 
         unsafe {
