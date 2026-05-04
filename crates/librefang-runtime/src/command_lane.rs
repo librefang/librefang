@@ -335,7 +335,7 @@ mod tests {
     /// Regression for #3495 — every successful `submit` must record a
     /// `librefang_queue_wait_seconds{lane}` histogram sample so operators
     /// can alert on queue starvation. Uses `metrics::with_local_recorder`
-    /// + a single-threaded runtime so the metric routes to our debugging
+    /// and a single-threaded runtime so the metric routes to our debugging
     /// recorder without touching any global state other tests share.
     #[test]
     fn test_submit_records_queue_wait_histogram() {
