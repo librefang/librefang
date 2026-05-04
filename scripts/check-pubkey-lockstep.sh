@@ -48,12 +48,15 @@ extract() {
   echo "$body"
 }
 
-# The daemon now embeds a SLICE of pubkeys (each `EmbeddedPubkey { b64,
-# expires_at }`). Slot 0 is the active key. We pull the FIRST `b64: "..."`
-# field — the active slot — and compare against the worker side.
+# The daemon now embeds a SLICE of pubkeys (each `EmbeddedPubkey {
+# pubkey_b64, expires_at }`). Slot 0 is the active key. We pull the
+# FIRST `pubkey_b64: "..."` field — the active slot — and compare
+# against the worker side. The unique field name avoids matching any
+# stray `b64` literal that drifts in elsewhere (PR re-review LOW
+# round 4).
 daemon=$(extract \
   "crates/librefang-runtime/src/plugin_manager.rs" \
-  'b64')
+  'pubkey_b64')
 registry_worker=$(extract \
   "web/workers/registry-worker/wrangler.toml" \
   'REGISTRY_PUBLIC_KEY')

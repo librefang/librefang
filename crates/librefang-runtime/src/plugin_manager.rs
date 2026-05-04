@@ -22,7 +22,11 @@ use tracing::{debug, info, warn};
 /// against every still-running daemon binary that carries it. PR re-review
 /// MEDIUM (round 3).
 struct EmbeddedPubkey {
-    b64: &'static str,
+    /// Base64-encoded raw 32-byte Ed25519 public key. Field name is
+    /// `pubkey_b64` (not `b64`) so the lockstep CI script's regex picks
+    /// up *this* field unambiguously and not some unrelated future
+    /// `b64: "..."` literal that drifts in (PR re-review LOW round 4).
+    pubkey_b64: &'static str,
     /// `None` = active key, no expiry. `Some(t)` = prior key, valid only
     /// while `now() < t`.
     expires_at: Option<i64>,
@@ -39,7 +43,7 @@ struct EmbeddedPubkey {
 /// attacker key forever (PR review HIGH #5/#16). Compiling the key in
 /// moves the trust path to HTTPS + the daemon release pipeline.
 ///
-/// `EMBEDDED_REGISTRY_PUBKEYS[0].b64` MUST match `REGISTRY_PUBLIC_KEY` in:
+/// `EMBEDDED_REGISTRY_PUBKEYS[0].pubkey_b64` MUST match `REGISTRY_PUBLIC_KEY` in:
 ///   - `web/workers/registry-worker/wrangler.toml`
 ///   - `web/workers/marketplace-worker/wrangler.toml`
 ///   - `web/public/_worker.js`
@@ -59,7 +63,7 @@ struct EmbeddedPubkey {
 ///      message, unlike the previous "accept forever" behaviour).
 const EMBEDDED_REGISTRY_PUBKEYS: &[EmbeddedPubkey] = &[
     EmbeddedPubkey {
-        b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+        pubkey_b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
         expires_at: None,
     },
 ];
@@ -211,11 +215,25 @@ async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, Str
     // official registry. The full slice — including any rotation-window
     // keys — is consulted at verification time via
     // `verify_registry_index_multi`, which also enforces per-key expiry.
+    // Defense-in-depth invariant: slot 0 (the active key) MUST NOT have
+    // an expiry — that's what "active" means. A maintainer who absent-
+    // mindedly sets `expires_at: Some(_)` on slot 0 during a rotation
+    // edit would silently break installs the moment the timestamp passed
+    // (PR re-review LOW round 4). Catch it in debug builds before
+    // shipping; the tests/ block also asserts this at compile + test time.
+    debug_assert!(
+        EMBEDDED_REGISTRY_PUBKEYS
+            .first()
+            .map(|k| k.expires_at.is_none())
+            .unwrap_or(true),
+        "EMBEDDED_REGISTRY_PUBKEYS[0] must have expires_at: None (active key)"
+    );
+
     if let Some(active) = EMBEDDED_REGISTRY_PUBKEYS
         .first()
-        .filter(|k| is_valid_registry_pubkey_b64(k.b64))
+        .filter(|k| is_valid_registry_pubkey_b64(k.pubkey_b64))
     {
-        return Ok(active.b64.to_string());
+        return Ok(active.pubkey_b64.to_string());
     }
     // Invalid slot-0 key is a build-time mistake; warn but keep trying
     // so the daemon stays usable for self-hosted forks.
@@ -344,8 +362,14 @@ fn verify_registry_index_multi(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    // Trim once for the dedup compare. All current call sites pass a
+    // pre-trimmed key, but a future code path that forgets would
+    // otherwise verify the resolved key twice (wasted CPU, not unsafe).
+    // PR re-review MEDIUM round 4.
+    let resolved_trimmed = resolved_pubkey.trim();
+    let mut expired_count = 0usize;
     for embedded in EMBEDDED_REGISTRY_PUBKEYS {
-        if embedded.b64 == resolved_pubkey {
+        if embedded.pubkey_b64 == resolved_trimmed {
             continue; // already tried as the resolved key
         }
         if let Some(exp) = embedded.expires_at {
@@ -354,10 +378,11 @@ fn verify_registry_index_multi(
                     "Skipping embedded pubkey: expired at {} (now {})",
                     exp, now
                 );
+                expired_count += 1;
                 continue;
             }
         }
-        match verify_registry_index(index_bytes, sig_b64, embedded.b64) {
+        match verify_registry_index(index_bytes, sig_b64, embedded.pubkey_b64) {
             Ok(()) => {
                 warn!(
                     "Registry index verified against a prior embedded pubkey \
@@ -369,6 +394,17 @@ fn verify_registry_index_multi(
             }
             Err(e) => last_err = e,
         }
+    }
+    // PR re-review MEDIUM round 4: when slot-0 verification fails AND
+    // every prior key in the slice has aged out, surface "your daemon
+    // binary is past its rotation window — upgrade" so the user has an
+    // actionable next step instead of a bare verify-failed message.
+    if expired_count > 0 {
+        last_err = format!(
+            "{last_err} ({expired_count} prior embedded pubkey(s) past expiry — \
+             this daemon binary is past its rotation window; upgrade librefang \
+             to restore plugin installs)"
+        );
     }
     Err(last_err)
 }
@@ -5060,6 +5096,27 @@ description = "Spanish description"
         assert_eq!(
             path,
             std::path::PathBuf::from("/tmp/librefang-test-home-pubkey/.librefang/registry.pub"),
+        );
+    }
+
+    /// Slot 0 of the embedded keys MUST be the active key — no expiry.
+    /// A maintainer who absent-mindedly sets `expires_at: Some(...)` on
+    /// slot 0 during a rotation edit would silently break installs the
+    /// moment that timestamp passed (PR re-review LOW round 4). Compile-
+    /// time + test-time guard so the regression is caught before ship.
+    #[test]
+    fn embedded_pubkeys_slot0_has_no_expiry() {
+        let slot0 = EMBEDDED_REGISTRY_PUBKEYS
+            .first()
+            .expect("EMBEDDED_REGISTRY_PUBKEYS must have at least one entry");
+        assert!(
+            slot0.expires_at.is_none(),
+            "EMBEDDED_REGISTRY_PUBKEYS[0] must have expires_at: None — slot 0 \
+             is the active key and must not be marked for rotation"
+        );
+        assert!(
+            is_valid_registry_pubkey_b64(slot0.pubkey_b64),
+            "EMBEDDED_REGISTRY_PUBKEYS[0].pubkey_b64 is not a valid 32-byte Ed25519 key"
         );
     }
 
