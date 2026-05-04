@@ -61,12 +61,10 @@ struct EmbeddedPubkey {
 ///      follow-up daemon release. Daemons that didn't update by then will
 ///      hard-fail installs (the failure surfaces an actionable error
 ///      message, unlike the previous "accept forever" behaviour).
-const EMBEDDED_REGISTRY_PUBKEYS: &[EmbeddedPubkey] = &[
-    EmbeddedPubkey {
-        pubkey_b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
-        expires_at: None,
-    },
-];
+const EMBEDDED_REGISTRY_PUBKEYS: &[EmbeddedPubkey] = &[EmbeddedPubkey {
+    pubkey_b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+    expires_at: None,
+}];
 
 /// Default URL for self-hosted registries that opt into HTTP pubkey
 /// resolution (operators of `acme/private-registry` style forks who don't
@@ -98,8 +96,7 @@ const OFFICIAL_INDEX_URL: &str = "https://stats.librefang.ai/api/registry/index.
 
 /// Base64-encoded Ed25519 signature over the bytes returned by
 /// [`OFFICIAL_INDEX_URL`].
-const OFFICIAL_INDEX_SIG_URL: &str =
-    "https://stats.librefang.ai/api/registry/index.json.sig";
+const OFFICIAL_INDEX_SIG_URL: &str = "https://stats.librefang.ai/api/registry/index.json.sig";
 
 /// On-disk pin for the registry pubkey (TOFU cache).
 ///
@@ -139,7 +136,10 @@ fn read_pubkey_cache_safely(path: &std::path::Path) -> Option<String> {
         let mut f = opts.open(path).ok()?;
         let meta = f.metadata().ok()?;
         if !meta.is_file() {
-            warn!("Pubkey cache {} is not a regular file — ignoring", path.display());
+            warn!(
+                "Pubkey cache {} is not a regular file — ignoring",
+                path.display()
+            );
             return None;
         }
         use std::io::Read as _;
@@ -154,7 +154,10 @@ fn read_pubkey_cache_safely(path: &std::path::Path) -> Option<String> {
         // NTFS ACLs for the rest.
         let meta = std::fs::metadata(path).ok()?;
         if !meta.is_file() {
-            warn!("Pubkey cache {} is not a regular file — ignoring", path.display());
+            warn!(
+                "Pubkey cache {} is not a regular file — ignoring",
+                path.display()
+            );
             return None;
         }
         std::fs::read_to_string(path).ok()
@@ -166,8 +169,8 @@ fn read_pubkey_cache_safely(path: &std::path::Path) -> Option<String> {
 fn write_pubkey_cache_safely(path: &std::path::Path, value: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -243,7 +246,10 @@ async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, Str
     if let Some(cached) = read_pubkey_cache_safely(&cache_path) {
         let trimmed = cached.trim().to_string();
         if is_valid_registry_pubkey_b64(&trimmed) {
-            debug!("Using TOFU-pinned registry pubkey from {}", cache_path.display());
+            debug!(
+                "Using TOFU-pinned registry pubkey from {}",
+                cache_path.display()
+            );
             return Ok(trimmed);
         }
         warn!(
@@ -374,10 +380,7 @@ fn verify_registry_index_multi(
         }
         if let Some(exp) = embedded.expires_at {
             if now >= exp {
-                debug!(
-                    "Skipping embedded pubkey: expired at {} (now {})",
-                    exp, now
-                );
+                debug!("Skipping embedded pubkey: expired at {} (now {})", exp, now);
                 expired_count += 1;
                 continue;
             }
@@ -1268,9 +1271,9 @@ async fn install_from_registry(
             ));
         };
 
-        let in_index = index_entries.iter().any(|e| {
-            e.get("name").and_then(|v| v.as_str()) == Some(name)
-        });
+        let in_index = index_entries
+            .iter()
+            .any(|e| e.get("name").and_then(|v| v.as_str()) == Some(name));
         if !in_index {
             let _ = tokio::fs::remove_dir_all(&target_dir).await;
             return Err(format!(
@@ -5127,7 +5130,10 @@ description = "Spanish description"
     fn registry_index_urls_official_defaults_to_worker_mirror() {
         let (idx, sig) = registry_index_urls("librefang/librefang-registry", None, None);
         assert_eq!(idx, "https://stats.librefang.ai/api/registry/index.json");
-        assert_eq!(sig, "https://stats.librefang.ai/api/registry/index.json.sig");
+        assert_eq!(
+            sig,
+            "https://stats.librefang.ai/api/registry/index.json.sig"
+        );
     }
 
     /// Self-hosted forks fall back to GitHub raw — keeps the existing path
