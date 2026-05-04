@@ -3000,7 +3000,7 @@ async fn finalize_successful_end_turn(
         ctx.memory
             .save_session_async(ctx.session)
             .await
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
     }
 
     // Post-turn memory writes and context-engine updates are skipped for
@@ -3777,7 +3777,7 @@ pub async fn run_agent_loop(
                         memory
                             .save_session_async(session)
                             .await
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                            .map_err(LibreFangError::memory)?;
                     }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
@@ -3811,7 +3811,7 @@ pub async fn run_agent_loop(
                     memory
                         .save_session_async(session)
                         .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                        .map_err(LibreFangError::memory)?;
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
@@ -4278,7 +4278,7 @@ fn check_retry_cooldown(
                 reason,
                 retry_after_secs,
             } => {
-                return Err(LibreFangError::LlmDriver(format!(
+                return Err(LibreFangError::llm_driver_msg(format!(
                     "Provider '{provider}' is in cooldown ({reason}). Retry in {retry_after_secs}s."
                 )));
             }
@@ -4319,7 +4319,7 @@ async fn handle_retryable_llm_error(
 ) -> Result<String, LibreFangError> {
     if attempt == MAX_RETRIES {
         record_retry_failure(provider, cooldown, false);
-        return Err(LibreFangError::LlmDriver(exhausted_message));
+        return Err(LibreFangError::llm_driver_msg(exhausted_message));
     }
 
     let delay = std::cmp::max(retry_after_ms, BASE_RETRY_DELAY_MS * 2u64.pow(attempt));
@@ -4352,7 +4352,10 @@ fn build_user_facing_llm_error(
         classified.sanitized_message
     };
 
-    (classified.is_billing, LibreFangError::LlmDriver(user_msg))
+    (
+        classified.is_billing,
+        LibreFangError::llm_driver_msg(user_msg),
+    )
 }
 
 #[instrument(
@@ -4428,7 +4431,7 @@ async fn call_with_retry(
         }
     }
 
-    Err(LibreFangError::LlmDriver(
+    Err(LibreFangError::llm_driver_msg(
         last_error.unwrap_or_else(|| "Unknown error".to_string()),
     ))
 }
@@ -4516,7 +4519,7 @@ async fn stream_with_retry(
                             .await;
                     }
                 }
-                return Err(LibreFangError::LlmDriver(format!(
+                return Err(LibreFangError::llm_driver_msg(format!(
                     "Task timed out after {inactivity_secs}s of inactivity \
                      (last: {last_activity}). \
                      {partial_text_len} chars of partial output were delivered. \
@@ -4546,7 +4549,7 @@ async fn stream_with_retry(
         }
     }
 
-    Err(LibreFangError::LlmDriver(
+    Err(LibreFangError::llm_driver_msg(
         last_error.unwrap_or_else(|| "Unknown error".to_string()),
     ))
 }
@@ -5225,7 +5228,7 @@ pub async fn run_agent_loop_streaming(
                         memory
                             .save_session_async(session)
                             .await
-                            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                            .map_err(LibreFangError::memory)?;
                     }
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
@@ -5256,7 +5259,7 @@ pub async fn run_agent_loop_streaming(
                     memory
                         .save_session_async(session)
                         .await
-                        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                        .map_err(LibreFangError::memory)?;
                     return Ok(build_silent_agent_loop_result(
                         total_usage,
                         iteration + 1,
