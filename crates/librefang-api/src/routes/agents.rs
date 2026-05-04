@@ -190,7 +190,7 @@ use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -6934,6 +6934,8 @@ mod monitoring_tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         });
         (state, tmp)
     }

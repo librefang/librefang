@@ -26,6 +26,18 @@ const REDDIT_TOKEN_URL: &str = "https://www.reddit.com/api/v1/access_token";
 /// Reddit OAuth API base URL.
 const REDDIT_API_BASE: &str = "https://oauth.reddit.com";
 
+/// Returns the default Reddit OAuth2 token URL. Used to initialise `RedditAdapter::token_url`.
+#[inline]
+fn default_reddit_token_url() -> String {
+    REDDIT_TOKEN_URL.to_string()
+}
+
+/// Returns the default Reddit OAuth API base URL. Used to initialise `RedditAdapter::api_base`.
+#[inline]
+fn default_reddit_api_base() -> String {
+    REDDIT_API_BASE.to_string()
+}
+
 /// Reddit poll interval (seconds). Reddit API rate limit is ~60 requests/minute.
 const POLL_INTERVAL_SECS: u64 = 5;
 
@@ -69,6 +81,12 @@ pub struct RedditAdapter {
     cached_token: Arc<RwLock<Option<(String, Instant)>>>,
     /// Track last seen comment IDs to avoid duplicates.
     seen_comments: Arc<RwLock<HashMap<String, bool>>>,
+    /// OAuth2 token endpoint. Defaults to `https://www.reddit.com/api/v1/access_token`.
+    /// Overridable in tests via `with_token_url()` to point at a wiremock server.
+    token_url: String,
+    /// Reddit OAuth API base URL. Defaults to `https://oauth.reddit.com`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
 }
 
 impl RedditAdapter {
@@ -108,11 +126,29 @@ impl RedditAdapter {
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
             seen_comments: Arc::new(RwLock::new(HashMap::new())),
+            token_url: default_reddit_token_url(),
+            api_base: default_reddit_api_base(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Reddit OAuth2 token endpoint. Intended for tests that point
+    /// the adapter at a wiremock server instead of `https://www.reddit.com/api/v1/access_token`.
+    #[cfg(test)]
+    pub fn with_token_url(mut self, url: String) -> Self {
+        self.token_url = url;
+        self
+    }
+
+    /// Override the Reddit OAuth API base URL. Intended for tests that point
+    /// the adapter at a wiremock server instead of `https://oauth.reddit.com`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
         self
     }
 
@@ -137,7 +173,7 @@ impl RedditAdapter {
 
         let resp = self
             .client
-            .post(REDDIT_TOKEN_URL)
+            .post(&self.token_url)
             .basic_auth(&self.client_id, Some(self.client_secret.as_str()))
             .form(&params)
             .send()
@@ -167,7 +203,7 @@ impl RedditAdapter {
     /// Validate credentials by calling `/api/v1/me`.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
-        let url = format!("{}/api/v1/me", REDDIT_API_BASE);
+        let url = format!("{}/api/v1/me", self.api_base);
 
         let resp = self.client.get(&url).bearer_auth(&token).send().await?;
 
@@ -189,7 +225,7 @@ impl RedditAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
-        let url = format!("{}/api/comment", REDDIT_API_BASE);
+        let url = format!("{}/api/comment", self.api_base);
 
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -360,6 +396,8 @@ impl ChannelAdapter for RedditAdapter {
         let reddit_username = self.username.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let token_url = self.token_url.clone();
+        let api_base = self.api_base.clone();
 
         tokio::spawn(async move {
             let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
@@ -392,7 +430,7 @@ impl ChannelAdapter for RedditAdapter {
                                 ("password", password.as_str()),
                             ];
                             match client
-                                .post(REDDIT_TOKEN_URL)
+                                .post(&token_url)
                                 .basic_auth(&client_id, Some(client_secret.as_str()))
                                 .form(&params)
                                 .send()
@@ -431,7 +469,7 @@ impl ChannelAdapter for RedditAdapter {
                 // Poll each subreddit for new comments
                 for subreddit in &subreddits {
                     let sub = subreddit.trim_start_matches("r/");
-                    let url = format!("{}/r/{}/comments?limit=25&sort=new", REDDIT_API_BASE, sub);
+                    let url = format!("{}/r/{}/comments?limit=25&sort=new", api_base, sub);
 
                     let resp = match client.get(&url).bearer_auth(&token).send().await {
                         Ok(r) => r,
@@ -550,6 +588,107 @@ impl ChannelAdapter for RedditAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `RedditAdapter`
+    // at it via `with_token_url()` + `with_api_base()`. Reddit's send() calls
+    // `api_comment()` which first fetches an OAuth2 token, so both the token
+    // endpoint and the comment endpoint are stubbed.
+
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(token_url: String, api_base: String) -> RedditAdapter {
+        RedditAdapter::new(
+            "test-client-id".to_string(),
+            "test-client-secret".to_string(),
+            "test-user".to_string(),
+            "test-pass".to_string(),
+            vec!["rust".to_string()],
+        )
+        .with_token_url(token_url)
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(fullname: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: fullname.to_string(),
+            display_name: "alice".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    async fn mount_token_stub(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/api/v1/access_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "test-reddit-token",
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "scope": "*"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reddit_send_posts_comment_with_parent_fullname() {
+        let server = MockServer::start().await;
+        mount_token_stub(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/comment"))
+            .and(body_string_contains("thing_id=t1_abc123"))
+            .and(body_string_contains("hello+from+librefang"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "json": { "errors": [], "data": { "things": [] } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(
+            format!("{}/api/v1/access_token", server.uri()),
+            server.uri(),
+        );
+        adapter
+            .send(
+                &dummy_user("t1_abc123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn reddit_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        mount_token_stub(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/comment"))
+            .and(body_string_contains("Unsupported+content+type"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "json": { "errors": [], "data": { "things": [] } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(
+            format!("{}/api/v1/access_token", server.uri()),
+            server.uri(),
+        );
+        adapter
+            .send(
+                &dummy_user("t1_xyz789"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_reddit_adapter_creation() {

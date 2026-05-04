@@ -11,7 +11,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +32,42 @@ pub fn router() -> axum::Router<Arc<AppState>> {
                 .delete(task_queue_delete),
         )
         .route("/tasks/{id}/retry", axum::routing::post(task_queue_retry))
+        // Command-queue lane occupancy (#3749 11/N: moved from system.rs).
+        .route("/queue/status", axum::routing::get(queue_status))
+}
+
+/// GET /api/queue/status — Command queue status and occupancy.
+#[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = crate::types::JsonObject)))]
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let occupancy = state.kernel.command_queue_ref().occupancy();
+    let lanes: Vec<serde_json::Value> = occupancy
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "lane": o.lane.to_string(),
+                "active": o.active,
+                "capacity": o.capacity,
+            })
+        })
+        .collect();
+
+    let kcfg2 = state.kernel.config_ref();
+    let queue_cfg = &kcfg2.queue;
+    Json(serde_json::json!({
+        "lanes": lanes,
+        "config": {
+            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+            "max_depth_global": queue_cfg.max_depth_global,
+            "task_ttl_secs": queue_cfg.task_ttl_secs,
+            "concurrency": {
+                "main_lane": queue_cfg.concurrency.main_lane,
+                "cron_lane": queue_cfg.concurrency.cron_lane,
+                "subagent_lane": queue_cfg.concurrency.subagent_lane,
+                "trigger_lane": queue_cfg.concurrency.trigger_lane,
+                "default_per_agent": queue_cfg.concurrency.default_per_agent,
+            },
+        },
+    }))
 }
 
 /// GET /api/tasks/status — Summary counts of tasks by status.

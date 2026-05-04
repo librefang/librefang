@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use librefang_kernel_handle::{AgentInfo, KernelHandle};
+use librefang_kernel_handle::prelude::*;
 use librefang_types::memory::{Entity, GraphMatch, GraphPattern, Relation};
 use librefang_types::user_policy::UserToolGate;
 
 struct NoopKernelHandle;
 
 #[async_trait]
-impl KernelHandle for NoopKernelHandle {
+impl AgentControl for NoopKernelHandle {
     async fn spawn_agent(
         &self,
         _manifest_toml: &str,
@@ -27,6 +27,12 @@ impl KernelHandle for NoopKernelHandle {
         Err("noop".into())
     }
 
+    fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+        vec![]
+    }
+}
+
+impl MemoryAccess for NoopKernelHandle {
     fn memory_store(
         &self,
         _key: &str,
@@ -47,11 +53,10 @@ impl KernelHandle for NoopKernelHandle {
     fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
         Err("noop".into())
     }
+}
 
-    fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-        vec![]
-    }
-
+#[async_trait]
+impl TaskQueue for NoopKernelHandle {
     async fn task_post(
         &self,
         _title: &str,
@@ -94,7 +99,10 @@ impl KernelHandle for NoopKernelHandle {
     async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
         Err("noop".into())
     }
+}
 
+#[async_trait]
+impl EventBus for NoopKernelHandle {
     async fn publish_event(
         &self,
         _event_type: &str,
@@ -102,7 +110,10 @@ impl KernelHandle for NoopKernelHandle {
     ) -> Result<(), String> {
         Err("noop".into())
     }
+}
 
+#[async_trait]
+impl KnowledgeGraph for NoopKernelHandle {
     async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, String> {
         Err("noop".into())
     }
@@ -115,6 +126,16 @@ impl KernelHandle for NoopKernelHandle {
         Err("noop".into())
     }
 }
+
+impl CronControl for NoopKernelHandle {}
+impl ApprovalGate for NoopKernelHandle {}
+impl HandsControl for NoopKernelHandle {}
+impl A2ARegistry for NoopKernelHandle {}
+impl ChannelSender for NoopKernelHandle {}
+impl PromptStore for NoopKernelHandle {}
+impl WorkflowRunner for NoopKernelHandle {}
+impl GoalControl for NoopKernelHandle {}
+impl ToolPolicy for NoopKernelHandle {}
 
 #[test]
 fn test_resolve_user_tool_decision_default_allow() {

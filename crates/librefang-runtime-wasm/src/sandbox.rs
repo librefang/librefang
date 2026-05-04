@@ -24,7 +24,7 @@
 //! and returns a packed pointer to JSON `{"ok": ...}` or `{"error": "..."}`.
 
 use crate::host_functions;
-use librefang_kernel_handle::KernelHandle;
+use librefang_kernel_handle::prelude::*;
 use librefang_types::capability::Capability;
 use serde_json::json;
 use std::sync::Arc;
