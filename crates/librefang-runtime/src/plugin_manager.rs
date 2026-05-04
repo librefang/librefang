@@ -18,16 +18,22 @@ use tracing::{debug, info, warn};
 /// Default URL for the official LibreFang plugin-registry public key.
 ///
 /// Served by the `registry-worker` Cloudflare Worker (see
-/// `web/workers/registry-worker/index.js`). The endpoint returns the raw
-/// 32-byte Ed25519 public key, base64-encoded — exactly what
+/// `web/workers/registry-worker/index.js`) at the same custom domain that
+/// hosts the signed index. The endpoint returns the raw 32-byte Ed25519
+/// public key, base64-encoded — exactly what
 /// `ed25519_dalek::VerifyingKey::from_bytes` consumes.
 ///
 /// Operators of forks / self-hosted registries can point at their own URL
 /// via `LIBREFANG_REGISTRY_PUBKEY_URL`, or skip the network call entirely by
 /// setting `LIBREFANG_REGISTRY_PUBKEY` directly with the base64 key.
 ///
+/// `librefang.ai/.well-known/registry-pubkey` is also wired up via the
+/// Cloudflare Pages worker (see `web/public/_worker.js`) as a stable
+/// alternate alias, but the worker subdomain stays the canonical default
+/// because the Pages worker is only updated on `main` branch deploys.
+///
 /// See `docs/architecture/plugin-signing.md` for the full trust model.
-const OFFICIAL_PUBKEY_URL: &str = "https://librefang.ai/.well-known/registry-pubkey";
+const OFFICIAL_PUBKEY_URL: &str = "https://stats.librefang.ai/.well-known/registry-pubkey";
 
 /// `owner/repo` of the official LibreFang plugin registry on GitHub.
 ///
