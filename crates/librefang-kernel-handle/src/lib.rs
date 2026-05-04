@@ -742,7 +742,7 @@ pub trait PromptStore: Send + Sync {
     fn get_running_experiment(
         &self,
         _agent_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(None)
     }
 
@@ -754,7 +754,7 @@ pub trait PromptStore: Send + Sync {
         _latency_ms: u64,
         _cost_usd: f64,
         _success: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 
@@ -762,7 +762,7 @@ pub trait PromptStore: Send + Sync {
     fn get_prompt_version(
         &self,
         _version_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, KernelOpError> {
         Ok(None)
     }
 
@@ -770,7 +770,7 @@ pub trait PromptStore: Send + Sync {
     fn list_prompt_versions(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -782,25 +782,25 @@ pub trait PromptStore: Send + Sync {
     fn create_prompt_version(
         &self,
         _version: &librefang_types::agent::PromptVersion,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Delete a prompt version. Default: error.
-    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    fn delete_prompt_version(&self, _version_id: &str) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Set a prompt version as active. Default: error.
-    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    fn set_active_prompt_version(&self, _version_id: &str, _agent_id: &str) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// List all experiments for an agent. Default: empty vec.
     fn list_experiments(
         &self,
         _agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -811,15 +811,15 @@ pub trait PromptStore: Send + Sync {
     fn create_experiment(
         &self,
         _experiment: &librefang_types::agent::PromptExperiment,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Get an experiment by ID. Default: None.
     fn get_experiment(
         &self,
         _experiment_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, KernelOpError> {
         Ok(None)
     }
 
@@ -828,15 +828,15 @@ pub trait PromptStore: Send + Sync {
         &self,
         _experiment_id: &str,
         _status: librefang_types::agent::ExperimentStatus,
-    ) -> Result<(), String> {
-        Err("Prompt store not available".to_string())
+    ) -> Result<(), KernelOpError> {
+        Err(KernelOpError::unavailable("Prompt store"))
     }
 
     /// Get experiment metrics. Default: empty vec.
     fn get_experiment_metrics(
         &self,
         _experiment_id: &str,
-    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -845,7 +845,7 @@ pub trait PromptStore: Send + Sync {
         &self,
         _agent_id: librefang_types::agent::AgentId,
         _system_prompt: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 }

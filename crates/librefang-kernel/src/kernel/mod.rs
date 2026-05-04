@@ -19354,21 +19354,21 @@ impl kernel_handle::PromptStore for LibreFangKernel {
     fn get_running_experiment(
         &self,
         agent_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, kernel_handle::KernelOpError> {
         let cfg = self.config.load();
         if !cfg.prompt_intelligence.enabled {
             return Ok(None);
         }
         let id: AgentId = agent_id
             .parse()
-            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid agent ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .get_running_experiment(id)
-            .map_err(|e| format!("Failed to get experiment: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}")))
     }
 
     fn record_experiment_request(
@@ -19378,55 +19378,55 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         latency_ms: u64,
         cost_usd: f64,
         success: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let exp_id: uuid::Uuid = experiment_id
             .parse()
-            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid experiment ID: {e}")))?;
         let var_id: uuid::Uuid = variant_id
             .parse()
-            .map_err(|e| format!("Invalid variant ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid variant ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .record_request(exp_id, var_id, latency_ms, cost_usd, success)
-            .map_err(|e| format!("Failed to record request: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to record request: {e}")))
     }
 
     fn get_prompt_version(
         &self,
         version_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptVersion>, kernel_handle::KernelOpError> {
         let id: uuid::Uuid = version_id
             .parse()
-            .map_err(|e| format!("Invalid version ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid version ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .get_version(id)
-            .map_err(|e| format!("Failed to get version: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get version: {e}")))
     }
 
     fn list_prompt_versions(
         &self,
         agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptVersion>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptVersion>, kernel_handle::KernelOpError> {
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .list_versions(agent_id)
-            .map_err(|e| format!("Failed to list versions: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to list versions: {e}")))
     }
 
     fn create_prompt_version(
         &self,
         version: &librefang_types::agent::PromptVersion,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let cfg = self.config.load();
         let store = self
             .prompt_store
@@ -19437,59 +19437,59 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         // #3553: callers (API handlers) no longer have to clone first.
         store
             .create_version(version.clone())
-            .map_err(|e| format!("Failed to create version: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to create version: {e}")))?;
         // Prune old versions if over the configured limit
         let max = cfg.prompt_intelligence.max_versions_per_agent;
         let _ = store.prune_old_versions(agent_id, max);
         Ok(())
     }
 
-    fn delete_prompt_version(&self, version_id: &str) -> Result<(), String> {
+    fn delete_prompt_version(&self, version_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         let id: uuid::Uuid = version_id
             .parse()
-            .map_err(|e| format!("Invalid version ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid version ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .delete_version(id)
-            .map_err(|e| format!("Failed to delete version: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to delete version: {e}")))
     }
 
-    fn set_active_prompt_version(&self, version_id: &str, agent_id: &str) -> Result<(), String> {
+    fn set_active_prompt_version(&self, version_id: &str, agent_id: &str) -> Result<(), kernel_handle::KernelOpError> {
         let id: uuid::Uuid = version_id
             .parse()
-            .map_err(|e| format!("Invalid version ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid version ID: {e}")))?;
         let agent: librefang_types::agent::AgentId = agent_id
             .parse()
-            .map_err(|e| format!("Invalid agent ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid agent ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .set_active_version(id, agent)
-            .map_err(|e| format!("Failed to set active version: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to set active version: {e}")))
     }
 
     fn list_experiments(
         &self,
         agent_id: librefang_types::agent::AgentId,
-    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Vec<librefang_types::agent::PromptExperiment>, kernel_handle::KernelOpError> {
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .list_experiments(agent_id)
-            .map_err(|e| format!("Failed to list experiments: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to list experiments: {e}")))
     }
 
     fn create_experiment(
         &self,
         experiment: &librefang_types::agent::PromptExperiment,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let store = self
             .prompt_store
             .get()
@@ -19497,46 +19497,46 @@ impl kernel_handle::PromptStore for LibreFangKernel {
         // Clone here — the store owns the value. See #3553.
         store
             .create_experiment(experiment.clone())
-            .map_err(|e| format!("Failed to create experiment: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to create experiment: {e}")))
     }
 
     fn get_experiment(
         &self,
         experiment_id: &str,
-    ) -> Result<Option<librefang_types::agent::PromptExperiment>, String> {
+    ) -> Result<Option<librefang_types::agent::PromptExperiment>, kernel_handle::KernelOpError> {
         let id: uuid::Uuid = experiment_id
             .parse()
-            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid experiment ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .get_experiment(id)
-            .map_err(|e| format!("Failed to get experiment: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}")))
     }
 
     fn update_experiment_status(
         &self,
         experiment_id: &str,
         status: librefang_types::agent::ExperimentStatus,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let id: uuid::Uuid = experiment_id
             .parse()
-            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid experiment ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .update_experiment_status(id, status)
-            .map_err(|e| format!("Failed to update experiment status: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to update experiment status: {e}")))?;
 
         // When completing an experiment, auto-activate the winning variant's prompt version
         if status == librefang_types::agent::ExperimentStatus::Completed {
             let metrics = store
                 .get_experiment_metrics(id)
-                .map_err(|e| format!("Failed to get experiment metrics: {e}"))?;
+                .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get experiment metrics: {e}")))?;
             if let Some(winner) = metrics.iter().max_by(|a, b| {
                 a.success_rate
                     .partial_cmp(&b.success_rate)
@@ -19544,7 +19544,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
             }) {
                 if let Some(exp) = store
                     .get_experiment(id)
-                    .map_err(|e| format!("Failed to get experiment: {e}"))?
+                    .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get experiment: {e}")))?
                 {
                     if let Some(variant) = exp.variants.iter().find(|v| v.id == winner.variant_id) {
                         let _ = store.set_active_version(variant.prompt_version_id, exp.agent_id);
@@ -19565,24 +19565,24 @@ impl kernel_handle::PromptStore for LibreFangKernel {
     fn get_experiment_metrics(
         &self,
         experiment_id: &str,
-    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, String> {
+    ) -> Result<Vec<librefang_types::agent::ExperimentVariantMetrics>, kernel_handle::KernelOpError> {
         let id: uuid::Uuid = experiment_id
             .parse()
-            .map_err(|e| format!("Invalid experiment ID: {e}"))?;
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Invalid experiment ID: {e}")))?;
         let store = self
             .prompt_store
             .get()
             .ok_or("Prompt store not initialized")?;
         store
             .get_experiment_metrics(id)
-            .map_err(|e| format!("Failed to get experiment metrics: {e}"))
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Failed to get experiment metrics: {e}")))
     }
 
     fn auto_track_prompt_version(
         &self,
         agent_id: librefang_types::agent::AgentId,
         system_prompt: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let cfg = self.config.load();
         if !cfg.prompt_intelligence.enabled {
             return Ok(());
@@ -19600,7 +19600,7 @@ impl kernel_handle::PromptStore for LibreFangKernel {
                 Ok(())
             }
             Ok(false) => Ok(()),
-            Err(e) => Err(format!("Failed to auto-track prompt version: {e}")),
+            Err(e) => Err(format!("Failed to auto-track prompt version: {e}").into()),
         }
     }
 }
