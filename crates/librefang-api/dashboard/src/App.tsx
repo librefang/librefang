@@ -477,7 +477,7 @@ function UserMenuPanel({
       <div className="flex items-center gap-2.5 px-2.5 pt-2 pb-2.5">
         <div
           className="h-8 w-8 rounded-full grid place-items-center text-white text-[12px] font-semibold shrink-0"
-          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+          style={{ background: "linear-gradient(135deg,#FF6A3D,#E04E28)" }}
         >
           {initials}
         </div>
@@ -647,7 +647,7 @@ function SidebarUserBlock({
       >
         <div
           className="h-[26px] w-[26px] rounded-full grid place-items-center text-white text-[11px] font-semibold shrink-0"
-          style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+          style={{ background: "linear-gradient(135deg,#FF6A3D,#E04E28)" }}
         >
           {initials}
         </div>
@@ -1167,7 +1167,7 @@ export function App() {
                     ? "ring-2 ring-brand/40 ring-offset-1 ring-offset-surface"
                     : "ring-1 ring-border-subtle hover:ring-brand/30"
                 }`}
-                style={{ background: "linear-gradient(135deg,#a78bfa,#7c3aed)" }}
+                style={{ background: "linear-gradient(135deg,#FF6A3D,#E04E28)" }}
                 title={t("nav.user_center")}
                 aria-label={t("nav.user_center")}
                 aria-expanded={userMenuOpen}

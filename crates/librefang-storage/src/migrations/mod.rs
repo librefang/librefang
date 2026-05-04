@@ -133,4 +133,14 @@ pub const OPERATIONAL_MIGRATIONS: &[Migration] = &[
         name: "totp_used_codes_bound_to_v1",
         sql: include_str!("sql/021_totp_used_codes_bound_to.surql"),
     },
+    Migration {
+        version: 22,
+        name: "sessions_message_count_v1",
+        sql: include_str!("sql/022_sessions_message_count.surql"),
+    },
+    Migration {
+        version: 23,
+        name: "sessions_search_analyzer_v1",
+        sql: include_str!("sql/023_sessions_search_analyzer.surql"),
+    },
 ];
