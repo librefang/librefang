@@ -22,6 +22,7 @@ This guide covers everything you need to get started, from setting up your devel
 - [How to Add a New LLM Provider](#how-to-add-a-new-llm-provider)
 - [How to Add a New Tool](#how-to-add-a-new-tool)
 - [How to Write Integration Tests](#how-to-write-integration-tests)
+- [Release Articles](#release-articles)
 - [Pull Request Process](#pull-request-process)
 - [Code of Conduct](#code-of-conduct)
 
@@ -733,6 +734,38 @@ mod tests {
   ```
 - **Extract a `setup()` helper** when multiple tests in the same module need the same boilerplate (see `crates/librefang-kernel/src/metering.rs` for an example).
 - **Test error cases too** — verify that invalid input returns the expected error, not just that the happy path works.
+
+---
+
+## Release Articles
+
+Each dated release in `CHANGELOG.md` (e.g. `## [2026.4.27]`) should land with a
+companion file in `articles/release-<YYYY.M.D>.md`. Two GitHub workflows
+consume these files on push to `main`:
+
+- `.github/workflows/devto-publish.yml` — creates / updates the matching
+  dev.to post (title-keyed, idempotent).
+- `.github/workflows/release-notify.yml` — posts a GitHub Discussion under the
+  release tag using the article body.
+
+If the article is missing on a release tag, the dev.to post and the GitHub
+Discussion are silently skipped — public release comms quietly stop. The
+`articles/` directory drifted out of sync with `CHANGELOG.md` after
+2026-03-22 (#3397) for exactly this reason.
+
+To scaffold an article from a CHANGELOG entry:
+
+```bash
+bash scripts/changelog-to-article.sh <YYYY.M.D> [<git-tag>]
+```
+
+The script slices the matching `## [YYYY.M.D]` section out of `CHANGELOG.md`
+and writes `articles/release-<YYYY.M.D>.md` with the front matter shape
+expected by `devto-publish.yml`. The optional second argument overrides the
+default `v<YYYY.M.D>` placeholder for `canonical_url` — pass the real CalVer
+tag (e.g. `v2026.4.27-beta6`) when you have it. Review the file, hand-edit
+the lead paragraph if the release deserves a narrative beyond the bullet
+list, then commit alongside the CHANGELOG bump.
 
 ---
 
