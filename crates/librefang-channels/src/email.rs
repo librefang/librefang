@@ -899,4 +899,59 @@ mod tests {
         assert_eq!(ctx.subject, "Original Subject");
         assert_eq!(ctx.message_id, "<msg-123@test.com>");
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Email's outbound path goes through `lettre::AsyncSmtpTransport`
+    // and a real SMTP handshake. Faking that boundary requires either a
+    // trait abstraction over `AsyncTransport` or an in-process SMTP
+    // server (e.g. `mailhog` via `testcontainers-rs`); both are larger
+    // architectural changes than this PR's wiremock-coverage scope.
+    //
+    // What we *can* pin without standing up a real SMTP server is the
+    // input-validation path that runs before any TCP I/O: an
+    // unparseable recipient address must surface as an Err before the
+    // adapter touches the network. That is the early-return contract
+    // future SMTP-fixture tests will rely on.
+
+    fn email_user(addr: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: addr.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn email_send_returns_err_for_invalid_recipient_before_smtp_io() {
+        // Use a syntactically invalid email so `to_addr.parse::<Mailbox>()`
+        // bails inside `send()` before any SMTP handshake is attempted.
+        // The SMTP host below is purposefully unreachable; if the
+        // pre-flight parse check were ever removed, this test would
+        // start hanging on DNS and the regression would be visible.
+        let adapter = EmailAdapter::new(
+            "imap.invalid.tld".to_string(),
+            993,
+            "smtp.invalid.tld".to_string(),
+            587,
+            "bot@example.com".to_string(),
+            "password".to_string(),
+            30,
+            vec![],
+            vec![],
+        );
+
+        let err = adapter
+            .send(
+                &email_user("not-an-email-at-all"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("email send must reject malformed recipient before SMTP");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("invalid recipient"),
+            "error should mention invalid recipient, got: {err}"
+        );
+    }
 }

@@ -613,4 +613,46 @@ mod tests {
         // No field 2 tag (0x12) should be present
         assert!(!payload.contains(&0x12));
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Mumble outbound writes a custom protobuf-framed packet through a
+    // TLS-wrapped `OwnedWriteHalf`. Standing up a Mumble server stub
+    // (TLS + protobuf TextMessage) is disproportionate to the test
+    // value here; the existing `build_text_message_packet` /
+    // `build_authenticate_packet` / `encode_packet` tests already cover
+    // the protobuf framing in isolation.
+    //
+    // What we *can* pin without that work is the fail-loud contract: if
+    // `send()` is called before `start()` has populated `self.stream`,
+    // it must return an Err naming the missing connection — and it
+    // must not panic on the `Mutex<Option<OwnedWriteHalf>>` `.as_mut()`
+    // path.
+
+    fn mumble_user(channel: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mumble_send_returns_err_when_not_connected() {
+        let adapter = MumbleAdapter::new(
+            "mumble.example.invalid".to_string(),
+            64738,
+            String::new(),
+            "librefang-bot".to_string(),
+            "Root".to_string(),
+        );
+        let err = adapter
+            .send(&mumble_user("Root"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("mumble send must error when stream is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("not connected"),
+            "error should mention disconnected stream, got: {err}"
+        );
+    }
 }

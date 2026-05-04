@@ -637,4 +637,38 @@ mod tests {
         let adapter = MqttAdapter::new(config);
         assert_eq!(adapter.port, 8883);
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // MQTT outbound goes through `rumqttc::AsyncClient::publish`. Faking
+    // that boundary requires either a trait abstraction over `AsyncClient`
+    // or an in-process MQTT broker (e.g. `rumqttd`); both are larger
+    // architectural changes than this PR's wiremock-coverage scope.
+    //
+    // What we *can* pin without that work is the fail-loud contract: if
+    // `send()` is called before `start()` has populated `self.client`,
+    // it must return an Err naming the missing connection — and it must
+    // not panic on the `RwLock<Option<AsyncClient>>` `.as_ref()` path.
+
+    fn mqtt_user(topic: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: topic.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mqtt_send_returns_err_when_not_started() {
+        let adapter = MqttAdapter::new(test_config());
+        // No `start()` ⇒ `self.client` stays None.
+        let err = adapter
+            .send(&mqtt_user("librefang/out"), ChannelContent::Text("x".into()))
+            .await
+            .expect_err("mqtt send must error when client is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("not connected"),
+            "error should mention disconnected client, got: {err}"
+        );
+    }
 }
