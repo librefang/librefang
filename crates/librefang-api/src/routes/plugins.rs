@@ -201,7 +201,7 @@ pub async fn list_plugins(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let lang = resolve_lang(lang.as_ref());
-    let mut plugins = librefang_runtime::plugin_manager::list_plugins();
+    let mut plugins = librefang_kernel::plugin_manager::list_plugins();
 
     // Apply enabled filter
     if let Some(enabled) = query.enabled {
@@ -211,7 +211,7 @@ pub async fn list_plugins(
     // Apply has_errors filter (runs lint on each plugin)
     if let Some(want_errors) = query.has_errors {
         plugins.retain(|p| {
-            let has_err = librefang_runtime::plugin_manager::lint_plugin(&p.manifest.name)
+            let has_err = librefang_kernel::plugin_manager::lint_plugin(&p.manifest.name)
                 .map(|r| !r.ok)
                 .unwrap_or(false);
             has_err == want_errors
@@ -282,7 +282,7 @@ pub async fn get_plugin(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let lang = resolve_lang(lang.as_ref());
-    match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(info) => {
             // Same canonical-vs-display split as `list_plugins` — `name`
             // is the route identifier, `display_name` is the localized UI
@@ -352,7 +352,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 .get("registry")
                 .and_then(|r| r.as_str())
                 .map(String::from);
-            librefang_runtime::plugin_manager::PluginSource::Registry { name, github_repo }
+            librefang_kernel::plugin_manager::PluginSource::Registry { name, github_repo }
         }
         Some("local") => {
             let path = match body.get("path").and_then(|p| p.as_str()) {
@@ -362,7 +362,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                         .into_json_tuple()
                 }
             };
-            librefang_runtime::plugin_manager::PluginSource::Local { path }
+            librefang_kernel::plugin_manager::PluginSource::Local { path }
         }
         Some("git") => {
             let url = match body.get("url").and_then(|u| u.as_str()) {
@@ -376,7 +376,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 .get("branch")
                 .and_then(|b| b.as_str())
                 .map(String::from);
-            librefang_runtime::plugin_manager::PluginSource::Git { url, branch }
+            librefang_kernel::plugin_manager::PluginSource::Git { url, branch }
         }
         _ => {
             return ApiErrorResponse::bad_request(
@@ -386,7 +386,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
         }
     };
 
-    match librefang_runtime::plugin_manager::install_plugin(&source).await {
+    match librefang_kernel::plugin_manager::install_plugin(&source).await {
         Ok(info) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -427,7 +427,7 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
         None => return ApiErrorResponse::bad_request("Missing 'name'").into_json_tuple(),
     };
 
-    match librefang_runtime::plugin_manager::remove_plugin(name) {
+    match librefang_kernel::plugin_manager::remove_plugin(name) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"removed": true, "name": name})),
@@ -475,7 +475,7 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
     // Optional runtime tag — defaults to "python" when omitted for BC.
     let runtime = body.get("runtime").and_then(|r| r.as_str());
 
-    match librefang_runtime::plugin_manager::scaffold_plugin(name, description, runtime) {
+    match librefang_kernel::plugin_manager::scaffold_plugin(name, description, runtime) {
         Ok(path) => (
             StatusCode::CREATED,
             Json(serde_json::json!({
@@ -510,11 +510,11 @@ pub async fn scaffold_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRe
 )]
 pub async fn plugin_doctor() -> impl IntoResponse {
     // `run_doctor` spawns subprocesses — keep it off the async runtime.
-    let report = tokio::task::spawn_blocking(librefang_runtime::plugin_manager::run_doctor)
+    let report = tokio::task::spawn_blocking(librefang_kernel::plugin_manager::run_doctor)
         .await
         .unwrap_or_else(|e| {
             tracing::error!(error = %e, "plugin doctor task panicked");
-            librefang_runtime::plugin_manager::DoctorReport {
+            librefang_kernel::plugin_manager::DoctorReport {
                 runtimes: Vec::new(),
                 plugins: Vec::new(),
             }
@@ -534,7 +534,7 @@ pub async fn plugin_doctor() -> impl IntoResponse {
     )
 )]
 pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::install_requirements(&name).await {
+    match librefang_kernel::plugin_manager::install_requirements(&name).await {
         Ok(output) => (
             StatusCode::OK,
             Json(serde_json::json!({"success": true, "output": output})),
@@ -560,7 +560,7 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
     )
 )]
 pub async fn reload_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::reload_plugin(&name) {
+    match librefang_kernel::plugin_manager::reload_plugin(&name) {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -596,7 +596,7 @@ pub async fn plugin_status(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     };
@@ -706,13 +706,13 @@ pub async fn list_plugin_registries(
         );
     }
 
-    let installed = librefang_runtime::plugin_manager::list_plugins();
+    let installed = librefang_kernel::plugin_manager::list_plugins();
     let installed_names: std::collections::HashSet<String> =
         installed.iter().map(|p| p.manifest.name.clone()).collect();
 
     let mut results = Vec::new();
     for reg in &registries {
-        let plugins = match librefang_runtime::plugin_manager::list_registry_plugins(
+        let plugins = match librefang_kernel::plugin_manager::list_registry_plugins(
             &reg.github_repo,
         )
         .await
@@ -805,7 +805,7 @@ pub async fn context_engine_traces(State(state): State<Arc<AppState>>) -> impl I
     )
 )]
 pub async fn enable_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::enable_plugin(&name) {
+    match librefang_kernel::plugin_manager::enable_plugin(&name) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -834,7 +834,7 @@ pub async fn enable_plugin(Path(name): Path<String>) -> impl IntoResponse {
     )
 )]
 pub async fn disable_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::disable_plugin(&name) {
+    match librefang_kernel::plugin_manager::disable_plugin(&name) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -891,7 +891,7 @@ pub async fn upgrade_plugin(
                     return ApiErrorResponse::bad_request(e).into_response();
                 }
             }
-            librefang_runtime::plugin_manager::PluginSource::Registry {
+            librefang_kernel::plugin_manager::PluginSource::Registry {
                 name: plugin_name,
                 github_repo,
             }
@@ -904,7 +904,7 @@ pub async fn upgrade_plugin(
                         .into_response()
                 }
             };
-            librefang_runtime::plugin_manager::PluginSource::Local { path }
+            librefang_kernel::plugin_manager::PluginSource::Local { path }
         }
         Some("git") => {
             let url = match body.get("url").and_then(|u| u.as_str()) {
@@ -918,18 +918,18 @@ pub async fn upgrade_plugin(
                 .get("branch")
                 .and_then(|b| b.as_str())
                 .map(String::from);
-            librefang_runtime::plugin_manager::PluginSource::Git { url, branch }
+            librefang_kernel::plugin_manager::PluginSource::Git { url, branch }
         }
         _ => {
             // Default to upgrading from registry using the path parameter name
-            librefang_runtime::plugin_manager::PluginSource::Registry {
+            librefang_kernel::plugin_manager::PluginSource::Registry {
                 name: name.clone(),
                 github_repo: None,
             }
         }
     };
 
-    match librefang_runtime::plugin_manager::upgrade_plugin(&name, &source).await {
+    match librefang_kernel::plugin_manager::upgrade_plugin(&name, &source).await {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -979,7 +979,7 @@ pub async fn test_plugin_hook(
     let input = body.get("input").cloned().unwrap_or(serde_json::json!({}));
 
     // Load plugin manifest
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(e) => return ApiErrorResponse::not_found(e).into_response(),
     };
@@ -1021,7 +1021,7 @@ pub async fn test_plugin_hook(
     }
 
     let runtime =
-        librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
+        librefang_kernel::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
     let timeout_secs = hooks.hook_timeout_secs.unwrap_or(30);
 
     // Build hook config and run
@@ -1034,7 +1034,7 @@ pub async fn test_plugin_hook(
         .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
         .collect();
 
-    let config = librefang_runtime::plugin_runtime::HookConfig {
+    let config = librefang_kernel::plugin_runtime::HookConfig {
         timeout_secs,
         plugin_env,
         max_memory_mb: info.manifest.hooks.max_memory_mb,
@@ -1043,7 +1043,7 @@ pub async fn test_plugin_hook(
     };
 
     let start = std::time::Instant::now();
-    match librefang_runtime::plugin_runtime::run_hook_json(
+    match librefang_kernel::plugin_runtime::run_hook_json(
         &hook_name,
         &script_abs.to_string_lossy(),
         runtime,
@@ -1098,7 +1098,7 @@ pub async fn test_plugin_hook(
     )
 )]
 pub async fn sign_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::sign_plugin(&name) {
+    match librefang_kernel::plugin_manager::sign_plugin(&name) {
         Ok(hashes) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1129,7 +1129,7 @@ pub async fn sign_plugin(Path(name): Path<String>) -> impl IntoResponse {
     )
 )]
 pub async fn lint_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::lint_plugin(&name) {
+    match librefang_kernel::plugin_manager::lint_plugin(&name) {
         Ok(report) => {
             let status = if report.ok {
                 StatusCode::OK
@@ -1186,7 +1186,7 @@ pub async fn context_engine_health(State(state): State<Arc<AppState>>) -> impl I
     let mut all_ok = true;
 
     for plugin_name in &active_plugins {
-        match librefang_runtime::plugin_manager::lint_plugin(plugin_name) {
+        match librefang_kernel::plugin_manager::lint_plugin(plugin_name) {
             Ok(report) => {
                 if !report.ok {
                     all_ok = false;
@@ -1262,7 +1262,7 @@ pub async fn context_engine_chain(State(state): State<Arc<AppState>>) -> impl In
     };
 
     for plugin_name in &plugins_to_describe {
-        let hooks_info = match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
+        let hooks_info = match librefang_kernel::plugin_manager::get_plugin_info(plugin_name) {
             Ok(info) => {
                 let hooks = &info.manifest.hooks;
                 serde_json::json!({
@@ -1423,16 +1423,16 @@ pub async fn batch_plugin_operation(Json(body): Json<serde_json::Value>) -> impl
     let mut results = Vec::new();
     for name in &plugins {
         let result = match operation.as_str() {
-            "enable" => librefang_runtime::plugin_manager::enable_plugin(name)
+            "enable" => librefang_kernel::plugin_manager::enable_plugin(name)
                 .map(|_| serde_json::json!({"ok": true}))
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-            "disable" => librefang_runtime::plugin_manager::disable_plugin(name)
+            "disable" => librefang_kernel::plugin_manager::disable_plugin(name)
                 .map(|_| serde_json::json!({"ok": true}))
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-            "lint" => librefang_runtime::plugin_manager::lint_plugin(name)
+            "lint" => librefang_kernel::plugin_manager::lint_plugin(name)
                 .map(|r| serde_json::to_value(&r).unwrap_or_default())
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-            "sign" => librefang_runtime::plugin_manager::sign_plugin(name)
+            "sign" => librefang_kernel::plugin_manager::sign_plugin(name)
                 .map(|h| serde_json::json!({"ok": true, "hashes": h}))
                 .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
             _ => {
@@ -1463,7 +1463,7 @@ pub async fn batch_plugin_operation(Json(body): Json<serde_json::Value>) -> impl
 pub async fn export_plugin(Path(name): Path<String>) -> impl IntoResponse {
     use axum::body::Body;
 
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(e) => return ApiErrorResponse::not_found(e).into_response(),
     };
@@ -1515,7 +1515,7 @@ pub async fn plugin_update_check(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(e) => return ApiErrorResponse::not_found(e).into_response(),
     };
@@ -1620,7 +1620,7 @@ pub async fn benchmark_plugin_hook(
         .unwrap_or(5)
         .min(50) as usize;
 
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(e) => return ApiErrorResponse::not_found(e).into_response(),
     };
@@ -1647,14 +1647,14 @@ pub async fn benchmark_plugin_hook(
 
     let script_abs = info.path.join(&script_rel);
     let runtime =
-        librefang_runtime::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
+        librefang_kernel::plugin_runtime::PluginRuntime::from_tag(hooks.runtime.as_deref());
     let plugin_env: Vec<(String, String)> = info
         .manifest
         .env
         .iter()
         .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
         .collect();
-    let config = librefang_runtime::plugin_runtime::HookConfig {
+    let config = librefang_kernel::plugin_runtime::HookConfig {
         timeout_secs: hooks.hook_timeout_secs.unwrap_or(30),
         plugin_env,
         max_memory_mb: hooks.max_memory_mb,
@@ -1667,7 +1667,7 @@ pub async fn benchmark_plugin_hook(
 
     for _ in 0..runs {
         let start = std::time::Instant::now();
-        match librefang_runtime::plugin_runtime::run_hook_json(
+        match librefang_kernel::plugin_runtime::run_hook_json(
             &hook_name,
             &script_abs.to_string_lossy(),
             runtime.clone(),
@@ -1715,11 +1715,11 @@ pub async fn benchmark_plugin_hook(
 ///
 /// Returns `{}` when the state file doesn't exist or shared state is not enabled.
 pub async fn get_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+    match librefang_kernel::plugin_manager::validate_plugin_name(&name) {
         Ok(()) => {}
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    let state_path = librefang_runtime::plugin_manager::plugins_dir()
+    let state_path = librefang_kernel::plugin_manager::plugins_dir()
         .join(&name)
         .join(".state.json");
 
@@ -1733,11 +1733,11 @@ pub async fn get_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
 
 /// DELETE /api/plugins/:name/state — Reset the plugin's shared state to `{}`.
 pub async fn reset_plugin_state(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+    match librefang_kernel::plugin_manager::validate_plugin_name(&name) {
         Ok(()) => {}
         Err(e) => return ApiErrorResponse::bad_request(e).into_response(),
     }
-    let state_path = librefang_runtime::plugin_manager::plugins_dir()
+    let state_path = librefang_kernel::plugin_manager::plugins_dir()
         .join(&name)
         .join(".state.json");
 
@@ -2089,7 +2089,7 @@ pub async fn context_engine_metrics_summary(
     )
 )]
 pub async fn plugin_advanced_config(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(info) => {
             let hooks = &info.manifest.hooks;
             let cb = hooks.circuit_breaker.as_ref().map(|cb| {
@@ -2140,7 +2140,7 @@ pub async fn plugin_advanced_config(Path(name): Path<String>) -> impl IntoRespon
     )
 )]
 pub async fn plugin_env(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(info) => {
             // Static env from [env] section — mask values that look like secrets.
             let env_static: serde_json::Map<String, serde_json::Value> = info
@@ -2290,7 +2290,7 @@ pub async fn context_engine_config(State(state): State<Arc<AppState>>) -> impl I
     )
 )]
 pub async fn prewarm_plugin(Path(name): Path<String>) -> impl IntoResponse {
-    match librefang_runtime::plugin_manager::reload_plugin(&name) {
+    match librefang_kernel::plugin_manager::reload_plugin(&name) {
         Ok(info) => {
             let applicable = info.manifest.hooks.persistent_subprocess
                 && info.manifest.hooks.prewarm_subprocesses;
@@ -2371,7 +2371,7 @@ pub async fn context_engine_sandbox_policy(
     let policies: Vec<serde_json::Value> = active
         .iter()
         .map(
-            |plugin_name| match librefang_runtime::plugin_manager::get_plugin_info(plugin_name) {
+            |plugin_name| match librefang_kernel::plugin_manager::get_plugin_info(plugin_name) {
                 Ok(info) => {
                     let hooks = &info.manifest.hooks;
                     serde_json::json!({
@@ -2421,7 +2421,7 @@ pub async fn get_trace_by_id(Path(trace_id): Path<String>) -> impl IntoResponse 
         return ApiErrorResponse::bad_request("trace_id must be 16 lowercase hex characters")
             .into_response();
     }
-    match librefang_runtime::plugin_manager::open_trace_store() {
+    match librefang_kernel::plugin_manager::open_trace_store() {
         Ok(store) => match store.query_by_trace_id(&trace_id) {
             Some(trace) => axum::Json(trace).into_response(),
             None => ApiErrorResponse::not_found(format!("No trace found with id '{trace_id}'"))
@@ -2452,7 +2452,7 @@ pub async fn prewarm_plugins(Json(body): Json<serde_json::Value>) -> impl IntoRe
 
     // If no names supplied, fall back to every installed plugin.
     let target_names: Vec<String> = if names.is_empty() {
-        librefang_runtime::plugin_manager::list_plugins()
+        librefang_kernel::plugin_manager::list_plugins()
             .into_iter()
             .map(|p| p.manifest.name)
             .collect()
@@ -2462,7 +2462,7 @@ pub async fn prewarm_plugins(Json(body): Json<serde_json::Value>) -> impl IntoRe
 
     let mut results = serde_json::Map::new();
     for name in &target_names {
-        let entry = match librefang_runtime::plugin_manager::reload_plugin(name) {
+        let entry = match librefang_kernel::plugin_manager::reload_plugin(name) {
             Ok(_info) => serde_json::json!({"ok": true, "message": "pre-warmed"}),
             Err(e) => {
                 if e.contains("not installed") || e.contains("not found") {
@@ -2489,7 +2489,7 @@ pub async fn plugin_health(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Verify the plugin is installed.
-    let info = match librefang_runtime::plugin_manager::get_plugin_info(&name) {
+    let info = match librefang_kernel::plugin_manager::get_plugin_info(&name) {
         Ok(i) => i,
         Err(_) => {
             return (
@@ -2628,14 +2628,14 @@ pub async fn install_plugin_with_deps_handler(
         Some(n) => n.to_string(),
         None => return ApiErrorResponse::bad_request("Missing 'name' field").into_response(),
     };
-    if let Err(e) = librefang_runtime::plugin_manager::validate_plugin_name(&name) {
+    if let Err(e) = librefang_kernel::plugin_manager::validate_plugin_name(&name) {
         return ApiErrorResponse::bad_request(e).into_response();
     }
     let registry = body
         .get("registry")
         .and_then(|v| v.as_str())
         .map(String::from);
-    match librefang_runtime::plugin_manager::install_plugin_with_deps(&name, registry.as_deref())
+    match librefang_kernel::plugin_manager::install_plugin_with_deps(&name, registry.as_deref())
         .await
     {
         Ok(installed) => (

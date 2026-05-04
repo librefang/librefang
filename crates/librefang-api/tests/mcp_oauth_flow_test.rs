@@ -237,7 +237,7 @@ async fn auth_revoke_known_server_resets_state_to_needs_auth() {
         let mut states = h.state.kernel.mcp_auth_states_ref().lock().await;
         states.insert(
             "test-srv".to_string(),
-            librefang_runtime::mcp_oauth::McpAuthState::Authorized {
+            librefang_kernel::mcp_oauth::McpAuthState::Authorized {
                 expires_at: None,
                 tokens: None,
             },

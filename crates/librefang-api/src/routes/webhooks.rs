@@ -685,7 +685,7 @@ pub async fn test_webhook(
     // (DNS rebind), bypassing the SSRF check (#3701). `.resolve(host, addr)`
     // forces the connection to go to `addr` and skips reqwest's resolver
     // for that hostname.
-    let mut builder = librefang_runtime::http_client::proxied_client_builder()
+    let mut builder = librefang_kernel::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none());
     if let Some((ref host, addr)) = pinned_host {

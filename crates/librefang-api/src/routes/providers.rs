@@ -113,7 +113,7 @@ pub async fn list_models(
     let live_models_per_provider: std::collections::HashMap<String, HashSet<String>> = catalog
         .list_providers()
         .iter()
-        .filter(|p| librefang_runtime::provider_health::is_local_provider(&p.id))
+        .filter(|p| librefang_kernel::provider_health::is_local_provider(&p.id))
         .filter_map(|p| {
             let probe = state.provider_probe_cache.get(&p.id)?;
             if !probe.reachable || probe.discovered_models.is_empty() {
@@ -427,7 +427,7 @@ pub async fn delete_model_overrides(
 /// discovered models into the catalog.
 fn attach_probe_result(
     entry: &mut serde_json::Value,
-    probe: &librefang_runtime::provider_health::ProbeResult,
+    probe: &librefang_kernel::provider_health::ProbeResult,
     provider_id: &str,
     kernel: &librefang_kernel::LibreFangKernel,
 ) {
@@ -444,7 +444,7 @@ fn attach_probe_result(
                     .discovered_models
                     .iter()
                     .map(
-                        |name| librefang_runtime::provider_health::DiscoveredModelInfo {
+                        |name| librefang_kernel::provider_health::DiscoveredModelInfo {
                             name: name.clone(),
                             parameter_size: None,
                             quantization_level: None,
@@ -498,7 +498,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
             // Resolve the provider's api_key env var (catalog field, falling
@@ -524,7 +524,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let probe_futures: Vec<_> = local_providers
         .iter()
         .map(|(_, id, url, api_key)| {
-            librefang_runtime::provider_health::probe_provider_cached(
+            librefang_kernel::provider_health::probe_provider_cached(
                 id,
                 url,
                 api_key.as_deref(),
@@ -535,7 +535,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let probe_results = futures::future::join_all(probe_futures).await;
 
     // Index probe results by provider list position for O(1) lookup
-    let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
+    let mut probe_map: HashMap<usize, librefang_kernel::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
     for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
@@ -588,7 +588,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
-        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
+        } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
         }
@@ -630,7 +630,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         .iter()
         .enumerate()
         .filter(|(_, p)| {
-            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+            librefang_kernel::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
         })
         .map(|(i, p)| {
             // See sibling site above — same env-var resolution so Open WebUI
@@ -651,7 +651,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
     let probe_futures: Vec<_> = local_providers
         .iter()
         .map(|(_, id, url, api_key)| {
-            librefang_runtime::provider_health::probe_provider_cached(
+            librefang_kernel::provider_health::probe_provider_cached(
                 id,
                 url,
                 api_key.as_deref(),
@@ -661,7 +661,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
         .collect();
     let probe_results = futures::future::join_all(probe_futures).await;
 
-    let mut probe_map: HashMap<usize, librefang_runtime::provider_health::ProbeResult> =
+    let mut probe_map: HashMap<usize, librefang_kernel::provider_health::ProbeResult> =
         HashMap::with_capacity(local_providers.len());
     for ((idx, _, _, _), result) in local_providers.iter().zip(probe_results) {
         probe_map.insert(*idx, result);
@@ -686,7 +686,7 @@ pub(crate) async fn providers_snapshot(state: &Arc<AppState>) -> Vec<serde_json:
             if !probe.reachable {
                 entry["auth_status"] = serde_json::json!("missing");
             }
-        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
+        } else if librefang_kernel::provider_health::is_local_provider(&p.id) {
             entry["is_local"] = serde_json::json!(true);
         }
         providers.push(entry);
@@ -757,7 +757,7 @@ pub async fn get_provider(
     });
 
     // For local providers, run a probe and attach the result
-    if librefang_runtime::provider_health::is_local_provider(&provider.id)
+    if librefang_kernel::provider_health::is_local_provider(&provider.id)
         && !provider.base_url.is_empty()
     {
         let cache = &state.provider_probe_cache;
@@ -771,7 +771,7 @@ pub async fn get_provider(
         let api_key = std::env::var(&env_var)
             .ok()
             .filter(|v| !v.trim().is_empty());
-        let probe = librefang_runtime::provider_health::probe_provider_cached(
+        let probe = librefang_kernel::provider_health::probe_provider_cached(
             &provider.id,
             &provider.base_url,
             api_key.as_deref(),
@@ -783,7 +783,7 @@ pub async fn get_provider(
         if !probe.reachable {
             entry["auth_status"] = serde_json::json!("missing");
         }
-    } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
+    } else if librefang_kernel::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
     }
 
@@ -1247,7 +1247,7 @@ pub async fn test_provider(
     // base_url are API providers missing configuration (e.g. OpenRouter proxied).
     if base_url.is_empty() && !key_required {
         let cli_start = Instant::now();
-        let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
+        let cli_ok = librefang_kernel::drivers::cli_provider_available(name.as_str());
         let cli_latency = cli_start.elapsed().as_millis();
         state.provider_test_cache.insert(
             name.clone(),
@@ -1279,7 +1279,7 @@ pub async fn test_provider(
     // LocalOffline on failure). Before this, the endpoint only refreshed an
     // in-memory cache — users could start Ollama after LibreFang booted and
     // the dashboard would stay stuck on `local_offline` forever.
-    if librefang_runtime::provider_health::is_local_provider(&name) {
+    if librefang_kernel::provider_health::is_local_provider(&name) {
         let result = state
             .kernel
             .probe_local_provider(
@@ -1341,7 +1341,7 @@ pub async fn test_provider(
     // a single `byteplus_coding 230 ms` round-trip surfaced on the
     // dashboard as `~500 ms` purely from the rebuilt client. Sharing the
     // pool also lets the second click reuse the warm TLS session.
-    let client = librefang_runtime::provider_health::probe_client();
+    let client = librefang_kernel::provider_health::probe_client();
     let start = std::time::Instant::now();
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
@@ -1563,7 +1563,7 @@ pub async fn set_provider_url(
     let probe_api_key = std::env::var(&probe_env_var)
         .ok()
         .filter(|v| !v.trim().is_empty());
-    let probe = librefang_runtime::provider_health::probe_provider(
+    let probe = librefang_kernel::provider_health::probe_provider(
         &name,
         &base_url,
         probe_api_key.as_deref(),
@@ -1579,7 +1579,7 @@ pub async fn set_provider_url(
                     .discovered_models
                     .iter()
                     .map(
-                        |n| librefang_runtime::provider_health::DiscoveredModelInfo {
+                        |n| librefang_kernel::provider_health::DiscoveredModelInfo {
                             name: n.clone(),
                             parameter_size: None,
                             quantization_level: None,
@@ -1965,7 +1965,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
 
-    match librefang_runtime::copilot_oauth::start_device_flow().await {
+    match librefang_kernel::copilot_oauth::start_device_flow().await {
         Ok(resp) => {
             let poll_id = uuid::Uuid::new_v4().to_string();
 
@@ -2028,12 +2028,12 @@ pub async fn copilot_oauth_poll(
     let device_code = flow.device_code.clone();
     drop(flow);
 
-    match librefang_runtime::copilot_oauth::poll_device_flow(&device_code).await {
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::Pending => (
+    match librefang_kernel::copilot_oauth::poll_device_flow(&device_code).await {
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::Pending => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "pending"})),
         ),
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
             // Save to secrets.env
             let secrets_path = state.kernel.home_dir().join("secrets.env");
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
@@ -2070,7 +2070,7 @@ pub async fn copilot_oauth_poll(
                 Json(serde_json::json!({"status": "complete"})),
             )
         }
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::SlowDown { new_interval } => {
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::SlowDown { new_interval } => {
             // Update interval
             if let Some(mut f) = COPILOT_FLOWS.get_mut(&poll_id) {
                 f.interval = new_interval;
@@ -2080,21 +2080,21 @@ pub async fn copilot_oauth_poll(
                 Json(serde_json::json!({"status": "pending", "interval": new_interval})),
             )
         }
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::Expired => {
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::Expired => {
             COPILOT_FLOWS.remove(&poll_id);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "expired"})),
             )
         }
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::AccessDenied => {
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::AccessDenied => {
             COPILOT_FLOWS.remove(&poll_id);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "denied"})),
             )
         }
-        librefang_runtime::copilot_oauth::DeviceFlowStatus::Error(e) => (
+        librefang_kernel::copilot_oauth::DeviceFlowStatus::Error(e) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "error", "error": e})),
         ),
@@ -2113,7 +2113,7 @@ pub async fn copilot_oauth_poll(
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.kernel.config_ref();
     let mirror = &cfg.registry.registry_mirror;
-    match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
+    match librefang_kernel::catalog_sync::sync_catalog_to(state.kernel.home_dir(), mirror).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
@@ -2161,7 +2161,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = crate::types::JsonObject)))]
 pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
+    let last_sync = librefang_kernel::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
@@ -2169,7 +2169,7 @@ pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
 pub async fn detect_ollama() -> impl IntoResponse {
-    let client = match librefang_runtime::http_client::client_builder()
+    let client = match librefang_kernel::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()
     {

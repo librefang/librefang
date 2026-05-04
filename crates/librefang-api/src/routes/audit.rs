@@ -105,7 +105,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
             // Authenticated but under-privileged — record with attribution.
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 format!("audit endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
@@ -119,7 +119,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
             // Anonymous (loopback / no-auth mode) — record without attribution.
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 "audit endpoint denied for anonymous caller",
                 "denied",
                 None,

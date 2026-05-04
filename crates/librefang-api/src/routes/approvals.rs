@@ -472,7 +472,7 @@ pub async fn approve_request(
                             // tables.
                             state.kernel.audit().record_with_context(
                                 "system",
-                                librefang_runtime::audit::AuditAction::AuthAttempt,
+                                librefang_kernel::audit::AuditAction::AuthAttempt,
                                 format!("totp_used_for_approval:{uuid}"),
                                 "totp_verified",
                                 None,

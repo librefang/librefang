@@ -21,9 +21,9 @@ use dashmap::DashMap;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use librefang_channels::types::SenderContext;
-use librefang_runtime::kernel_handle::prelude::*;
-use librefang_runtime::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
-use librefang_runtime::llm_errors;
+use librefang_kernel::kernel_handle::prelude::*;
+use librefang_kernel::llm_driver::{StreamEvent, PHASE_RESPONSE_COMPLETE};
+use librefang_kernel::llm_errors;
 use librefang_types::agent::{AgentId, SessionId};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -1495,7 +1495,7 @@ async fn handle_command(
         },
         "context" => match state.kernel.context_report(agent_id) {
             Ok(report) => {
-                let formatted = librefang_runtime::compactor::format_context_report(&report);
+                let formatted = librefang_kernel::compactor::format_context_report(&report);
                 serde_json::json!({
                     "type": "command_result",
                     "command": cmd,
@@ -1780,7 +1780,7 @@ fn sanitize_text(s: &str) -> String {
 
 /// Classify a streaming/setup error into a user-friendly message.
 ///
-/// Uses the proper LLM error classifier from `librefang_runtime::llm_errors`
+/// Uses the proper LLM error classifier from `librefang_kernel::llm_errors`
 /// for comprehensive 20-provider coverage with actionable advice.
 // Accepts any `Display` error so this module does not have to depend on
 // `librefang_kernel::error::KernelError` directly. Keeping the API↔kernel

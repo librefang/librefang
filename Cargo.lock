@@ -4148,7 +4148,6 @@ dependencies = [
  "librefang-llm-drivers",
  "librefang-memory",
  "librefang-migrate",
- "librefang-runtime",
  "librefang-skills",
  "librefang-telemetry",
  "librefang-testing",

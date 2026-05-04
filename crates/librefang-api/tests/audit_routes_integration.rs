@@ -35,7 +35,7 @@ use http_body_util::BodyExt;
 use librefang_api::middleware;
 use librefang_api::routes;
 use librefang_kernel::auth::UserRole as KernelUserRole;
-use librefang_runtime::audit::AuditAction;
+use librefang_kernel::audit::AuditAction;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::UserId;
 use librefang_types::config::UserConfig;

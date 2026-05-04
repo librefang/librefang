@@ -328,7 +328,7 @@ use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::llm_driver::StreamEvent;
+use librefang_kernel::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
@@ -337,7 +337,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use librefang_runtime::str_utils::safe_truncate_str;
+use librefang_kernel::str_utils::safe_truncate_str;
 
 /// Convert a snake_case / kebab-case / dotted tool ID into a human-readable
 /// display name. Used in progress lines so users see "Web Search" instead of
@@ -375,7 +375,7 @@ fn tr_progress_failed(language: &str) -> &'static str {
 fn start_stream_text_bridge<E>(
     event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
+        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -408,7 +408,7 @@ where
 fn start_stream_text_bridge_with_status<E>(
     mut event_rx: mpsc::Receiver<StreamEvent>,
     kernel_handle: tokio::task::JoinHandle<
-        Result<librefang_runtime::agent_loop::AgentLoopResult, E>,
+        Result<librefang_kernel::agent_loop::AgentLoopResult, E>,
     >,
     is_group: bool,
     show_progress: bool,
@@ -459,7 +459,7 @@ where
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
                         } else if looks_like_tool_call(&iter_buf) {
                             warn!("Streaming bridge: filtered leaked tool call text at ContentComplete (len={})", iter_buf.len());
-                        } else if librefang_runtime::silent_response::is_silent_response(&iter_buf)
+                        } else if librefang_kernel::silent_response::is_silent_response(&iter_buf)
                         {
                             debug!(
                                 "Streaming bridge: suppressed NO_REPLY sentinel at ContentComplete"
@@ -535,7 +535,7 @@ where
                     "Streaming bridge: filtered leaked tool call text in final flush (len={})",
                     iter_buf.len()
                 );
-            } else if librefang_runtime::silent_response::is_silent_response(&iter_buf) {
+            } else if librefang_kernel::silent_response::is_silent_response(&iter_buf) {
                 debug!("Streaming bridge: suppressed NO_REPLY sentinel in final flush");
             } else {
                 let _ = tx.send(iter_buf).await;
@@ -559,7 +559,7 @@ where
                 let err_str = e.to_string();
                 error!("Streaming kernel task returned error: {err_str}");
                 let is_timeout =
-                    err_str.contains(librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
+                    err_str.contains(librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER);
                 let user_msg = if is_timeout {
                     Some(
                         "\n\n---\n[Task timed out. The output above may be incomplete.]"
@@ -2154,7 +2154,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         message: &str,
         thread_id: Option<&str>,
     ) -> Result<String, String> {
-        use librefang_runtime::kernel_handle::prelude::*;
+        use librefang_kernel::kernel_handle::prelude::*;
         self.kernel
             .send_channel_message(channel_type, recipient, message, thread_id, None)
             .await
@@ -4213,7 +4213,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("rate limit hit".to_string()),
             )
         });
@@ -4256,7 +4256,7 @@ mod tests {
 
         let (_, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async {
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal("some internal failure".to_string()),
             )
         });
@@ -4304,9 +4304,9 @@ mod tests {
             // the timeout marker constant.
             let err = format!(
                 "agent loop timed out: {}",
-                librefang_runtime::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
+                librefang_kernel::agent_loop::TIMEOUT_PARTIAL_OUTPUT_MARKER
             );
-            Err::<librefang_runtime::agent_loop::AgentLoopResult, LibreFangError>(
+            Err::<librefang_kernel::agent_loop::AgentLoopResult, LibreFangError>(
                 LibreFangError::Internal(err),
             )
         });

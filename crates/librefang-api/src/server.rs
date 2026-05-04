@@ -1088,7 +1088,7 @@ pub async fn build_router(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         skillhub_cache: dashmap::DashMap::new(),
-        provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
         provider_test_cache: dashmap::DashMap::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.home_dir().join("data").join("webhooks.json"),
@@ -1096,7 +1096,7 @@ pub async fn build_router(
         active_sessions: active_sessions.clone(),
         api_key_lock: api_key_lock.clone(),
         user_api_keys: user_api_keys_lock.clone(),
-        media_drivers: librefang_runtime::media::MediaDriverCache::new_with_urls(
+        media_drivers: librefang_kernel::media::MediaDriverCache::new_with_urls(
             kernel.config_ref().provider_urls.clone(),
         ),
         webhook_router,
@@ -1692,7 +1692,7 @@ pub async fn run_daemon(
         bg_tasks.push(tokio::spawn(async move {
             loop {
                 let cfg = kernel.config_snapshot();
-                match librefang_runtime::catalog_sync::sync_catalog_to(
+                match librefang_kernel::catalog_sync::sync_catalog_to(
                     kernel.home_dir(),
                     &cfg.registry.registry_mirror,
                 )

@@ -377,7 +377,7 @@ fn auth_denied(
     };
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::PermissionDenied,
+        librefang_kernel::audit::AuditAction::PermissionDenied,
         detail,
         "denied",
         user_id,
@@ -2085,13 +2085,13 @@ mod tests {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),

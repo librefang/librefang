@@ -3079,7 +3079,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_runtime::browser::BrowserCommand::ReadPage,
+            librefang_kernel::browser::BrowserCommand::ReadPage,
         )
         .await
     {
@@ -3109,7 +3109,7 @@ pub async fn hand_instance_browser(
         .browser()
         .send_command(
             &agent_id_str,
-            librefang_runtime::browser::BrowserCommand::Screenshot,
+            librefang_kernel::browser::BrowserCommand::Screenshot,
         )
         .await
     {
@@ -3211,8 +3211,8 @@ pub async fn hand_send_message(
             .send_message_ephemeral(agent_id, &effective_message)
             .await
     } else {
-        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
-            state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
+        let kernel_handle: Arc<dyn librefang_kernel::kernel_handle::KernelHandle> =
+            state.kernel.clone() as Arc<dyn librefang_kernel::kernel_handle::KernelHandle>;
         state
             .kernel
             .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
@@ -3879,7 +3879,7 @@ pub async fn add_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server added: {name}"),
         "completed",
     );
@@ -3985,7 +3985,7 @@ pub async fn update_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server updated: {name}"),
         "completed",
     );
@@ -4102,7 +4102,7 @@ pub async fn patch_mcp_server_taint(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server taint updated: {name}"),
         "completed",
     );
@@ -4231,7 +4231,7 @@ pub async fn delete_mcp_server(
 
     state.kernel.audit().record(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("mcp_server removed: {name}"),
         "completed",
     );
@@ -4697,7 +4697,7 @@ fn audit_evolve(state: &Arc<AppState>, action: &str, skill_name: &str, detail: &
         // Dashboard calls don't have an agent_id — use a distinctive
         // actor so audit readers can tell user actions from agent ones.
         "dashboard".to_string(),
-        librefang_runtime::audit::AuditAction::AgentMessage,
+        librefang_kernel::audit::AuditAction::AgentMessage,
         format!("skill_evolve:{action}:{skill_name}"),
         detail.to_string(),
     );

@@ -1295,7 +1295,7 @@ async fn users_rotate_key_audit_includes_old_hash_fingerprint() {
     let rotate_entry = entries
         .iter()
         .find(|e| {
-            matches!(e.action, librefang_runtime::audit::AuditAction::RoleChange)
+            matches!(e.action, librefang_kernel::audit::AuditAction::RoleChange)
                 && e.detail.contains("api_key rotated")
                 && e.detail.contains("for user Erin")
         })
@@ -1356,7 +1356,7 @@ async fn users_rotate_key_audit_old_none_when_no_prior_hash() {
     let rotate_entry = entries
         .iter()
         .find(|e| {
-            matches!(e.action, librefang_runtime::audit::AuditAction::RoleChange)
+            matches!(e.action, librefang_kernel::audit::AuditAction::RoleChange)
                 && e.detail.contains("for user Frank")
         })
         .expect("rotate-key audit entry must exist");

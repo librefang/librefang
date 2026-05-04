@@ -104,7 +104,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -2120,7 +2120,7 @@ fn cron_session_metrics(
     state: &AppState,
     agent_id: librefang_types::agent::AgentId,
 ) -> (usize, u64) {
-    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_kernel::compactor::estimate_token_count;
     use librefang_types::agent::SessionId;
 
     let cron_sid = SessionId::for_channel(agent_id, "cron");

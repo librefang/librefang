@@ -12,7 +12,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
-use librefang_runtime::mcp_oauth::{self, McpAuthState, OAuthTokens};
+use librefang_kernel::mcp_oauth::{self, McpAuthState, OAuthTokens};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -398,7 +398,7 @@ pub async fn auth_start(
     let flow_vault_key =
         |field: &str| KernelOAuthProvider::vault_key(&format!("{server_url}:{flow_id}"), field);
     let store =
-        |field: &str, value: &str| -> Result<(), librefang_runtime::mcp_oauth::McpOAuthError> {
+        |field: &str, value: &str| -> Result<(), librefang_kernel::mcp_oauth::McpOAuthError> {
             provider.vault_set(&flow_vault_key(field), value)
         };
     if let Err(e) = store("pkce_verifier", &pkce_verifier) {
@@ -710,7 +710,7 @@ pub async fn auth_callback(
     // Exchange authorization code for tokens.
     // Use the proxy-aware client so token endpoint requests respect proxy config
     // and inherit default connect/read timeouts (prevents hung token exchanges).
-    let http_client = librefang_runtime::http_client::proxied_client();
+    let http_client = librefang_kernel::http_client::proxied_client();
     let mut form_params = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),
@@ -948,7 +948,7 @@ pub async fn auth_revoke(
         // #3750: surface VaultLocked / KeyNotFound / Io / Crypto distinctly so
         // the dashboard can render the right recovery prompt instead of a
         // generic 500.
-        use librefang_runtime::mcp_oauth::McpOAuthError;
+        use librefang_kernel::mcp_oauth::McpOAuthError;
         let resp = match e {
             McpOAuthError::VaultLocked => ApiErrorResponse::bad_request(
                 "Vault is locked — set LIBREFANG_VAULT_KEY before retrying sign-out.",

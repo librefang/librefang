@@ -382,7 +382,7 @@ pub async fn update_budget(
     let new_budget = state.kernel.budget_config();
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!(
             "global_budget updated: {}",
             fmt_global_budget_diff(&old_budget, &new_budget)
@@ -584,7 +584,7 @@ pub async fn update_agent_budget(
             // is conveyed via `user_id` (None for anonymous loopback).
             state.kernel.audit().record_with_context(
                 agent_id.to_string(),
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "agent_budget updated for {agent_id}: {}",
                     fmt_agent_resources_diff(old_resources.as_ref(), new_resources.as_ref())
@@ -636,7 +636,7 @@ fn require_admin_for_user_budget(
         Some(u) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 format!("user budget endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
@@ -650,7 +650,7 @@ fn require_admin_for_user_budget(
         None => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 "user budget endpoint denied for anonymous caller",
                 "denied",
                 None,
@@ -995,7 +995,7 @@ pub async fn update_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "user_budget updated for {user_id_param}: {}",
                     fmt_user_budget_diff(old_budget.as_ref(), Some(&new_budget))
@@ -1087,7 +1087,7 @@ pub async fn delete_user_budget(
         Ok(()) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::ConfigChange,
+                librefang_kernel::audit::AuditAction::ConfigChange,
                 format!(
                     "user_budget cleared for {user_id_param}: {}",
                     fmt_user_budget_diff(old_budget.as_ref(), None)

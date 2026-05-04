@@ -58,7 +58,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
         Some(u) => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 format!("authz/effective endpoint denied for role {}", u.role),
                 "denied",
                 Some(u.user_id),
@@ -72,7 +72,7 @@ fn require_admin(state: &AppState, api_user: Option<&AuthenticatedApiUser>) -> O
         None => {
             state.kernel.audit().record_with_context(
                 "system",
-                librefang_runtime::audit::AuditAction::PermissionDenied,
+                librefang_kernel::audit::AuditAction::PermissionDenied,
                 "authz/effective endpoint denied for anonymous caller",
                 "denied",
                 None,

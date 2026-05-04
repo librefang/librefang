@@ -288,7 +288,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
 
     // Detect best available provider
     let (provider, api_key_env) = if let Some((p, _model, env_var)) =
-        librefang_runtime::drivers::detect_available_provider()
+        librefang_kernel::drivers::detect_available_provider()
     {
         (p.to_string(), env_var.to_string())
     } else {
@@ -296,7 +296,7 @@ pub async fn quick_init(State(state): State<Arc<AppState>>) -> axum::response::R
     };
 
     // Resolve default model from catalog
-    let model = librefang_runtime::model_catalog::ModelCatalog::default()
+    let model = librefang_kernel::model_catalog::ModelCatalog::default()
         .default_model_for_provider(&provider)
         .unwrap_or_else(|| "auto".to_string());
 
@@ -369,7 +369,7 @@ pub async fn shutdown(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
         "ok",
         user_id,
@@ -1643,7 +1643,7 @@ pub async fn config_reload(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         "config reload requested via API",
         "pending",
         user_id,
@@ -2278,7 +2278,7 @@ pub async fn config_set(
     let user_id = api_user.as_ref().map(|u| u.0.user_id);
     state.kernel.audit().record_with_context(
         "system",
-        librefang_runtime::audit::AuditAction::ConfigChange,
+        librefang_kernel::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
         "completed",
         user_id,

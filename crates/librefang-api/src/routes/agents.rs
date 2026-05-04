@@ -190,7 +190,7 @@ use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -288,7 +288,7 @@ async fn resolve_manifest(
                 tracing::warn!("Manifest signature verification failed: {e}");
                 state.kernel.audit().record(
                     "system",
-                    librefang_runtime::audit::AuditAction::AuthAttempt,
+                    librefang_kernel::audit::AuditAction::AuthAttempt,
                     "manifest signature verification failed",
                     format!("error: {e}"),
                 );
@@ -784,7 +784,7 @@ pub async fn bulk_stop_agents(
 pub(crate) fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
-    catalog: Option<&librefang_runtime::model_catalog::ModelCatalog>,
+    catalog: Option<&librefang_kernel::model_catalog::ModelCatalog>,
     bulk_stats: Option<&std::collections::HashMap<String, (u64, f64)>>,
 ) -> serde_json::Value {
     let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
@@ -1395,7 +1395,7 @@ pub fn resolve_attachments(
             match std::fs::read(&file_path) {
                 Ok(data) => {
                     let header = format!("[Attached PDF: {} ({} bytes)]", filename, data.len());
-                    let body = match librefang_runtime::pdf_text::extract_text_from_pdf(&data) {
+                    let body = match librefang_kernel::pdf_text::extract_text_from_pdf(&data) {
                         Ok(text) => text,
                         Err(e) => {
                             tracing::warn!(
@@ -1561,7 +1561,7 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = librefang_runtime::http_client::proxied_client_builder()
+    let client = librefang_kernel::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("HTTP client build");
@@ -2621,7 +2621,7 @@ pub async fn send_message_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
 
     let (err_too_large, err_invalid_id, err_not_found, err_streaming_failed) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -2824,7 +2824,7 @@ pub async fn attach_session_stream(
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
     use tokio::sync::broadcast::error::RecvError;
 
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
@@ -4071,7 +4071,7 @@ pub async fn get_agent_mcp_servers(
             .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         for tool in mcp_tools.iter() {
-            if let Some(server) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+            if let Some(server) = librefang_kernel::mcp::resolve_mcp_server_from_known(
                 &tool.name,
                 configured_servers.iter().map(String::as_str),
             ) {
@@ -7024,13 +7024,13 @@ mod monitoring_tests {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             clawhub_cache: dashmap::DashMap::new(),
             skillhub_cache: dashmap::DashMap::new(),
-            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+            provider_probe_cache: librefang_kernel::provider_health::ProbeCache::new(),
             provider_test_cache: dashmap::DashMap::new(),
             webhook_store: crate::webhook_store::WebhookStore::load(
                 home_dir.join("data").join("webhooks.json"),
             ),
             active_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            media_drivers: librefang_runtime::media::MediaDriverCache::new(),
+            media_drivers: librefang_kernel::media::MediaDriverCache::new(),
             webhook_router: Arc::new(tokio::sync::RwLock::new(Arc::new(axum::Router::new()))),
             api_key_lock: Arc::new(tokio::sync::RwLock::new(String::new())),
             user_api_keys: Arc::new(tokio::sync::RwLock::new(Vec::new())),

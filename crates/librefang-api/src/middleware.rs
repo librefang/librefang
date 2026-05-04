@@ -60,7 +60,7 @@ pub struct AuthState {
     /// middleware can record `PermissionDenied` events when a request is
     /// rejected by the role gate. Wrapped in `Option` because some test
     /// harnesses construct `AuthState` without a kernel attached.
-    pub audit_log: Option<Arc<librefang_runtime::audit::AuditLog>>,
+    pub audit_log: Option<Arc<librefang_kernel::audit::AuditLog>>,
 }
 
 #[derive(Clone)]
@@ -80,7 +80,7 @@ pub struct AuthenticatedApiUser {
     pub role: UserRole,
     /// Same id stored on [`ApiUserAuth`]; downstream handlers read this
     /// from request extensions to pass the caller through to kernel
-    /// `authorize()` calls and into [`librefang_runtime::audit::AuditEntry`].
+    /// `authorize()` calls and into [`librefang_kernel::audit::AuditEntry`].
     pub user_id: UserId,
 }
 
@@ -715,7 +715,7 @@ pub async fn auth(
                         if let Some(ref audit) = auth_state.audit_log {
                             audit.record_with_context(
                                 "system",
-                                librefang_runtime::audit::AuditAction::PermissionDenied,
+                                librefang_kernel::audit::AuditAction::PermissionDenied,
                                 format!("{} {}", method, path),
                                 format!("role={}", user.role),
                                 Some(user.user_id),
@@ -1030,7 +1030,7 @@ pub async fn auth(
                 if let Some(ref audit) = auth_state.audit_log {
                     audit.record_with_context(
                         "system",
-                        librefang_runtime::audit::AuditAction::PermissionDenied,
+                        librefang_kernel::audit::AuditAction::PermissionDenied,
                         format!("{} {}", method, path),
                         format!("role={}", user.role),
                         Some(user.user_id),

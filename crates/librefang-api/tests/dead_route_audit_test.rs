@@ -76,9 +76,9 @@ async fn boot_full_router() -> (Router, Arc<AppState>, TempDir) {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Populate the model registry so the kernel boots without warnings.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 

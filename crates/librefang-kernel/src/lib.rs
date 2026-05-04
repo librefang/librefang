@@ -60,13 +60,30 @@ pub use kernel::LibreFangKernel;
 // `librefang-api/Cargo.toml`'s direct `librefang-runtime` dependency once the
 // last in-tree `use librefang_runtime::*` is gone, letting the compiler
 // enforce the boundary.
+pub use librefang_runtime::a2a;
 pub use librefang_runtime::agent_loop;
 pub use librefang_runtime::audit;
+pub use librefang_runtime::browser;
+pub use librefang_runtime::catalog_sync;
+pub use librefang_runtime::channel_registry;
+pub use librefang_runtime::compactor;
+pub use librefang_runtime::copilot_oauth;
+pub use librefang_runtime::drivers;
+pub use librefang_runtime::http_client;
 pub use librefang_runtime::kernel_handle;
 pub use librefang_runtime::llm_driver;
 pub use librefang_runtime::llm_errors;
+pub use librefang_runtime::mcp;
 pub use librefang_runtime::mcp_oauth;
+pub use librefang_runtime::mcp_server;
 pub use librefang_runtime::media;
+pub use librefang_runtime::model_catalog;
+pub use librefang_runtime::pdf_text;
+pub use librefang_runtime::plugin_manager;
+pub use librefang_runtime::plugin_runtime;
+pub use librefang_runtime::provider_health;
+pub use librefang_runtime::registry_sync;
+pub use librefang_runtime::silent_response;
 pub use librefang_runtime::str_utils;
 pub use librefang_runtime::tool_runner;
 

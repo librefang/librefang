@@ -1,35 +1,52 @@
 #!/usr/bin/env bash
-# refs #3596 — API → Kernel → Runtime layering progress check.
+# refs #3596 — API → Kernel → Runtime layering, compiler-enforced.
 #
-# `librefang-api` historically imported runtime types directly, bypassing
-# kernel encapsulation. The intended layering is `API → Kernel → Runtime`;
-# API code should reach runtime types through the kernel boundary.
+# As of 2/N (#3596), `librefang-api` no longer declares a direct
+# `librefang-runtime` dependency in `Cargo.toml` — `cargo check`
+# rejects any new `use librefang_runtime::*` outright. This script
+# is now a defence-in-depth guard against re-introducing the dep:
+#   1. asserts the `librefang-runtime = { path = ... }` line is gone
+#      from `crates/librefang-api/Cargo.toml`,
+#   2. asserts no `use librefang_runtime::*` slipped back into
+#      `crates/librefang-api/{src,tests}/` via a path-style import.
 #
-# Migration is incremental: this script counts remaining direct
-# `use librefang_runtime` occurrences in `crates/librefang-api/src/` so PR
-# diffs make progress visible. It is informational only (does not fail) —
-# a follow-up PR will delete the runtime dep line in
-# `crates/librefang-api/Cargo.toml`, at which point the compiler enforces
-# the boundary and this script becomes redundant.
+# Failure means the layering invariant has regressed. Fix the diff,
+# don't suppress this script.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+API_TOML="$ROOT/crates/librefang-api/Cargo.toml"
 API_SRC="$ROOT/crates/librefang-api/src"
+API_TESTS="$ROOT/crates/librefang-api/tests"
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "ripgrep (rg) not found; skipping API↔runtime decoupling check" >&2
-  exit 0
+fail=0
+
+# 1. Cargo.toml must not declare a direct runtime dep. Anchor the
+# regex on a real dep-line (key = value), so doc / comment mentions
+# of the crate name don't false-trip the check.
+if grep -E '^[[:space:]]*librefang-runtime[[:space:]]*=' "$API_TOML" >/dev/null 2>&1; then
+  echo "::error file=$API_TOML::librefang-runtime dependency reintroduced. API → Kernel → Runtime layering (#3596) requires reaching runtime types through librefang-kernel re-exports."
+  fail=1
 fi
 
-remaining=$(rg -c 'use librefang_runtime' "$API_SRC" 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+# 2. Source / test imports must not name librefang_runtime directly.
+# Use grep (not rg) to avoid a hard dep on ripgrep in CI; filter doc
+# comments (lines that are pure /// or // mentions).
+hits=$(grep -rEn 'use librefang_runtime|librefang_runtime::' \
+        "$API_SRC" "$API_TESTS" --include='*.rs' 2>/dev/null \
+        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*///' \
+        || true)
+if [ -n "$hits" ]; then
+  echo "::error::direct librefang_runtime reference in librefang-api source (#3596 regression):"
+  printf '%s\n' "$hits" | sed 's|^|  |'
+  fail=1
+fi
 
-echo "[check-api-runtime-decoupling] direct \`use librefang_runtime\` in librefang-api/src: $remaining"
-echo "[check-api-runtime-decoupling] target: 0 (then drop runtime dep from crates/librefang-api/Cargo.toml — refs #3596)"
-
-if [ "$remaining" -gt 0 ]; then
+if [ "$fail" != "0" ]; then
   echo
-  echo "Remaining import sites:"
-  rg -n 'use librefang_runtime' "$API_SRC" | sed 's|^|  |'
+  echo "API ↔ runtime decoupling regressed. See errors above." >&2
+  exit 1
 fi
 
+echo "[check-api-runtime-decoupling] OK — librefang-api has no direct librefang_runtime imports or Cargo dep."
 exit 0

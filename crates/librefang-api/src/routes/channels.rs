@@ -1660,7 +1660,7 @@ pub async fn test_channel(
 
 /// Send a real test message to a specific channel/chat on the given platform.
 async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Result<(), String> {
-    let client = librefang_runtime::http_client::proxied_client();
+    let client = librefang_kernel::http_client::proxied_client();
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {
@@ -1973,7 +1973,7 @@ const WECHAT_ILINK_BASE: &str = "https://ilinkai.weixin.qq.com";
 )]
 /// POST /api/channels/wechat/qr/start — Request a QR code from iLink for WeChat login.
 pub async fn wechat_qr_start() -> impl IntoResponse {
-    let client = match librefang_runtime::http_client::client_builder()
+    let client = match librefang_kernel::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {
@@ -2052,7 +2052,7 @@ pub async fn wechat_qr_status(
     // iLink uses long-polling: the request hangs until the user scans or it
     // times out server-side (~30s). Use a generous timeout so we don't mistake
     // a normal long-poll wait for a network error.
-    let client = match librefang_runtime::http_client::client_builder()
+    let client = match librefang_kernel::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(35))
         .build()
     {
@@ -2127,7 +2127,7 @@ pub async fn wechat_qr_status(
 )]
 pub async fn list_channel_registry(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels_dir = state.kernel.home_dir().join("channels");
-    let metadata = librefang_runtime::channel_registry::load_channel_metadata(&channels_dir);
+    let metadata = librefang_kernel::channel_registry::load_channel_metadata(&channels_dir);
     Json(serde_json::to_value(&metadata).unwrap_or_default())
 }
 

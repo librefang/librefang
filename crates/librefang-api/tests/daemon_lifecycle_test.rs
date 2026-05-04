@@ -128,7 +128,7 @@ async fn test_full_daemon_lifecycle() {
     assert_eq!(loaded.listen_addr, addr.to_string());
 
     // --- Verify health endpoint ---
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let resp = client
         .get(format!("http://{}/api/health", addr))
         .send()
@@ -210,7 +210,7 @@ async fn test_server_immediate_responsiveness() {
     let (_state, _tmp, _) = test.into_parts();
 
     // Hit health endpoint immediately — should respond fast
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_kernel::http_client::new_client();
     let start = Instant::now();
     let resp = client
         .get(format!("http://{}/api/health", addr))

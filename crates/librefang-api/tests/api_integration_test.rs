@@ -15,7 +15,7 @@ use librefang_api::routes::{self, AppState};
 use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::audit::AuditAction;
+use librefang_kernel::audit::AuditAction;
 use librefang_testing::{MockKernelBuilder, TestAppState};
 use librefang_types::agent::WebSearchAugmentationMode;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
@@ -175,9 +175,9 @@ async fn start_full_router(api_key: &str) -> FullRouterHarness {
 
     // Sync registry content into the temp home_dir so the kernel boots
     // with a populated model catalog.
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
@@ -2352,7 +2352,7 @@ async fn test_attach_session_stream_404_for_unknown_agent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_attach_session_stream_fans_out_to_multiple_clients() {
     use futures::StreamExt as _;
-    use librefang_runtime::llm_driver::StreamEvent;
+    use librefang_kernel::llm_driver::StreamEvent;
     use std::time::Duration;
 
     let server = start_test_server().await;
@@ -2463,9 +2463,9 @@ async fn test_attach_session_stream_fans_out_to_multiple_clients() {
 async fn start_full_router_with_proactive(enabled: bool) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    librefang_runtime::registry_sync::sync_registry(
+    librefang_kernel::registry_sync::sync_registry(
         tmp.path(),
-        librefang_runtime::registry_sync::DEFAULT_CACHE_TTL_SECS,
+        librefang_kernel::registry_sync::DEFAULT_CACHE_TTL_SECS,
         "",
     );
 
