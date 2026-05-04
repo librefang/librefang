@@ -837,6 +837,20 @@ pub async fn auth_callback(
     // existing race in DCR persistence at L345-346 and is acceptable: two
     // simultaneous sign-ins for one server are an unusual operator action
     // and both arrive at the same metadata under normal use. No locking.
+    //
+    // Fail-open on `store_oauth_metadata` error (parity with the
+    // `store_tokens` warn-and-continue at L823-825): the user has just
+    // completed an interactive OAuth flow and we already have the access
+    // token in hand. Returning a 5xx here would force them through another
+    // browser round-trip — much worse UX than silently breaking refresh
+    // until the next interactive sign-in, which is the *existing* failure
+    // mode pre-#4547 anyway. The recovery path is: when refresh fails
+    // (`McpOAuthError::MissingTokenEndpoint`), the daemon flips back to
+    // `NeedsAuth` and the next message kicks off a fresh OAuth flow,
+    // which re-runs this block. Operators see the failure in the
+    // `Failed to persist OAuth metadata for refresh` log line above the
+    // expected `No token_endpoint stored for refresh` later — that
+    // pairing is the diagnostic signal.
     if let Err(e) = trait_provider
         .store_oauth_metadata(&server_url, &token_endpoint, client_id.as_deref())
         .await

@@ -420,6 +420,43 @@ impl KernelOAuthProvider {
 mod tests {
     use super::*;
 
+    /// RAII guard that sets `LIBREFANG_VAULT_KEY` on construction and
+    /// removes it on `Drop`. Critical because the test bodies below run
+    /// `expect()` / `assert!` between set_var and remove_var; on panic
+    /// the manual `remove_var` is skipped, the `serial_test` mutex is
+    /// released anyway, and any subsequent test that doesn't itself set
+    /// the env var would observe a polluted environment. The guard
+    /// makes cleanup unconditional regardless of panic / early-return.
+    struct VaultKeyEnvGuard;
+
+    impl VaultKeyEnvGuard {
+        fn set(value: &str) -> Self {
+            // SAFETY: tests are gated by `serial_test::serial(librefang_vault_key)`
+            // so concurrent mutators of this env var inside the same
+            // process are serialized; no other thread observes a torn
+            // value while this guard is alive.
+            unsafe {
+                std::env::set_var("LIBREFANG_VAULT_KEY", value);
+            }
+            Self
+        }
+    }
+
+    impl Drop for VaultKeyEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: same justification as `set` above.
+            unsafe {
+                std::env::remove_var("LIBREFANG_VAULT_KEY");
+            }
+        }
+    }
+
+    /// Syntactically-valid 32-byte (base64-encoded 44-char) master key
+    /// used by the negative-path tests below. Reaches the decrypt step
+    /// and fails on the corrupt ciphertext, rather than failing on a
+    /// missing key (which is a different code path).
+    const TEST_VAULT_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
     #[test]
     fn vault_key_format() {
         let key = KernelOAuthProvider::vault_key("https://example.com/mcp", "access_token");
@@ -477,21 +514,12 @@ mod tests {
         let home = tmp.path().to_path_buf();
         // Write a garbage vault.enc so unlock() fails for every vault_remove call.
         std::fs::write(home.join("vault.enc"), b"not-a-real-vault").expect("seed bad vault");
-        // Provide a syntactically valid master key so unlock() reaches the
-        // decrypt step and fails on the corrupt ciphertext rather than on a
-        // missing key.
-        unsafe {
-            std::env::set_var(
-                "LIBREFANG_VAULT_KEY",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            );
-        }
+        // RAII-guarded master key: cleared on Drop even if the assertion
+        // below panics, so subsequent tests don't observe a polluted env.
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
 
         let provider = KernelOAuthProvider::new(home);
         let result = provider.clear_tokens("https://example.com/mcp").await;
-        unsafe {
-            std::env::remove_var("LIBREFANG_VAULT_KEY");
-        }
 
         assert!(
             result.is_err(),
@@ -575,18 +603,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
         std::fs::write(home.join("vault.enc"), b"not-a-real-vault").expect("seed bad vault");
-        unsafe {
-            std::env::set_var(
-                "LIBREFANG_VAULT_KEY",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            );
-        }
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
 
         let provider = KernelOAuthProvider::new(home);
         let result = provider.load_token("https://example.com/mcp").await;
-        unsafe {
-            std::env::remove_var("LIBREFANG_VAULT_KEY");
-        }
 
         assert!(
             result.is_err(),
@@ -609,12 +629,7 @@ mod tests {
     async fn store_oauth_metadata_persists_to_bare_namespace() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
-        unsafe {
-            std::env::set_var(
-                "LIBREFANG_VAULT_KEY",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            );
-        }
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
         let provider = KernelOAuthProvider::new(home);
         let server_url = "https://mcp.notion.com/mcp";
 
@@ -645,10 +660,6 @@ mod tests {
             Some("client-xyz".to_string()),
             "client_id must be readable under the bare per-server key for refresh"
         );
-
-        unsafe {
-            std::env::remove_var("LIBREFANG_VAULT_KEY");
-        }
     }
 
     /// `client_id` is optional (servers with a pre-registered public client
@@ -662,12 +673,7 @@ mod tests {
     async fn store_oauth_metadata_skips_client_id_when_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().to_path_buf();
-        unsafe {
-            std::env::set_var(
-                "LIBREFANG_VAULT_KEY",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            );
-        }
+        let _vault_key = VaultKeyEnvGuard::set(TEST_VAULT_KEY);
         let provider = KernelOAuthProvider::new(home);
         let server_url = "https://example.com/mcp";
         let client_id_key = KernelOAuthProvider::vault_key(server_url, "client_id");
@@ -703,10 +709,6 @@ mod tests {
             Some("preexisting-cid".to_string()),
             "writes are additive: passing None must NOT clear an existing client_id"
         );
-
-        unsafe {
-            std::env::remove_var("LIBREFANG_VAULT_KEY");
-        }
     }
 
     #[test]

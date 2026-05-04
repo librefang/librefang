@@ -285,6 +285,13 @@ async fn auth_revoke_unknown_server_is_404() {
 // assert the side effect on the shared vault. This protects against future
 // refactors that swap the trait provider for a no-op shim or repoint the
 // home directory away from where `try_refresh` looks.
+//
+// REMAINING GAP — tracked at #3403: these tests assert the trait surface
+// but don't lock that `auth_callback` itself calls `store_oauth_metadata`.
+// A future refactor could delete the call site in `routes/mcp_auth.rs` and
+// these tests would still pass. The full e2e refresh-path coverage planned
+// in #3403 (driving `auth_callback` against a fake AS that the SSRF guard
+// can be configured to allow) is the right place to close that gap.
 // ---------------------------------------------------------------------------
 
 /// `oauth_provider_ref().store_oauth_metadata` MUST persist `token_endpoint`
