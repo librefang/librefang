@@ -96,13 +96,13 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
+use crate::workflow::{
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use crate::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
-};
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
