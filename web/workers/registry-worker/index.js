@@ -581,33 +581,72 @@ async function handleForcedRefresh(request, env) {
     return errorResponse('unauthorized', 401)
   }
 
-  const indexUrl =
-    'https://raw.githubusercontent.com/librefang/librefang-registry/main/plugins-index.json'
-  const resp = await fetch(indexUrl, { cf: { cacheTtl: 0 } })
-  if (!resp.ok) {
+  const RAW_BASE =
+    'https://raw.githubusercontent.com/librefang/librefang-registry/main'
+  const pluginsUrl = `${RAW_BASE}/plugins-index.json`
+  const registryUrl = `${RAW_BASE}/registry-index.json`
+
+  // Fetch both in parallel — 2 subrequests, regardless of how many
+  // plugins / agents / skills the registry contains.
+  const [pluginsResp, registryResp] = await Promise.all([
+    fetch(pluginsUrl, { cf: { cacheTtl: 0 } }),
+    fetch(registryUrl, { cf: { cacheTtl: 0 } }),
+  ])
+  if (!pluginsResp.ok) {
     return errorResponse(
-      `failed to fetch plugins-index.json: HTTP ${resp.status}`,
+      `failed to fetch plugins-index.json: HTTP ${pluginsResp.status}`,
       502,
     )
   }
-  const indexText = await resp.text()
-  // Validate JSON shape — refuse to sign unparseable bytes.
+  if (!registryResp.ok) {
+    return errorResponse(
+      `failed to fetch registry-index.json: HTTP ${registryResp.status}`,
+      502,
+    )
+  }
+  const pluginsText = await pluginsResp.text()
+  const registryText = await registryResp.text()
+
+  // Validate JSON shapes — refuse to ingest unparseable bytes.
   try {
-    const parsed = JSON.parse(indexText)
+    const parsed = JSON.parse(pluginsText)
     if (!Array.isArray(parsed)) throw new Error('plugins-index.json is not an array')
   } catch (e) {
     return errorResponse(`plugins-index.json invalid: ${e.message}`, 502)
   }
+  try {
+    const parsed = JSON.parse(registryText)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      throw new Error('registry-index.json is not an object')
+  } catch (e) {
+    return errorResponse(`registry-index.json invalid: ${e.message}`, 502)
+  }
 
   const now = Math.floor(Date.now() / 1000)
-  await env.DB.prepare(
-    `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-  ).bind(indexText, now).run()
+  await env.DB.batch([
+    env.DB
+      .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(pluginsText, now),
+    env.DB
+      .prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(registryText, now),
+  ])
+
+  // Purge the Cache-API entry the dashboard hits — without this, /api/registry
+  // serves the previous (now-superseded) cached payload for up to 1h.
+  try {
+    await caches.default.delete(new Request('https://internal/registry_data'))
+  } catch (_) { /* best-effort */ }
 
   let signed = false
   try {
-    const sig = await signWithRegistryKey(env, new TextEncoder().encode(indexText))
+    const sig = await signWithRegistryKey(env, new TextEncoder().encode(pluginsText))
     if (sig) {
       await env.DB.prepare(
         `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
@@ -620,7 +659,13 @@ async function handleForcedRefresh(request, env) {
   }
 
   return new Response(
-    JSON.stringify({ ok: true, refreshed_at: now, signed, bytes: indexText.length }),
+    JSON.stringify({
+      ok: true,
+      refreshed_at: now,
+      signed,
+      plugins_bytes: pluginsText.length,
+      registry_bytes: registryText.length,
+    }),
     { headers: { 'Content-Type': 'application/json', ...CORS } },
   )
 }
