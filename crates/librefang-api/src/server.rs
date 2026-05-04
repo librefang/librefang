@@ -375,9 +375,9 @@ fn session_cookie_attrs(headers: &axum::http::HeaderMap) -> &'static str {
     post,
     path = "/api/auth/dashboard-login",
     tag = "auth",
-    request_body = serde_json::Value,
+    request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = serde_json::Value),
+        (status = 200, description = "Login outcome — returns session token on success or `requires_totp` when 2FA is needed", body = crate::types::JsonObject),
         (status = 401, description = "Invalid username, password, or TOTP code")
     )
 )]
@@ -559,7 +559,7 @@ pub(crate) async fn dashboard_login(
     path = "/api/auth/dashboard-check",
     tag = "auth",
     responses(
-        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = serde_json::Value)
+        (status = 200, description = "Auth mode for the dashboard SPA — one of `none`, `api_key`, `credentials`, or `hybrid`", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn dashboard_auth_check(
@@ -616,7 +616,7 @@ pub(crate) async fn dashboard_auth_check(
     path = "/api/auth/logout",
     tag = "auth",
     responses(
-        (status = 200, description = "Session invalidated and cookie cleared", body = serde_json::Value)
+        (status = 200, description = "Session invalidated and cookie cleared", body = crate::types::JsonObject)
     )
 )]
 pub(crate) async fn dashboard_logout(
@@ -695,7 +695,7 @@ pub(crate) struct ChangePasswordRequest {
     tag = "auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 200, description = "Credentials updated and existing sessions invalidated", body = serde_json::Value),
+        (status = 200, description = "Credentials updated and existing sessions invalidated", body = crate::types::JsonObject),
         (status = 400, description = "Missing required fields or password too short"),
         (status = 401, description = "Current password is incorrect")
     )

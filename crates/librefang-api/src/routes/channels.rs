@@ -1558,7 +1558,7 @@ pub async fn remove_channel(
     params(
         ("name" = String, Path, description = "Channel name")
     ),
-    request_body(content = Option<serde_json::Value>, content_type = "application/json"),
+    request_body(content = Option<crate::types::JsonObject>, content_type = "application/json", description = "Optional target — `{ \"channel_id\": \"...\" }` for Discord/Slack or `{ \"chat_id\": \"...\" }` for Telegram"),
     responses(
         (status = 200, description = "Channel test succeeded", body = crate::types::JsonObject),
         (status = 404, description = "Unknown channel", body = crate::types::JsonObject),
