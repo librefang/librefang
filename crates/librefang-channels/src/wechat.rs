@@ -175,7 +175,7 @@ impl WeChatAdapter {
         info!("WeChat: starting QR code login flow");
 
         // Step 1: Get QR code
-        let qr_url = format!("{}/ilink/bot/get_bot_qrcode?bot_type=3", ILINK_BASE);
+        let qr_url = format!("{}/ilink/bot/get_bot_qrcode?bot_type=3", self.api_base);
         let resp = self.client.get(&qr_url).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -203,7 +203,7 @@ impl WeChatAdapter {
 
             let status_url = format!(
                 "{}/ilink/bot/get_qrcode_status?qrcode={}",
-                ILINK_BASE, encoded_qr
+                self.api_base, encoded_qr
             );
             let resp = self.client.get(&status_url).send().await;
             match resp {
@@ -247,6 +247,13 @@ impl WeChatAdapter {
     }
 
     /// Fetch the typing ticket from getconfig.
+    ///
+    /// This helper is called from the spawn'd long-poll task in `start()`,
+    /// so it cannot reach `self.api_base`. It uses the `ILINK_BASE` const
+    /// directly. Tests that need to redirect this endpoint would have to
+    /// either change the helper's signature to take a base URL, or stand
+    /// up the long-poll loop end-to-end; this PR does neither because
+    /// `getconfig` is on the inbound path, not the `send()` path.
     async fn refresh_typing_ticket(
         client: &reqwest::Client,
         headers: &reqwest::header::HeaderMap,
@@ -275,6 +282,11 @@ impl WeChatAdapter {
     }
 
     /// Long-poll for new messages via getupdates.
+    ///
+    /// Same constraint as `refresh_typing_ticket`: this helper is called
+    /// from the spawn'd long-poll loop and cannot reach `self.api_base`,
+    /// so it uses `ILINK_BASE` directly. Inbound path; not covered by
+    /// this PR's `send()`-path tests.
     async fn poll_updates(
         client: &reqwest::Client,
         headers: &reqwest::header::HeaderMap,
@@ -776,7 +788,7 @@ impl ChannelAdapter for WeChatAdapter {
         };
 
         let headers = self.ilink_headers(token.as_str());
-        let url = format!("{}/ilink/bot/sendtyping", ILINK_BASE);
+        let url = format!("{}/ilink/bot/sendtyping", self.api_base);
         let body = serde_json::json!({
             "to_user_id": user.platform_id,
             "typing_ticket": ticket,

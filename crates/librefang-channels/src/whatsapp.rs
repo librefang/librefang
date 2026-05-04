@@ -191,8 +191,8 @@ impl WhatsAppAdapter {
         use reqwest::multipart;
 
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/media",
-            self.phone_number_id
+            "{}/{}/media",
+            self.cloud_api_base, self.phone_number_id
         );
 
         // Build multipart form: file field + messaging_product field
@@ -247,8 +247,8 @@ impl WhatsAppAdapter {
         let media_id = self.api_upload_media(audio, mime_type).await?;
 
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            "{}/{}/messages",
+            self.cloud_api_base, self.phone_number_id
         );
         let body = serde_json::json!({
             "messaging_product": "whatsapp",
@@ -397,8 +397,8 @@ impl WhatsAppAdapter {
         message_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
-            "https://graph.facebook.com/v21.0/{}/messages",
-            self.phone_number_id
+            "{}/{}/messages",
+            self.cloud_api_base, self.phone_number_id
         );
 
         let body = serde_json::json!({
@@ -546,8 +546,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     "audio": { "link": url }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 let resp = self
                     .client
@@ -574,8 +574,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
@@ -595,8 +595,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
@@ -616,8 +616,8 @@ impl ChannelAdapter for WhatsAppAdapter {
                     }
                 });
                 let api_url = format!(
-                    "https://graph.facebook.com/v21.0/{}/messages",
-                    self.phone_number_id
+                    "{}/{}/messages",
+                    self.cloud_api_base, self.phone_number_id
                 );
                 self.client
                     .post(&api_url)
