@@ -41,16 +41,16 @@ impl CapturingKernel {
 
 #[async_trait]
 impl AgentControl for CapturingKernel {
-    async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
+    async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, _: &str, _: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn list_agents(&self) -> Vec<AgentInfo> {
         vec![]
     }
-    fn kill_agent(&self, _: &str) -> Result<(), String> {
+    fn kill_agent(&self, _: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
     fn find_agents(&self, _: &str) -> Vec<AgentInfo> {

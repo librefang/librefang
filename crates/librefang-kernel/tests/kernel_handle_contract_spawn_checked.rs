@@ -156,7 +156,7 @@ async fn test_spawn_agent_checked_rejects_capability_escalation() {
         "spawn_agent_checked should reject child capability escalation"
     );
 
-    let error = result.unwrap_err();
+    let error = result.unwrap_err().to_string();
     let error_lower = error.to_lowercase();
     assert!(
         error_lower.contains("escalation")

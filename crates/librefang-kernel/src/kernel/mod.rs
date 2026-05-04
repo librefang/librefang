@@ -17813,7 +17813,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         &self,
         manifest_toml: &str,
         parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), kernel_handle::KernelOpError> {
         // Verify manifest integrity if a signed manifest hash is present
         let content_hash = librefang_types::manifest_signing::hash_manifest(manifest_toml);
         tracing::debug!(hash = %content_hash, "Manifest SHA-256 computed for integrity tracking");
@@ -17828,7 +17828,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         Ok((id.to_string(), name))
     }
 
-    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, kernel_handle::KernelOpError> {
         let id = self.resolve_agent_identifier(agent_id)?;
         let result = self
             .send_message(id, message)
@@ -17842,7 +17842,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         agent_id: &str,
         message: &str,
         parent_agent_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         let id = self.resolve_agent_identifier(agent_id)?;
         // Parent resolution: try the name/alias resolver first for ergonomics,
         // but fall back to bare UUID parsing when the parent has been removed
@@ -17894,7 +17894,7 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         agent_id: &str,
         prompt: &str,
         allowed_tools: Option<Vec<String>>,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         let id = agent_id
             .parse::<AgentId>()
             .map_err(|e| format!("bad agent_id: {e}"))?;
@@ -17926,9 +17926,12 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         Ok(result.response)
     }
 
-    fn kill_agent(&self, agent_id: &str) -> Result<(), String> {
-        let id = self.resolve_agent_identifier(agent_id)?;
-        LibreFangKernel::kill_agent(self, id).map_err(|e| format!("Kill failed: {e}"))
+    fn kill_agent(&self, agent_id: &str) -> Result<(), kernel_handle::KernelOpError> {
+        let id = self
+            .resolve_agent_identifier(agent_id)
+            .map_err(kernel_handle::KernelOpError::Other)?;
+        LibreFangKernel::kill_agent(self, id)
+            .map_err(|e| kernel_handle::KernelOpError::Other(format!("Kill failed: {e}")))
     }
 
     fn find_agents(&self, query: &str) -> Vec<kernel_handle::AgentInfo> {
@@ -17966,14 +17969,19 @@ impl kernel_handle::AgentControl for LibreFangKernel {
         manifest_toml: &str,
         parent_id: Option<&str>,
         parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), kernel_handle::KernelOpError> {
         // Parse the child manifest to extract its capabilities
-        let child_manifest: AgentManifest =
-            toml::from_str(manifest_toml).map_err(|e| format!("Invalid manifest: {e}"))?;
+        let child_manifest: AgentManifest = toml::from_str(manifest_toml).map_err(|e| {
+            kernel_handle::KernelOpError::Invalid {
+                field: "manifest",
+                reason: e.to_string(),
+            }
+        })?;
         let child_caps = manifest_to_capabilities(&child_manifest);
 
         // Enforce: child capabilities must be a subset of parent capabilities
-        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)?;
+        librefang_types::capability::validate_capability_inheritance(parent_caps, &child_caps)
+            .map_err(|e| kernel_handle::KernelOpError::Other(e))?;
 
         tracing::info!(
             parent = parent_id.unwrap_or("kernel"),

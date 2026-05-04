@@ -40,11 +40,11 @@ impl AgentControl for CapturingFileKernel {
         &self,
         _manifest_toml: &str,
         _parent_id: Option<&str>,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+    async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -52,7 +52,7 @@ impl AgentControl for CapturingFileKernel {
         vec![]
     }
 
-    fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+    fn kill_agent(&self, _agent_id: &str) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 

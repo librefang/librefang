@@ -147,7 +147,7 @@ pub trait AgentControl: Send + Sync {
         &self,
         manifest_toml: &str,
         parent_id: Option<&str>,
-    ) -> Result<(String, String), String>;
+    ) -> Result<(String, String), KernelOpError>;
 
     /// Spawn an agent with capability inheritance enforcement.
     /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
@@ -157,7 +157,7 @@ pub trait AgentControl: Send + Sync {
         manifest_toml: &str,
         parent_id: Option<&str>,
         parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), KernelOpError> {
         // Default: delegate to spawn_agent (no enforcement)
         // The kernel MUST override this with real enforcement
         let _ = parent_caps;
@@ -165,7 +165,7 @@ pub trait AgentControl: Send + Sync {
     }
 
     /// Send a message to another agent and get the response.
-    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
+    async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, KernelOpError>;
 
     /// Like [`send_to_agent`](Self::send_to_agent), but records that the
     /// call was made on behalf of `parent_agent_id`, so a `/stop` issued to
@@ -178,7 +178,7 @@ pub trait AgentControl: Send + Sync {
         agent_id: &str,
         message: &str,
         parent_agent_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         tracing::trace!(
             agent = %agent_id,
             parent = %parent_agent_id,
@@ -191,7 +191,7 @@ pub trait AgentControl: Send + Sync {
     fn list_agents(&self) -> Vec<AgentInfo>;
 
     /// Kill an agent by ID.
-    fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
+    fn kill_agent(&self, agent_id: &str) -> Result<(), KernelOpError>;
 
     /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
     fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
@@ -232,8 +232,8 @@ pub trait AgentControl: Send + Sync {
         _agent_id: &str,
         _prompt: &str,
         _allowed_tools: Option<Vec<String>>,
-    ) -> Result<String, String> {
-        Err("run_forked_agent_oneshot not available in this handle".to_string())
+    ) -> Result<String, KernelOpError> {
+        Err(KernelOpError::unavailable("run_forked_agent_oneshot"))
     }
 
     /// Maximum inter-agent call depth (from config). Default: 5.
@@ -1050,16 +1050,16 @@ mod tests {
             &self,
             _manifest_toml: &str,
             _parent_id: Option<&str>,
-        ) -> Result<(String, String), String> {
+        ) -> Result<(String, String), super::KernelOpError> {
             Err("stub".into())
         }
-        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, super::KernelOpError> {
             Err("stub".into())
         }
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
-        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), super::KernelOpError> {
             Err("stub".into())
         }
         fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
