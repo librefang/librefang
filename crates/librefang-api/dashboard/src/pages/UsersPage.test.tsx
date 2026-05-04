@@ -158,8 +158,7 @@ describe("UsersPage", () => {
       makeUser({
         name: "bob",
         role: "Viewer",
-        platform: "discord",
-        platform_id: "bob#1234",
+        channel_bindings: { discord: "bob#1234" },
       }),
     ]);
     renderPage();
