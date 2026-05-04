@@ -39,7 +39,7 @@ export const SKILL_HUBS: readonly SkillHub[] = [
     id: "fanghub",
     name: "FangHub",
     glyph: "🪝",
-    color: "#38bdf8",
+    color: "#FF6A3D",
     domain: "fanghub.librefang.ai",
     desc:
       "Official LibreFang registry — curated hands, agents, MCP, providers, plugins.",

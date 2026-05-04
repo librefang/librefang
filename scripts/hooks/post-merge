@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# post-merge — enforce BossFang brand tokens after every `git merge`.
+#
+# Automatically runs scripts/enforce-branding.py so that upstream LibreFang
+# sky-blue tokens never survive into committed state.
+#
+# Enabled by: git config core.hooksPath scripts/hooks
+# (set automatically by `just setup` / `cargo xtask setup`)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO_ROOT" ] || exit 0
+
+ENFORCE="$REPO_ROOT/scripts/enforce-branding.py"
+[ -f "$ENFORCE" ] || exit 0
+
+echo "[post-merge] enforcing BossFang brand tokens …"
+python3 "$ENFORCE"

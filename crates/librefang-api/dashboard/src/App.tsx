@@ -987,7 +987,7 @@ export function App() {
           the user-menu's `fixed inset-0` close-on-outside-click backdrop
           inside the sidebar's bounds. */}
       <aside className={`
-        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(2,6,23,0.55)] lg:static lg:translate-x-0
+        fixed inset-y-0 left-0 z-50 flex w-[232px] flex-col border-r border-border-subtle bg-surface dark:bg-[rgba(11,15,20,0.55)] lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
         ${isSidebarCollapsed ? "lg:w-[64px]" : "lg:w-[232px]"}

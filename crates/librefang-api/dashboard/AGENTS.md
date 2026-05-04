@@ -145,3 +145,64 @@ Run all three after any change to `src/lib/queries/`, `src/lib/mutations/`, or `
   ```
 - Mutation invalidation lives in the hook — callers should never need to know which keys a mutation touches. Call sites MAY attach per-call `onSuccess` / `onError` handlers for UI feedback (toasts, modal dismissal, local state updates); that is orthogonal to invalidation and stays at the call site. See `MemoryPage` delete/cleanup and `ChannelsPage` configure/test for the pattern.
 - Commit convention matches the root repo: `feat(dashboard/<area>): ...`, `refactor(dashboard/queries): ...`, `fix(dashboard/<area>): ...`. Never include a `Co-Authored-By` footer.
+
+## BossFang Branding
+
+This dashboard is part of the **BossFang** product. Upstream (LibreFang) visual
+identity must never appear in committed code. These rules are absolute — they apply
+to new components, refactors, and post-merge cleanups alike.
+
+### Identity constants
+
+| Element | Value | Never use |
+|---|---|---|
+| Product name | `BossFang` | `librefang`, `LibreFang` |
+| Logo | `<img src="/boss-libre.png" alt="BossFang" ...>` | SVG fang glyph, sky-blue gradient box |
+| Light brand color | `#E04E28` / `var(--brand-color)` | `#0284c7`, `#0ea5e9`, any sky-blue |
+| Dark brand color | `#FF6A3D` / `var(--brand-color)` | `#38bdf8`, any sky-blue |
+| Dark background | `#0B0F14` / `var(--bg-main)` | `#020617`, `rgba(2,6,23,...)` |
+
+### CSS rules
+
+- **Always** use `var(--brand-color)` for brand-colored elements, or the Tailwind
+  utility classes `text-brand`, `bg-brand`, `border-brand` which resolve to that variable.
+- **Never** hardcode `#0284c7`, `#38bdf8`, `#0ea5e9`, or any sky-blue hex/rgba in
+  `style={{}}` props or CSS files.
+- When upstream adds a new component with a hardcoded gradient like
+  `linear-gradient(135deg,#38bdf8,#0ea5e9)`, replace the sky-blue values with the
+  ember equivalents (`#FF6A3D` → `#E04E28`) before committing.
+
+### Tailwind utility quick reference
+
+```
+text-brand          → brand-colored text (ember orange)
+bg-brand            → brand-colored background
+border-brand        → brand-colored border
+hover:text-brand    → hover brand text
+shadow-brand        → brand glow shadow
+ring-brand          → focus ring in brand color
+bg-brand/15         → 15% opacity brand background
+border-brand/30     → 30% opacity brand border
+```
+
+### Logo usage
+
+Sidebar brand block and mobile header must always render:
+```tsx
+<img
+  src="/boss-libre.png"
+  alt="BossFang"
+  className="h-[26px] w-[26px] rounded-[7px] object-contain shrink-0"
+/>
+```
+Never replace with an SVG icon, emoji, or gradient-box logo from upstream.
+
+### After every upstream merge
+
+Run the enforcement script from the repo root before committing:
+```bash
+python3 scripts/enforce-branding.py
+```
+It automatically replaces all sky-blue upstream tokens with ember equivalents across
+the entire `dashboard/src/` tree. Review the diff afterward to catch any SVG-glyph
+or gradient-box logo regressions that the script cannot handle automatically.

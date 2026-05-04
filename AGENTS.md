@@ -91,6 +91,27 @@ Routes are organized by domain in `crates/librefang-api/src/routes/`:
 - **Testing**: Tests live alongside source code in `#[cfg(test)]` modules; integration test helpers in `librefang-testing`
 - **Commits**: Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
 
+## BossFang Product Identity
+
+This repo is the **BossFang** fork of LibreFang. Upstream branding (LibreFang name,
+sky-blue `#0284c7`/`#38bdf8` palette, SVG fang glyph) must never appear in any merged
+or committed state.
+
+| Element | BossFang value |
+|---|---|
+| Product name | **BossFang** |
+| Logo asset | `boss-libre.png` (dashboard public, desktop frontend, static) |
+| Light primary | `#E04E28` (Muted Ember) |
+| Dark primary | `#FF6A3D` (Bright Ember) |
+| Dark background | `#0B0F14` (Deep Charcoal) |
+| Full spec | `docs/branding/branding-guide.html` |
+
+**After every upstream merge**, run before committing:
+```bash
+python3 scripts/enforce-branding.py
+```
+For detailed conflict-resolution rules see `CLAUDE.md § BossFang Branding`.
+
 ## Important Notes
 
 - **Do not modify `librefang-cli`** without explicit instruction -- it is under active development.

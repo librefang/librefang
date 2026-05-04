@@ -14,7 +14,7 @@ export function Sparkline({
   data,
   width = 220,
   height = 56,
-  color = "#38bdf8",
+  color = "#FF6A3D",
   filled = true,
   glow = true,
   className = "",

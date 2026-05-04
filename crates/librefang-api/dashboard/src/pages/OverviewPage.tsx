@@ -61,8 +61,8 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
     <svg viewBox={`0 0 ${w} ${height}`} preserveAspectRatio="none" className="block w-full h-[130px] lg:h-[170px]" aria-hidden="true">
       <defs>
         <linearGradient id="cc-1" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.3" />
-          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
+          <stop offset="0%" stopColor="#FF6A3D" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="#FF6A3D" stopOpacity="0" />
         </linearGradient>
         <linearGradient id="cc-2" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.3" />
@@ -75,9 +75,9 @@ function CostChart({ data, height = 170 }: { data: number[]; height?: number }) 
       <path d={fill} fill="url(#cc-1)" />
       <path d={fill2} fill="url(#cc-2)" />
       <path d={path2} fill="none" stroke="#a78bfa" strokeWidth={1.5} />
-      <path d={path} fill="none" stroke="#38bdf8" strokeWidth={2} />
-      <line x1={markerX} y1={0} x2={markerX} y2={height} stroke="rgba(56,189,248,0.4)" strokeWidth={1} strokeDasharray="2 2" />
-      <circle cx={markerX} cy={markerY} r={3.5} fill="#38bdf8" stroke="rgba(2,6,23,0.95)" strokeWidth={2} />
+      <path d={path} fill="none" stroke="#FF6A3D" strokeWidth={2} />
+      <line x1={markerX} y1={0} x2={markerX} y2={height} stroke="rgba(255,106,61,0.4)" strokeWidth={1} strokeDasharray="2 2" />
+      <circle cx={markerX} cy={markerY} r={3.5} fill="#FF6A3D" stroke="rgba(11,15,20,0.95)" strokeWidth={2} />
     </svg>
   );
 }
@@ -594,7 +594,7 @@ export function OverviewPage() {
           delta={agentsRunning > 0 ? `+${agentsRunning}` : undefined}
           trend="up"
           accent
-          sparkline={<Sparkline data={[6, 8, 7, 9, 10, 9, 11, 10, agentsRunning + 1, agentsRunning]} width={70} height={28} color="#38bdf8" />}
+          sparkline={<Sparkline data={[6, 8, 7, 9, 10, 9, 11, 10, agentsRunning + 1, agentsRunning]} width={70} height={28} color="#FF6A3D" />}
           onClick={() => navigate({ to: "/agents" })}
         />
         <Kpi
@@ -1007,7 +1007,7 @@ export function OverviewPage() {
                   <span className="font-mono text-[11.5px] w-32 truncate">{agent.name}</span>
                   <div className="flex-1 h-1.5 bg-slate-700/40 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-linear-to-r from-sky-400/40 to-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.5)] rounded-full"
+                      className="h-full bg-linear-to-r from-sky-400/40 to-sky-400 shadow-[0_0_8px_rgba(255,106,61,0.5)] rounded-full"
                       style={{ width: `${pct * 100}%` }}
                     />
                   </div>

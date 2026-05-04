@@ -1395,7 +1395,7 @@ export function AgentsPage() {
                 className={`flex-1 rounded-t-[2px] ${isLast ? "bg-brand" : "bg-brand/40"}`}
                 style={{
                   height: `${Math.max(8, Math.min(100, v))}%`,
-                  boxShadow: isLast ? "0 0 8px rgba(56,189,248,0.6)" : "none",
+                  boxShadow: isLast ? "0 0 8px rgba(255,106,61,0.6)" : "none",
                   minHeight: 6,
                 }}
                 aria-hidden="true"
@@ -1461,7 +1461,7 @@ export function AgentsPage() {
         ) : (
           <div
             className="rounded-md border border-border-subtle p-3 font-mono text-[11.5px] leading-[1.6] max-h-60 overflow-auto -mx-3 sm:mx-0"
-            style={{ background: "rgba(2,6,23,0.6)" }}
+            style={{ background: "rgba(11,15,20,0.6)" }}
           >
             {events.map((e, i) => (
               <div key={`${e.timestamp}-${i}`} className="flex gap-2.5 min-w-max sm:min-w-0">
