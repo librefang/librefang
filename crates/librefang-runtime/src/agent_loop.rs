@@ -546,6 +546,29 @@ fn tool_use_blocks_from_calls(tool_calls: &[ToolCall]) -> Vec<ContentBlock> {
         .collect()
 }
 
+/// Sanitize a tool name into a bounded, low-cardinality metric label.
+///
+/// Strips control chars and caps the length so an LLM that hallucinates
+/// a wild tool name can't blow up the metric registry. The set of real
+/// tool names is bounded (builtins + skill tools + MCP tools), so this
+/// label dimension stays tractable in steady state.
+fn sanitize_tool_label(name: &str) -> String {
+    name.chars().filter(|c| !c.is_control()).take(64).collect()
+}
+
+/// Record a tool-call outcome for observability (#3495). `outcome` is
+/// one of `"success"` / `"failure"`; we never push raw error text into
+/// metric labels.
+fn record_tool_call_metric(tool_name: &str, is_error: bool) {
+    let outcome = if is_error { "failure" } else { "success" };
+    metrics::counter!(
+        "librefang_tool_call_total",
+        "tool" => sanitize_tool_label(tool_name),
+        "outcome" => outcome,
+    )
+    .increment(1);
+}
+
 fn append_tool_result_guidance_blocks(tool_result_blocks: &mut Vec<ContentBlock>) {
     let denial_count = tool_result_blocks
         .iter()
@@ -3963,6 +3986,7 @@ pub async fn run_agent_loop(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                    record_tool_call_metric(&tool_call.name, executed.result.is_error);
 
                     // §A — capture owner_notice side-channel from notify_owner tool.
                     if let Some(ref notice) = executed.result.owner_notice {
@@ -5428,6 +5452,7 @@ pub async fn run_agent_loop_streaming(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
+                    record_tool_call_metric(&tool_call.name, executed.result.is_error);
 
                     // §A — capture owner_notice from notify_owner tool and
                     // surface it on the live SSE stream so the gateway can

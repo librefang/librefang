@@ -15452,10 +15452,25 @@ system_prompt = "You are a helpful assistant."
                     "MCP server reconnected"
                 );
                 self.mcp_connections.lock().await.push(conn);
+                // Cardinality: server label is the operator-configured MCP
+                // server id (bounded set), outcome is one of two fixed
+                // values. (#3495)
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "success",
+                )
+                .increment(1);
                 Ok(tool_count)
             }
             Err(e) => {
                 self.mcp_health.report_error(id, e.to_string());
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "failure",
+                )
+                .increment(1);
                 Err(format!("Reconnect failed for '{id}': {e}"))
             }
         }
