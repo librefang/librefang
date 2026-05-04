@@ -28,6 +28,12 @@ const POLL_INTERVAL_SECS: u64 = 3;
 /// Keybase Chat API base URL (local daemon or remote API).
 const KEYBASE_API_URL: &str = "http://127.0.0.1:5222/api";
 
+/// Returns the default Keybase Chat API URL. Used to initialise `KeybaseAdapter::api_url`.
+#[inline]
+fn default_keybase_api_url() -> String {
+    KEYBASE_API_URL.to_string()
+}
+
 /// Keybase Chat channel adapter using JSON API protocol with polling.
 ///
 /// Interfaces with the Keybase Chat API to send and receive messages. Supports
@@ -49,6 +55,9 @@ pub struct KeybaseAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Last read message ID per conversation for incremental polling.
     last_msg_ids: Arc<RwLock<HashMap<String, i64>>>,
+    /// Keybase Chat API URL. Defaults to `http://127.0.0.1:5222/api`.
+    /// Overridable in tests via `with_api_url()` to point at a wiremock server.
+    api_url: String,
 }
 
 impl KeybaseAdapter {
@@ -69,11 +78,20 @@ impl KeybaseAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_msg_ids: Arc::new(RwLock::new(HashMap::new())),
+            api_url: default_keybase_api_url(),
         }
     }
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Keybase Chat API URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `http://127.0.0.1:5222/api`.
+    #[cfg(test)]
+    pub fn with_api_url(mut self, url: String) -> Self {
+        self.api_url = url;
         self
     }
 
@@ -100,7 +118,7 @@ impl KeybaseAdapter {
 
         let resp = self
             .client
-            .post(KEYBASE_API_URL)
+            .post(&self.api_url)
             .json(&payload)
             .send()
             .await?;
@@ -137,7 +155,7 @@ impl KeybaseAdapter {
 
         let resp = self
             .client
-            .post(KEYBASE_API_URL)
+            .post(&self.api_url)
             .json(&payload)
             .send()
             .await?;
@@ -177,7 +195,7 @@ impl KeybaseAdapter {
 
             let resp = self
                 .client
-                .post(KEYBASE_API_URL)
+                .post(&self.api_url)
                 .json(&payload)
                 .send()
                 .await?;
@@ -224,6 +242,7 @@ impl ChannelAdapter for KeybaseAdapter {
         let last_msg_ids = Arc::clone(&self.last_msg_ids);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let api_url = self.api_url.clone();
 
         tokio::spawn(async move {
             let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
@@ -250,12 +269,7 @@ impl ChannelAdapter for KeybaseAdapter {
                     }
                 });
 
-                let conversations = match client
-                    .post(KEYBASE_API_URL)
-                    .json(&list_payload)
-                    .send()
-                    .await
-                {
+                let conversations = match client.post(&api_url).json(&list_payload).send().await {
                     Ok(resp) => {
                         let body: serde_json::Value = resp.json().await.unwrap_or_default();
                         body["result"]["conversations"]
@@ -302,12 +316,7 @@ impl ChannelAdapter for KeybaseAdapter {
                         }
                     });
 
-                    let messages = match client
-                        .post(KEYBASE_API_URL)
-                        .json(&read_payload)
-                        .send()
-                        .await
-                    {
+                    let messages = match client.post(&api_url).json(&read_payload).send().await {
                         Ok(resp) => {
                             let body: serde_json::Value = resp.json().await.unwrap_or_default();
                             body["result"]["messages"]
@@ -475,6 +484,104 @@ impl ChannelAdapter for KeybaseAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `KeybaseAdapter`
+    // at it via `with_api_url()`. This exercises the `POST /api` call (JSON-RPC
+    // `method: "send"`) made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_url: String) -> KeybaseAdapter {
+        KeybaseAdapter::new("testuser".to_string(), "test-paper-key".to_string(), vec![])
+            .with_api_url(api_url)
+    }
+
+    /// The production const includes a `/api` path segment
+    /// (`http://127.0.0.1:5222/api`); the mock URI must mirror that so the
+    /// `path("/api")` matcher actually validates the request path the
+    /// adapter uses, instead of silently passing on `/`.
+    fn mock_api_url(server: &MockServer) -> String {
+        format!("{}/api", server.uri())
+    }
+
+    fn dummy_user(platform_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: platform_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn keybase_send_posts_json_rpc_send_method() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "send",
+                "params": {
+                    "options": {
+                        "channel": {
+                            "name": "myteam",
+                            "topic_name": "general",
+                            "members_type": "team"
+                        },
+                        "message": { "body": "hello from librefang" }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "message_id": 42 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(mock_api_url(&server));
+        adapter
+            .send(
+                &dummy_user("myteam:general"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn keybase_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "send",
+                "params": {
+                    "options": {
+                        "message": { "body": "(Unsupported content type)" }
+                    }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "message_id": 43 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(mock_api_url(&server));
+        adapter
+            .send(
+                &dummy_user("myteam:general"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_keybase_adapter_creation() {

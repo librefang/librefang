@@ -42,11 +42,20 @@ fn verify_viber_signature(auth_token: &[u8], body: &[u8], signature_hex: &str) -
 /// Viber set webhook endpoint.
 const VIBER_SET_WEBHOOK_URL: &str = "https://chatapi.viber.com/pa/set_webhook";
 
-/// Viber send message endpoint.
-const VIBER_SEND_MESSAGE_URL: &str = "https://chatapi.viber.com/pa/send_message";
+/// Viber send message endpoint path (appended to `api_base`).
+const VIBER_SEND_MESSAGE_PATH: &str = "/pa/send_message";
 
 /// Viber get account info endpoint (used for validation).
 const VIBER_ACCOUNT_INFO_URL: &str = "https://chatapi.viber.com/pa/get_account_info";
+
+/// Viber REST API base URL.
+const VIBER_API_BASE: &str = "https://chatapi.viber.com";
+
+/// Returns the default Viber REST API base URL. Used to initialise `ViberAdapter::api_base`.
+#[inline]
+fn default_viber_api_base() -> String {
+    VIBER_API_BASE.to_string()
+}
 
 /// Maximum Viber message text length (characters).
 const MAX_MESSAGE_LEN: usize = 7000;
@@ -72,6 +81,9 @@ pub struct ViberAdapter {
     client: reqwest::Client,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Base URL for the Viber REST API. Defaults to `https://chatapi.viber.com`.
+    /// Overridable in tests via `with_api_base()` to point at a wiremock server.
+    api_base: String,
 }
 
 impl ViberAdapter {
@@ -90,11 +102,21 @@ impl ViberAdapter {
             sender_avatar: None,
             client: crate::http_client::new_client(),
             account_id: None,
+            api_base: default_viber_api_base(),
         }
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Viber REST API base URL. Intended for tests that point the
+    /// adapter at a wiremock server instead of `https://chatapi.viber.com`.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base = base;
         self
     }
 
@@ -208,8 +230,9 @@ impl ViberAdapter {
                 "text": chunk,
             });
 
+            let url = format!("{}{}", self.api_base, VIBER_SEND_MESSAGE_PATH);
             let resp = self
-                .auth_header(self.client.post(VIBER_SEND_MESSAGE_URL))
+                .auth_header(self.client.post(&url))
                 .json(&body)
                 .send()
                 .await?;
@@ -443,8 +466,9 @@ impl ChannelAdapter for ViberAdapter {
                     "media": url,
                 });
 
+                let url = format!("{}{}", self.api_base, VIBER_SEND_MESSAGE_PATH);
                 let resp = self
-                    .auth_header(self.client.post(VIBER_SEND_MESSAGE_URL))
+                    .auth_header(self.client.post(&url))
                     .json(&body)
                     .send()
                     .await?;
@@ -479,6 +503,102 @@ impl ChannelAdapter for ViberAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `ViberAdapter`
+    // at it via `with_api_base()`. This mirrors the pattern used for the discord
+    // slice (PR #4551) and exercises the `POST /pa/send_message` call made by
+    // `ChannelAdapter::send`.
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(api_base: String) -> ViberAdapter {
+        ViberAdapter::new(
+            "test-viber-auth-token".to_string(),
+            "https://example.com/viber/webhook".to_string(),
+            8443,
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_user(user_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn viber_send_posts_send_message_with_auth_header_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/pa/send_message"))
+            .and(header("X-Viber-Auth-Token", "test-viber-auth-token"))
+            .and(body_json(serde_json::json!({
+                "receiver": "user-abc-123",
+                "min_api_version": 1,
+                "sender": { "name": "LibreFang" },
+                "tracking_data": "librefang",
+                "type": "text",
+                "text": "hello from librefang",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "status_message": "ok",
+                "message_token": 5098034272017990000_u64,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("user-abc-123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn viber_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/pa/send_message"))
+            .and(header("X-Viber-Auth-Token", "test-viber-auth-token"))
+            .and(body_json(serde_json::json!({
+                "receiver": "user-xyz-456",
+                "min_api_version": 1,
+                "sender": { "name": "LibreFang" },
+                "tracking_data": "librefang",
+                "type": "text",
+                "text": "(Unsupported content type)",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 0,
+                "status_message": "ok",
+                "message_token": 5098034272017990001_u64,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("user-xyz-456"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
 
     #[test]
     fn test_verify_viber_signature_valid() {
