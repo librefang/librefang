@@ -251,9 +251,11 @@ async fn agent_budget_ranking_is_empty_with_no_usage() {
     let (status, body) = request(&h, Method::GET, "/api/budget/agents", None).await;
     assert_eq!(status, StatusCode::OK);
     // Agents with zero spend are filtered out — the ranking is "top
-    // spenders", not "every registered agent".
-    assert_eq!(body["agents"].as_array().unwrap().len(), 0);
+    // spenders", not "every registered agent". #3842: canonical
+    // PaginatedResponse{items,total,offset,limit} envelope.
+    assert_eq!(body["items"].as_array().unwrap().len(), 0);
     assert_eq!(body["total"], 0);
+    assert_eq!(body["offset"], 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,9 +273,10 @@ async fn agent_budget_ranking_lists_agents_with_recorded_spend() {
 
     let (status, body) = request(&h, Method::GET, "/api/budget/agents", None).await;
     assert_eq!(status, StatusCode::OK);
-    let agents = body["agents"].as_array().unwrap();
-    assert_eq!(agents.len(), 1, "only alpha has spend: {body:?}");
-    let row = &agents[0];
+    // #3842: canonical PaginatedResponse{items,total,offset,limit} envelope.
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "only alpha has spend: {body:?}");
+    let row = &items[0];
     assert_eq!(row["agent_id"], alpha.to_string());
     assert_eq!(row["name"], "alpha");
     assert!(
@@ -285,6 +288,7 @@ async fn agent_budget_ranking_lists_agents_with_recorded_spend() {
     assert_eq!(row["monthly_limit"], 100.0);
     assert!(row["max_llm_tokens_per_hour"].is_number());
     assert_eq!(body["total"], 1);
+    assert_eq!(body["offset"], 0);
 }
 
 // ---------------------------------------------------------------------------
