@@ -312,12 +312,11 @@ impl TrajectoryExporter {
         session_id: SessionId,
         agent: AgentContext,
     ) -> LibreFangResult<TrajectoryBundle> {
-        let session = self
-            .memory
-            .get_session(session_id)?
-            .ok_or_else(|| LibreFangError::Memory(format!("session {} not found", session_id.0)))?;
+        let session = self.memory.get_session(session_id)?.ok_or_else(|| {
+            LibreFangError::memory_msg(format!("session {} not found", session_id.0))
+        })?;
         if session.agent_id != agent_id {
-            return Err(LibreFangError::Memory(format!(
+            return Err(LibreFangError::memory_msg(format!(
                 "session {} does not belong to agent {}",
                 session_id.0, agent_id.0
             )));

@@ -398,8 +398,31 @@ async fn goals_delete_removes_goal_and_descendants() {
     let other = create_goal(&h, serde_json::json!({"title": "unrelated"})).await;
     let oid = other["id"].as_str().unwrap().to_string();
 
-    let (status, _) = json_request(&h, Method::DELETE, &format!("/api/goals/{pid}"), None).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Issue #3832: DELETE returns 204 No Content per RFC 9110 §15.3.5 — the
+    // response MUST have an empty body. Hit the router directly so we can
+    // assert on the raw byte length.
+    let raw_resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/api/goals/{pid}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw_resp.status(), StatusCode::NO_CONTENT);
+    let raw_bytes = axum::body::to_bytes(raw_resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(
+        raw_bytes.is_empty(),
+        "204 response must have empty body (got {} bytes: {:?})",
+        raw_bytes.len(),
+        String::from_utf8_lossy(&raw_bytes)
+    );
 
     for missing in [&pid, &cid, &gid] {
         let (s, _) = json_request(&h, Method::GET, &format!("/api/goals/{missing}"), None).await;

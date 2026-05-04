@@ -4906,6 +4906,7 @@
           "workflows"
         ],
         "summary": "GET /api/cron/jobs/{id}/status — Get status of a specific cron job.",
+        "description": "Same response shape as `GET /api/cron/jobs/{id}`, including the\n#3693 `session_message_count` / `session_token_count` fields.",
         "operationId": "cron_job_status",
         "parameters": [
           {

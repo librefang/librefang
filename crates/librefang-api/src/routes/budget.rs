@@ -877,7 +877,7 @@ pub async fn user_budget_detail(
     tag = "budget",
     params(("user_id" = String, Path, description = "User UUID or configured name")),
     responses(
-        (status = 200, description = "Budget written and reloaded", body = crate::types::JsonObject),
+        (status = 200, description = "Budget written and reloaded — body is the canonical UserBudgetConfig (max_hourly_usd, max_daily_usd, max_monthly_usd, alert_threshold)", body = crate::types::JsonObject),
         (status = 400, description = "Invalid or partial budget payload"),
         (status = 403, description = "Caller is not an admin"),
         (status = 404, description = "No user matches the given id/name"),
@@ -1004,14 +1004,11 @@ pub async fn update_user_budget(
                 api_user_ref.map(|u| u.user_id),
                 Some("api".to_string()),
             );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "budget": new_budget,
-                })),
-            )
-                .into_response()
+            // Issue #3832: return the canonical UserBudgetConfig entity so
+            // dashboard mutations can `setQueryData` without a follow-up GET.
+            // The previous `{"status":"ok","budget":...}` ack envelope forced
+            // every successful PUT into a refetch.
+            (StatusCode::OK, Json(new_budget)).into_response()
         }
         Err(super::users::PersistError::NotFound(m)) => {
             ApiErrorResponse::not_found(m).into_response()

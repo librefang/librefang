@@ -2101,7 +2101,67 @@ fn cron_persist_failed_response(
     )
 }
 
+/// Look up the persistent cron session for `agent_id` and return
+/// `(message_count, estimated_tokens)`. Returns `(0, 0)` when no
+/// session exists yet (job has never fired in `Persistent` mode).
+///
+/// #3693: surfaces session-size growth to operators via the cron
+/// status / detail endpoints so the trend is visible in the
+/// dashboard before the provider returns a hard context-window
+/// 400. Estimation matches the kernel's prune path (system prompt
+/// and tools are excluded) — under-counts slightly but is
+/// consistent across calls.
+fn cron_session_metrics(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+) -> (usize, u64) {
+    use librefang_runtime::compactor::estimate_token_count;
+    use librefang_types::agent::SessionId;
+
+    let cron_sid = SessionId::for_channel(agent_id, "cron");
+    match state.kernel.memory_substrate().get_session(cron_sid) {
+        Ok(Some(session)) => {
+            let count = session.messages.len();
+            let tokens = estimate_token_count(&session.messages, None, None) as u64;
+            (count, tokens)
+        }
+        _ => (0, 0),
+    }
+}
+
+/// Merge a cron `JobMeta` with `session_message_count` /
+/// `session_token_count` into a JSON object response (#3693).
+/// Falls back to the bare `meta` JSON if it does not serialize
+/// to an object — the existing schema is forward-compatible
+/// because both fields are additive.
+fn cron_job_response_with_metrics(
+    state: &AppState,
+    meta: &librefang_kernel::cron::JobMeta,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(meta).unwrap_or(serde_json::Value::Null);
+    let (msg_count, tok_count) = cron_session_metrics(state, meta.job.agent_id);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "session_message_count".to_string(),
+            serde_json::Value::from(msg_count),
+        );
+        obj.insert(
+            "session_token_count".to_string(),
+            serde_json::Value::from(tok_count),
+        );
+    }
+    value
+}
+
 /// GET /api/cron/jobs/{id} — Get a single cron job by ID.
+///
+/// Response carries the cron `JobMeta` plus two #3693 observability
+/// fields:
+/// - `session_message_count` (`usize`): messages in the persistent
+///   `(agent, "cron")` session.
+/// - `session_token_count` (`u64`): kernel-estimated tokens for those
+///   messages (system prompt and tools excluded — same accounting as
+///   the prune path).
 #[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = crate::types::JsonObject), (status = 404, description = "Job not found")))]
 pub async fn get_cron_job(
     State(state): State<Arc<AppState>>,
@@ -2113,7 +2173,7 @@ pub async fn get_cron_job(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
+                    Json(cron_job_response_with_metrics(&state, &meta)),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }
@@ -2123,6 +2183,9 @@ pub async fn get_cron_job(
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
+///
+/// Same response shape as `GET /api/cron/jobs/{id}`, including the
+/// #3693 `session_message_count` / `session_token_count` fields.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = crate::types::JsonObject)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
@@ -2134,7 +2197,7 @@ pub async fn cron_job_status(
             match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&meta).unwrap_or_default()),
+                    Json(cron_job_response_with_metrics(&state, &meta)),
                 ),
                 None => ApiErrorResponse::not_found("Job not found").into_json_tuple(),
             }

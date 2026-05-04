@@ -111,7 +111,8 @@ async fn create_prompt_version_round_trips_through_get_and_list() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "body={body:?}");
+    // Issue #3832: POST /versions creates a resource — must be 201 Created.
+    assert_eq!(status, StatusCode::CREATED, "body={body:?}");
     assert_eq!(body["agent_id"], AGENT_UUID);
     assert_eq!(body["system_prompt"], "You are a helpful assistant.");
     // Server must compute a sha256 content_hash from system_prompt and

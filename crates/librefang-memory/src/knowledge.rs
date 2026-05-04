@@ -35,10 +35,10 @@ impl KnowledgeStore {
         } else {
             entity.id.clone()
         };
-        let entity_type_str = serde_json::to_string(&entity.entity_type)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-        let props_str = serde_json::to_string(&entity.properties)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let entity_type_str =
+            serde_json::to_string(&entity.entity_type).map_err(LibreFangError::serialization)?;
+        let props_str =
+            serde_json::to_string(&entity.properties).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id)
@@ -46,7 +46,7 @@ impl KnowledgeStore {
              ON CONFLICT(id) DO UPDATE SET name = ?3, properties = ?4, updated_at = ?5",
             rusqlite::params![id, entity_type_str, entity.name, props_str, now, agent_id],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(id)
     }
 
@@ -57,10 +57,10 @@ impl KnowledgeStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let id = Uuid::new_v4().to_string();
-        let rel_type_str = serde_json::to_string(&relation.relation)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
-        let props_str = serde_json::to_string(&relation.properties)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let rel_type_str =
+            serde_json::to_string(&relation.relation).map_err(LibreFangError::serialization)?;
+        let props_str =
+            serde_json::to_string(&relation.properties).map_err(LibreFangError::serialization)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at, agent_id)
@@ -76,7 +76,7 @@ impl KnowledgeStore {
                 agent_id,
             ],
         )
-        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        .map_err(LibreFangError::memory)?;
         Ok(id)
     }
 
@@ -92,21 +92,20 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
         let tx = conn
             .unchecked_transaction()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         let rel_count = tx
             .execute(
                 "DELETE FROM relations WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
+            .map_err(LibreFangError::memory)? as u64;
         let ent_count = tx
             .execute(
                 "DELETE FROM entities WHERE agent_id = ?1",
                 rusqlite::params![agent_id],
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
-        tx.commit()
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)? as u64;
+        tx.commit().map_err(LibreFangError::memory)?;
         Ok(rel_count + ent_count)
     }
 
@@ -121,8 +120,8 @@ impl KnowledgeStore {
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-        let rel_str = serde_json::to_string(relation_type)
-            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let rel_str =
+            serde_json::to_string(relation_type).map_err(LibreFangError::serialization)?;
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM relations r
@@ -132,7 +131,7 @@ impl KnowledgeStore {
                 rusqlite::params![source_id, rel_str, target_id],
                 |row| row.get(0),
             )
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
         Ok(count > 0)
     }
 
@@ -163,8 +162,7 @@ impl KnowledgeStore {
             idx += 2;
         }
         if let Some(ref relation) = pattern.relation {
-            let rel_str = serde_json::to_string(relation)
-                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+            let rel_str = serde_json::to_string(relation).map_err(LibreFangError::serialization)?;
             sql.push_str(&format!(" AND r.relation_type = ?{idx}"));
             params.push(Box::new(rel_str));
             idx += 1;
@@ -179,9 +177,7 @@ impl KnowledgeStore {
 
         sql.push_str(" LIMIT 100");
 
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(LibreFangError::memory)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
 
@@ -209,11 +205,11 @@ impl KnowledgeStore {
                     t_updated: row.get(18)?,
                 })
             })
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            .map_err(LibreFangError::memory)?;
 
         let mut matches = Vec::new();
         for row_result in rows {
-            let r = row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let r = row_result.map_err(LibreFangError::memory)?;
             matches.push(GraphMatch {
                 source: parse_entity(
                     &r.s_id,

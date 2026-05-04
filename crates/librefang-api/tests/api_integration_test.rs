@@ -3593,6 +3593,23 @@ async fn test_user_budget_put_get_delete_round_trip() {
         .unwrap();
     assert_eq!(put_resp.status(), 200, "PUT should accept the upsert");
 
+    // Issue #3832: the success body is the canonical UserBudgetConfig — no
+    // `{"status":"ok","budget":...}` ack envelope. Dashboard mutations rely on
+    // this to `setQueryData` without a follow-up GET.
+    let put_body: serde_json::Value = put_resp.json().await.unwrap();
+    assert!(
+        put_body.get("status").is_none(),
+        "PUT body must not carry the legacy ack envelope: {put_body:?}"
+    );
+    assert!(
+        put_body.get("budget").is_none(),
+        "PUT body must be the bare UserBudgetConfig, not nested under `budget`: {put_body:?}"
+    );
+    assert_eq!(put_body["max_hourly_usd"], serde_json::json!(1.5));
+    assert_eq!(put_body["max_daily_usd"], serde_json::json!(12.0));
+    assert_eq!(put_body["max_monthly_usd"], serde_json::json!(100.0));
+    assert_eq!(put_body["alert_threshold"], serde_json::json!(0.75));
+
     // GET should reflect the new caps.
     let after_put: serde_json::Value = client
         .get(&url)
