@@ -3681,7 +3681,7 @@
           "budget"
         ],
         "summary": "GET /api/budget/agents — Per-agent cost ranking (top spenders).",
-        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.",
+        "description": "Uses a single `GROUP BY agent_id` query instead of one `SUM` per agent to\neliminate the N+1 SQLite pattern that caused ~1200 queries/min under normal\ndashboard polling at 100 agents. See #3684.\n\nEnvelope is the canonical `PaginatedResponse{items,total,offset,limit}` per\n#3842; the underlying GROUP BY returns the full ranking in a single shot, so\n`offset=0`, `limit=None`.",
         "operationId": "agent_budget_ranking",
         "responses": {
           "200": {
@@ -3689,8 +3689,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {}
+                  "$ref": "#/components/schemas/JsonObject"
                 }
               }
             }

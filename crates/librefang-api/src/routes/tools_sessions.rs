@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_runtime::tool_runner::{builtin_tool_definitions, execute_tool};
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
