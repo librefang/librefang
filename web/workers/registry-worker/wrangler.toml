@@ -19,4 +19,4 @@ crons = ["0 2 * * *"]
 # Until both are set, the signing endpoints return 503 and the cron refresh
 # skips signing — the existing /api/registry path remains fully functional.
 [vars]
-REGISTRY_PUBLIC_KEY = "julGSbXv8BZWStCGQYf3E98uVT+/EBbRGHoN4aG21ng="
+REGISTRY_PUBLIC_KEY = "FqJmVvJmCChmxX1xWjygaZyR4F/ls/Z8QvedpMVgMPE="

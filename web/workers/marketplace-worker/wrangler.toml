@@ -17,7 +17,7 @@ GITHUB_CLIENT_ID = "Iv1.3683b4ad4a41e982"
 # Until both are set, /v1/pubkey and /v1/download/.../signature return 503,
 # new versions are stored without bundle_sig (NULL), and existing endpoints
 # remain fully functional.
-REGISTRY_PUBLIC_KEY = "julGSbXv8BZWStCGQYf3E98uVT+/EBbRGHoN4aG21ng="
+REGISTRY_PUBLIC_KEY = "FqJmVvJmCChmxX1xWjygaZyR4F/ls/Z8QvedpMVgMPE="
 
 # Weekly stats aggregation
 [triggers]
