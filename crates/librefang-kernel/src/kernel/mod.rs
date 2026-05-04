@@ -800,9 +800,11 @@ pub struct LibreFangKernel {
     /// provider/key/url combination on every agent message.
     driver_cache: librefang_runtime::drivers::DriverCache,
     /// Hot-reloadable budget configuration. Initialised from `config.budget` at
-    /// boot and mutated safely via [`update_budget_config`] from the API layer,
-    /// replacing the previous `unsafe` raw-pointer mutation pattern.
-    budget_config: std::sync::RwLock<librefang_types::config::BudgetConfig>,
+    /// boot and mutated atomically via [`update_budget_config`] from the API
+    /// layer. Backed by `ArcSwap` so the LLM hot path (which reads it on every
+    /// turn for budget enforcement) never parks a tokio worker thread on a
+    /// blocking lock — see #3579.
+    budget_config: arc_swap::ArcSwap<librefang_types::config::BudgetConfig>,
     /// Shutdown signal sender for background tasks (e.g., approval expiry sweep).
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Checkpoint manager — takes automatic shadow-git snapshots before every
@@ -1045,36 +1047,32 @@ impl LibreFangKernel {
 
     /// Return a snapshot of the current budget configuration.
     ///
-    /// This reads from the `RwLock`-protected copy that can be updated at
-    /// runtime via [`update_budget_config`], so callers always see the
-    /// latest values set through the API.
+    /// Backed by `ArcSwap`, so this is a lock-free atomic load: no reader
+    /// can ever block an LLM turn even if a config write is concurrent.
+    /// Returns an owned `BudgetConfig` for API compatibility.
     pub fn budget_config(&self) -> librefang_types::config::BudgetConfig {
-        // Recover from poisoning instead of panicking — a panic here would
-        // kill every LLM turn that needs a budget check (#3447).
-        self.budget_config
-            .read()
-            .unwrap_or_else(|p| {
-                tracing::warn!(
-                    "budget_config read lock was poisoned, recovering with last-known state"
-                );
-                p.into_inner()
-            })
-            .clone()
+        // `load_full()` returns `Arc<BudgetConfig>` cheaply; we then clone
+        // the inner value to keep the existing owned-return contract.
+        (*self.budget_config.load_full()).clone()
     }
 
     /// Safely mutate the runtime budget configuration.
     ///
     /// The caller supplies a closure that receives `&mut BudgetConfig`.
-    /// All writes are serialised through an `RwLock` write-guard, which
-    /// eliminates the data-race hazard of the old raw-pointer approach.
-    pub fn update_budget_config(&self, f: impl FnOnce(&mut librefang_types::config::BudgetConfig)) {
-        let mut guard = self.budget_config.write().unwrap_or_else(|p| {
-            tracing::warn!(
-                "budget_config write lock was poisoned, recovering with last-known state"
-            );
-            p.into_inner()
+    /// Implementation: `rcu()` provides a CAS retry loop — if another
+    /// writer wins the race between load and store, we re-clone the new
+    /// snapshot and re-apply the closure. This is critical when the
+    /// closure does field-level mutation (e.g. `cfg.daily_cap_usd = x`)
+    /// because a plain load-clone-store would silently drop the other
+    /// writer's edits to unrelated fields. The closure must therefore be
+    /// idempotent and side-effect free; `Fn` rather than `FnOnce` enforces
+    /// that at the type level.
+    pub fn update_budget_config(&self, f: impl Fn(&mut librefang_types::config::BudgetConfig)) {
+        self.budget_config.rcu(|current| {
+            let mut next = (**current).clone();
+            f(&mut next);
+            std::sync::Arc::new(next)
         });
-        f(&mut guard);
     }
 
     /// LibreFang home directory path (boot-time immutable).
@@ -3702,7 +3700,7 @@ impl LibreFangKernel {
             agent_watchers: dashmap::DashMap::new(),
             mcp_generation: std::sync::atomic::AtomicU64::new(0),
             driver_cache: librefang_runtime::drivers::DriverCache::new(),
-            budget_config: std::sync::RwLock::new(initial_budget),
+            budget_config: arc_swap::ArcSwap::from_pointee(initial_budget),
             approval_sweep_started: AtomicBool::new(false),
             task_board_sweep_started: AtomicBool::new(false),
             session_stream_hub_gc_started: AtomicBool::new(false),
@@ -4822,12 +4820,7 @@ system_prompt = "You are a helpful assistant."
         agent_id: AgentId,
         message: &str,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_with_handle(agent_id, message, handle)
+        self.send_message_with_handle(agent_id, message, Some(self.kernel_handle()))
             .await
     }
 
@@ -4841,13 +4834,13 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         blocks: Vec<librefang_types::message::ContentBlock>,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
-        self.send_message_with_handle_and_blocks(agent_id, message, handle, Some(blocks))
-            .await
+        self.send_message_with_handle_and_blocks(
+            agent_id,
+            message,
+            Some(self.kernel_handle()),
+            Some(blocks),
+        )
+        .await
     }
 
     /// Send a message to an agent with sender identity context from a channel.
@@ -4860,15 +4853,10 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         sender: &SenderContext,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
         self.send_message_full(
             agent_id,
             message,
-            handle,
+            self.kernel_handle(),
             None,
             Some(sender),
             None,
@@ -4891,15 +4879,10 @@ system_prompt = "You are a helpful assistant."
         sender: &SenderContext,
         thinking_override: Option<bool>,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
         self.send_message_full(
             agent_id,
             message,
-            handle,
+            self.kernel_handle(),
             None,
             Some(sender),
             None,
@@ -4917,15 +4900,10 @@ system_prompt = "You are a helpful assistant."
         blocks: Vec<librefang_types::message::ContentBlock>,
         sender: &SenderContext,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
         self.send_message_full(
             agent_id,
             message,
-            handle,
+            self.kernel_handle(),
             Some(blocks),
             Some(sender),
             None,
@@ -4936,23 +4914,19 @@ system_prompt = "You are a helpful assistant."
     }
 
     /// Send a message with an optional kernel handle for inter-agent tools.
+    ///
+    /// `kernel_handle` is `Option` only because some tests pass a stub handle;
+    /// production callers always reach this with `Some(...)` (see #3652). When
+    /// `None`, the kernel auto-wires its own self-handle.
     pub async fn send_message_with_handle(
         &self,
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_full(
-            agent_id,
-            message,
-            kernel_handle,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_full(agent_id, message, handle, None, None, None, None, None)
+            .await
     }
 
     /// Send a message to `agent_id` on behalf of `parent_agent_id`. If the
@@ -4971,14 +4945,17 @@ system_prompt = "You are a helpful assistant."
         message: &str,
         parent_agent_id: AgentId,
     ) -> KernelResult<AgentLoopResult> {
-        let handle: Option<Arc<dyn KernelHandle>> = self
-            .self_handle
-            .get()
-            .and_then(|w| w.upgrade())
-            .map(|arc| arc as Arc<dyn KernelHandle>);
         let upstream = self.any_session_interrupt_for_agent(parent_agent_id);
         self.send_message_full_with_upstream(
-            agent_id, message, handle, None, None, None, None, None, upstream,
+            agent_id,
+            message,
+            self.kernel_handle(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            upstream,
         )
         .await
     }
@@ -4996,10 +4973,11 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         thinking_override: Option<bool>,
     ) -> KernelResult<AgentLoopResult> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_full(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             None,
             None,
             None,
@@ -5026,10 +5004,11 @@ system_prompt = "You are a helpful assistant."
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
     ) -> KernelResult<AgentLoopResult> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_full(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             None,
             sender_context,
             None,
@@ -5055,10 +5034,11 @@ system_prompt = "You are a helpful assistant."
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_full(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             content_blocks,
             None,
             None,
@@ -5221,6 +5201,22 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn by default so external writers
+            // (cron jobs, integrations) reach the LLM on the next message.
+            // Opt out via `cache_context = true` on the manifest.
+            // Pre-loaded off the runtime worker (tokio::fs) so the struct
+            // literal below stays sync — see #3579.
+            let context_md = match manifest.workspace.as_ref() {
+                Some(w) => {
+                    librefang_runtime::agent_context::load_context_md_async(
+                        w,
+                        manifest.cache_context,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -5267,12 +5263,7 @@ system_prompt = "You are a helpful assistant."
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
                 is_group: false,
                 was_mentioned: false,
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =
@@ -5436,7 +5427,7 @@ system_prompt = "You are a helpful assistant."
         &self,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
@@ -5466,7 +5457,7 @@ system_prompt = "You are a helpful assistant."
         &self,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
@@ -6009,7 +6000,8 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None, None, None)
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_streaming_resolved(agent_id, message, handle, None, None, None)
             .await
     }
 
@@ -6027,10 +6019,11 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_streaming_resolved(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             None,
             None,
             session_id_override,
@@ -6049,15 +6042,9 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_resolved(
-            agent_id,
-            message,
-            kernel_handle,
-            Some(sender),
-            None,
-            None,
-        )
-        .await
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_streaming_resolved(agent_id, message, handle, Some(sender), None, None)
+            .await
     }
 
     /// Streaming entry point with per-call deep-thinking override.
@@ -6075,10 +6062,11 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_streaming_resolved(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             Some(sender),
             thinking_override,
             None,
@@ -6104,10 +6092,11 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
         self.send_message_streaming_resolved(
             agent_id,
             message,
-            kernel_handle,
+            handle,
             Some(sender),
             thinking_override,
             session_id_override,
@@ -6132,7 +6121,8 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None, None)
+        let handle = kernel_handle.unwrap_or_else(|| self.kernel_handle());
+        self.send_message_streaming_with_sender(agent_id, message, handle, None, None)
     }
 
     /// Run a *derivative* (forked) turn for an agent using the canonical
@@ -6223,7 +6213,7 @@ system_prompt = "You are a helpful assistant."
         self.send_message_streaming_with_sender_and_opts(
             agent_id,
             fork_prompt,
-            None, // auto-wire self
+            self.kernel_handle(),
             None, // no sender context — fork uses the canonical session
             None, // no thinking override
             None, // forks MUST stay on canonical — see invariant above
@@ -6235,7 +6225,7 @@ system_prompt = "You are a helpful assistant."
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
     ) -> KernelResult<(
@@ -6256,7 +6246,7 @@ system_prompt = "You are a helpful assistant."
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
@@ -6309,7 +6299,7 @@ system_prompt = "You are a helpful assistant."
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
@@ -6318,18 +6308,6 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        // Auto-wire the self kernel handle when the caller did not supply one.
-        // This mirrors the non-streaming `send_message()` path and is required
-        // for inter-agent tools (memory_store, memory_recall, agent_send, …) to
-        // work in streaming mode — channels like Telegram go through
-        // channel_bridge.rs which historically passes `None` here (#2058).
-        let kernel_handle = kernel_handle.or_else(|| {
-            self.self_handle
-                .get()
-                .and_then(|w| w.upgrade())
-                .map(|arc| arc as Arc<dyn KernelHandle>)
-        });
-
         // Try to acquire config reload barrier (non-blocking — this is a sync fn).
         // If a reload is in progress we proceed without the guard.
         let _config_guard = self.config_reload_lock.try_read();
@@ -6670,6 +6648,17 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn (cache_context=true to opt out).
+            // NOTE: this site is inside `send_message_streaming_with_sender_and_opts`,
+            // which is intentionally a non-async wrapper returning a JoinHandle, so
+            // we cannot use the async variant here. The sync read remains a known
+            // blocking site tracked under #3579 — async-ifying it requires lifting
+            // the streaming entry path itself to async, which is out of scope for
+            // this PR.
+            let context_md = manifest.workspace.as_ref().and_then(|w| {
+                librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
+            });
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -6732,12 +6721,7 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =
@@ -7003,7 +6987,7 @@ system_prompt = "You are a helpful assistant."
                 &memory,
                 driver,
                 &tools,
-                kernel_handle,
+                Some(kernel_handle),
                 tx,
                 Some(&skill_snapshot),
                 Some(effective_mcp),
@@ -7398,7 +7382,7 @@ system_prompt = "You are a helpful assistant."
         &self,
         entry: &AgentEntry,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
     ) -> KernelResult<AgentLoopResult> {
         let module_path = entry.manifest.module.strip_prefix("wasm:").unwrap_or("");
         let wasm_path = self.resolve_module_path(module_path);
@@ -7433,7 +7417,7 @@ system_prompt = "You are a helpful assistant."
                 &wasm_bytes,
                 input,
                 sandbox_config,
-                kernel_handle,
+                Some(kernel_handle),
                 &entry.id.to_string(),
             )
             .await
@@ -7690,7 +7674,7 @@ system_prompt = "You are a helpful assistant."
         self: &Arc<Self>,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         sender_context: Option<&SenderContext>,
         thinking_override: Option<bool>,
         session_id_override: Option<SessionId>,
@@ -8037,7 +8021,7 @@ system_prompt = "You are a helpful assistant."
         entry: &AgentEntry,
         agent_id: AgentId,
         message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        kernel_handle: Arc<dyn KernelHandle>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
         session_mode_override: Option<librefang_types::agent::SessionMode>,
@@ -8206,7 +8190,7 @@ system_prompt = "You are a helpful assistant."
                     // Other registry updates (update_skills, update_mcp_servers, etc.)
                     // follow the same pattern: update + save_agent.
                     if let Some(updated) = self.registry.get(agent_id) {
-                        if let Err(e) = self.memory.save_agent(&updated) {
+                        if let Err(e) = self.memory.save_agent_async(&updated).await {
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 error = %e,
@@ -8345,6 +8329,19 @@ system_prompt = "You are a helpful assistant."
             };
             let dynamic_sections = self.hooks.collect_prompt_sections(&hook_ctx);
 
+            // Re-read context.md per turn (cache_context=true to opt out).
+            // Pre-loaded off the runtime worker via tokio::fs — see #3579.
+            let context_md = match manifest.workspace.as_ref() {
+                Some(w) => {
+                    librefang_runtime::agent_context::load_context_md_async(
+                        w,
+                        manifest.cache_context,
+                    )
+                    .await
+                }
+                None => None,
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
@@ -8407,12 +8404,7 @@ system_prompt = "You are a helpful assistant."
                         .to_string(),
                 ),
                 active_goals: self.active_goals_for_prompt(Some(agent_id)),
-                // Re-read context.md per turn by default so external writers
-                // (cron jobs, integrations) reach the LLM on the next message.
-                // Opt out via `cache_context = true` on the manifest.
-                context_md: manifest.workspace.as_ref().and_then(|w| {
-                    librefang_runtime::agent_context::load_context_md(w, manifest.cache_context)
-                }),
+                context_md,
                 dynamic_sections,
             };
             manifest.model.system_prompt =
@@ -8718,7 +8710,7 @@ system_prompt = "You are a helpful assistant."
             &self.memory,
             driver,
             &tools,
-            kernel_handle,
+            Some(kernel_handle),
             Some(&skill_snapshot),
             Some(effective_mcp),
             Some(&self.web_ctx),
@@ -8849,12 +8841,16 @@ system_prompt = "You are a helpful assistant."
             let start = result.new_messages_start.min(session.messages.len());
             if start < session.messages.len() {
                 let new_messages = session.messages[start..].to_vec();
-                if let Err(e) = self.memory.append_canonical(
-                    agent_id,
-                    &new_messages,
-                    None,
-                    Some(effective_session_id),
-                ) {
+                if let Err(e) = self
+                    .memory
+                    .append_canonical_async(
+                        agent_id,
+                        &new_messages,
+                        None,
+                        Some(effective_session_id),
+                    )
+                    .await
+                {
                     warn!("Failed to update canonical session: {e}");
                 }
             }
@@ -11827,6 +11823,33 @@ system_prompt = "You are a helpful assistant."
         }
     }
 
+    /// Upgrade the weak `self_handle` into a strong `Arc<dyn KernelHandle>`.
+    ///
+    /// Production call sites (cron dispatch, channel bridges, inter-agent
+    /// tools, …) all need this conversion to plumb kernel access into the
+    /// runtime's tool layer. Previously every site repeated a 4-line
+    /// `self.self_handle.get().and_then(|w| w.upgrade()).map(|arc| arc as _)`
+    /// incantation that produced an `Option`, then silently no-op'd downstream
+    /// when the upgrade failed — masking bootstrap-order bugs (issue #3652).
+    ///
+    /// This helper panics instead. The `self_handle` slot is populated by
+    /// [`Self::set_self_handle`] right after the kernel is wrapped in `Arc`,
+    /// before any code path that dispatches an agent turn can run. Reaching
+    /// this method with an empty slot means the bootstrap sequence was
+    /// violated, which is a programmer error — fail loud, not silently.
+    ///
+    /// Public boundary methods that accept `Option<Arc<dyn KernelHandle>>`
+    /// (`send_message_with_handle`, etc.) keep the `Option` for test stubs;
+    /// they call this helper to materialize a handle when the caller passes
+    /// `None`.
+    pub(crate) fn kernel_handle(&self) -> Arc<dyn KernelHandle> {
+        self.self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>)
+            .expect("kernel self_handle accessed before set_self_handle — bootstrap order bug")
+    }
+
     // ─── Agent Binding management ──────────────────────────────────────
 
     /// List all agent bindings.
@@ -12686,11 +12709,7 @@ system_prompt = "You are a helpful assistant."
                             };
                             // (3) Inner per-session mutex applies inside
                             //     send_message_full when session_id_override is Some.
-                            let handle: Option<Arc<dyn KernelHandle>> = kernel
-                                .self_handle
-                                .get()
-                                .and_then(|w| w.upgrade())
-                                .map(|arc| arc as Arc<dyn KernelHandle>);
+                            let handle = kernel.kernel_handle();
                             let home_channel = kernel.resolve_agent_home_channel(aid);
                             // Bound permit-hold duration so a stuck LLM
                             // call cannot pin Lane::Trigger kernel-wide.
@@ -13131,7 +13150,7 @@ system_prompt = "You are a helpful assistant."
                 .iter()
                 .flat_map(|inst| inst.agent_ids.values().copied().collect::<Vec<_>>())
                 .collect();
-            match self.memory.load_all_agents() {
+            match self.memory.load_all_agents_async().await {
                 Ok(all) => {
                     let mut removed = 0usize;
                     for entry in all {
@@ -13141,7 +13160,7 @@ system_prompt = "You are a helpful assistant."
                         if live_hand_agents.contains(&entry.id) {
                             continue;
                         }
-                        match self.memory.remove_agent(entry.id) {
+                        match self.memory.remove_agent_async(entry.id).await {
                             Ok(()) => {
                                 removed += 1;
                                 info!(
@@ -13611,7 +13630,11 @@ system_prompt = "You are a helpful assistant."
                         Err(e) => warn!("Startup session prune (excess) failed: {e}"),
                     }
                 }
-                if let Err(e) = self.memory.vacuum_if_shrank(pruned_total as usize) {
+                if let Err(e) = self
+                    .memory
+                    .vacuum_if_shrank_async(pruned_total as usize)
+                    .await
+                {
                     warn!("Startup VACUUM after session prune failed: {e}");
                 }
                 if pruned_total > 0 {
@@ -14050,7 +14073,7 @@ system_prompt = "You are a helpful assistant."
                                         kernel_job.send_message_full(
                                             agent_id,
                                             &message_owned,
-                                            Some(kh),
+                                            kh,
                                             None,
                                             sender_ctx,
                                             mode_override,
@@ -15452,10 +15475,25 @@ system_prompt = "You are a helpful assistant."
                     "MCP server reconnected"
                 );
                 self.mcp_connections.lock().await.push(conn);
+                // Cardinality: server label is the operator-configured MCP
+                // server id (bounded set), outcome is one of two fixed
+                // values. (#3495)
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "success",
+                )
+                .increment(1);
                 Ok(tool_count)
             }
             Err(e) => {
                 self.mcp_health.report_error(id, e.to_string());
+                metrics::counter!(
+                    "librefang_mcp_reconnect_total",
+                    "server" => id.to_string(),
+                    "outcome" => "failure",
+                )
+                .increment(1);
                 Err(format!("Reconnect failed for '{id}': {e}"))
             }
         }
@@ -19860,7 +19898,7 @@ impl LibreFangKernel {
             }
         };
 
-        let mut session = match self.memory.get_session(session_id) {
+        let mut session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(
@@ -19970,7 +20008,7 @@ impl LibreFangKernel {
             return;
         }
 
-        let persisted_session = match self.memory.get_session(session_id) {
+        let persisted_session = match self.memory.get_session_async(session_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 warn!(

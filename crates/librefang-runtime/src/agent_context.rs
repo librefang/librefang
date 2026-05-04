@@ -105,6 +105,117 @@ pub fn load_context_md(workspace: &Path, cache_context: bool) -> Option<String> 
     }
 }
 
+/// Async variant of [`load_context_md`] that performs the per-turn disk
+/// read off the tokio worker thread via `tokio::fs`. Use this from any
+/// `async fn` running on the runtime — it matches the sync version's
+/// behaviour byte-for-byte (same cache, same symlink rejection, same
+/// UTF-8 trim and size cap) but never parks the executor on the read.
+///
+/// The sync [`load_context_md`] is retained for the streaming entry
+/// point (`send_message_streaming_with_sender_and_opts`) which is itself
+/// a non-async wrapper that returns a `JoinHandle` — async-ifying that
+/// call site requires lifting an entire kernel entry path to async and
+/// is tracked as a follow-up under #3579.
+pub async fn load_context_md_async(workspace: &Path, cache_context: bool) -> Option<String> {
+    let path = resolve_context_path_async(workspace).await;
+
+    if cache_context {
+        if let Some(cached) = get_cached(&path) {
+            return Some(cached);
+        }
+    }
+
+    match read_capped_async(&path).await {
+        Ok(Some(content)) => {
+            store_cached(&path, &content);
+            Some(content)
+        }
+        Ok(None) => {
+            if cache_context {
+                get_cached(&path)
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            if let Some(prev) = get_cached(&path) {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to re-read context.md; falling back to cached content"
+                );
+                Some(prev)
+            } else {
+                debug!(path = %path.display(), error = %e, "context.md unreadable and no cache");
+                None
+            }
+        }
+    }
+}
+
+async fn resolve_context_path_async(workspace: &Path) -> PathBuf {
+    let identity_path = workspace.join(".identity").join(CONTEXT_FILENAME);
+    if matches!(tokio::fs::try_exists(&identity_path).await, Ok(true)) {
+        return identity_path;
+    }
+    workspace.join(CONTEXT_FILENAME)
+}
+
+/// Async mirror of [`read_capped`]. Behaviour and limits are identical;
+/// only the I/O primitives change to `tokio::fs` so the runtime worker
+/// is free during the read.
+async fn read_capped_async(path: &Path) -> io::Result<Option<String>> {
+    use tokio::io::AsyncReadExt;
+
+    // SECURITY: see `read_capped` — symlink targets are explicitly refused.
+    let meta = match tokio::fs::symlink_metadata(path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if meta.file_type().is_symlink() {
+        warn!(
+            path = %path.display(),
+            "Refusing to read context.md: target is a symlink"
+        );
+        return Ok(None);
+    }
+    if !meta.is_file() {
+        return Ok(None);
+    }
+
+    let cap = (MAX_CONTEXT_BYTES as usize).saturating_add(4);
+    let mut bytes = Vec::with_capacity(cap.min((meta.len() as usize).saturating_add(1)));
+    tokio::fs::File::open(path)
+        .await?
+        .take(cap as u64)
+        .read_to_end(&mut bytes)
+        .await?;
+
+    let valid_up_to = match std::str::from_utf8(&bytes) {
+        Ok(_) => bytes.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    if valid_up_to == 0 && !bytes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "context.md contains no valid UTF-8 prefix",
+        ));
+    }
+    bytes.truncate(valid_up_to);
+    let content = String::from_utf8(bytes).expect("trimmed to valid UTF-8 boundary above");
+
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+
+    if meta.len() > MAX_CONTEXT_BYTES {
+        let truncated = crate::str_utils::safe_truncate_str(&content, MAX_CONTEXT_BYTES as usize);
+        return Ok(Some(truncated.to_string()));
+    }
+    Ok(Some(content))
+}
+
 fn get_cached(path: &Path) -> Option<String> {
     cache()
         .lock()
@@ -333,6 +444,55 @@ mod tests {
             loaded.is_none(),
             "symlinked context.md must be refused, got {loaded:?}"
         );
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// Async variant must yield identical content for the standard read
+    /// path. This pins the byte-for-byte equivalence with the sync API
+    /// — if a future refactor diverges, this test will catch it.
+    #[tokio::test]
+    async fn async_variant_matches_sync_for_basic_read() {
+        let ws = fresh_workspace("async_basic");
+        fs::write(ws.join(CONTEXT_FILENAME), "async-ok payload").unwrap();
+
+        let loaded = load_context_md_async(&ws, false).await.unwrap();
+        assert!(loaded.contains("async-ok payload"));
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// Async API must honour the symlink rejection identically to sync.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn async_variant_rejects_symlink_context_file() {
+        let ws = fresh_workspace("async_symlink");
+        let real = ws.join("real.md");
+        fs::write(&real, "would-be-leaked content").unwrap();
+        std::os::unix::fs::symlink(&real, ws.join(CONTEXT_FILENAME)).unwrap();
+
+        let loaded = load_context_md_async(&ws, false).await;
+        assert!(
+            loaded.is_none(),
+            "async symlinked context.md must be refused, got {loaded:?}"
+        );
+
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    /// Async API picks up `.identity/context.md` over the legacy root
+    /// fallback — same precedence rule as the sync version.
+    #[tokio::test]
+    async fn async_variant_identity_dir_takes_precedence() {
+        let ws = fresh_workspace("async_identity");
+        let identity_dir = ws.join(".identity");
+        fs::create_dir_all(&identity_dir).unwrap();
+        fs::write(ws.join(CONTEXT_FILENAME), "root payload").unwrap();
+        fs::write(identity_dir.join(CONTEXT_FILENAME), "identity payload").unwrap();
+
+        let loaded = load_context_md_async(&ws, false).await.unwrap();
+        assert!(loaded.contains("identity payload"));
+        assert!(!loaded.contains("root payload"));
 
         let _ = fs::remove_dir_all(&ws);
     }

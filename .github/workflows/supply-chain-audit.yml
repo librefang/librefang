@@ -1,0 +1,64 @@
+name: supply-chain-audit
+
+# Static supply-chain audit for skill / hand / extension content. Gates PRs
+# that touch any of the bundle-bearing trees. Closes part of #3333:
+# SECURITY.md acknowledged this gap (a malicious skill PR could ship a `.pth`
+# import hijack, base64-encoded exec payload, or a jailbreak prompt) but CI
+# had no automated catch.
+#
+# Cargo-deny / cargo-audit (Rust dependency advisories) is a separate gate
+# tracked under #3305.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/librefang-skills/**'
+      - 'crates/librefang-hands/**'
+      - 'crates/librefang-extensions/**'
+      - 'examples/**'
+      - 'scripts/check-skills-supply-chain.py'
+      - '.github/workflows/supply-chain-audit.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/librefang-skills/**'
+      - 'crates/librefang-hands/**'
+      - 'crates/librefang-extensions/**'
+      - 'examples/**'
+      - 'scripts/check-skills-supply-chain.py'
+      - '.github/workflows/supply-chain-audit.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Self-test runs first and is required: if the script's own fixtures don't
+  # trip every rule, the live `audit` job is meaningless (a broken rule could
+  # silently let a real violation through). Failure here means somebody
+  # weakened a rule without updating the fixtures.
+  self-test:
+    name: audit script self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run --self-test (embedded fixtures)
+        run: python3 scripts/check-skills-supply-chain.py --self-test
+
+  audit:
+    name: scan skills / hands / extensions
+    needs: self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run supply-chain audit (strict)
+        run: python3 scripts/check-skills-supply-chain.py --strict

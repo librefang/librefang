@@ -2,9 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { animate } from 'motion/react';
 import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-import 'katex/dist/katex.min.css';
+import { useMathPlugins } from '../lib/hooks/useMathPlugins';
 
 const mdComponents: Components = {
   p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
@@ -40,6 +38,12 @@ const mdComponents: Components = {
 /// (e.g. the upstream message restarted), the typewriter rewinds to 0.
 export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
+  // Lazy-load remark-math / rehype-katex / katex CSS only when the source
+  // contains math delimiters. While the dynamic import is in flight the
+  // arrays are empty, so math notation transiently shows as raw text — that's
+  // the same fallback react-markdown would produce without the plugins, and
+  // it avoids paying ~280 KB of KaTeX on every chat (#3381).
+  const { remarkPlugins: mathRemark, rehypePlugins: mathRehype } = useMathPlugins(text);
 
   useEffect(() => {
     // If upstream restarted the stream (new text shorter than what we already
@@ -62,13 +66,18 @@ export function Typewriter_v2({ text, speed = 20 }: { text: string; speed?: numb
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, speed]);
 
+  const remarkPlugins = useMemo(
+    () => [remarkGfm, ...mathRemark],
+    [mathRemark],
+  );
+
   return useMemo(() => (
     <Markdown
-      remarkPlugins={[remarkGfm, remarkMath]}
-      rehypePlugins={[rehypeKatex]}
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={mathRehype}
       components={mdComponents}
     >
       {displayed}
     </Markdown>
-  ), [displayed]);
+  ), [displayed, remarkPlugins, mathRehype]);
 }

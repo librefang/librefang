@@ -5288,4 +5288,310 @@ mod tests {
             }
         }
     }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Continues the #3820 series (slack/discord/teams/line/dingtalk/messenger/
+    // mattermost/bluesky/viber/keybase/mastodon/nextcloud/ntfy/pumble/reddit/
+    // gotify already covered). Uses `wiremock` to stand up a local HTTP server
+    // and points `TelegramAdapter` at it via the `api_url` constructor parameter.
+    // Exercises `ChannelAdapter::send` and `ChannelAdapter::send_in_thread`,
+    // asserting URL path (`/bot{token}/{method}`), JSON body shape, the
+    // 4096-UTF-16-unit chunking boundary, HTML sanitization on the wire, and
+    // failure propagation.
+
+    use wiremock::matchers::{body_json, body_partial_json, method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_TOKEN: &str = "123456:test-bot-token";
+
+    fn make_send_adapter(api_base: String) -> TelegramAdapter {
+        TelegramAdapter::new(
+            TEST_TOKEN.to_string(),
+            vec![],
+            std::time::Duration::from_secs(5),
+            Some(api_base),
+        )
+    }
+
+    fn dummy_user(chat_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: chat_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_send_text_calls_send_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 12345_i64,
+                "text": "hello from librefang",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 12345, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("12345"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_propagates_non_2xx_failure() {
+        // Non-recoverable failure (HTTP 500, body without "can't parse entities")
+        // must surface to the caller — silently swallowing would leave operators
+        // unaware of delivery loss.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        let err = adapter
+            .send(&dummy_user("12345"), ChannelContent::Text("kaboom".into()))
+            .await
+            .expect_err("send must propagate non-2xx as error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Telegram sendMessage failed"),
+            "expected error to mention sendMessage failure, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_send_long_text_splits_at_4096_boundary() {
+        // Telegram caps a single sendMessage at 4096 UTF-16 units. A 6000-char
+        // ASCII payload must be split into 2 chunks; both must hit the wire.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let long_text: String = "a".repeat(6000);
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(&dummy_user("1"), ChannelContent::Text(long_text))
+            .await
+            .expect("send must succeed across two chunks");
+        // Wiremock's `expect(2)` is verified on MockServer drop; force it now
+        // so the assertion failure (if any) is attributed to this test.
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn telegram_send_command_formats_with_slash_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 7_i64,
+                "text": "/start arg1 arg2",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 7, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("7"),
+                ChannelContent::Command {
+                    name: "start".into(),
+                    args: vec!["arg1".into(), "arg2".into()],
+                },
+            )
+            .await
+            .expect("command send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_in_thread_includes_message_thread_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 9000_i64,
+                "text": "topic reply",
+                "parse_mode": "HTML",
+                "message_thread_id": 42_i64,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 9000, "type": "supergroup" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send_in_thread(
+                &dummy_user("9000"),
+                ChannelContent::Text("topic reply".into()),
+                "42",
+            )
+            .await
+            .expect("send_in_thread must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_unknown_html_tag_is_escaped_on_the_wire() {
+        // Sanitizer must escape disallowed tags (e.g. <thinking>) before the
+        // request leaves the adapter — otherwise Telegram's parse_mode=HTML
+        // rejects the message with 400. We assert on the actual JSON body to
+        // catch regressions in the sanitize boundary.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendMessage")))
+            .and(body_partial_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "text": "&lt;thinking&gt;hidden&lt;/thinking&gt; visible",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Text("<thinking>hidden</thinking> visible".into()),
+            )
+            .await
+            .expect("send with unknown HTML tag must succeed (sanitized)");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_location_calls_send_location_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendLocation")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "latitude": 37.7749,
+                "longitude": -122.4194,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Location {
+                    lat: 37.7749,
+                    lon: -122.4194,
+                },
+            )
+            .await
+            .expect("location send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_image_calls_send_photo_with_caption() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{TEST_TOKEN}/sendPhoto")))
+            .and(body_json(serde_json::json!({
+                "chat_id": 1_i64,
+                "photo": "https://example.com/cat.png",
+                "caption": "look at this cat",
+                "parse_mode": "HTML",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": { "message_id": 1, "date": 0, "chat": { "id": 1, "type": "private" } },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Image {
+                    url: "https://example.com/cat.png".into(),
+                    caption: Some("look at this cat".into()),
+                    mime_type: None,
+                },
+            )
+            .await
+            .expect("image send must succeed");
+    }
+
+    #[tokio::test]
+    async fn telegram_send_interactive_falls_through_silently_on_5xx() {
+        // PRODUCTION OBSERVATION (#3820): Telegram's
+        // `api_send_interactive_message` logs warn! on non-2xx but always
+        // returns Ok(()). This is fail-open behaviour — inconsistent with
+        // `api_send_message` (which propagates non-2xx as Err). This test
+        // pins the current behaviour so a future fix is a deliberate change,
+        // not an accidental drift. Tracked in the PR body.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(format!(r"^/bot{TEST_TOKEN}/sendMessage$")))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_send_adapter(server.uri());
+        let res = adapter
+            .send(
+                &dummy_user("1"),
+                ChannelContent::Interactive {
+                    text: "pick one".into(),
+                    buttons: vec![vec![InteractiveButton {
+                        label: "ok".into(),
+                        action: "ok".into(),
+                        url: None,
+                        style: None,
+                    }]],
+                },
+            )
+            .await;
+        assert!(
+            res.is_ok(),
+            "interactive send currently swallows 5xx (see PR #3820 production observation)"
+        );
+    }
 }

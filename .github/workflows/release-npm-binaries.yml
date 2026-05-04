@@ -1,0 +1,73 @@
+name: release-npm-binaries
+
+# Manual re-publish of CLI npm binary packages. Issue #3304 1/N
+# (non-destructive split). Mirrors the `cli_npm` job in release.yml but
+# is triggered only via workflow_dispatch — release.yml stays the
+# canonical entrypoint on tag push.
+#
+# Auth model differs from release.yml's monolithic path: this workflow
+# is wired for npm OIDC trusted publishing (`id-token: write` +
+# `npm publish --provenance`) instead of the legacy NPM_TOKEN PAT. The
+# maintainer must configure the npm trusted-publisher relationship
+# (https://docs.npmjs.com/trusted-publishers) before this workflow can
+# replace the monolithic publish path. Until then it serves as the
+# scaffold; the monolithic NPM_TOKEN path in release.yml continues to
+# handle real releases. See docs/operations/release.md.
+#
+# Inputs:
+#   tag — existing release tag whose CLI binaries should be re-published.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (e.g. v2026.5.4)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-npm-binaries-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli_npm:
+    name: CLI / npm (binary packages)
+    runs-on: ubuntu-latest
+    environment: release-npm
+    permissions:
+      id-token: write   # OIDC token for npm provenance attestations
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish CLI binaries to npm (OIDC + provenance)
+        # No NODE_AUTH_TOKEN set — the publish call relies on npm's
+        # OIDC trusted-publisher exchange. `cargo xtask
+        # publish-npm-binaries` must propagate `--provenance` to its
+        # underlying `npm publish` invocation; if it does not, the
+        # follow-up cutover PR adds that flag before flipping traffic
+        # to this workflow. Maintainer must configure the npm trusted
+        # publisher BEFORE enabling this workflow as the real publish
+        # path.
+        env:
+          TAG: ${{ inputs.tag }}
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          VERSION="${TAG#v}"
+          cargo xtask publish-npm-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "$TAG"

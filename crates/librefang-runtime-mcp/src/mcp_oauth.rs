@@ -487,6 +487,28 @@ pub trait McpOAuthProvider: Send + Sync {
         tokens: OAuthTokens,
     ) -> Result<(), McpOAuthError>;
 
+    /// Persist the discovery-derived OAuth metadata (`token_endpoint` and the
+    /// optional `client_id`) under the durable per-server namespace.
+    ///
+    /// This is the bridge from the per-flow vault namespace (where the
+    /// authorization handler stages discovery output keyed by `flow_id`) to
+    /// the bare per-server namespace that the refresh path reads from. It
+    /// must be called from the OAuth callback **after** `store_tokens`
+    /// succeeds and **before** the per-flow PKCE values are cleaned up — see
+    /// `librefang-api/src/routes/mcp_auth.rs::auth_callback`.
+    ///
+    /// Required (no default impl) so that any new provider must consciously
+    /// decide how it persists this metadata. A silent no-op default would
+    /// silently re-introduce the refresh bug this method exists to fix
+    /// (refresh fails on the first access-token expiry with
+    /// `No token_endpoint stored for refresh`).
+    async fn store_oauth_metadata(
+        &self,
+        server_url: &str,
+        token_endpoint: &str,
+        client_id: Option<&str>,
+    ) -> Result<(), McpOAuthError>;
+
     /// Clear stored tokens for the given server URL.
     async fn clear_tokens(&self, server_url: &str) -> Result<(), McpOAuthError>;
 }
