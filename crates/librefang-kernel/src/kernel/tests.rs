@@ -6075,6 +6075,104 @@ fn resolve_cron_max_tokens_nonzero_passthrough() {
     assert_eq!(resolve_cron_max_tokens(Some(1)), Some(1));
 }
 
+// -----------------------------------------------------------------------
+// #3693 — cron session warn-threshold resolver
+// -----------------------------------------------------------------------
+
+#[test]
+fn resolve_cron_warn_threshold_disabled_when_no_fraction() {
+    // No fraction → no warn even if budget is set.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(100_000), Some(200_000), None),
+        None
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_disabled_when_no_budget() {
+    // No max_tokens, no fallback → no budget → skip warn.
+    assert_eq!(resolve_cron_warn_threshold(None, None, Some(0.8)), None);
+}
+
+#[test]
+fn resolve_cron_warn_threshold_uses_max_tokens_when_set() {
+    // Explicit cap wins over fallback.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), Some(200_000), Some(0.8)),
+        Some(8_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_falls_back_to_total_tokens() {
+    // No explicit cap → fall back to warn_total_tokens.
+    assert_eq!(
+        resolve_cron_warn_threshold(None, Some(200_000), Some(0.5)),
+        Some(100_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_rejects_out_of_range_fraction() {
+    // Negative, zero, > 1.0, NaN, Inf must all disable warn (silent).
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(-0.1)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(0.0)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(1.5)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::NAN)),
+        None
+    );
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10_000), None, Some(f64::INFINITY)),
+        None
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_at_full_fraction() {
+    // 1.0 = warn at budget; threshold equals budget exactly.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(50_000), None, Some(1.0)),
+        Some(50_000)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_ceils_partial_token() {
+    // 12345 * 0.8 = 9876.0 — exact, no rounding involved.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(12_345), None, Some(0.8)),
+        Some(9_876)
+    );
+    // 100 * 0.83 = 83.0 → ceils to 83.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(100), None, Some(0.83)),
+        Some(83)
+    );
+    // 10 * 0.85 = 8.5 → ceils to 9 so the warn trips before the cap.
+    assert_eq!(
+        resolve_cron_warn_threshold(Some(10), None, Some(0.85)),
+        Some(9)
+    );
+}
+
+#[test]
+fn resolve_cron_warn_threshold_zero_budget_disabled() {
+    // budget=0 must not produce a warn (would warn on every fire).
+    assert_eq!(resolve_cron_warn_threshold(Some(0), None, Some(0.8)), None);
+    // Same with fallback explicitly zero (operator override).
+    assert_eq!(resolve_cron_warn_threshold(None, Some(0), Some(0.8)), None);
+}
+
 /// Regression for #3533: `spawn_agent` must reject manifests whose
 /// `module` string escapes the LibreFang home dir. The pure-function
 /// `validate_module_string` is unit-tested in librefang-runtime, but
