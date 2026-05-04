@@ -379,7 +379,7 @@ pub async fn spawn_agent(
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
             let (status, code) = match &e {
-                librefang_kernel::error::KernelError::LibreFang(
+                crate::error::KernelError::LibreFang(
                     librefang_types::error::LibreFangError::AgentAlreadyExists(_),
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
@@ -884,7 +884,12 @@ pub async fn list_agents(
         )
     };
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
+    // #3569: dashboard hot path. Switch to `list_arcs()` so we share Arc
+    // pointers with the registry instead of deep-cloning every manifest
+    // (12+ Vecs/HashMaps) on each refresh — at 50 agents and a 20-30s
+    // dashboard poll that was the dominant allocator on this handler.
+    let mut agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> =
+        state.kernel.agent_registry().list_arcs();
 
     // -- Filtering --
     // Exclude hand agents by default; pass ?include_hands=true to include them.
@@ -957,7 +962,7 @@ pub async fn list_agents(
     // -- Pagination --
     let offset = params.offset.unwrap_or(0);
     let limit = params.limit.map(|l| l.min(500));
-    let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(lim) = limit {
+    let agents: Vec<std::sync::Arc<librefang_types::agent::AgentEntry>> = if let Some(lim) = limit {
         agents.into_iter().skip(offset).take(lim).collect()
     } else {
         agents.into_iter().skip(offset).collect()
@@ -968,9 +973,11 @@ pub async fn list_agents(
     // pagination-clipped).
     let bulk_stats = state.kernel.memory_substrate().agents_stats_24h_bulk().ok();
 
+    // `e` is &Arc<AgentEntry>; `as_ref()` on Arc yields the &AgentEntry the
+    // helper expects without forcing a manifest deep-clone (#3569).
     let items: Vec<serde_json::Value> = agents
         .iter()
-        .map(|e| enrich_agent_json(e, &dm, &catalog, bulk_stats.as_ref()))
+        .map(|e| enrich_agent_json(e.as_ref(), &dm, &catalog, bulk_stats.as_ref()))
         .collect();
 
     Json(PaginatedResponse {
@@ -1779,7 +1786,7 @@ pub async fn send_message(
                     .unwrap_or(StatusCode::BAD_REQUEST)
                     .into_response();
             }
-            Err(e) => Err(librefang_kernel::error::KernelError::LibreFang(
+            Err(e) => Err(crate::error::KernelError::LibreFang(
                 librefang_types::error::LibreFangError::Internal(format!("task panicked: {e}")),
             )),
         }
@@ -1810,7 +1817,7 @@ pub async fn send_message(
                     .unwrap_or(StatusCode::BAD_REQUEST)
                     .into_response();
             }
-            Err(e) => Err(librefang_kernel::error::KernelError::LibreFang(
+            Err(e) => Err(crate::error::KernelError::LibreFang(
                 librefang_types::error::LibreFangError::Internal(format!("task panicked: {e}")),
             )),
         }
@@ -2279,7 +2286,7 @@ pub async fn kill_agent(
             // caller's intent ("agent {id} should be gone") is satisfied.
             if matches!(
                 e,
-                librefang_kernel::error::KernelError::LibreFang(
+                crate::error::KernelError::LibreFang(
                     librefang_types::error::LibreFangError::AgentNotFound(_)
                 )
             ) {
@@ -3148,7 +3155,7 @@ pub async fn export_session_trajectory(
     // not need to import `librefang_kernel::trajectory` directly (#3744).
     let bundle = match state.kernel.export_session_trajectory(agent_id, session_id) {
         Ok(b) => b,
-        Err(librefang_kernel::error::KernelError::LibreFang(
+        Err(crate::error::KernelError::LibreFang(
             librefang_types::error::LibreFangError::AgentNotFound(_),
         )) => {
             return (
@@ -3157,7 +3164,7 @@ pub async fn export_session_trajectory(
             )
                 .into_response();
         }
-        Err(librefang_kernel::error::KernelError::LibreFang(
+        Err(crate::error::KernelError::LibreFang(
             librefang_types::error::LibreFangError::Memory { message: msg, .. },
         )) if msg.contains("not found") || msg.contains("does not belong") => {
             return (
@@ -4714,10 +4721,8 @@ fn hand_override_nullable_string(raw: Option<String>) -> Option<Option<String>> 
 ///   the requested agent id — kernel has no dedicated variant, so we match
 ///   on the single well-known prefix emitted by the kernel)
 /// - everything else → 500
-fn map_hand_runtime_override_err(
-    err: &librefang_kernel::error::KernelError,
-) -> (StatusCode, String) {
-    use librefang_kernel::error::KernelError;
+fn map_hand_runtime_override_err(err: &crate::error::KernelError) -> (StatusCode, String) {
+    use crate::error::KernelError;
     use librefang_types::error::LibreFangError;
     match err {
         KernelError::LibreFang(LibreFangError::AgentNotFound(_)) => {
@@ -5216,7 +5221,8 @@ pub async fn get_agent_file(
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let resolved_lang = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(resolved_lang);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -5290,7 +5296,14 @@ pub async fn get_agent_file(
         );
     }
 
-    let content = match std::fs::read_to_string(&canonical) {
+    // Off-runtime read so this axum handler never parks a tokio worker
+    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
+    // must be dropped before the `.await` and re-created afterwards or
+    // axum's `Handler` bound fails to compile.
+    drop(t);
+    let read_result = tokio::fs::read_to_string(&canonical).await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
         Ok(c) => c,
         Err(_) => {
             return (
@@ -6051,7 +6064,7 @@ pub async fn inject_message(
             Json(serde_json::json!({"injected": injected})),
         )
             .into_response(),
-        Err(librefang_kernel::error::KernelError::Backpressure(msg)) => {
+        Err(crate::error::KernelError::Backpressure(msg)) => {
             // Stable machine-readable code so clients can distinguish this
             // from other 503s without substring-matching the message body.
             ApiErrorResponse::internal(msg)
@@ -6239,7 +6252,7 @@ mod tests {
 
     #[test]
     fn test_map_hand_runtime_override_err_maps_not_found_and_conflict() {
-        use librefang_kernel::error::KernelError;
+        use crate::error::KernelError;
         use librefang_types::error::LibreFangError;
 
         let not_found =
@@ -6897,7 +6910,7 @@ mod monitoring_tests {
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use librefang_runtime::audit::AuditAction;
+    use librefang_kernel::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     fn monitoring_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {

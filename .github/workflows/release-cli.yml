@@ -1,0 +1,596 @@
+name: release-cli
+
+# Manual CLI rebuild + re-upload. Issue #3304 1/N (non-destructive split).
+#
+# Mirrors the cli_* + sign_release_artifacts + cli_npm + cli_pypi +
+# sync_homebrew jobs in release.yml. release.yml stays the canonical
+# entrypoint on tag push — this workflow is for "an artifact failed and
+# I just want to redo the CLI slice without rerunning the entire 30-job
+# release pipeline".
+#
+# Inputs:
+#   tag      — existing release tag to (re)build for, e.g. v2026.5.4
+#   targets  — comma-separated subset of jobs to run; default 'all'
+#
+# Maintainer must configure the `release-cli` GitHub environment (with
+# required reviewers) before this stub becomes useful for redirecting
+# real release traffic — see docs/operations/release.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to rebuild for (e.g. v2026.5.4)'
+        required: true
+        type: string
+      include_pypi:
+        description: 'Re-publish CLI PyPI wheels (the JS npm binary side lives in release-npm-binaries.yml)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cli-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_dashboard:
+    name: Build Dashboard
+    runs-on: ubuntu-latest
+    environment: release-cli
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: pnpm/action-setup@26f6d4f2c533a43e6b5da0b4a5dd983f98f7b49a # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 20
+      - name: Install dependencies
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm install --frozen-lockfile --config.strict-dep-builds=false
+      - name: Build dashboard
+        working-directory: crates/librefang-api/dashboard
+        run: pnpm run build
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+          retention-days: 1
+
+  cli_mac:
+    name: CLI / ${{ matrix.target }}
+    needs: [build_dashboard]
+    runs-on: macos-latest
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Ad-hoc codesign
+        run: |
+          xattr -cr target/${{ matrix.target }}/release/librefang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_linux:
+    name: CLI / ${{ matrix.target }}
+    needs: [build_dashboard]
+    runs-on: ubuntu-22.04
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            use_cross: true
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin librefang
+          else
+            cargo build --release --target ${{ matrix.target }} --bin librefang
+          fi
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_android:
+    name: CLI / aarch64-linux-android
+    needs: [build_dashboard]
+    runs-on: ubuntu-22.04
+    environment: release-cli
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-aarch64-linux-android-${{ inputs.tag }}
+      - name: Build CLI (Android aarch64)
+        # channel-email excluded: rustls-connector 0.23.0 calls Verifier::new_with_extra_roots
+        # which is not implemented in rustls-platform-verifier 0.7.0 on Android.
+        run: cross build --release --target aarch64-linux-android --bin librefang --no-default-features --features android,telemetry
+      - name: Package
+        run: |
+          cd target/aarch64-linux-android/release
+          tar czf ../../../librefang-aarch64-linux-android.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-aarch64-linux-android.tar.gz > librefang-aarch64-linux-android.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-aarch64-linux-android.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_linux_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    needs: [build_dashboard]
+    runs-on: ubuntu-22.04
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libdbus-1-dev
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_musl:
+    name: CLI / ${{ matrix.target }} (static)
+    needs: [build_dashboard]
+    runs-on: ubuntu-22.04
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build static CLI
+        run: cross build --release --target ${{ matrix.target }} --bin librefang
+      - name: Verify static linking
+        run: |
+          FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
+          echo "$FILE_OUT"
+          if ! echo "$FILE_OUT" | grep -qE "statically linked|static-pie linked"; then
+            echo "::error::Binary is not statically linked!"
+            exit 1
+          fi
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_windows:
+    name: CLI / ${{ matrix.target }}
+    needs: [build_dashboard]
+    runs-on: windows-latest
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
+          $hash = (Get-FileHash "librefang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  librefang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}.zip.sha256"
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_mac_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    needs: [build_dashboard]
+    runs-on: macos-latest
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Ad-hoc codesign
+        run: |
+          xattr -cr target/${{ matrix.target }}/release/librefang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          cd ../../..
+          shasum -a 256 librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  cli_windows_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    needs: [build_dashboard]
+    runs-on: windows-latest
+    environment: release-cli
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: dashboard-dist
+          path: crates/librefang-api/static/react/
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ inputs.tag }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}-mini.zip"
+          $hash = (Get-FileHash "librefang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  librefang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}-mini.zip.sha256"
+      - name: Upload to GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in $(seq 1 5); do
+            if gh release upload "${{ inputs.tag }}" librefang-${{ matrix.target }}-mini.* --clobber; then
+              echo "✓ Upload succeeded (attempt $attempt)"
+              exit 0
+            fi
+            echo "Upload failed (attempt $attempt/5), retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::Upload failed after 5 attempts"
+          exit 1
+
+  sign_release_artifacts:
+    name: Sign Release Artifacts
+    needs:
+      - cli_mac
+      - cli_linux
+      - cli_android
+      - cli_linux_mini
+      - cli_musl
+      - cli_windows
+      - cli_mac_mini
+      - cli_windows_mini
+    runs-on: ubuntu-latest
+    environment: release-cli
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+        with:
+          cosign-release: "v2.6.3"
+      - name: Build SHA256SUMS manifest from release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p sums
+          cd sums
+          gh release view "${{ inputs.tag }}" --json assets \
+            --jq '.assets[].name | select(endswith(".sha256")) | select(. != "SHA256SUMS")' \
+            > asset-list.txt
+          if [ ! -s asset-list.txt ]; then
+            echo "::error::no *.sha256 sibling files attached to release ${{ inputs.tag }}"
+            exit 1
+          fi
+          # Same EXPECTED_PLATFORMS gate as release.yml — change in lockstep.
+          EXPECTED_PLATFORMS=12
+          ACTUAL=$(wc -l < asset-list.txt | tr -d ' ')
+          if [ "$ACTUAL" -ne "$EXPECTED_PLATFORMS" ]; then
+            echo "::error::expected exactly $EXPECTED_PLATFORMS .sha256 siblings, got $ACTUAL"
+            cat asset-list.txt
+            exit 1
+          fi
+          while IFS= read -r name; do
+            echo "Fetching $name"
+            gh release download "${{ inputs.tag }}" --pattern "$name" --clobber
+          done < asset-list.txt
+          ls *.sha256 | sort | xargs awk 1 > ../SHA256SUMS
+          cd ..
+          echo "::group::SHA256SUMS"
+          cat SHA256SUMS
+          echo "::endgroup::"
+      - name: Sign SHA256SUMS with cosign (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+      - name: Verify signature locally before upload
+        run: |
+          cosign verify-blob \
+            --certificate SHA256SUMS.pem \
+            --signature SHA256SUMS.sig \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            SHA256SUMS
+      - name: Upload signed manifest to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ inputs.tag }}" \
+            SHA256SUMS \
+            SHA256SUMS.sig \
+            SHA256SUMS.pem \
+            --clobber
+
+  cli_pypi:
+    name: CLI / PyPI
+    if: ${{ inputs.include_pypi }}
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    environment: release-pypi
+    permissions:
+      id-token: write   # OIDC trusted publishing to PyPI
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+      - name: Build CLI wheels (no upload)
+        run: |
+          VERSION="${TAG#v}"
+          mkdir -p "${{ runner.temp }}/cli-pypi-dist"
+          cargo xtask publish-pypi-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "${TAG}" \
+            --build-only \
+            --dist-dir "${{ runner.temp }}/cli-pypi-dist"
+        env:
+          TAG: ${{ inputs.tag }}
+      - name: Publish CLI wheels to PyPI (OIDC)
+        # OIDC trusted publishing — configure at:
+        # pypi.org/manage/project/librefang/settings/publishing
+        # workflow filename: release-cli.yml, environment: release-pypi
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: ${{ runner.temp }}/cli-pypi-dist
+          skip-existing: true

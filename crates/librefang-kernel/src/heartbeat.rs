@@ -73,7 +73,9 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
     let now = Utc::now();
     let mut statuses = Vec::new();
 
-    for entry_ref in registry.list() {
+    // Heartbeat scans every running agent on a tick — read-only, so use the
+    // Arc-cloning snapshot instead of deep-cloning every manifest (#3569).
+    for entry_ref in registry.list_arcs() {
         // Only check running agents
         if entry_ref.state != AgentState::Running {
             continue;

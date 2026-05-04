@@ -6,32 +6,45 @@ use std::sync::{Arc, Mutex};
 
 type TaskPostCalls = Arc<Mutex<Vec<Option<String>>>>;
 type CronCreateCalls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+type TaskGetCalls = Arc<Mutex<Vec<String>>>;
 
 struct CapturedCalls {
     task_post: TaskPostCalls,
     cron_create: CronCreateCalls,
+    task_get: TaskGetCalls,
 }
 
 struct CapturingKernel {
     task_post_calls: TaskPostCalls,
     cron_create_calls: CronCreateCalls,
+    task_get_calls: TaskGetCalls,
+    // When set, task_get returns Some(this) regardless of id; otherwise None.
+    task_get_response: Mutex<Option<serde_json::Value>>,
 }
 
 impl CapturingKernel {
     fn new() -> (Self, CapturedCalls) {
         let task_post = Arc::new(Mutex::new(Vec::new()));
         let cron_create = Arc::new(Mutex::new(Vec::new()));
+        let task_get = Arc::new(Mutex::new(Vec::new()));
         let kernel = Self {
             task_post_calls: Arc::clone(&task_post),
             cron_create_calls: Arc::clone(&cron_create),
+            task_get_calls: Arc::clone(&task_get),
+            task_get_response: Mutex::new(None),
         };
         (
             kernel,
             CapturedCalls {
                 task_post,
                 cron_create,
+                task_get,
             },
         )
+    }
+
+    fn set_task_get_response(&self, value: Option<serde_json::Value>) {
+        *self.task_get_response.lock().unwrap() = value;
     }
 }
 
@@ -96,8 +109,12 @@ impl TaskQueue for CapturingKernel {
     async fn task_retry(&self, _: &str) -> Result<bool, String> {
         Err("not implemented".into())
     }
-    async fn task_get(&self, _: &str) -> Result<Option<serde_json::Value>, String> {
-        Err("not implemented".into())
+    async fn task_get(&self, task_id: &str) -> Result<Option<serde_json::Value>, String> {
+        self.task_get_calls
+            .lock()
+            .unwrap()
+            .push(task_id.to_string());
+        Ok(self.task_get_response.lock().unwrap().clone())
     }
     async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
         Err("not implemented".into())
@@ -284,4 +301,103 @@ async fn test_cron_create_forwards_caller_as_agent_id() {
     let cron_calls = calls.cron_create.lock().unwrap();
     assert_eq!(cron_calls.len(), 1);
     assert_eq!(cron_calls[0].0, "agent-1");
+}
+
+#[tokio::test]
+async fn test_task_status_projects_six_canonical_fields() {
+    let (kernel, calls) = CapturingKernel::new();
+    // task_get returns the full row shape that librefang-memory's
+    // substrate emits (id/description/created_by/result/claimed_at/
+    // retry_count are present); task_status must project to exactly the
+    // six fields the comms_task_status MCP bridge tool returns.
+    kernel.set_task_get_response(Some(json!({
+        "id": "task-42",
+        "title": "Investigate flaky test",
+        "description": "long form description",
+        "status": "completed",
+        "assigned_to": "worker-1",
+        "created_by": "agent-1",
+        "created_at": "2026-05-04T00:00:00Z",
+        "completed_at": "2026-05-04T00:05:00Z",
+        "result": "fixed by retrying",
+        "claimed_at": null,
+        "retry_count": 0,
+    })));
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let input = json!({"task_id": "task-42"});
+    let result = execute_tool_raw("ts1", "task_status", &input, &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "task_status should succeed: {}",
+        result.content
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result.content).expect("task_status returns JSON");
+    let obj = parsed.as_object().expect("object");
+    let keys: std::collections::BTreeSet<&str> = obj.keys().map(|s| s.as_str()).collect();
+    let expected: std::collections::BTreeSet<&str> = [
+        "status",
+        "result",
+        "title",
+        "assigned_to",
+        "created_at",
+        "completed_at",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(keys, expected, "exactly the six canonical fields");
+    assert_eq!(parsed["status"], "completed");
+    assert_eq!(parsed["result"], "fixed by retrying");
+    assert_eq!(parsed["title"], "Investigate flaky test");
+    assert_eq!(parsed["assigned_to"], "worker-1");
+    assert_eq!(parsed["created_at"], "2026-05-04T00:00:00Z");
+    assert_eq!(parsed["completed_at"], "2026-05-04T00:05:00Z");
+
+    let getters = calls.task_get.lock().unwrap();
+    assert_eq!(getters.len(), 1);
+    assert_eq!(getters[0], "task-42");
+}
+
+#[tokio::test]
+async fn test_task_status_not_found_returns_message() {
+    let (kernel, calls) = CapturingKernel::new();
+    // No response set -> task_get returns None.
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let input = json!({"task_id": "task-missing"});
+    let result = execute_tool_raw("ts2", "task_status", &input, &ctx).await;
+
+    assert!(
+        !result.is_error,
+        "task_status should not error on missing task: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("not found"),
+        "expected not-found message, got: {}",
+        result.content
+    );
+    let getters = calls.task_get.lock().unwrap();
+    assert_eq!(getters.len(), 1);
+    assert_eq!(getters[0], "task-missing");
+}
+
+#[tokio::test]
+async fn test_task_status_missing_task_id_errors() {
+    let (kernel, _calls) = CapturingKernel::new();
+    let kernel: Arc<dyn KernelHandle> = Arc::new(kernel);
+
+    let ctx = make_ctx(&kernel, None, Some("agent-1"));
+    let input = json!({});
+    let result = execute_tool_raw("ts3", "task_status", &input, &ctx).await;
+
+    assert!(
+        result.is_error,
+        "task_status without task_id should error: {}",
+        result.content
+    );
 }

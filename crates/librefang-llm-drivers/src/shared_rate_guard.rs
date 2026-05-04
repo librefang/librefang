@@ -373,6 +373,15 @@ pub fn record_429_from_headers(
         Some(retry_after),
         Some(reason.to_string()),
     );
+    // Cardinality: provider is a fixed enum (anthropic/openai/gemini/…),
+    // status is the bare HTTP status code as string. We never include
+    // key_id or reason text. (#3495)
+    metrics::counter!(
+        "librefang_llm_provider_errors_total",
+        "provider" => provider.to_string(),
+        "status" => "429",
+    )
+    .increment(1);
     retry_after
 }
 

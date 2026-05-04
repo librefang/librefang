@@ -210,7 +210,7 @@ export function PluginsPage() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-                      <h3 className="text-xs sm:text-sm font-bold">{p.name}</h3>
+                      <h3 className="text-xs sm:text-sm font-bold">{p.display_name ?? p.name}</h3>
                       <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">{p.version}</span>
                       {p.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
                       {p.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
@@ -298,7 +298,7 @@ export function PluginsPage() {
                             </div>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <h4 className="text-sm font-bold truncate">{rp.name}</h4>
+                                <h4 className="text-sm font-bold truncate">{rp.display_name ?? rp.name}</h4>
                                 {rp.version && (
                                   <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">
                                     {rp.version}
@@ -575,7 +575,7 @@ export function PluginsPage() {
       <DrawerPanel
         isOpen={!!detailsRegistryPlugin}
         onClose={() => setDetailsRegistryPlugin(null)}
-        title={detailsRegistryPlugin?.rp.name ?? ""}
+        title={detailsRegistryPlugin?.rp.display_name ?? detailsRegistryPlugin?.rp.name ?? ""}
         size="md"
       >
         {detailsRegistryPlugin && (() => {
@@ -589,7 +589,7 @@ export function PluginsPage() {
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <h2 className="text-lg font-black tracking-tight truncate">{rp.name}</h2>
+                    <h2 className="text-lg font-black tracking-tight truncate">{rp.display_name ?? rp.name}</h2>
                     {rp.version && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">v{rp.version}</span>
                     )}
