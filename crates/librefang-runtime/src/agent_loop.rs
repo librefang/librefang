@@ -934,7 +934,22 @@ struct ToolExecutionContext<'a> {
         tool.id = %tool_call.id,
     ),
 )]
+/// Thin wrapper around `execute_single_tool_call_inner` that guarantees
+/// `record_tool_call_metric` is called on **every** return path — both `Ok`
+/// (success or is_error tool result) and `Err` (e.g. circuit-break).
 async fn execute_single_tool_call(
+    ctx: &mut ToolExecutionContext<'_>,
+    tool_call: &ToolCall,
+) -> Result<ExecutedToolCall, LibreFangError> {
+    let result = execute_single_tool_call_inner(ctx, tool_call).await;
+    match &result {
+        Ok(executed) => record_tool_call_metric(&tool_call.name, executed.result.is_error),
+        Err(_) => record_tool_call_metric(&tool_call.name, true),
+    }
+    result
+}
+
+async fn execute_single_tool_call_inner(
     ctx: &mut ToolExecutionContext<'_>,
     tool_call: &ToolCall,
 ) -> Result<ExecutedToolCall, LibreFangError> {
@@ -3986,7 +4001,6 @@ pub async fn run_agent_loop(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
-                    record_tool_call_metric(&tool_call.name, executed.result.is_error);
 
                     // §A — capture owner_notice side-channel from notify_owner tool.
                     if let Some(ref notice) = executed.result.owner_notice {
@@ -5452,7 +5466,6 @@ pub async fn run_agent_loop_streaming(
                         dangerous_command_checker: Some(&session_checker),
                     };
                     let executed = execute_single_tool_call(&mut tool_exec_ctx, tool_call).await?;
-                    record_tool_call_metric(&tool_call.name, executed.result.is_error);
 
                     // §A — capture owner_notice from notify_owner tool and
                     // surface it on the live SSE stream so the gateway can
@@ -11297,6 +11310,79 @@ mod tests {
             messages.first().map(|m| m.role),
             Some(Role::User),
             "history must start with a user turn after trim+repair"
+        );
+    }
+
+    // ── record_tool_call_metric covers failure paths ───────────────────────
+
+    /// Regression for #4560 — `record_tool_call_metric` must fire with
+    /// `outcome="failure"` even when `execute_single_tool_call` returns
+    /// `Err(...)` (e.g. circuit-break), not only on the `Ok` path.
+    ///
+    /// We test `record_tool_call_metric` directly: call it with `is_error =
+    /// true` inside a `with_local_recorder` scope and assert the counter has
+    /// a "failure" label — mirroring the `DebuggingRecorder` pattern used in
+    /// `command_lane.rs::test_submit_records_queue_wait_histogram`.
+    #[test]
+    fn test_record_tool_call_metric_failure_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            // Simulate what the wrapper does when execute_single_tool_call_inner
+            // returns Err (circuit-break or any hard error).
+            record_tool_call_metric("my_tool", true);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let failure_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "tool" && l.value() == "my_tool")
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "failure")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            failure_counter.is_some(),
+            "outcome=failure counter must be recorded for error paths"
+        );
+        if let Some((_, _, _, DebugValue::Counter(count))) = failure_counter {
+            assert_eq!(*count, 1, "counter must be incremented exactly once");
+        }
+    }
+
+    /// Success path: `record_tool_call_metric` with `is_error = false` must
+    /// produce `outcome="success"`.
+    #[test]
+    fn test_record_tool_call_metric_success_outcome() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_tool_call_metric("other_tool", false);
+        });
+
+        let snap = snapshotter.snapshot().into_vec();
+        let success_counter = snap.iter().find(|(ckey, _, _, val)| {
+            ckey.key().name() == "librefang_tool_call_total"
+                && ckey
+                    .key()
+                    .labels()
+                    .any(|l| l.key() == "outcome" && l.value() == "success")
+                && matches!(val, DebugValue::Counter(_))
+        });
+        assert!(
+            success_counter.is_some(),
+            "outcome=success counter must be recorded for successful tool calls"
         );
     }
 }
