@@ -15,37 +15,53 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+/// One embedded pubkey + its expiry (Unix seconds). Slot-0 (active) uses
+/// `expires_at == None`; rotation-window slots MUST set an expiry, or
+/// daemons in the field would accept the prior key indefinitely — and a
+/// post-rotation leak of that prior private key would still be exploitable
+/// against every still-running daemon binary that carries it. PR re-review
+/// MEDIUM (round 3).
+struct EmbeddedPubkey {
+    b64: &'static str,
+    /// `None` = active key, no expiry. `Some(t)` = prior key, valid only
+    /// while `now() < t`.
+    expires_at: Option<i64>,
+}
+
 /// Embedded raw 32-byte Ed25519 public keys for the official LibreFang
-/// plugin registry, base64-encoded. The first entry is the **current**
-/// production key; the slice may carry one or more **prior** keys during
-/// a rotation grace window so that daemons in the field don't hard-fail
-/// installs the moment ops rotates the worker side.
+/// plugin registry. Slot 0 is the **current** production key (no expiry).
+/// Subsequent slots carry **prior** keys during a rotation window, each
+/// with a hard expiry timestamp.
 ///
-/// This is the **primary trust root** for `librefang/librefang-registry`
-/// installs. The earlier TOFU-via-HTTP approach was vulnerable to a
-/// first-install MITM (cafe wifi, hostile DNS, subdomain takeover of the
-/// pubkey-serving host) silently pinning an attacker key forever — see PR
-/// review HIGH #5 / #16. By compiling the keys into the daemon binary we
-/// take HTTPS + the daemon release pipeline as the trust path instead.
+/// Primary trust root for `librefang/librefang-registry` installs — the
+/// earlier TOFU-via-HTTP approach was MITM-vulnerable on first install
+/// (cafe wifi, hostile DNS, subdomain takeover) and silently pinned the
+/// attacker key forever (PR review HIGH #5/#16). Compiling the key in
+/// moves the trust path to HTTPS + the daemon release pipeline.
 ///
-/// `EMBEDDED_REGISTRY_PUBKEYS[0]` (the first/active key) MUST match
-/// `REGISTRY_PUBLIC_KEY` in:
+/// `EMBEDDED_REGISTRY_PUBKEYS[0].b64` MUST match `REGISTRY_PUBLIC_KEY` in:
 ///   - `web/workers/registry-worker/wrangler.toml`
 ///   - `web/workers/marketplace-worker/wrangler.toml`
 ///   - `web/public/_worker.js`
 ///
 /// `scripts/check-pubkey-lockstep.sh` (CI guard) extracts and compares
-/// against the first entry only.
+/// against slot 0 only.
 ///
 /// Rotation procedure:
 ///   1. Generate new keypair, publish private to registry CI.
-///   2. Land a daemon release that prepends the new key to this slice
-///      (old key remains in slot 1 as a fallback).
+///   2. Land a daemon release that prepends the new key to slot 0 AND
+///      moves the old slot-0 entry to slot 1 with `expires_at: Some(t)`
+///      where `t` ≈ now + 4 weeks.
 ///   3. Roll registry / worker side to the new key.
-///   4. After the deprecation window (4-6 weeks), drop the old key from
-///      this slice in a follow-up daemon release.
-const EMBEDDED_REGISTRY_PUBKEYS: &[&str] = &[
-    "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+///   4. After the deprecation window passes, drop the prior entry in a
+///      follow-up daemon release. Daemons that didn't update by then will
+///      hard-fail installs (the failure surfaces an actionable error
+///      message, unlike the previous "accept forever" behaviour).
+const EMBEDDED_REGISTRY_PUBKEYS: &[EmbeddedPubkey] = &[
+    EmbeddedPubkey {
+        b64: "ClGa0Ucap8NdrKAy1rw9Tt6A9I8eg4zJ53+xIuKMuq0=",
+        expires_at: None,
+    },
 ];
 
 /// Default URL for self-hosted registries that opt into HTTP pubkey
@@ -193,15 +209,15 @@ async fn resolve_registry_pubkey(client: &reqwest::Client) -> Result<String, Str
 
     // Active embedded key (slot 0) is the primary trust anchor for the
     // official registry. The full slice — including any rotation-window
-    // keys — is consulted at verification time via `verify_registry_index`.
+    // keys — is consulted at verification time via
+    // `verify_registry_index_multi`, which also enforces per-key expiry.
     if let Some(active) = EMBEDDED_REGISTRY_PUBKEYS
         .first()
-        .copied()
-        .filter(|k| is_valid_registry_pubkey_b64(k))
+        .filter(|k| is_valid_registry_pubkey_b64(k.b64))
     {
-        return Ok(active.to_string());
+        return Ok(active.b64.to_string());
     }
-    // No valid embedded key is a build-time mistake; warn but keep trying
+    // Invalid slot-0 key is a build-time mistake; warn but keep trying
     // so the daemon stays usable for self-hosted forks.
     warn!("EMBEDDED_REGISTRY_PUBKEYS slot 0 is malformed — falling through to TOFU/HTTP");
 
@@ -306,11 +322,15 @@ fn verify_registry_index(
 }
 
 /// Verify the index signature against `resolved_pubkey` first, then fall
-/// back to any prior keys in [`EMBEDDED_REGISTRY_PUBKEYS`]. This gives a
-/// rotation grace window: when ops rotates the worker-side key but a
-/// daemon in the field is still on the previous release, the daemon
-/// keeps verifying installs as long as the previous key is still in the
-/// embedded slice. PR re-review LOW.
+/// back to any **non-expired** prior keys in [`EMBEDDED_REGISTRY_PUBKEYS`].
+/// Expired keys are skipped — closes round-3 MEDIUM (a leaked prior key
+/// must not stay accepted forever).
+///
+/// Provides a bounded rotation grace window: when ops rotates the
+/// worker-side key but a daemon in the field is still on the previous
+/// release, the daemon keeps verifying installs against the prior key
+/// until its `expires_at` passes, after which installs hard-fail with an
+/// actionable error.
 fn verify_registry_index_multi(
     index_bytes: &[u8],
     sig_b64: &str,
@@ -320,16 +340,30 @@ fn verify_registry_index_multi(
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
-    for &candidate in EMBEDDED_REGISTRY_PUBKEYS {
-        if candidate == resolved_pubkey {
-            continue; // already tried
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for embedded in EMBEDDED_REGISTRY_PUBKEYS {
+        if embedded.b64 == resolved_pubkey {
+            continue; // already tried as the resolved key
         }
-        match verify_registry_index(index_bytes, sig_b64, candidate) {
+        if let Some(exp) = embedded.expires_at {
+            if now >= exp {
+                debug!(
+                    "Skipping embedded pubkey: expired at {} (now {})",
+                    exp, now
+                );
+                continue;
+            }
+        }
+        match verify_registry_index(index_bytes, sig_b64, embedded.b64) {
             Ok(()) => {
                 warn!(
                     "Registry index verified against a prior embedded pubkey \
-                     (rotation grace window). Update the daemon binary to \
-                     drop the prior key once the rollout is complete."
+                     (rotation grace window). Daemon binary still carries the \
+                     prior key — update to a newer release before its expiry \
+                     to keep installs working."
                 );
                 return Ok(());
             }
