@@ -3454,8 +3454,9 @@ pub async fn start_channel_bridge_with_config(
     // Load bindings and broadcast config from kernel
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
-        // Register all known agents in the router's name cache for binding resolution
-        for entry in kernel.agent_registry().list() {
+        // Register all known agents in the router's name cache for binding
+        // resolution. Read-only iteration; cheap Arc clones (#3569).
+        for entry in kernel.agent_registry().list_arcs() {
             router.register_agent(entry.name.clone(), entry.id);
         }
         router.load_bindings(&bindings);
