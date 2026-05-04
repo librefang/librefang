@@ -429,23 +429,47 @@ jobs:
         run: pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("web/public/install.ps1",[ref]$tokens,[ref]$errors); if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
   # ── Ubuntu tests: selective on PR, full on main ────────────────────────────────
+  # Full-run lane (push to main, workspace Cargo.toml change) runs the full
+  # workspace test matrix sharded 4 ways via `cargo nextest run --partition
+  # hash:N/4`. `fail-fast: false` prevents one failing shard from masking
+  # failures in the others. The selective lane (PR touching only a few crates)
+  # stays on a single runner — the affected crate set is small, and shard
+  # startup cost dominates wallclock for short test sets. (#3311)
   test-ubuntu:
-    name: Test / Ubuntu
+    name: Test / Ubuntu (shard ${{ matrix.shard }}/4)
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Skip non-1 shards in selective lane
+        id: gate
+        run: |
+          if [ "${{ needs.changes.outputs.full_test }}" != "true" ] && [ "${{ matrix.shard }}" != "1" ]; then
+            echo "Selective lane: only shard 1 runs (no benefit to fan-out for a small affected set)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.gate.outputs.skip != 'true'
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        if: steps.gate.outputs.skip != 'true'
         with:
           key: test-ubuntu-${{ hashFiles('**/Cargo.lock') }}
       - name: Install nextest
+        if: steps.gate.outputs.skip != 'true'
         uses: taiki-e/install-action@4616abf838e456930a67014fba647f87c185cc6c # nextest
       - name: Ensure dashboard build dir exists
+        if: steps.gate.outputs.skip != 'true'
         run: mkdir -p crates/librefang-api/static/react
       - name: Install Tauri system deps
+        if: steps.gate.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -455,9 +479,10 @@ jobs:
             librsvg2-dev \
             patchelf
       - name: Build tests
+        if: steps.gate.outputs.skip != 'true'
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
-            echo "Building workspace tests (full run)…"
+            echo "Building workspace tests (full run, shard ${{ matrix.shard }}/4)…"
             cargo test --workspace --no-run -j 2
           else
             CRATES="${{ needs.changes.outputs.crates }}"
@@ -471,12 +496,18 @@ jobs:
             cargo test $PFLAGS --no-run -j 2
           fi
       - name: Run tests
+        if: steps.gate.outputs.skip != 'true'
         env:
           RUST_TEST_THREADS: "1"
         run: |
           if [ "${{ needs.changes.outputs.full_test }}" = "true" ]; then
-            echo "Running workspace tests (full run)…"
-            cargo nextest run --workspace --no-fail-fast
+            echo "Running workspace tests (shard ${{ matrix.shard }}/4)…"
+            # `--partition hash:N/M` deterministically buckets each test into
+            # one of M shards by the hash of its name. Adding tests doesn't
+            # reshuffle the others; deleting tests doesn't either. Stable
+            # buckets are critical for cache hit rates across runs.
+            cargo nextest run --workspace --no-fail-fast \
+              --partition hash:${{ matrix.shard }}/4
           else
             CRATES="${{ needs.changes.outputs.crates }}"
             if [ -z "$CRATES" ]; then

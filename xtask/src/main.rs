@@ -4,6 +4,7 @@ pub(crate) mod common;
 
 mod api_docs;
 mod bench;
+mod build_timings;
 mod build_web;
 mod changelog;
 mod check_links;
@@ -90,6 +91,12 @@ enum Command {
     /// Run criterion benchmarks
     Bench(bench::BenchArgs),
 
+    /// Collect `cargo build --timings` snapshot for compile-hotspot tracking
+    BuildTimings(build_timings::BuildTimingsArgs),
+
+    /// Compare the latest build-timings snapshot against the baseline
+    CompareBuildTimings(build_timings::CompareBuildTimingsArgs),
+
     /// Migrate agents from other frameworks (OpenClaw, OpenFang)
     Migrate(migrate::MigrateArgs),
 
@@ -157,6 +164,8 @@ fn main() {
         Command::Codegen(args) => codegen::run(args),
         Command::CheckLinks(args) => check_links::run(args),
         Command::Bench(args) => bench::run(args),
+        Command::BuildTimings(args) => build_timings::run_collect(args),
+        Command::CompareBuildTimings(args) => build_timings::run_compare(args),
         Command::Migrate(args) => migrate::run(args),
         Command::Fmt(args) => fmt::run(args),
         Command::CleanAll(args) => clean_all::run(args),

@@ -275,6 +275,42 @@ After building, verify your local setup:
 cargo run -- doctor
 ```
 
+### Test Sharding & Build-Timings Tracking (#3311)
+
+CI splits the full-workspace test run into **4 nextest shards** that run in
+parallel. Each shard runs `cargo nextest run --workspace --partition
+hash:N/4`, which deterministically buckets every test into exactly one shard
+by the hash of its name. Adding or removing tests does not reshuffle existing
+buckets, so cache hit rates stay stable across runs. The matrix is
+`fail-fast: false` so a failure in one shard does not mask failures in the
+others.
+
+Sharding only kicks in for the **full-run** lane (push to `main`, or a PR
+that touches the workspace `Cargo.toml` / `Cargo.lock`). The selective lane
+(typical PR touching a few crates) keeps running on a single runner — shard
+fan-out has no benefit when the affected crate set is small, and adds startup
+overhead.
+
+A weekly job (`.github/workflows/build-timings.yml`, Mondays 07:00 UTC) tracks
+compile hotspots:
+
+```bash
+# Local: collect a per-crate compile-time snapshot for the current HEAD.
+cargo xtask build-timings
+# Writes bench-results/build-timings/<git-sha>.json by parsing
+# target/cargo-timings/cargo-timing*.html (the embedded UNIT_DATA array).
+
+# Local: compare the latest snapshot against bench-results/build-timings/baseline.json.
+cargo xtask compare-build-timings
+# Exits non-zero (annotated, not blocking) when any crate regressed by
+# more than 10%.
+```
+
+The baseline file is seeded by committing the first weekly run's snapshot.
+After that, weekly snapshots are uploaded as workflow artifacts (90-day
+retention) for trend tracking — they are not auto-committed back into the
+repo.
+
 ---
 
 ## Code Style
