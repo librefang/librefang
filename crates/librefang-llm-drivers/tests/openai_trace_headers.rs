@@ -283,6 +283,47 @@ async fn complete_passes_through_extended_ascii_trace_header_value() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn complete_skips_empty_string_trace_header_value() {
+    // Empty-string values are treated as absent: `Some("")` is a common
+    // shape for external callers that haven't decided whether they want
+    // the field to be set, and emitting `x-librefang-agent-id:` (header
+    // name with empty value) would just pollute downstream log
+    // correlation. In-tree call sites format UUIDs / integers so this
+    // can't fire today, but we lock the contract for external
+    // consumers.
+    let _env = isolated_env();
+    let server = MockServer::start().await;
+    let driver = mock_openai_driver(&server);
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(openai_200_body("ok")))
+        .mount(&server)
+        .await;
+
+    let req = request_with_trace_ids(Some(""), Some(""), Some(""));
+    let result = driver.complete(req).await;
+    assert!(result.is_ok(), "complete should succeed: {result:?}");
+
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let headers = &received[0].headers;
+    assert!(
+        headers.get("x-librefang-agent-id").is_none(),
+        "empty agent_id must not emit a header",
+    );
+    assert!(
+        headers.get("x-librefang-session-id").is_none(),
+        "empty session_id must not emit a header",
+    );
+    assert!(
+        headers.get("x-librefang-step-id").is_none(),
+        "empty step_id must not emit a header",
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn stream_emits_trace_headers_when_set() {
     let _env = isolated_env();
     let server = MockServer::start().await;

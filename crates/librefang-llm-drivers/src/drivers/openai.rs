@@ -355,6 +355,19 @@ impl OpenAIDriver {
 /// which makes downstream log correlation ambiguous. We unify everything
 /// in a single `HeaderMap` and use `insert` semantics so the trace IDs win.
 ///
+/// **Wire-shape change** (vs. the pre-existing per-extra `req_builder.header(...)`
+/// loop the call sites used to run): attaching the assembled `HeaderMap` via
+/// `RequestBuilder::headers(map)` invokes `replace_headers` semantics
+/// internally — i.e. for any header name appearing both in `extra_headers`
+/// and in a default already set on the builder (e.g. an `Authorization`
+/// fallback), the per-request value now **replaces** the default instead of
+/// appending. This matches how almost every operator already expects
+/// "extras override" to behave; documented here because an operator who was
+/// relying on the old append-and-keep-both semantics for a same-named
+/// header would see one value on the wire instead of two after this PR.
+/// Multi-value `extra_headers` entries with *distinct* names are unaffected
+/// (still appended, still preserved).
+///
 /// Validation: each value is parsed via [`reqwest::header::HeaderValue::from_str`]
 /// before insertion. Values containing `\r`, `\n`, NUL, or other non-visible
 /// bytes are rejected with a `warn!` log and **silently skipped** — the
@@ -414,6 +427,12 @@ fn build_custom_header_map(
 /// Insert one `x-librefang-*` trace header, validating the value and
 /// silently skipping (with a `warn!`) on parse failure. See
 /// [`build_custom_header_map`] for the rationale on swallow-on-invalid.
+///
+/// Empty-string values are also treated as absent (no header emitted).
+/// In-tree call sites format UUIDs and integers so this can't trigger
+/// today, but external crates constructing `CompletionRequest` could pass
+/// `Some("")` where `None` was meant, and emitting a header with an empty
+/// value would just pollute downstream log correlation.
 fn insert_trace_header(
     map: &mut reqwest::header::HeaderMap,
     name: &'static str,
@@ -421,7 +440,7 @@ fn insert_trace_header(
 ) {
     use reqwest::header::{HeaderName, HeaderValue};
 
-    let Some(raw) = value else {
+    let Some(raw) = value.filter(|s| !s.is_empty()) else {
         return;
     };
     match HeaderValue::from_str(raw) {
