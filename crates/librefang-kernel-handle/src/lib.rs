@@ -551,8 +551,8 @@ pub trait ApprovalGate: Send + Sync {
 #[async_trait]
 pub trait HandsControl: Send + Sync {
     /// List available Hands and their activation status.
-    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
-        Err("Hands system not available".to_string())
+    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, KernelOpError> {
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Install a Hand from TOML content.
@@ -560,9 +560,9 @@ pub trait HandsControl: Send + Sync {
         &self,
         toml_content: &str,
         skill_content: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, KernelOpError> {
         let _ = (toml_content, skill_content);
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Activate a Hand — spawns a specialized autonomous agent.
@@ -570,21 +570,21 @@ pub trait HandsControl: Send + Sync {
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, KernelOpError> {
         let _ = (hand_id, config);
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Check the status and dashboard metrics of an active Hand.
-    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, String> {
+    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, KernelOpError> {
         let _ = hand_id;
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 
     /// Deactivate a running Hand and stop its agent.
-    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
+    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), KernelOpError> {
         let _ = instance_id;
-        Err("Hands system not available".to_string())
+        Err(KernelOpError::unavailable("Hands system"))
     }
 }
 
@@ -863,9 +863,9 @@ pub trait WorkflowRunner: Send + Sync {
         &self,
         workflow_id: &str,
         input: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), KernelOpError> {
         let _ = (workflow_id, input);
-        Err("Workflow engine not available".to_string())
+        Err(KernelOpError::unavailable("Workflow engine"))
     }
 }
 
@@ -876,7 +876,10 @@ pub trait WorkflowRunner: Send + Sync {
 pub trait GoalControl: Send + Sync {
     /// List active goals (pending or in_progress), optionally filtered by agent ID.
     /// Returns a JSON array of goal objects.
-    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    fn goal_list_active(
+        &self,
+        _agent_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -886,8 +889,8 @@ pub trait GoalControl: Send + Sync {
         _goal_id: &str,
         _status: Option<&str>,
         _progress: Option<u8>,
-    ) -> Result<serde_json::Value, String> {
-        Err("Goal system not available".to_string())
+    ) -> Result<serde_json::Value, KernelOpError> {
+        Err(KernelOpError::unavailable("Goal system"))
     }
 }
 

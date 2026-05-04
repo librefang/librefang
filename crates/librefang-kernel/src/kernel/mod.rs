@@ -18492,7 +18492,7 @@ impl kernel_handle::CronControl for LibreFangKernel {
 
 #[async_trait::async_trait]
 impl kernel_handle::HandsControl for LibreFangKernel {
-    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
+    async fn hand_list(&self) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         let defs = self.hand_registry.list_definitions();
         let instances = self.hand_registry.list_instances();
 
@@ -18533,7 +18533,7 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         &self,
         toml_content: &str,
         skill_content: &str,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let def = self
             .hand_registry
             .install_from_content_persisted(&self.home_dir_boot, toml_content, skill_content)
@@ -18552,7 +18552,7 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         &self,
         hand_id: &str,
         config: std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let instance = self
             .activate_hand(hand_id, config)
             .map_err(|e| format!("{e}"))?;
@@ -18566,7 +18566,7 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         }))
     }
 
-    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, String> {
+    async fn hand_status(&self, hand_id: &str) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let instances = self.hand_registry.list_instances();
         let instance = instances
             .iter()
@@ -18590,10 +18590,14 @@ impl kernel_handle::HandsControl for LibreFangKernel {
         }))
     }
 
-    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), String> {
-        let uuid =
-            uuid::Uuid::parse_str(instance_id).map_err(|e| format!("Invalid instance ID: {e}"))?;
-        self.deactivate_hand(uuid).map_err(|e| format!("{e}"))
+    async fn hand_deactivate(&self, instance_id: &str) -> Result<(), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
+        let uuid = uuid::Uuid::parse_str(instance_id).map_err(|e| KernelOpError::Invalid {
+            field: "instance_id",
+            reason: e.to_string(),
+        })?;
+        self.deactivate_hand(uuid)
+            .map_err(|e| KernelOpError::Other(e.to_string()))
     }
 }
 
@@ -19603,7 +19607,8 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
         &self,
         workflow_id: &str,
         input: &str,
-    ) -> Result<(String, String), String> {
+    ) -> Result<(String, String), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         use crate::workflow::WorkflowId;
 
         // Try parsing as UUID first, then fall back to name lookup.
@@ -19617,16 +19622,15 @@ impl kernel_handle::WorkflowRunner for LibreFangKernel {
                 .iter()
                 .find(|w| w.name.to_lowercase() == name_lower)
                 .map(|w| w.id)
-                .ok_or_else(|| {
-                    format!(
-                        "Workflow '{workflow_id}' not found. Use a valid UUID or workflow name."
-                    )
+                .ok_or_else(|| KernelOpError::NotFound {
+                    kind: "workflow",
+                    id: workflow_id.to_string(),
                 })?
         };
 
         let (run_id, output) = LibreFangKernel::run_workflow(self, wf_id, input.to_string())
             .await
-            .map_err(|e| format!("Workflow execution failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Workflow execution failed: {e}")))?;
 
         Ok((run_id.to_string(), output))
     }
@@ -19636,13 +19640,13 @@ impl kernel_handle::GoalControl for LibreFangKernel {
     fn goal_list_active(
         &self,
         agent_id_filter: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         let shared_id = shared_memory_agent_id();
         let goals: Vec<serde_json::Value> =
             match self.memory.structured_get(shared_id, "__librefang_goals") {
                 Ok(Some(serde_json::Value::Array(arr))) => arr,
                 Ok(_) => return Ok(Vec::new()),
-                Err(e) => return Err(format!("Failed to load goals: {e}")),
+                Err(e) => return Err(kernel_handle::KernelOpError::Other(format!("Failed to load goals: {e}"))),
             };
         let active: Vec<serde_json::Value> = goals
             .into_iter()
@@ -19666,13 +19670,13 @@ impl kernel_handle::GoalControl for LibreFangKernel {
         goal_id: &str,
         status: Option<&str>,
         progress: Option<u8>,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, kernel_handle::KernelOpError> {
         let shared_id = shared_memory_agent_id();
         let mut goals: Vec<serde_json::Value> =
             match self.memory.structured_get(shared_id, "__librefang_goals") {
                 Ok(Some(serde_json::Value::Array(arr))) => arr,
-                Ok(_) => return Err(format!("Goal '{}' not found", goal_id)),
-                Err(e) => return Err(format!("Failed to load goals: {e}")),
+                Ok(_) => return Err(kernel_handle::KernelOpError::NotFound { kind: "goal", id: goal_id.to_string() }),
+                Err(e) => return Err(kernel_handle::KernelOpError::Other(format!("Failed to load goals: {e}"))),
             };
 
         let mut updated_goal = None;
@@ -19690,7 +19694,10 @@ impl kernel_handle::GoalControl for LibreFangKernel {
             }
         }
 
-        let result = updated_goal.ok_or_else(|| format!("Goal '{}' not found", goal_id))?;
+        let result = updated_goal.ok_or_else(|| kernel_handle::KernelOpError::NotFound {
+            kind: "goal",
+            id: goal_id.to_string(),
+        })?;
 
         self.memory
             .structured_set(
@@ -19698,7 +19705,9 @@ impl kernel_handle::GoalControl for LibreFangKernel {
                 "__librefang_goals",
                 serde_json::Value::Array(goals),
             )
-            .map_err(|e| format!("Failed to save goals: {e}"))?;
+            .map_err(|e| {
+                kernel_handle::KernelOpError::Other(format!("Failed to save goals: {e}"))
+            })?;
 
         Ok(result)
     }

@@ -3590,7 +3590,7 @@ fn tool_goal_update(
     }
 
     let kh = require_kernel(kernel)?;
-    let updated = kh.goal_update(goal_id, status, progress)?;
+    let updated = kh.goal_update(goal_id, status, progress).map_err(|e| e.to_string())?;
     Ok(serde_json::to_string_pretty(&updated).unwrap_or_else(|_| updated.to_string()))
 }
 
@@ -3616,7 +3616,7 @@ async fn tool_workflow_run(
     };
 
     let kh = require_kernel(kernel)?;
-    let (run_id, output) = kh.run_workflow(workflow_id, &input_str).await?;
+    let (run_id, output) = kh.run_workflow(workflow_id, &input_str).await.map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
         "run_id": run_id,
@@ -4366,7 +4366,7 @@ async fn tool_channel_send(
 
 async fn tool_hand_list(kernel: Option<&Arc<dyn KernelHandle>>) -> Result<String, String> {
     let kh = require_kernel(kernel)?;
-    let hands = kh.hand_list().await?;
+    let hands = kh.hand_list().await.map_err(|e| e.to_string())?;
 
     if hands.is_empty() {
         return Ok(
@@ -4416,7 +4416,7 @@ async fn tool_hand_activate(
             std::collections::HashMap::new()
         };
 
-    let result = kh.hand_activate(hand_id, config).await?;
+    let result = kh.hand_activate(hand_id, config).await.map_err(|e| e.to_string())?;
 
     let instance_id = result["instance_id"].as_str().unwrap_or("?");
     let agent_name = result["agent_name"].as_str().unwrap_or("?");
@@ -4437,7 +4437,7 @@ async fn tool_hand_status(
         .as_str()
         .ok_or("Missing 'hand_id' parameter")?;
 
-    let result = kh.hand_status(hand_id).await?;
+    let result = kh.hand_status(hand_id).await.map_err(|e| e.to_string())?;
 
     let icon = result["icon"].as_str().unwrap_or("");
     let name = result["name"].as_str().unwrap_or(hand_id);
@@ -4460,7 +4460,7 @@ async fn tool_hand_deactivate(
     let instance_id = input["instance_id"]
         .as_str()
         .ok_or("Missing 'instance_id' parameter")?;
-    kh.hand_deactivate(instance_id).await?;
+    kh.hand_deactivate(instance_id).await.map_err(|e| e.to_string())?;
     Ok(format!("Hand instance '{}' deactivated.", instance_id))
 }
 
