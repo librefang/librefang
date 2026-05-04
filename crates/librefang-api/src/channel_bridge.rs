@@ -3868,7 +3868,7 @@ mod tests {
     /// filtered at ContentComplete, not forwarded to the channel (#2379).
     #[tokio::test]
     async fn test_stream_bridge_filters_agent_send_tool_call_at_content_complete() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -3907,7 +3907,7 @@ mod tests {
     /// behavior of hermes-agent's commentary stream).
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_use_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -3970,7 +3970,7 @@ mod tests {
     /// user knows the agent's plan hit a snag.
     #[tokio::test]
     async fn test_stream_bridge_surfaces_tool_failure() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4012,7 +4012,7 @@ mod tests {
     /// noisy fast for agents that chain many tools.
     #[tokio::test]
     async fn test_stream_bridge_quiet_on_tool_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4077,7 +4077,7 @@ mod tests {
     /// scenarios.
     #[tokio::test]
     async fn test_stream_bridge_show_progress_false_suppresses_all_markers() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4148,7 +4148,7 @@ mod tests {
     /// should produce only one progress line — some drivers double-fire.
     #[tokio::test]
     async fn test_stream_bridge_dedupes_consecutive_tool_progress() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });
@@ -4184,7 +4184,7 @@ mod tests {
     /// `record_delivery(success=true)`.
     #[tokio::test]
     async fn test_stream_bridge_status_success() {
-        use librefang_runtime::agent_loop::AgentLoopResult;
+        use librefang_kernel::agent_loop::AgentLoopResult;
 
         let (event_tx, event_rx) = mpsc::channel::<StreamEvent>(16);
         let kernel_handle = tokio::spawn(async { Ok::<_, String>(AgentLoopResult::default()) });

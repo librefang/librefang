@@ -1899,8 +1899,8 @@ mod tests {
     //! kernel; `auth_denied_*` tests do boot a kernel because we need to
     //! observe the audit chain.
     use super::*;
+    use librefang_kernel::audit::AuditAction;
     use librefang_memory::namespace_acl::{MemoryNamespaceGuard, NamespaceGate};
-    use librefang_runtime::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     #[test]
