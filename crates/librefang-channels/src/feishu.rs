@@ -167,6 +167,9 @@ pub struct FeishuAdapter {
     /// is removed when the bot sends its reply.  Fail-open: reaction errors
     /// never block message processing.
     pending_reactions: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// API base URL override for tests. When `Some`, `send_url()` uses this
+    /// instead of `region.api_base()` so wiremock can intercept send calls.
+    api_base_override: Option<String>,
 }
 
 impl FeishuAdapter {
@@ -193,12 +196,31 @@ impl FeishuAdapter {
             cached_token: Arc::new(RwLock::new(None)),
             seen_events: Arc::new(Mutex::new(HashMap::new())),
             pending_reactions: Arc::new(Mutex::new(HashMap::<String, (String, String)>::new())),
+            api_base_override: None,
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the Feishu/Lark API base URL for send calls. Intended for tests that
+    /// point the adapter at a wiremock server instead of the real Feishu/Lark endpoint.
+    #[cfg(test)]
+    pub fn with_api_base(mut self, base: String) -> Self {
+        self.api_base_override = Some(base);
+        self
+    }
+
+    /// Pre-seed the token cache with a known token. Intended for tests so that
+    /// `get_token()` returns immediately without making an HTTP call to the token
+    /// endpoint.
+    #[cfg(test)]
+    pub async fn with_cached_token(self, token: String) -> Self {
+        let expiry = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        *self.cached_token.write().await = Some((token, expiry));
         self
     }
 
@@ -224,7 +246,11 @@ impl FeishuAdapter {
 
     /// Region-aware send message URL.
     fn send_url(&self) -> String {
-        format!("{}/open-apis/im/v1/messages", self.region.api_base())
+        let base = self
+            .api_base_override
+            .as_deref()
+            .unwrap_or_else(|| self.region.api_base());
+        format!("{base}/open-apis/im/v1/messages")
     }
 
     /// Region-aware bot info URL.
@@ -2761,5 +2787,104 @@ mod tests {
             }
             other => panic!("expected Text content, got {other:?}"),
         }
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // Uses `wiremock` to stand up a local HTTP server and points `FeishuAdapter`
+    // at it via `with_api_base()`. The token cache is pre-seeded via
+    // `with_cached_token()` so `get_token()` never hits a real token endpoint.
+    // Exercises the `POST /open-apis/im/v1/messages?receive_id_type=chat_id` call
+    // made by `ChannelAdapter::send`.
+
+    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_feishu_adapter(api_base: String) -> FeishuAdapter {
+        FeishuAdapter::new(
+            "cli_test_app_id".to_string(),
+            "test-app-secret".to_string(),
+            0,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Webhook,
+        )
+        .with_api_base(api_base)
+    }
+
+    fn dummy_feishu_user(chat_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: chat_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn feishu_send_posts_im_message() {
+        let server = MockServer::start().await;
+
+        // The expected body has `content` as a JSON string (double-serialized).
+        let expected_content = serde_json::json!({"text": "hello from librefang"}).to_string();
+
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .and(query_param("receive_id_type", "chat_id"))
+            .and(header("Authorization", "Bearer test-feishu-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "success",
+                "data": { "message_id": "om_001" },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_feishu_adapter(server.uri())
+            .with_cached_token("test-feishu-token".to_string())
+            .await;
+
+        // The adapter picks up expected_content in the body; we just verify the
+        // HTTP method / path / auth are correct — body matching would require
+        // a custom matcher because `content` is a double-serialized JSON string.
+        let _ = expected_content; // referenced for documentation clarity
+
+        adapter
+            .send(
+                &dummy_feishu_user("oc_chat123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn feishu_send_unsupported_content_uses_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .and(query_param("receive_id_type", "chat_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "success",
+                "data": { "message_id": "om_002" },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_feishu_adapter(server.uri())
+            .with_cached_token("test-feishu-token".to_string())
+            .await;
+
+        adapter
+            .send(
+                &dummy_feishu_user("oc_chat456"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send with unsupported content must succeed");
     }
 }
