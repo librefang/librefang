@@ -77,6 +77,10 @@ pub struct WeChatAdapter {
     last_error: Arc<RwLock<Option<String>>>,
     /// X-WECHAT-UIN header value, generated on construction.
     wechat_uin: String,
+    /// REST base URL for the iLink API. Defaults to `ILINK_BASE`; tests
+    /// override via `with_base_url` so the adapter talks to a local
+    /// wiremock instead.
+    api_base: String,
 }
 
 /// Generate a random UIN for the X-WECHAT-UIN header.
@@ -121,12 +125,21 @@ impl WeChatAdapter {
             started_at: Arc::new(RwLock::new(None)),
             last_error: Arc::new(RwLock::new(None)),
             wechat_uin: generate_wechat_uin(),
+            api_base: ILINK_BASE.to_string(),
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Override the iLink REST base URL. `#[cfg(test)]`-only — used by
+    /// wiremock-driven tests to point the adapter at a local mock server.
+    #[cfg(test)]
+    pub fn with_base_url(mut self, url: String) -> Self {
+        self.api_base = url;
         self
     }
 
@@ -304,7 +317,7 @@ impl WeChatAdapter {
             &token.as_str().chars().take(10).collect::<String>());
 
         let headers = self.ilink_headers(token.as_str());
-        let url = format!("{}/ilink/bot/sendmessage", ILINK_BASE);
+        let url = format!("{}/ilink/bot/sendmessage", self.api_base);
 
         // Split long messages
         let chunks = split_message(text, MAX_MESSAGE_LEN);
@@ -949,5 +962,123 @@ mod tests {
         use base64::Engine;
         let decoded = base64::engine::general_purpose::STANDARD.decode(&uin);
         assert!(decoded.is_ok());
+    }
+
+    // ----- send() path tests (issue #3820) -----
+    //
+    // The `ILINK_BASE` const is now backed by an `api_base` field (only
+    // for the `send()` path — start / qrcode / getconfig / getupdates /
+    // typing still reference the const directly, as they sit on
+    // unrelated paths). A `#[cfg(test)] with_base_url` setter points the
+    // adapter at a local `wiremock::MockServer`. Asserts the
+    // `POST /ilink/bot/sendmessage` request shape — `Authorization`
+    // header carries the bot token; the JSON envelope wraps an
+    // `item_list` of text items keyed by the user's `context_token`.
+
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    fn wechat_user(user_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: user_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    /// Custom responder: validates the JSON body shape and returns 200 on a
+    /// successful match, otherwise records the body so the assertion failure
+    /// surfaces a meaningful diff.
+    struct AssertWeChatBody {
+        expected_to: &'static str,
+        expected_text: &'static str,
+        expected_context_token: &'static str,
+    }
+    impl Respond for AssertWeChatBody {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).expect("body must be JSON");
+            assert_eq!(
+                body["msg"]["to_user_id"].as_str(),
+                Some(self.expected_to),
+                "to_user_id mismatch in body: {body}"
+            );
+            assert_eq!(
+                body["msg"]["context_token"].as_str(),
+                Some(self.expected_context_token),
+                "context_token mismatch in body: {body}"
+            );
+            assert_eq!(
+                body["msg"]["item_list"][0]["text_item"]["text"].as_str(),
+                Some(self.expected_text),
+                "text item mismatch in body: {body}"
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn wechat_send_posts_sendmessage_with_seeded_context_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ilink/bot/sendmessage"))
+            .and(header_exists("authorization"))
+            .respond_with(AssertWeChatBody {
+                expected_to: "user-42@im.wechat",
+                expected_text: "hi wechat",
+                expected_context_token: "ctx-abc",
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter =
+            WeChatAdapter::new(Some("bot-tok".to_string()), vec![]).with_base_url(server.uri());
+        // Seed the per-user context_token that `send()` looks up before
+        // calling `ilink_send_text`. mod tests has access to the private
+        // `Arc<RwLock<HashMap<...>>>` because it lives in the same module.
+        adapter
+            .user_context_tokens
+            .write()
+            .await
+            .insert("user-42@im.wechat".to_string(), "ctx-abc".to_string());
+
+        adapter
+            .send(
+                &wechat_user("user-42@im.wechat"),
+                ChannelContent::Text("hi wechat".into()),
+            )
+            .await
+            .expect("wechat send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn wechat_send_returns_err_when_not_logged_in() {
+        // No bot_token + no mock server route — `ilink_send_text` should
+        // bail with "WeChat: not logged in" before any HTTP call. We do
+        // not even need a wiremock listener here, but using one lets us
+        // also assert that no request is dispatched.
+        let server = MockServer::start().await;
+        let adapter = WeChatAdapter::new(None, vec![]).with_base_url(server.uri());
+        let err = adapter
+            .send(
+                &wechat_user("user-42@im.wechat"),
+                ChannelContent::Text("x".into()),
+            )
+            .await
+            .expect_err("wechat send must error when bot_token is unset");
+        assert!(
+            err.to_string().to_lowercase().contains("not logged in"),
+            "error should mention not-logged-in state, got: {err}"
+        );
+        let received = server
+            .received_requests()
+            .await
+            .expect("MockServer should expose received_requests");
+        assert!(
+            received.is_empty(),
+            "wechat must not hit the network when bot_token is unset; got {} request(s)",
+            received.len()
+        );
     }
 }
