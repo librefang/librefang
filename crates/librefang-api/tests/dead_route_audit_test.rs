@@ -11,9 +11,11 @@
 //! Strategy:
 //! 1. Boot the real production router via `server::build_router()`.
 //! 2. Iterate every path declared in `ApiDoc::openapi()`.
-//! 3. For each path, fill any `{param}` segments with a synthetic
-//!    placeholder and dispatch a `GET` request through the router via
-//!    `tower::ServiceExt::oneshot`.
+//! 3. For each path, iterate every declared HTTP method (GET, POST, PUT,
+//!    DELETE, PATCH, …) and dispatch one request per (path, method) pair.
+//!    Non-GET methods send an empty JSON body (`{}`) with
+//!    `Content-Type: application/json` — enough to reach the handler
+//!    without triggering deserialization failures at the router level.
 //! 4. Distinguish *router-level* 404 (path not registered) from
 //!    *handler-level* 404 (handler ran and decided "agent not found")
 //!    by inspecting the response. Axum's default fallback for an
@@ -21,9 +23,11 @@
 //!    a literal body of `"Not Found"`. Every real handler in the
 //!    codebase returns JSON when it produces a 404 (`ApiErrorResponse`
 //!    and `application/json`). Only a `text/plain` "Not Found" counts as
-//!    a dead route. Anything else — `200`, `204`, `400`, `401`, `403`,
-//!    `405`, JSON `404`, `415`, `422`, `5xx`, … — means the route is
-//!    wired and the handler ran.
+//!    a dead route. A `405 Method Not Allowed` means the *path* is wired
+//!    even if this specific method is not — that still proves the route
+//!    registration exists. Anything else — `200`, `204`, `400`, `401`,
+//!    `403`, `405`, JSON `404`, `415`, `422`, `5xx`, … — means the route
+//!    is wired and the handler ran.
 //!
 //! This is the automated replacement for Steps 4-6 of the legacy
 //! "Live Integration Testing" curl checklist that lived in CLAUDE.md.
@@ -154,56 +158,94 @@ async fn dead_route_audit_every_openapi_path_is_registered_in_router() {
     let skip = skip_paths();
     let mut missing: Vec<String> = Vec::new();
     let mut audited: usize = 0;
+    let total_paths = paths.len();
 
-    for (template, _ops) in paths {
+    for (template, ops) in paths {
         if skip.contains(template.as_str()) {
             continue;
         }
 
         let request_path = substitute_path_params(template);
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(&request_path)
-                    .body(Body::empty())
-                    .expect("synthetic audit request should build"),
-            )
-            .await
-            .expect("router oneshot must not panic");
 
-        audited += 1;
-        let status = response.status();
-
-        if status != StatusCode::NOT_FOUND {
-            // Route is wired and the handler ran (or another tower
-            // layer such as auth / body-limit returned an error).
-            // Either way it is reachable — not a dead route.
-            continue;
-        }
-
-        // Distinguish router-fallback 404 from handler 404. Axum's
-        // default `not_found` service returns `text/plain` + the
-        // literal body "Not Found". Real handlers that return 404
-        // (e.g. "agent not found") use `ApiErrorResponse` which is
-        // serialized as `application/json`.
-        let content_type = response
-            .headers()
-            .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
-            .await
+        // Collect every HTTP method declared for this path in OpenAPI.
+        // The operations object has keys like "get", "post", "put", etc.
+        let methods: Vec<String> = ops
+            .as_object()
+            .map(|obj| {
+                obj.keys()
+                    .filter(|k| {
+                        matches!(
+                            k.to_lowercase().as_str(),
+                            "get" | "post" | "put" | "delete" | "patch" | "head" | "options"
+                        )
+                    })
+                    .map(|k| k.to_uppercase())
+                    .collect()
+            })
             .unwrap_or_default();
-        let body_str = String::from_utf8_lossy(&body_bytes);
 
-        let looks_like_router_fallback = content_type.starts_with("text/plain")
-            && body_str.trim().eq_ignore_ascii_case("not found");
+        // Fall back to GET if OpenAPI has no recognised method keys
+        // (should not happen in a well-formed spec, but be defensive).
+        let methods = if methods.is_empty() {
+            vec!["GET".to_string()]
+        } else {
+            methods
+        };
 
-        if looks_like_router_fallback {
-            missing.push(template.clone());
+        for method in &methods {
+            let body = if method == "GET" || method == "HEAD" || method == "DELETE" {
+                Body::empty()
+            } else {
+                Body::from("{}")
+            };
+
+            let mut builder = Request::builder().method(method.as_str()).uri(&request_path);
+            if method != "GET" && method != "HEAD" && method != "DELETE" {
+                builder = builder.header("content-type", "application/json");
+            }
+
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(body)
+                        .expect("synthetic audit request should build"),
+                )
+                .await
+                .expect("router oneshot must not panic");
+
+            audited += 1;
+            let status = response.status();
+
+            // 405 Method Not Allowed means the *path* is registered in axum —
+            // the route wiring exists even though this specific verb isn't
+            // handled. That is not a dead route.
+            if status != StatusCode::NOT_FOUND {
+                continue;
+            }
+
+            // Distinguish router-fallback 404 from handler 404. Axum's
+            // default `not_found` service returns `text/plain` + the
+            // literal body "Not Found". Real handlers that return 404
+            // (e.g. "agent not found") use `ApiErrorResponse` which is
+            // serialized as `application/json`.
+            let content_type = response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body_bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap_or_default();
+            let body_str = String::from_utf8_lossy(&body_bytes);
+
+            let looks_like_router_fallback = content_type.starts_with("text/plain")
+                && body_str.trim().eq_ignore_ascii_case("not found");
+
+            if looks_like_router_fallback {
+                missing.push(format!("{method} {template}"));
+            }
         }
     }
 
@@ -211,16 +253,17 @@ async fn dead_route_audit_every_openapi_path_is_registered_in_router() {
     state.kernel.shutdown();
 
     assert!(
-        audited > 100,
-        "expected to audit 100+ OpenAPI paths, only saw {audited} — \
+        audited >= total_paths,
+        "expected to audit at least {total_paths} (path, method) pairs \
+         (one per OpenAPI path), only saw {audited} — \
          either the spec regressed or the audit logic broke"
     );
 
     assert!(
         missing.is_empty(),
-        "Dead-route audit found {} OpenAPI path(s) that returned the axum \
-         router fallback (`404 Not Found`, `text/plain`). Each entry below \
-         is declared via `#[utoipa::path]` on a handler in \
+        "Dead-route audit found {} OpenAPI (method, path) pair(s) that returned \
+         the axum router fallback (`404 Not Found`, `text/plain`). Each entry \
+         below is declared via `#[utoipa::path]` on a handler in \
          `crates/librefang-api/src/routes/` but is missing a matching \
          `.route(...)` registration in `crates/librefang-api/src/server.rs` \
          (or one of the sub-routers it merges). Add the registration or, \
