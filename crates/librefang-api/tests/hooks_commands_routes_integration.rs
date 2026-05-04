@@ -35,13 +35,26 @@ struct Harness {
 }
 
 /// Boot a kernel + system router with optional `webhook_triggers` config.
+///
+/// Mounts the per-domain routers exercised by this file: `webhooks::router`
+/// owns `/api/hooks/*` (#3749 11/N: moved from `system::router`) and
+/// `commands::router` owns `/api/commands*` (#3749 11/N: moved from
+/// `system::router`). `system::router` is still merged for the historical
+/// surface that hasn't moved.
 async fn boot_with_webhook(webhook: Option<WebhookTriggerConfig>) -> Harness {
     let test = TestAppState::with_builder(MockKernelBuilder::new().with_config(move |cfg| {
         cfg.webhook_triggers = webhook.clone();
     }));
     let state = test.state.clone();
+    // `system::router()` already merges `commands::router()` (#3749 11/N),
+    // so we only need to extra-merge `webhooks::router()` here for the
+    // `/api/hooks/{wake,agent}` endpoints, which the production server
+    // mounts as a sibling of `system::router()` rather than a child.
     let app = Router::new()
-        .nest("/api", routes::system::router())
+        .nest(
+            "/api",
+            routes::system::router().merge(routes::webhooks::router()),
+        )
         .with_state(state.clone());
     Harness {
         app,
