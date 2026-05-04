@@ -4163,7 +4163,8 @@ async fn tool_channel_send(
             .send_channel_media(
                 &channel, recipient, "image", url, caption, None, thread_id, account_id,
             )
-            .await;
+            .await
+            .map_err(|e| e.to_string());
     }
 
     if let Some(url) = file_url {
@@ -4178,7 +4179,8 @@ async fn tool_channel_send(
             .send_channel_media(
                 &channel, recipient, "file", url, caption, filename, thread_id, account_id,
             )
-            .await;
+            .await
+            .map_err(|e| e.to_string());
     }
 
     // Local file attachment: read from disk and send as FileData. Honor named
@@ -4246,7 +4248,8 @@ async fn tool_channel_send(
                 thread_id,
                 account_id,
             )
-            .await;
+            .await
+            .map_err(|e| e.to_string());
     }
 
     if let Some(poll_question) = input.get("poll_question").and_then(|v| v.as_str()) {
@@ -4315,7 +4318,8 @@ async fn tool_channel_send(
             explanation,
             account_id,
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
 
         let mut result = format!("Poll sent to {recipient} on {channel}: {poll_question}");
         if is_quiz {
@@ -4358,6 +4362,7 @@ async fn tool_channel_send(
 
     kh.send_channel_message(&channel, recipient, &final_message, thread_id, account_id)
         .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -6693,7 +6698,7 @@ mod tests {
             _tool_name: &str,
             _action_summary: &str,
             _session_id: Option<&str>,
-        ) -> Result<librefang_types::approval::ApprovalDecision, String> {
+        ) -> Result<librefang_types::approval::ApprovalDecision, librefang_kernel_handle::KernelOpError> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::approval::ApprovalDecision::Denied)
         }
@@ -6705,7 +6710,7 @@ mod tests {
             _action_summary: &str,
             _deferred: librefang_types::tool::DeferredToolExecution,
             _session_id: Option<&str>,
-        ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+        ) -> Result<librefang_types::tool::ToolApprovalSubmission, librefang_kernel_handle::KernelOpError> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {
                 request_id: uuid::Uuid::new_v4(),
@@ -6886,7 +6891,7 @@ mod tests {
             _action_summary: &str,
             deferred: librefang_types::tool::DeferredToolExecution,
             _session_id: Option<&str>,
-        ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+        ) -> Result<librefang_types::tool::ToolApprovalSubmission, librefang_kernel_handle::KernelOpError> {
             self.approval_requests.fetch_add(1, Ordering::SeqCst);
             *self.last_force_human.lock().unwrap() = Some(deferred.force_human);
             Ok(librefang_types::tool::ToolApprovalSubmission::Pending {

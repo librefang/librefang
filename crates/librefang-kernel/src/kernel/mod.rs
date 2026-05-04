@@ -17388,6 +17388,7 @@ impl crate::cron_delivery::CronChannelSender for KernelCronBridge {
             .send_channel_message(channel_type, recipient, message, thread_id, account_id)
             .await
             .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -18670,7 +18671,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         tool_name: &str,
         action_summary: &str,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, kernel_handle::KernelOpError> {
         use librefang_types::approval::{ApprovalDecision, ApprovalRequest as TypedRequest};
 
         // Hand agents are curated trusted packages — auto-approve tool execution.
@@ -18812,7 +18813,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
         session_id: Option<&str>,
-    ) -> Result<ToolApprovalSubmission, String> {
+    ) -> Result<ToolApprovalSubmission, kernel_handle::KernelOpError> {
         use librefang_types::approval::ApprovalRequest as TypedRequest;
 
         // Hand agents are curated trusted packages — auto-approve for non-blocking execution.
@@ -18944,7 +18945,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
             librefang_types::approval::ApprovalResponse,
             Option<librefang_types::tool::DeferredToolExecution>,
         ),
-        String,
+        kernel_handle::KernelOpError,
     > {
         let (response, deferred) = self.approval_manager.resolve(
             request_id,
@@ -18979,7 +18980,7 @@ impl kernel_handle::ApprovalGate for LibreFangKernel {
     fn get_approval_status(
         &self,
         request_id: uuid::Uuid,
-    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, kernel_handle::KernelOpError> {
         // If still pending, no decision yet.
         if self.approval_manager.get_pending(request_id).is_some() {
             return Ok(None);
@@ -19037,7 +19038,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         message: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         let cfg = self.config.load_full();
         let lookup_key = account_id
             .filter(|s| !s.is_empty())
@@ -19112,7 +19113,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         filename: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         let lookup_key = account_id
             .filter(|s| !s.is_empty())
             .map(|aid| format!("{channel}:{aid}"))
@@ -19156,9 +19157,12 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
                 filename: filename.unwrap_or("file").to_string(),
             },
             _ => {
-                return Err(format!(
-                    "Unsupported media type: '{media_type}'. Use 'image' or 'file'."
-                ));
+                return Err(kernel_handle::KernelOpError::Invalid {
+                    field: "media_type",
+                    reason: format!(
+                        "Unsupported media type: '{media_type}'. Use 'image' or 'file'."
+                    ),
+                });
             }
         };
 
@@ -19190,7 +19194,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         mime_type: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, kernel_handle::KernelOpError> {
         let lookup_key = account_id
             .filter(|s| !s.is_empty())
             .map(|aid| format!("{channel}:{aid}"))
@@ -19263,7 +19267,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         let lookup_key = account_id
             .filter(|s| !s.is_empty())
             .map(|aid| format!("{channel}:{aid}"))
@@ -19308,7 +19312,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         user_id: &str,
         display_name: &str,
         username: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
             .roster()
             .upsert(channel, chat_id, user_id, display_name, username);
@@ -19319,7 +19323,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         &self,
         channel: &str,
         chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<serde_json::Value>, kernel_handle::KernelOpError> {
         let members = self.memory.roster().members(channel, chat_id);
         Ok(members
             .into_iter()
@@ -19338,7 +19342,7 @@ impl kernel_handle::ChannelSender for LibreFangKernel {
         channel: &str,
         chat_id: &str,
         user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
         self.memory
             .roster()
             .remove_member(channel, chat_id, user_id);

@@ -497,7 +497,7 @@ pub trait ApprovalGate: Send + Sync {
         tool_name: &str,
         action_summary: &str,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::approval::ApprovalDecision, String> {
+    ) -> Result<librefang_types::approval::ApprovalDecision, KernelOpError> {
         let _ = (agent_id, tool_name, action_summary, session_id);
         Ok(librefang_types::approval::ApprovalDecision::Approved)
     }
@@ -510,9 +510,9 @@ pub trait ApprovalGate: Send + Sync {
         action_summary: &str,
         deferred: librefang_types::tool::DeferredToolExecution,
         session_id: Option<&str>,
-    ) -> Result<librefang_types::tool::ToolApprovalSubmission, String> {
+    ) -> Result<librefang_types::tool::ToolApprovalSubmission, KernelOpError> {
         let _ = (agent_id, tool_name, action_summary, deferred, session_id);
-        Err("Approval system not available".to_string())
+        Err(KernelOpError::unavailable("Approval system"))
     }
 
     /// Resolve an approval request and get the deferred payload.
@@ -528,17 +528,17 @@ pub trait ApprovalGate: Send + Sync {
             librefang_types::approval::ApprovalResponse,
             Option<librefang_types::tool::DeferredToolExecution>,
         ),
-        String,
+        KernelOpError,
     > {
         let _ = (request_id, decision, decided_by, totp_verified, user_id);
-        Err("Approval system not available".to_string())
+        Err(KernelOpError::unavailable("Approval system"))
     }
 
     /// Check current status of an approval request.
     fn get_approval_status(
         &self,
         request_id: uuid::Uuid,
-    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, String> {
+    ) -> Result<Option<librefang_types::approval::ApprovalDecision>, KernelOpError> {
         let _ = request_id;
         Ok(None)
     }
@@ -622,9 +622,9 @@ pub trait ChannelSender: Send + Sync {
         message: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (channel, recipient, message, thread_id, account_id);
-        Err("Channel send not available".to_string())
+        Err(KernelOpError::unavailable("Channel send"))
     }
 
     /// Send media content (image/file) to a user on a named channel adapter.
@@ -642,11 +642,11 @@ pub trait ChannelSender: Send + Sync {
         filename: Option<&str>,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (
             channel, recipient, media_type, media_url, caption, filename, thread_id, account_id,
         );
-        Err("Channel media send not available".to_string())
+        Err(KernelOpError::unavailable("Channel media send"))
     }
 
     /// Send a local file (raw bytes) to a user on a named channel adapter.
@@ -669,11 +669,11 @@ pub trait ChannelSender: Send + Sync {
         mime_type: &str,
         thread_id: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, KernelOpError> {
         let _ = (
             channel, recipient, data, filename, mime_type, thread_id, account_id,
         );
-        Err("Channel file data send not available".to_string())
+        Err(KernelOpError::unavailable("Channel file data send"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -687,7 +687,7 @@ pub trait ChannelSender: Send + Sync {
         correct_option_id: Option<u8>,
         explanation: Option<&str>,
         account_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         let _ = (
             channel,
             recipient,
@@ -698,7 +698,7 @@ pub trait ChannelSender: Send + Sync {
             explanation,
             account_id,
         );
-        Err("Channel poll send not available".to_string())
+        Err(KernelOpError::unavailable("Channel poll send"))
     }
 
     /// Upsert a group roster member (channel bridge → persistent storage).
@@ -709,7 +709,7 @@ pub trait ChannelSender: Send + Sync {
         _user_id: &str,
         _display_name: &str,
         _username: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 
@@ -718,7 +718,7 @@ pub trait ChannelSender: Send + Sync {
         &self,
         _channel: &str,
         _chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<serde_json::Value>, KernelOpError> {
         Ok(Vec::new())
     }
 
@@ -728,7 +728,7 @@ pub trait ChannelSender: Send + Sync {
         _channel: &str,
         _chat_id: &str,
         _user_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), KernelOpError> {
         Ok(())
     }
 }
