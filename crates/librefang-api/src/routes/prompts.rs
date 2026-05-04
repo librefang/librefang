@@ -100,7 +100,8 @@ async fn create_prompt_version(
     hasher.update(version.system_prompt.as_bytes());
     version.content_hash = format!("{:x}", hasher.finalize());
     match state.kernel.create_prompt_version(&version) {
-        Ok(_) => Json(version).into_response(),
+        // Issue #3832: POST /versions creates a new resource — 201 Created.
+        Ok(_) => (StatusCode::CREATED, Json(version)).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
@@ -211,7 +212,8 @@ async fn create_experiment(
         variant.id = uuid::Uuid::new_v4();
     }
     match state.kernel.create_experiment(&experiment) {
-        Ok(_) => Json(experiment).into_response(),
+        // Issue #3832: POST /experiments creates a new resource — 201 Created.
+        Ok(_) => (StatusCode::CREATED, Json(experiment)).into_response(),
         Err(e) => ApiErrorResponse::internal(e)
             .into_json_tuple()
             .into_response(),
