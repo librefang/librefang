@@ -63,7 +63,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::goals::router())
         .merge(routes::inbox::router())
         .merge(routes::media::router())
-        .merge(routes::prompts::routes())
+        .merge(routes::prompts::router())
         .merge(routes::terminal::router())
         .merge(routes::users::router())
         .merge(routes::webhooks::router())

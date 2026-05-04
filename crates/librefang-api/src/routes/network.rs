@@ -262,7 +262,8 @@ pub async fn network_trusted_peers(State(state): State<Arc<AppState>>) -> impl I
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only aggregation; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let cfg = state.kernel.config_ref();
     let base_url = format!("http://{}", cfg.api_listen);
 
@@ -318,7 +319,8 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.agent_registry().list();
+    // Read-only iteration; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
     let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let items: Vec<serde_json::Value> = agents
@@ -1463,7 +1465,8 @@ pub async fn mcp_http(
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.agent_registry().list();
+    // Read-only projection; cheap Arc clones over full manifest deep-copy (#3569).
+    let agents = state.kernel.agent_registry().list_arcs();
 
     let nodes: Vec<TopoNode> = agents
         .iter()

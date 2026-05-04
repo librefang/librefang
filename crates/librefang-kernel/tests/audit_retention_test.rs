@@ -19,7 +19,6 @@
 
 use librefang_runtime::audit::AuditAction;
 use librefang_testing::MockKernelBuilder;
-use std::sync::Arc;
 
 // `start_background_agents` reaches into kernel paths that call
 // `tokio::task::block_in_place` (e.g. the synchronous toml_edit /
@@ -38,7 +37,6 @@ async fn test_kernel_boot_with_retention_config_starts_trim_task() {
             c.audit.retention.max_in_memory_entries = Some(10);
         })
         .build();
-    let kernel = Arc::new(kernel);
 
     // Seed 50 audit entries — well over the cap of 10. Use RoleChange
     // so no per-action retention rule could kick in (we want the cap

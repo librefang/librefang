@@ -411,7 +411,11 @@ pub async fn agent_budget_status(
     let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
-            return ApiErrorResponse::not_found("Agent not found").into_response();
+            // #3511: even on 404 we know agent_id was well-formed, so emit it.
+            return crate::extensions::with_agent_id(
+                agent_id,
+                ApiErrorResponse::not_found("Agent not found"),
+            );
         }
     };
 
@@ -426,7 +430,7 @@ pub async fn agent_budget_status(
     let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
     let tokens_used = token_usage.map(|s| s.total_tokens).unwrap_or(0);
 
-    (
+    let body = (
         StatusCode::OK,
         Json(serde_json::json!({
             "agent_id": agent_id.to_string(),
@@ -452,8 +456,9 @@ pub async fn agent_budget_status(
                 "pct": if quota.effective_token_limit() > 0 { tokens_used as f64 / quota.effective_token_limit() as f64 } else { 0.0 },
             },
         })),
-    )
-        .into_response()
+    );
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
@@ -538,10 +543,13 @@ pub async fn update_agent_budget(
     let tokens = body["max_llm_tokens_per_hour"].as_u64();
 
     if hourly.is_none() && daily.is_none() && monthly.is_none() && tokens.is_none() {
-        return ApiErrorResponse::bad_request(
-            "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
-        )
-        .into_response();
+        // #3511: tag even validation failures with agent_id (path was well-formed).
+        return crate::extensions::with_agent_id(
+            agent_id,
+            ApiErrorResponse::bad_request(
+                "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour",
+            ),
+        );
     }
 
     // Capture OLD per-agent caps BEFORE the in-memory mutation so the
@@ -554,7 +562,7 @@ pub async fn update_agent_budget(
         .get(agent_id)
         .map(|e| e.manifest.resources.clone());
 
-    match state
+    let body = match state
         .kernel
         .agent_registry()
         .update_resources(agent_id, hourly, daily, monthly, tokens)
@@ -603,7 +611,9 @@ pub async fn update_agent_budget(
             }
         }
         Err(e) => ApiErrorResponse::not_found(format!("{e}")).into_response(),
-    }
+    };
+    // #3511: tag response so request_logging middleware can emit `agent_id`.
+    crate::extensions::with_agent_id(agent_id, body)
 }
 
 // ---------------------------------------------------------------------------

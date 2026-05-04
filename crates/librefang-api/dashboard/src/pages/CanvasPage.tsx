@@ -92,20 +92,30 @@ type CanvasNodeData = {
   _expanded?: boolean;
   _childCount?: number;
   _childIds?: string[];
-  _origWidth?: number;
-  _origHeight?: number;
+  // Restored on group expand. Stored as CSS width/height so it round-trips
+  // straight through `n.style` without a narrowing dance.
+  _origWidth?: number | string;
+  _origHeight?: number | string;
   _groupId?: string;
   _onToggle?: (id: string) => void;
   _onUngroup?: (id: string) => void;
   _onDeleteGroup?: (id: string) => void;
   // Imported from backend (group inner content)
-  nodes?: Node[];
+  nodes?: CanvasNode[];
   edges?: Edge[];
   // Edge data overlays for collapse/expand redirection
   _origSource?: string;
   _origTarget?: string;
   [key: string]: unknown;
 };
+
+/**
+ * Concrete React Flow node type for this page. Parameterizing on
+ * `CanvasNodeData` makes `n.data._childIds` etc. typed access — replaces
+ * the previous `(n.data as CanvasNodeData)` cast riddled across this file
+ * (and the `as any` escapes that preceded those casts, see #3390).
+ */
+type CanvasNode = Node<CanvasNodeData>;
 
 /** Shape of a node entry persisted into sessionStorage by the templates flow. */
 type StoredCanvasNode = {
@@ -145,7 +155,7 @@ type WorkflowStepBuild = {
 };
 
 type CanvasDraft = {
-  nodes: Node[];
+  nodes: CanvasNode[];
   edges: Edge[];
   workflowName: string;
   workflowDescription: string;
@@ -226,7 +236,7 @@ function CustomNode({ data, type: nodeTypeKey, selected, t }: { data: CanvasNode
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
   const isEnd = data.nodeType === "end";
-  const runState = data._runState as string | undefined;
+  const runState = data._runState;
   const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType ?? "");
   const missingAgent = needsAgent && !data.agentId;
   const KindIcon = NODE_KIND_ICON[data.nodeType ?? ""] ?? HelpCircle;
@@ -611,14 +621,14 @@ const labelClass = "text-[10px] font-bold text-text-dim uppercase";
 function NodeConfigPanel({
   node, agents, onUpdate, onClose, onDelete, siblingNodes, t
 }: {
-  node: Node; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
+  node: CanvasNode; agents: AgentItem[]; onUpdate: (id: string, data: CanvasNodeData) => void;
   /** Sibling step nodes available as `depends_on` candidates. Passed in
    *  alongside `node` so we don't have to stuff this onto the ReactFlow
    *  Node type (which doesn't allow arbitrary fields). */
   siblingNodes?: Array<{ id: string; label: string }>;
   onClose: () => void; onDelete: (id: string) => void; t: (key: string) => string;
 }) {
-  const d = node.data as CanvasNodeData;
+  const d = node.data;
   const [label, setLabel] = useState(d.label || "");
   const [description, setDescription] = useState(d.description || "");
   const [agentId, setAgentId] = useState(d.agentId || "");
@@ -829,7 +839,7 @@ function CanvasPageInner() {
   const { t: routeTimestamp, wf: routeWorkflowId } = useSearch({ from: "/canvas" });
   const theme = useUIStore((s) => s.theme);
   const { fitView } = useReactFlow();
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const queryClient = useQueryClient();
   const agentsQuery = useAgents();
@@ -843,7 +853,7 @@ function CanvasPageInner() {
   const [isFullscreen, setIsFullscreen] = useState(true);
   const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [editingNode, setEditingNode] = useState<Node | null>(null);
+  const [editingNode, setEditingNode] = useState<CanvasNode | null>(null);
   const [runResult, setRunResult] = useState<{ output: string; status: string; run_id: string; step_results?: WorkflowStepResult[] } | null>(null);
   const [showRunInput, setShowRunInput] = useState<false | "run" | "dry">(false);
   const [runInput, setRunInput] = useState("");
@@ -871,9 +881,9 @@ function CanvasPageInner() {
   const saveWorkflowAsTemplateMutation = useSaveWorkflowAsTemplate();
 
   // Undo/redo history
-  const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
+  const historyRef = useRef<{ nodes: CanvasNode[]; edges: Edge[] }[]>([]);
   const historyIndexRef = useRef(-1);
-  const clipboardRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
+  const clipboardRef = useRef<{ nodes: CanvasNode[]; edges: Edge[] } | null>(null);
 
   const pushHistory = useCallback(() => {
     const snapshot = { nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) };
@@ -930,7 +940,7 @@ function CanvasPageInner() {
     const offset = 40;
     const idMap = new Map<string, string>();
     const newNodes = clipboardRef.current.nodes.map(n => {
-      const newId = `${(n.data as CanvasNodeData)?.nodeType || "node"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const newId = `${n.data?.nodeType || "node"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       idMap.set(n.id, newId);
       return { ...n, id: newId, position: { x: n.position.x + offset, y: n.position.y + offset }, selected: true };
     });
@@ -996,10 +1006,10 @@ function CanvasPageInner() {
   const NODE_H = 80;
   const GROUP_PAD = 30;
   const GROUP_HEADER = 36;
-  const recalcGroupBounds = useCallback((nds: Node[], groupId: string): Node[] => {
+  const recalcGroupBounds = useCallback((nds: CanvasNode[], groupId: string): CanvasNode[] => {
     const groupNode = nds.find(n => n.id === groupId);
-    if (!groupNode || (groupNode.data as CanvasNodeData)._expanded === false) return nds;
-    const childIds = new Set<string>((groupNode.data as CanvasNodeData)?._childIds || []);
+    if (!groupNode || groupNode.data._expanded === false) return nds;
+    const childIds = new Set<string>(groupNode.data._childIds || []);
     const children = nds.filter(n => childIds.has(n.id) && !n.hidden);
     if (children.length === 0) return nds;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -1018,7 +1028,7 @@ function CanvasPageInner() {
     return nds.map(n => n.id === groupId ? {
       ...n, position: { x: gx, y: gy },
       style: { ...n.style, width: gw, height: gh },
-      data: { ...(n.data as CanvasNodeData), _origWidth: gw, _origHeight: gh },
+      data: { ...n.data, _origWidth: gw, _origHeight: gh },
     } : n);
   }, []);
 
@@ -1207,7 +1217,7 @@ function CanvasPageInner() {
     setNodes(nds => {
       const groupNode = nds.find(n => n.id === groupId);
       if (!groupNode) return nds;
-      const gd = groupNode.data as CanvasNodeData;
+      const gd = groupNode.data;
       const isExpanded = gd._expanded !== false;
       const willCollapse = isExpanded;
       const childIds = new Set<string>(gd._childIds || []);
@@ -1237,7 +1247,7 @@ function CanvasPageInner() {
     // Handle edges
     setEdges(eds => {
       const groupNode = nodes.find(n => n.id === groupId);
-      const gd = groupNode?.data as CanvasNodeData;
+      const gd = groupNode?.data;
       const isExpanded = gd?._expanded !== false;
       const willCollapse = isExpanded;
       const childIds = new Set<string>(gd?._childIds || []);
@@ -1255,8 +1265,11 @@ function CanvasPageInner() {
           if (srcChild) return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
           if (tgtChild) return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
         } else {
-          // Expand: restore original endpoints
-          const ed = e.data as CanvasNodeData;
+          // Expand: restore original endpoints. Edge.data is unstructured
+          // (xyflow's `Edge<T>` defaults to `Record<string, unknown>`); we
+          // attach `_origSource`/`_origTarget` ourselves on collapse, so
+          // narrow them locally rather than carrying a typed edge generic.
+          const ed = e.data as { _origSource?: string; _origTarget?: string } | undefined;
           if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
           if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
           // Restore internal edge visibility
@@ -1271,17 +1284,17 @@ function CanvasPageInner() {
   const ungroupNodes = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
+      const childIds = new Set<string>(group?.data._childIds || []);
       return nds
         .filter(n => n.id !== groupId)
         .map(n => childIds.has(n.id)
-          ? { ...n, data: { ...(n.data as CanvasNodeData), _groupId: undefined } }
+          ? { ...n, data: { ...n.data, _groupId: undefined } }
           : n
         );
     });
     // Restore redirected edges
     setEdges(eds => eds.map(e => {
-      const ed = e.data as CanvasNodeData;
+      const ed = e.data as { _origSource?: string; _origTarget?: string } | undefined;
       if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
       if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
       return { ...e, hidden: false };
@@ -1292,14 +1305,14 @@ function CanvasPageInner() {
   const deleteGroupAndChildren = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
+      const childIds = new Set<string>(group?.data._childIds || []);
       childIds.add(groupId);
       return nds.filter(n => !childIds.has(n.id));
     });
     // Delete edges involving child nodes
     setEdges(eds => {
       const group = nodes.find(n => n.id === groupId);
-      const childIds = new Set<string>((group?.data as CanvasNodeData)?._childIds || []);
+      const childIds = new Set<string>(group?.data._childIds || []);
       childIds.add(groupId);
       return eds.filter(e => !childIds.has(e.source) && !childIds.has(e.target));
     });
@@ -1309,13 +1322,20 @@ function CanvasPageInner() {
   // unmounting/remounting all nodes on every render, which breaks click handlers.
   // We use refs for all callbacks and the translation function so the deps are empty.
   const nodeTypes = useMemo(() => ({
-    custom: (props: NodeProps) => <CustomNode {...props as unknown as { data: CanvasNodeData; type: string; selected?: boolean }} t={tRef.current} />,
-    groupNode: (props: NodeProps) => <GroupNodeComponent {...props as unknown as { data: CanvasNodeData; id: string }} data={{
-      ...props.data,
-      _onToggle: (id: string) => toggleGroupRef.current(id),
-      _onUngroup: (id: string) => ungroupNodesRef.current(id),
-      _onDeleteGroup: (id: string) => deleteGroupAndChildrenRef.current(id),
-    }} />,
+    custom: (props: NodeProps<CanvasNode>) => (
+      <CustomNode data={props.data} type={props.type} selected={props.selected} t={tRef.current} />
+    ),
+    groupNode: (props: NodeProps<CanvasNode>) => (
+      <GroupNodeComponent
+        id={props.id}
+        data={{
+          ...props.data,
+          _onToggle: (id: string) => toggleGroupRef.current(id),
+          _onUngroup: (id: string) => ungroupNodesRef.current(id),
+          _onDeleteGroup: (id: string) => deleteGroupAndChildrenRef.current(id),
+        }}
+      />
+    ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
 
@@ -1410,9 +1430,9 @@ function CanvasPageInner() {
 
   const loadWorkflowIntoCanvas = useCallback(async (workflowId: string, fallback?: WorkflowItem | null) => {
     const detail = await queryClient.fetchQuery(workflowQueries.detail(workflowId));
-    let wfNodes: Node[];
+    let wfNodes: CanvasNode[];
     let wfEdges: Edge[];
-    const layout = detail.layout as { nodes?: Node[]; edges?: Edge[] } | undefined;
+    const layout = detail.layout as { nodes?: CanvasNode[]; edges?: Edge[] } | undefined;
     if (layout?.nodes) {
       wfNodes = layout.nodes;
       wfEdges = layout.edges || [];
@@ -1562,7 +1582,7 @@ function CanvasPageInner() {
         const right = n.position.x + (n.measured?.width || 200);
         if (right > maxX) maxX = right;
       }
-      const newNode: Node = {
+      const newNode: CanvasNode = {
         id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
         type: "custom",
         position: { x: existing.length === 0 ? 80 : maxX + 40, y: 100 },
@@ -1602,12 +1622,12 @@ function CanvasPageInner() {
   }, [setEdges, edgeColorActive]);
 
   // Node click -> open config panel
-  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+  const onNodeClick = useCallback((_: React.MouseEvent, node: CanvasNode) => {
     setEditingNode(node);
   }, []);
 
   // Clean up editing panel when nodes are deleted
-  const onNodesDelete = useCallback((deleted: Node[]) => {
+  const onNodesDelete = useCallback((deleted: CanvasNode[]) => {
     if (editingNode && deleted.some(n => n.id === editingNode.id)) {
       setEditingNode(null);
     }
@@ -1616,19 +1636,19 @@ function CanvasPageInner() {
   // Group drag moves child nodes along
   const groupDragStart = useRef<{ id: string; x: number; y: number } | null>(null);
 
-  const onNodeDragStart = useCallback((_: React.MouseEvent, node: Node) => {
+  const onNodeDragStart = useCallback((_: React.MouseEvent, node: CanvasNode) => {
     if (node.type === "groupNode") {
       groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
     }
   }, []);
 
-  const onNodeDrag = useCallback((_: React.MouseEvent, node: Node) => {
+  const onNodeDrag = useCallback((_: React.MouseEvent, node: CanvasNode) => {
     if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
       // Dragging group -> move child nodes along
       const dx = node.position.x - groupDragStart.current.x;
       const dy = node.position.y - groupDragStart.current.y;
       if (dx === 0 && dy === 0) return;
-      const childIds = new Set<string>((node.data as CanvasNodeData)?._childIds || []);
+      const childIds = new Set<string>(node.data._childIds || []);
       groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
       setNodes(nds => nds.map(n =>
         childIds.has(n.id) && !n.hidden
@@ -1637,7 +1657,7 @@ function CanvasPageInner() {
       ));
     } else {
       // Dragging child node -> expand parent group bounds
-      const groupId = (node.data as CanvasNodeData)?._groupId;
+      const groupId = node.data._groupId;
       if (groupId) {
         setNodes(nds => recalcGroupBounds(nds, groupId));
       }
@@ -1675,7 +1695,7 @@ function CanvasPageInner() {
     const gw = maxX - minX + padding * 2;
     const gh = maxY - minY + padding * 2 + headerH;
 
-    const groupNode: Node = {
+    const groupNode: CanvasNode = {
       id: groupId,
       type: "groupNode",
       position: { x: minX - padding, y: minY - padding - headerH },
@@ -1696,7 +1716,7 @@ function CanvasPageInner() {
     setNodes(nds => [
       groupNode,
       ...nds.map(n => childIds.includes(n.id)
-        ? { ...n, data: { ...(n.data as CanvasNodeData), _groupId: groupId } }
+        ? { ...n, data: { ...n.data, _groupId: groupId } }
         : n
       ),
     ]);
@@ -1719,14 +1739,14 @@ function CanvasPageInner() {
   }, [setNodes]);
 
   // Build backend steps from nodes: only nodes bound to a real agent are steps
-  const buildSteps = useCallback((nodeList: Node[]) => {
+  const buildSteps = useCallback((nodeList: CanvasNode[]) => {
     return nodeList
       .filter(n => {
-        const d = n.data as CanvasNodeData;
+        const d = n.data;
         return d.agentId || d.agentName;
       })
       .map((n, idx) => {
-        const d = n.data as CanvasNodeData;
+        const d = n.data;
         const step: WorkflowStepBuild = {
           name: d.label || `Step ${idx + 1}`,
           agent_id: d.agentId,
@@ -1903,8 +1923,8 @@ function CanvasPageInner() {
     setNodes(nds => nds.map(n => ({
       ...n,
       data: {
-        ...(n.data as CanvasNodeData),
-        _runState: (n.data as CanvasNodeData).agentId ? "running" : undefined,
+        ...n.data,
+        _runState: n.data.agentId ? "running" : undefined,
       }
     })));
 
@@ -1923,11 +1943,11 @@ function CanvasPageInner() {
         run_id: r.run_id || "",
         step_results: r.step_results ?? [],
       });
-      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as CanvasNodeData), _runState: undefined } })));
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
     } catch (e) {
       // Error: clear all state and edge animation
-      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as CanvasNodeData), _runState: undefined } })));
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
       const detail = toErrorMessage(e);
       showError(detail);
@@ -2198,8 +2218,8 @@ function CanvasPageInner() {
             <NodeConfigPanel
               node={editingNode}
               siblingNodes={nodes
-                .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has((n.data as CanvasNodeData).nodeType ?? ""))
-                .map(n => ({ id: n.id, label: (n.data as CanvasNodeData).label || n.id }))}
+                .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has(n.data.nodeType ?? ""))
+                .map(n => ({ id: n.id, label: n.data.label || n.id }))}
               agents={agents}
               onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}
               onDelete={(id) => { setNodes(nds => nds.filter(n => n.id !== id)); setEditingNode(null); }}
@@ -2302,7 +2322,12 @@ function CanvasPageInner() {
             </div>
             <MiniMap className="bg-surface/80! border-border-subtle! rounded-xl! shadow-lg!"
               nodeColor={(n) => {
-                const cfg = NODE_TYPES.find(t => t.type === (n.data as CanvasNodeData)?.nodeType);
+                // ReactFlow's MiniMap callback hands us the broad `Node` type
+                // (data is `Record<string, unknown>`), so narrow once at the
+                // boundary instead of treating its generic as our canvas-wide
+                // contract.
+                const data = n.data as CanvasNodeData;
+                const cfg = NODE_TYPES.find(t => t.type === data?.nodeType);
                 return cfg?.color || "#3b82f6";
               }}
               maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />

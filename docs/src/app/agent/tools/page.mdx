@@ -71,6 +71,7 @@ The shared task board lets agents post work that other agents can claim. Useful 
 | `task_claim` | optional `priority_filter` | Claim ownership of the highest-priority pending task. The TTL is `[task_board] claim_ttl_secs` (default 600s). |
 | `task_complete` | `task_id`, optional `result` | Mark a claimed task done. |
 | `task_list` | optional `status`, `assignee` | List tasks with optional filters. |
+| `task_status` | `task_id` | Look up one task by ID and return its `status`, `result`, `title`, `assigned_to`, `created_at`, `completed_at`. Native counterpart of the `comms_task_status` MCP bridge tool — agents that delegated work via `task_post` can poll the outcome without loading the bridge. |
 
 The claim TTL exists to recover from worker crashes — if the claimer doesn't `task_complete` within the TTL, the sweeper resets the task to `pending` so another worker can pick it up.
 
