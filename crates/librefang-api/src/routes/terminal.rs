@@ -740,7 +740,22 @@ pub async fn terminal_ws(
         }
     }
 
-    let ip = addr.ip();
+    // SECURITY: Mirror the `agent_ws` per-IP slot key fix. Behind a
+    // trusted reverse proxy, `addr.ip()` is the proxy and every
+    // terminal collapses onto one shared slot — `max_ws_per_ip` then
+    // traps the whole org. Resolve the real client IP from forwarding
+    // headers, gated on `trust_forwarded_for` AND a peer match in
+    // `trusted_proxies`. The compiled allowlist + master switch live
+    // on `AppState` (built once at boot in `server.rs`) so this upgrade
+    // path never re-parses the raw config strings. Untrusted peers fall
+    // through to `addr.ip()` — a spoofed XFF from the open internet
+    // still hits the per-IP cap on its real source.
+    let ip = crate::client_ip::resolve_real_client_ip(
+        addr.ip(),
+        &headers,
+        &state.trusted_proxies,
+        state.trust_forwarded_for,
+    );
     let max_ws_per_ip = state.kernel.config_ref().rate_limit.max_ws_per_ip;
     let initial_cols = initial_terminal_dimension(&uri, "cols", MAX_COLS);
     let initial_rows = initial_terminal_dimension(&uri, "rows", MAX_ROWS);

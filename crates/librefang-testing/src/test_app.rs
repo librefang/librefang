@@ -212,6 +212,10 @@ impl TestAppState {
                 librefang_api::rate_limiter::AuthLoginLimiter::new(),
             ),
             gcra_limiter: librefang_api::rate_limiter::create_rate_limiter(0),
+            // Tests run with header-trust off (the production default) so
+            // per-IP rate-limiter / WS slot keying always uses the TCP peer.
+            trusted_proxies: Arc::new(librefang_api::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         })
     }
 }
