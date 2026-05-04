@@ -13,7 +13,7 @@ use librefang_runtime::kernel_handle::prelude::*;
 use std::sync::Arc;
 
 use crate::types::ApiErrorResponse;
-pub fn routes() -> Router<Arc<AppState>> {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/agents/{agent_id}/prompts/versions",
