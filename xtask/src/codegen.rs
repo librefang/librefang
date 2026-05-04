@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::fs;
 use std::path::Path;
@@ -50,6 +51,8 @@ fn generate_openapi(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run(args: CodegenArgs) -> Result<(), Box<dyn std::error::Error>> {
+    local_check_mode::apply_for_subcommand("codegen");
+
     let root = repo_root();
 
     // If no specific flag, run all codegen

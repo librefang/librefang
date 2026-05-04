@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::process::Command;
 
@@ -22,6 +23,8 @@ pub struct BenchArgs {
 }
 
 pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    local_check_mode::apply_for_subcommand("bench");
+
     let root = repo_root();
 
     let mut cmd = Command::new("cargo");

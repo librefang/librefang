@@ -13,6 +13,11 @@ regex = "1"
 chrono = "0.4"
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# Host probe (RAM / CPU) for `LIBREFANG_LOCAL_CHECK_MODE` auto-throttle (#3301).
+# Kept xtask-local; not promoted to workspace.dependencies because no
+# production crate consumes it. Default features are disabled — we only need
+# the system probe, not disks/networks/processes.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 librefang-migrate = { path = "../crates/librefang-migrate" }
 
 [lints]

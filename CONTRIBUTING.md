@@ -275,6 +275,43 @@ After building, verify your local setup:
 cargo run -- doctor
 ```
 
+### Local Check Mode (low-spec hosts)
+
+`cargo xtask ci`, `cargo xtask pre-commit`, `cargo xtask coverage`,
+`cargo xtask bench`, `cargo xtask codegen`, `cargo xtask dev`, and
+`cargo xtask api-docs` probe the host on startup and may auto-throttle
+cargo concurrency to avoid OOM-ing low-spec laptops (refs #3301).
+
+Three modes, controlled by the `LIBREFANG_LOCAL_CHECK_MODE` environment
+variable:
+
+| Mode        | When                                                    | Effect                                                            |
+|-------------|---------------------------------------------------------|-------------------------------------------------------------------|
+| `full`      | `CI=true` env, or auto-detect on capable hosts          | No env tweaks (matches historical behaviour)                      |
+| `throttled` | Auto-detect on `mem < 16 GB` **or** `cpus < 4`          | `CARGO_BUILD_JOBS=1`, appends `-C codegen-units=1` to `RUSTFLAGS`, sets `RUST_MIN_STACK=8388608` |
+| `off`       | User explicit opt-out                                   | No env tweaks (you know your machine; we won't touch anything)    |
+
+The mode is printed at the top of each affected subcommand:
+
+```
+xtask ci: local-check-mode = throttled (cpus=4, mem=8 GB)
+```
+
+**Auto-detect heuristic:**
+- If `CI` env is set (GitHub Actions, GitLab CI, CircleCI, etc.), mode is forced to `full`.
+- Else if total RAM < 16 GB or available CPU count < 4, mode is `throttled`.
+- Otherwise, mode is `full`.
+
+**Manual override:**
+```bash
+LIBREFANG_LOCAL_CHECK_MODE=full cargo xtask ci        # force full concurrency
+LIBREFANG_LOCAL_CHECK_MODE=throttled cargo xtask ci   # force throttled
+LIBREFANG_LOCAL_CHECK_MODE=off cargo xtask ci         # disable env tweaks entirely
+```
+
+Existing values for `CARGO_BUILD_JOBS` / `RUST_MIN_STACK` are preserved
+(only set when unset); `RUSTFLAGS` is appended to, never replaced.
+
 ---
 
 ## Code Style

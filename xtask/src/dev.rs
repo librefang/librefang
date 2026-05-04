@@ -1,4 +1,5 @@
 use crate::common::repo_root;
+use crate::local_check_mode;
 use clap::Parser;
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,6 +20,8 @@ pub struct DevArgs {
 }
 
 pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
+    local_check_mode::apply_for_subcommand("dev");
+
     let root = repo_root();
 
     // Kill stale processes on relevant ports
