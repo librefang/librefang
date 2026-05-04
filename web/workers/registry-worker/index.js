@@ -77,6 +77,15 @@ export default {
     if (path === '/.well-known/registry-pubkey' && request.method === 'GET')
       return handlePubkey(env)
 
+    // Operator-only path used by the librefang-registry GitHub Action to
+    // rebuild the D1 cache + signed index right after a push to main, so
+    // dashboard / daemon don't have to wait for the next 02:00 UTC cron
+    // tick. Auth is a shared bearer token deployed as a worker secret;
+    // until it is set, the route returns 503 and stays inert. See
+    // `web/workers/SIGNING.md` § "Forced refresh from the registry repo".
+    if (path === '/api/registry/refresh' && request.method === 'POST')
+      return handleForcedRefresh(request, env)
+
     return new Response('Not Found', { status: 404 })
   },
 
@@ -543,6 +552,59 @@ async function handleSignedIndexSig(env) {
       ...CORS,
     },
   })
+}
+
+// Forced refresh — invoked by the librefang-registry GitHub Action after a
+// push to main. Constant-time auth against `REGISTRY_REFRESH_TOKEN` (worker
+// secret); 503 until the secret is set so the endpoint can't be probed.
+// On success: rebuild D1 caches (`registry_data` + `plugins_index`),
+// re-sign, and purge the Cache-API row so the next dashboard hit reads
+// fresh bytes instead of the 1h-cached previous payload.
+async function handleForcedRefresh(request, env) {
+  const expected = (env.REGISTRY_REFRESH_TOKEN || '').trim()
+  if (!expected) return errorResponse('refresh endpoint not configured', 503)
+
+  const auth = request.headers.get('authorization') || ''
+  const m = auth.match(/^Bearer\s+(.+)$/i)
+  const provided = m ? m[1].trim() : ''
+  if (!constantTimeEqual(provided, expected)) {
+    return errorResponse('unauthorized', 401)
+  }
+
+  // Force a full rebuild by pre-emptively dropping the rows the
+  // signature-equality short-circuit relies on. Without this, a no-op
+  // commit (e.g. README typo) would short-circuit and never refresh
+  // plugins_index — but legitimate plugin pushes also might not flip
+  // the directory `sha`. Dropping the rows guarantees a real fetch.
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'registry_data'`),
+    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'plugins_index'`),
+    env.DB.prepare(`DELETE FROM kv_store WHERE key = 'plugins_index_sig'`),
+  ])
+
+  await refreshRegistryCache(env)
+
+  // Purge the Cache-API entry that backs `/api/registry`. A new request
+  // would otherwise see the previous (now-superseded) cached payload for
+  // up to REGISTRY_CACHE_TTL.
+  try {
+    await caches.default.delete(new Request('https://internal/registry_data'))
+  } catch (_) { /* best-effort */ }
+
+  const fresh = await env.DB.prepare(
+    `SELECT updated_at FROM kv_store WHERE key = 'registry_data'`,
+  ).first()
+  return new Response(
+    JSON.stringify({ ok: true, refreshed_at: fresh?.updated_at ?? null }),
+    { headers: { 'Content-Type': 'application/json', ...CORS } },
+  )
+}
+
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false
+  let mismatch = 0
+  for (let i = 0; i < a.length; i++) mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return mismatch === 0
 }
 
 function handlePubkey(env) {
