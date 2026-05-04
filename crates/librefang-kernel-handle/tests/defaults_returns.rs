@@ -63,11 +63,11 @@ impl TaskQueue for NoopKernelHandle {
         _description: &str,
         _assigned_to: Option<&str>,
         _created_by: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<String, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
@@ -76,27 +76,27 @@ impl TaskQueue for NoopKernelHandle {
         _agent_id: &str,
         _task_id: &str,
         _result: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+    async fn task_delete(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+    async fn task_retry(&self, _task_id: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+    async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 
-    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
+    async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, librefang_kernel_handle::KernelOpError> {
         Err("noop".into())
     }
 }
