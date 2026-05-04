@@ -4068,7 +4068,7 @@ export async function getUserBudget(name: string): Promise<UserBudgetResponse> {
 export async function updateUserBudget(
   name: string,
   payload: UserBudgetPayload,
-): Promise<{ status: string; budget: UserBudgetPayload }> {
+): Promise<UserBudgetPayload> {
   return put(
     `/api/budget/users/${encodeURIComponent(name)}`,
     payload,
