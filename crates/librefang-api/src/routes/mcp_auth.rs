@@ -831,6 +831,12 @@ pub async fn auth_callback(
     // we skip this step the refresh fails on the first access-token expiry
     // with `No token_endpoint stored for refresh` and the user is bounced
     // back through a fresh OAuth flow each session.
+    //
+    // NOTE: concurrent OAuth flows for the same `server_url` race here on
+    // the bare per-server namespace — last write wins. This matches the
+    // existing race in DCR persistence at L345-346 and is acceptable: two
+    // simultaneous sign-ins for one server are an unusual operator action
+    // and both arrive at the same metadata under normal use. No locking.
     if let Err(e) = trait_provider
         .store_oauth_metadata(&server_url, &token_endpoint, client_id.as_deref())
         .await

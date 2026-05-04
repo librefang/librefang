@@ -266,3 +266,107 @@ async fn auth_revoke_unknown_server_is_404() {
     let (status, body) = delete(&h, "/api/mcp/servers/does-not-exist/auth/revoke").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "got body: {body:?}");
 }
+
+// ---------------------------------------------------------------------------
+// store_oauth_metadata wiring
+//
+// The OAuth callback handler (`auth_callback` in `routes::mcp_auth`) calls
+// `state.kernel.oauth_provider_ref().store_oauth_metadata(...)` AFTER a
+// successful token exchange and BEFORE the per-flow PKCE cleanup loop. This
+// promotes `token_endpoint` (and an optional DCR `client_id`) from the
+// per-flow staging namespace into the durable per-server namespace that
+// `KernelOAuthProvider::try_refresh` reads from.
+//
+// Driving the full callback path end-to-end would require mocking the OAuth
+// token endpoint at a loopback HTTP URL — which the SSRF guard
+// (`is_ssrf_blocked_url`) explicitly forbids. So we test the wiring at the
+// trait surface instead: we exercise the same `oauth_provider_ref()` that
+// the callback handler resolves, against the same kernel home directory, and
+// assert the side effect on the shared vault. This protects against future
+// refactors that swap the trait provider for a no-op shim or repoint the
+// home directory away from where `try_refresh` looks.
+// ---------------------------------------------------------------------------
+
+/// `oauth_provider_ref().store_oauth_metadata` MUST persist `token_endpoint`
+/// and `client_id` under the bare per-server vault namespace (`{server_url}/...`)
+/// — the same keys `try_refresh` reads from. If the trait provider were
+/// silently replaced with a no-op, refresh would fail on the first
+/// access-token expiry and this test would catch it before users do.
+#[tokio::test(flavor = "multi_thread")]
+async fn store_oauth_metadata_via_kernel_writes_bare_namespace() {
+    use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
+
+    let h = boot_no_servers();
+
+    let server_url = "https://mcp.example.com/mcp";
+    let token_endpoint = "https://mcp.example.com/token";
+    let client_id = "dcr-client-xyz";
+
+    // Drive the same path the callback uses to reach the trait provider.
+    h.state
+        .kernel
+        .oauth_provider_ref()
+        .store_oauth_metadata(server_url, token_endpoint, Some(client_id))
+        .await
+        .expect("store_oauth_metadata via trait provider");
+
+    // Read back through a fresh `KernelOAuthProvider` rooted at the kernel's
+    // own home_dir — this mirrors how `try_refresh` resolves the vault and
+    // confirms the callback's promotion lands on the keys refresh reads.
+    let provider = KernelOAuthProvider::new(h.state.kernel.home_dir().to_path_buf());
+
+    assert_eq!(
+        provider
+            .vault_get(&KernelOAuthProvider::vault_key(
+                server_url,
+                "token_endpoint"
+            ))
+            .expect("vault_get token_endpoint"),
+        Some(token_endpoint.to_string()),
+        "token_endpoint must be readable under {{server_url}}/token_endpoint — \
+         this is the key try_refresh reads from"
+    );
+    assert_eq!(
+        provider
+            .vault_get(&KernelOAuthProvider::vault_key(server_url, "client_id"))
+            .expect("vault_get client_id"),
+        Some(client_id.to_string()),
+        "DCR client_id must be readable under {{server_url}}/client_id for refresh"
+    );
+}
+
+/// Bonus: `try_refresh`'s precondition — a stored `token_endpoint` —
+/// is satisfied by the trait wiring. The kernel-side `try_refresh` is
+/// private, so we assert the closest observable proxy: after the
+/// callback's `store_oauth_metadata` runs, `vault_get_or_warn` resolves
+/// the same key `try_refresh` reads, returning `Some(_)` rather than
+/// `None` (which would surface as `MissingTokenEndpoint` /
+/// "No token_endpoint stored for refresh" at refresh time).
+#[tokio::test(flavor = "multi_thread")]
+async fn store_oauth_metadata_unblocks_try_refresh_token_endpoint_lookup() {
+    use librefang_kernel::mcp_oauth_provider::KernelOAuthProvider;
+
+    let h = boot_no_servers();
+    let server_url = "https://mcp.example.com/mcp";
+    let token_endpoint = "https://mcp.example.com/token";
+
+    h.state
+        .kernel
+        .oauth_provider_ref()
+        .store_oauth_metadata(server_url, token_endpoint, None)
+        .await
+        .expect("store_oauth_metadata");
+
+    let provider = KernelOAuthProvider::new(h.state.kernel.home_dir().to_path_buf());
+    let lookup = provider.vault_get_or_warn(&KernelOAuthProvider::vault_key(
+        server_url,
+        "token_endpoint",
+    ));
+    assert_eq!(
+        lookup,
+        Some(token_endpoint.to_string()),
+        "try_refresh's `vault_get_or_warn(...token_endpoint)` must return the \
+         promoted value — None here would mean refresh fails with \
+         'No token_endpoint stored for refresh'"
+    );
+}
