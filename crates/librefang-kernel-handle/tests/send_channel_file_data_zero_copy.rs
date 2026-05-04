@@ -13,7 +13,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use librefang_kernel_handle::{AgentInfo, KernelHandle};
+use librefang_kernel_handle::prelude::*;
 use librefang_types::memory::{Entity, GraphMatch, GraphPattern, Relation};
 use std::sync::Mutex;
 
@@ -35,7 +35,7 @@ impl CapturingFileKernel {
 }
 
 #[async_trait]
-impl KernelHandle for CapturingFileKernel {
+impl AgentControl for CapturingFileKernel {
     async fn spawn_agent(
         &self,
         _manifest_toml: &str,
@@ -56,6 +56,12 @@ impl KernelHandle for CapturingFileKernel {
         Err("not used".into())
     }
 
+    fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+        vec![]
+    }
+}
+
+impl MemoryAccess for CapturingFileKernel {
     fn memory_store(
         &self,
         _key: &str,
@@ -76,11 +82,10 @@ impl KernelHandle for CapturingFileKernel {
     fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
         Err("not used".into())
     }
+}
 
-    fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-        vec![]
-    }
-
+#[async_trait]
+impl TaskQueue for CapturingFileKernel {
     async fn task_post(
         &self,
         _title: &str,
@@ -123,7 +128,10 @@ impl KernelHandle for CapturingFileKernel {
     async fn task_update_status(&self, _task_id: &str, _new_status: &str) -> Result<bool, String> {
         Err("not used".into())
     }
+}
 
+#[async_trait]
+impl EventBus for CapturingFileKernel {
     async fn publish_event(
         &self,
         _event_type: &str,
@@ -131,7 +139,10 @@ impl KernelHandle for CapturingFileKernel {
     ) -> Result<(), String> {
         Err("not used".into())
     }
+}
 
+#[async_trait]
+impl KnowledgeGraph for CapturingFileKernel {
     async fn knowledge_add_entity(&self, _entity: &Entity) -> Result<String, String> {
         Err("not used".into())
     }
@@ -143,7 +154,15 @@ impl KernelHandle for CapturingFileKernel {
     async fn knowledge_query(&self, _pattern: GraphPattern) -> Result<Vec<GraphMatch>, String> {
         Err("not used".into())
     }
+}
 
+impl CronControl for CapturingFileKernel {}
+impl ApprovalGate for CapturingFileKernel {}
+impl HandsControl for CapturingFileKernel {}
+impl A2ARegistry for CapturingFileKernel {}
+
+#[async_trait]
+impl ChannelSender for CapturingFileKernel {
     // The method under test. Records the underlying pointer + length so
     // the test can assert the kernel observed the same allocation as the
     // caller's Bytes — i.e. the trait did not silently copy the buffer.
@@ -162,6 +181,11 @@ impl KernelHandle for CapturingFileKernel {
         Ok("captured".into())
     }
 }
+
+impl PromptStore for CapturingFileKernel {}
+impl WorkflowRunner for CapturingFileKernel {}
+impl GoalControl for CapturingFileKernel {}
+impl ToolPolicy for CapturingFileKernel {}
 
 #[test]
 fn cloning_bytes_shares_underlying_allocation() {
