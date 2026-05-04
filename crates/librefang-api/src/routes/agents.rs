@@ -190,7 +190,7 @@ use axum::Json;
 use dashmap::DashMap;
 use librefang_channels::types::SenderContext;
 use librefang_kernel::LibreFangKernel;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;

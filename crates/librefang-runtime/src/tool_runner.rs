@@ -3,7 +3,7 @@
 //! Provides filesystem, web, shell, and inter-agent tools. Agent tools
 //! (agent_send, agent_spawn, etc.) require a KernelHandle to be passed in.
 
-use crate::kernel_handle::KernelHandle;
+use crate::kernel_handle::prelude::*;
 use crate::mcp;
 use crate::web_search::{parse_ddg_results, WebToolsContext};
 use librefang_skills::registry::SkillRegistry;
@@ -6194,8 +6194,6 @@ async fn tool_canvas_present(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel_handle::{AgentInfo, KernelHandle};
-    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -6505,8 +6503,10 @@ mod tests {
         user_gate_override: Option<librefang_types::user_policy::UserToolGate>,
     }
 
-    #[async_trait]
-    impl KernelHandle for ApprovalKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for ApprovalKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for ApprovalKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -6527,6 +6527,12 @@ mod tests {
             Err("not used".to_string())
         }
 
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for ApprovalKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -6547,11 +6553,10 @@ mod tests {
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
+    }
 
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
-
+    #[async_trait::async_trait]
+    impl TaskQueue for ApprovalKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -6598,7 +6603,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl EventBus for ApprovalKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -6606,7 +6614,10 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for ApprovalKernel {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
@@ -6627,7 +6638,10 @@ mod tests {
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ApprovalGate for ApprovalKernel {
         fn requires_approval(&self, tool_name: &str) -> bool {
             tool_name == "shell_exec"
         }
@@ -6669,8 +6683,22 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl KernelHandle for ForceHumanCapturingKernel {
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for ApprovalKernel {}
+    impl HandsControl for ApprovalKernel {}
+    impl A2ARegistry for ApprovalKernel {}
+    impl ChannelSender for ApprovalKernel {}
+    impl PromptStore for ApprovalKernel {}
+    impl WorkflowRunner for ApprovalKernel {}
+    impl GoalControl for ApprovalKernel {}
+    impl ToolPolicy for ApprovalKernel {}
+
+    // ---- END role-trait impls (#3746) ----
+
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for ForceHumanCapturingKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for ForceHumanCapturingKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -6678,15 +6706,25 @@ mod tests {
         ) -> Result<(String, String), String> {
             Err("not used".to_string())
         }
+
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
+
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
             Err("not used".to_string())
         }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for ForceHumanCapturingKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -6695,6 +6733,7 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         fn memory_recall(
             &self,
             _key: &str,
@@ -6702,12 +6741,14 @@ mod tests {
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskQueue for ForceHumanCapturingKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -6717,9 +6758,11 @@ mod tests {
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_complete(
             &self,
             _agent_id: &str,
@@ -6728,18 +6771,23 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_update_status(
             &self,
             _task_id: &str,
@@ -6747,6 +6795,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBus for ForceHumanCapturingKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -6754,25 +6806,34 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for ForceHumanCapturingKernel {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl ApprovalGate for ForceHumanCapturingKernel {
         fn requires_approval(&self, tool_name: &str) -> bool {
             tool_name == "shell_exec"
         }
@@ -6803,6 +6864,18 @@ mod tests {
                 .unwrap_or(librefang_types::user_policy::UserToolGate::Allow)
         }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for ForceHumanCapturingKernel {}
+    impl HandsControl for ForceHumanCapturingKernel {}
+    impl A2ARegistry for ForceHumanCapturingKernel {}
+    impl ChannelSender for ForceHumanCapturingKernel {}
+    impl PromptStore for ForceHumanCapturingKernel {}
+    impl WorkflowRunner for ForceHumanCapturingKernel {}
+    impl GoalControl for ForceHumanCapturingKernel {}
+    impl ToolPolicy for ForceHumanCapturingKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     /// Regression: when the per-user gate returns `NeedsApproval`, the
     /// `DeferredToolExecution.force_human` flag MUST be set so the
@@ -7180,8 +7253,10 @@ mod tests {
         download_dir: Option<std::path::PathBuf>,
     }
 
-    #[async_trait]
-    impl KernelHandle for NamedWsKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for NamedWsKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for NamedWsKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -7189,15 +7264,25 @@ mod tests {
         ) -> Result<(String, String), String> {
             Err("not used".to_string())
         }
+
         async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         fn list_agents(&self) -> Vec<AgentInfo> {
             vec![]
         }
+
         fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
             Err("not used".to_string())
         }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for NamedWsKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -7206,6 +7291,7 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         fn memory_recall(
             &self,
             _key: &str,
@@ -7213,12 +7299,14 @@ mod tests {
         ) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
+    }
+
+    #[async_trait::async_trait]
+    impl TaskQueue for NamedWsKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -7228,9 +7316,11 @@ mod tests {
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_complete(
             &self,
             _agent_id: &str,
@@ -7239,18 +7329,23 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+
         async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
             Err("not used".to_string())
         }
+
         async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
             Err("not used".to_string())
         }
+
         async fn task_update_status(
             &self,
             _task_id: &str,
@@ -7258,6 +7353,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBus for NamedWsKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -7265,30 +7364,40 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
+
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for NamedWsKernel {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_add_relation(
             &self,
             _relation: &librefang_types::memory::Relation,
         ) -> Result<String, String> {
             Err("not used".to_string())
         }
+
         async fn knowledge_query(
             &self,
             _pattern: librefang_types::memory::GraphPattern,
         ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
             Err("not used".to_string())
         }
+    }
+
+    impl ToolPolicy for NamedWsKernel {
         fn named_workspace_prefixes(
             &self,
             _agent_id: &str,
         ) -> Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)> {
             self.named.clone()
         }
+
         fn readonly_workspace_prefixes(&self, _agent_id: &str) -> Vec<std::path::PathBuf> {
             self.named
                 .iter()
@@ -7300,6 +7409,18 @@ mod tests {
             self.download_dir.clone()
         }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for NamedWsKernel {}
+    impl HandsControl for NamedWsKernel {}
+    impl ApprovalGate for NamedWsKernel {}
+    impl A2ARegistry for NamedWsKernel {}
+    impl ChannelSender for NamedWsKernel {}
+    impl PromptStore for NamedWsKernel {}
+    impl WorkflowRunner for NamedWsKernel {}
+    impl GoalControl for NamedWsKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     fn make_named_ws_kernel(
         named: Vec<(std::path::PathBuf, librefang_types::agent::WorkspaceMode)>,
@@ -9772,8 +9893,10 @@ mod tests {
         should_fail_escalation: bool,
     }
 
-    #[async_trait]
-    impl KernelHandle for SpawnCheckKernel {
+    // ---- BEGIN role-trait impls (split from former `impl KernelHandle for SpawnCheckKernel`, #3746) ----
+
+    #[async_trait::async_trait]
+    impl AgentControl for SpawnCheckKernel {
         async fn spawn_agent(
             &self,
             _manifest_toml: &str,
@@ -9818,6 +9941,12 @@ mod tests {
             Err("not used".to_string())
         }
 
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for SpawnCheckKernel {
         fn memory_store(
             &self,
             _key: &str,
@@ -9838,11 +9967,10 @@ mod tests {
         fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
             Err("not used".to_string())
         }
+    }
 
-        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
-            vec![]
-        }
-
+    #[async_trait::async_trait]
+    impl TaskQueue for SpawnCheckKernel {
         async fn task_post(
             &self,
             _title: &str,
@@ -9889,7 +10017,10 @@ mod tests {
         ) -> Result<bool, String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl EventBus for SpawnCheckKernel {
         async fn publish_event(
             &self,
             _event_type: &str,
@@ -9897,7 +10028,10 @@ mod tests {
         ) -> Result<(), String> {
             Err("not used".to_string())
         }
+    }
 
+    #[async_trait::async_trait]
+    impl KnowledgeGraph for SpawnCheckKernel {
         async fn knowledge_add_entity(
             &self,
             _entity: &librefang_types::memory::Entity,
@@ -9919,6 +10053,19 @@ mod tests {
             Err("not used".to_string())
         }
     }
+
+    // No-op role-trait impls (#3746) — mock relies on default bodies.
+    impl CronControl for SpawnCheckKernel {}
+    impl HandsControl for SpawnCheckKernel {}
+    impl ApprovalGate for SpawnCheckKernel {}
+    impl A2ARegistry for SpawnCheckKernel {}
+    impl ChannelSender for SpawnCheckKernel {}
+    impl PromptStore for SpawnCheckKernel {}
+    impl WorkflowRunner for SpawnCheckKernel {}
+    impl GoalControl for SpawnCheckKernel {}
+    impl ToolPolicy for SpawnCheckKernel {}
+
+    // ---- END role-trait impls (#3746) ----
 
     #[test]
     fn parse_poll_options_accepts_2_to_10_strings() {

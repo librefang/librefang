@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use librefang_kernel_handle::{AgentInfo, KernelHandle};
+use librefang_kernel_handle::prelude::*;
 use librefang_runtime::tool_runner::{execute_tool_raw, ToolExecContext};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -40,7 +40,7 @@ impl CapturingKernel {
 }
 
 #[async_trait]
-impl KernelHandle for CapturingKernel {
+impl AgentControl for CapturingKernel {
     async fn spawn_agent(&self, _: &str, _: Option<&str>) -> Result<(String, String), String> {
         Err("not implemented".into())
     }
@@ -53,6 +53,12 @@ impl KernelHandle for CapturingKernel {
     fn kill_agent(&self, _: &str) -> Result<(), String> {
         Err("not implemented".into())
     }
+    fn find_agents(&self, _: &str) -> Vec<AgentInfo> {
+        vec![]
+    }
+}
+
+impl MemoryAccess for CapturingKernel {
     fn memory_store(
         &self,
         _key: &str,
@@ -83,9 +89,10 @@ impl KernelHandle for CapturingKernel {
             .push(peer_id.map(|s| s.to_string()));
         Ok(vec![])
     }
-    fn find_agents(&self, _: &str) -> Vec<AgentInfo> {
-        vec![]
-    }
+}
+
+#[async_trait]
+impl TaskQueue for CapturingKernel {
     async fn task_post(
         &self,
         _: &str,
@@ -116,9 +123,17 @@ impl KernelHandle for CapturingKernel {
     async fn task_update_status(&self, _: &str, _: &str) -> Result<bool, String> {
         Err("not implemented".into())
     }
+}
+
+#[async_trait]
+impl EventBus for CapturingKernel {
     async fn publish_event(&self, _: &str, _: serde_json::Value) -> Result<(), String> {
         Err("not implemented".into())
     }
+}
+
+#[async_trait]
+impl KnowledgeGraph for CapturingKernel {
     async fn knowledge_add_entity(
         &self,
         _: &librefang_types::memory::Entity,
@@ -138,6 +153,16 @@ impl KernelHandle for CapturingKernel {
         Err("not implemented".into())
     }
 }
+
+impl CronControl for CapturingKernel {}
+impl ApprovalGate for CapturingKernel {}
+impl HandsControl for CapturingKernel {}
+impl A2ARegistry for CapturingKernel {}
+impl ChannelSender for CapturingKernel {}
+impl PromptStore for CapturingKernel {}
+impl WorkflowRunner for CapturingKernel {}
+impl GoalControl for CapturingKernel {}
+impl ToolPolicy for CapturingKernel {}
 
 fn make_ctx<'a>(
     kernel: &'a Arc<dyn KernelHandle>,
