@@ -77,13 +77,33 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/memory/agents/{id}/import",
             axum::routing::post(memory_import_agent),
         )
+        // Agent KV store (#3749 11/N: moved from system.rs).
+        .route("/memory/agents/{id}/kv", axum::routing::get(get_agent_kv))
+        .route(
+            "/memory/agents/{id}/kv/{key}",
+            axum::routing::get(get_agent_kv_key)
+                .put(set_agent_kv_key)
+                .delete(delete_agent_kv_key),
+        )
+        .route(
+            "/agents/{id}/memory/export",
+            axum::routing::get(export_agent_memory),
+        )
+        .route(
+            "/agents/{id}/memory/import",
+            axum::routing::post(import_agent_memory),
+        )
 }
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use librefang_types::agent::AgentId;
+use librefang_types::i18n::ErrorTranslator;
 use librefang_types::memory::ProactiveMemory;
 
+use crate::extractors::AgentIdPath;
+use crate::middleware::RequestLanguage;
 use crate::types::ApiErrorResponse;
 // ---------------------------------------------------------------------------
 // Query / path helpers
@@ -1520,6 +1540,346 @@ pub async fn memory_config_patch(
     (StatusCode::OK, Json(body))
 }
 
+// ---------------------------------------------------------------------------
+// Agent KV store endpoints (#3749 11/N: moved from system.rs).
+// ---------------------------------------------------------------------------
+
+/// Owner-or-admin scoping for the per-agent KV store.
+///
+/// Returns `Err((status, body))` when the caller is authenticated but is
+/// neither an admin nor the agent's author — caller propagates that pair
+/// through `into_json_tuple`-style returns. Anonymous (no extension) and
+/// admin callers always succeed.
+///
+/// The list endpoint already enforced this; the single-key get / set /
+/// delete and the export / import handlers were missed in the original
+/// `system.rs` implementation, which let any authenticated user read or
+/// mutate `user.preferences`, `oncall.contact`, `api.tokens`, etc. on
+/// any agent as long as they knew the key name.
+fn assert_kv_owner_or_admin(
+    state: &AppState,
+    agent_id: librefang_types::agent::AgentId,
+    api_user: Option<&axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    t: &ErrorTranslator,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let Some(user) = api_user else {
+        return Ok(());
+    };
+    use crate::middleware::UserRole;
+    if user.0.role >= UserRole::Admin {
+        return Ok(());
+    }
+    let owned = state
+        .kernel
+        .agent_registry()
+        .get(agent_id)
+        .map(|e| e.manifest.author.eq_ignore_ascii_case(&user.0.name))
+        .unwrap_or(false);
+    if owned {
+        Ok(())
+    } else {
+        Err(ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple())
+    }
+}
+
+/// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = crate::types::JsonObject)))]
+pub async fn get_agent_kv(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
+    match state.kernel.memory_substrate().list_kv(agent_id) {
+        Ok(pairs) => {
+            let kv: Vec<serde_json::Value> = pairs
+                .into_iter()
+                .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv})))
+        }
+        Err(e) => {
+            tracing::warn!("Memory list_kv failed: {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = crate::types::JsonObject)))]
+pub async fn get_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, &key)
+    {
+        Ok(Some(val)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"key": key, "value": val})),
+        ),
+        Ok(None) => {
+            ApiErrorResponse::not_found(t.t("api-error-kv-key-not-found")).into_json_tuple()
+        }
+        Err(e) => {
+            tracing::warn!("Memory get failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
+#[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = crate::types::JsonObject, responses((status = 200, description = "KV value set", body = crate::types::JsonObject)))]
+pub async fn set_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
+    let value = body.get("value").cloned().unwrap_or(body);
+
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_set(agent_id, &key, value)
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "stored", "key": key})),
+        ),
+        Err(e) => {
+            tracing::warn!("Memory set failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
+#[utoipa::path(delete, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV key deleted")))]
+pub async fn delete_agent_kv_key(
+    State(state): State<Arc<AppState>>,
+    Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> axum::response::Response {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return ApiErrorResponse::bad_request(t.t("api-error-agent-invalid-id"))
+                .into_json_tuple()
+                .into_response();
+        }
+    };
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp.into_response();
+    }
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_delete(agent_id, &key)
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::warn!("Memory delete failed for key '{key}': {e}");
+            ApiErrorResponse::internal(t.t("api-error-memory-operation-failed"))
+                .into_json_tuple()
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
+#[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = crate::types::JsonObject)))]
+pub async fn export_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Verify agent exists. The owner-or-admin check below would already
+    // hide unknown agents from non-admins via 404, but admins skip the
+    // scope check entirely, so we still need this branch to give them a
+    // clean 404 instead of falling through to a `list_kv` against a
+    // non-existent id.
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
+
+    match state.kernel.memory_substrate().list_kv(agent_id) {
+        Ok(pairs) => {
+            let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "agent_id": agent_id.0.to_string(),
+                    "version": 1,
+                    "kv": kv_map,
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Memory export failed for agent {agent_id}: {e}");
+            ApiErrorResponse::internal(t.t("api-error-kv-export-failed")).into_json_tuple()
+        }
+    }
+}
+
+/// POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.
+///
+/// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
+/// Optionally accepts `clear_existing: true` to wipe existing memory before import.
+///
+/// **Response contract — clients MUST inspect `body.status`, not just the
+/// HTTP status code.** A 200 may indicate either:
+///   - `{ "status": "imported", "keys_imported": N }` — every key written.
+///   - `{ "status": "partial", "keys_imported": N, "failed_keys": [...] }` —
+///     one or more keys failed at the substrate layer; the rest were
+///     written. The endpoint deliberately does not surface partial as
+///     207 Multi-Status to avoid breaking existing callers that gate on
+///     `status == 200`. Treat any non-`"imported"` body status as a
+///     soft failure that requires retrying the listed keys.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/memory/import",
+    tag = "memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Memory imported (status=\"imported\") OR partial \
+            failure (status=\"partial\" with failed_keys list — clients must check body)",
+            body = crate::types::JsonObject),
+        (status = 400, description = "Missing or malformed `kv` object"),
+        (status = 404, description = "Agent not found, or caller is not the agent's author and not an admin"),
+        (status = 500, description = "Backend failure clearing existing memory before import")
+    )
+)]
+pub async fn import_agent_memory(
+    State(state): State<Arc<AppState>>,
+    AgentIdPath(agent_id): AgentIdPath,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    api_user: Option<axum::Extension<crate::middleware::AuthenticatedApiUser>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+
+    // Verify agent exists (admins skip the owner check below, so we still
+    // need this branch for them — see `export_agent_memory`).
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return ApiErrorResponse::not_found(t.t("api-error-agent-not-found")).into_json_tuple();
+    }
+    if let Err(resp) = assert_kv_owner_or_admin(&state, agent_id, api_user.as_ref(), &t) {
+        return resp;
+    }
+
+    let kv = match body.get("kv").and_then(|v| v.as_object()) {
+        Some(obj) => obj.clone(),
+        None => {
+            return ApiErrorResponse::bad_request(t.t("api-error-kv-missing-kv-object"))
+                .into_json_tuple();
+        }
+    };
+
+    let clear_existing = body
+        .get("clear_existing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Clear existing memory if requested
+    if clear_existing {
+        match state.kernel.memory_substrate().list_kv(agent_id) {
+            Ok(existing) => {
+                for (key, _) in existing {
+                    if let Err(e) = state
+                        .kernel
+                        .memory_substrate()
+                        .structured_delete(agent_id, &key)
+                    {
+                        tracing::warn!("Failed to delete key '{key}' during import clear: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to list existing KV during import clear: {e}");
+                return ApiErrorResponse::internal(t.t("api-error-kv-import-clear-failed"))
+                    .into_json_tuple();
+            }
+        }
+    }
+
+    let mut imported = 0u64;
+    let mut errors = Vec::new();
+
+    for (key, value) in &kv {
+        match state
+            .kernel
+            .memory_substrate()
+            .structured_set(agent_id, key, value.clone())
+        {
+            Ok(()) => imported += 1,
+            Err(e) => {
+                tracing::warn!("Memory import failed for key '{key}': {e}");
+                errors.push(key.clone());
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "imported",
+                "keys_imported": imported,
+            })),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "partial",
+                "keys_imported": imported,
+                "failed_keys": errors,
+            })),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Regression tests for PR #3205 follow-ups.
@@ -1696,6 +2056,8 @@ mod tests {
             pending_a2a_agents: dashmap::DashMap::new(),
             auth_login_limiter: std::sync::Arc::new(crate::rate_limiter::AuthLoginLimiter::new()),
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
+            trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
+            trust_forwarded_for: false,
         });
         (state, tmp)
     }

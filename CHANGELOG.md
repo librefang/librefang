@@ -387,6 +387,7 @@ _338 PRs from 7 contributors since v2026.4.28-beta7._
 ### Added
 
 - Config-driven session mode for agent triggers (`session_mode = "new" | "persistent"`) — per-agent default with per-trigger override
+- **Real-client-IP resolution for proxied deployments** via two new top-level config fields, `trusted_proxies` and `trust_forwarded_for`. When both are set and the TCP peer matches the allowlist, the GCRA + auth-login rate limiters and the WebSocket per-IP connection cap key on the IP from forwarding headers (`CF-Connecting-IP` → `X-Real-IP` → `Forwarded` (RFC 7239) → rightmost-untrusted hop in `X-Forwarded-For`) instead of the proxy's own address. Without both flags set, behaviour is unchanged: TCP peer only, headers ignored. Forged forwarding headers from peers outside the allowlist are still ignored, so a rotating `X-Forwarded-For` from the open internet can never bypass per-IP limits. Closes the long-standing TODO referenced in `rate_limiter::resolve_client_ip` (now retired).
 
 ### Changed
 
