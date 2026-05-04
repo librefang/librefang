@@ -1,0 +1,299 @@
+name: release-sdks
+
+# Manual SDK re-publish. Issue #3304 1/N (non-destructive split).
+#
+# Mirrors release.yml's sdk_javascript / sdk_cli_npm / sdk_python /
+# sdk_rust / sdk_go jobs, gated behind workflow_dispatch only. The
+# monolithic release.yml continues to handle the auto-trigger path on
+# tag push. This workflow is the "redo just the SDK slice" tool.
+#
+# Auth deltas vs. release.yml:
+#   - npm publishes here are wired for OIDC trusted publishing
+#     (id-token: write + --provenance) instead of NPM_TOKEN. Maintainer
+#     must configure the npm trusted-publisher relationship before this
+#     becomes the canonical publish path; see docs/operations/release.md.
+#   - PyPI is OIDC in both monolithic and split (already trusted-publishing).
+#   - crates.io still uses CARGO_REGISTRY_TOKEN (no OIDC support yet).
+#
+# Inputs:
+#   tag             — existing release tag whose SDKs should be (re)published
+#   include_javascript / include_cli_npm / include_python / include_rust / include_go
+#                   — toggle individual SDK jobs (default: all on)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (e.g. v2026.5.4)'
+        required: true
+        type: string
+      include_javascript:
+        description: 'Re-publish JavaScript SDK to npm'
+        required: false
+        type: boolean
+        default: true
+      include_cli_npm:
+        description: 'Re-publish @librefang/cli to npm'
+        required: false
+        type: boolean
+        default: true
+      include_python:
+        description: 'Re-publish Python SDK to PyPI'
+        required: false
+        type: boolean
+        default: true
+      include_rust:
+        description: 'Re-publish Rust SDK to crates.io'
+        required: false
+        type: boolean
+        default: true
+      include_go:
+        description: 'Tag Go module'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sdks-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  sdk_javascript:
+    name: SDK / JavaScript (npm)
+    if: ${{ inputs.include_javascript }}
+    runs-on: ubuntu-latest
+    environment: release-npm
+    permissions:
+      id-token: write   # OIDC for npm provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/javascript
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing @librefang/sdk@$VERSION"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Publish to npm (with OIDC provenance)
+        # OIDC trusted-publisher relationship must be configured at
+        # https://www.npmjs.com/package/@librefang/sdk/access before
+        # this workflow can replace the monolithic NPM_TOKEN path.
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
+          else
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
+              NPM_TAG="--tag lts"
+            fi
+            npm publish --access public --provenance --ignore-scripts $NPM_TAG
+          fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm config set registry https://npm.pkg.github.com
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          GPR_TAG=""
+          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            GPR_TAG="--tag next"
+          elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
+            GPR_TAG="--tag lts"
+          fi
+          npm publish --access public --ignore-scripts $GPR_TAG 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+
+  sdk_cli_npm:
+    name: SDK / CLI npm (@librefang/cli)
+    if: ${{ inputs.include_cli_npm }}
+    runs-on: ubuntu-latest
+    environment: release-npm
+    permissions:
+      id-token: write   # OIDC for npm provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/cli-npm
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing @librefang/cli@$VERSION"
+
+      - name: Publish to npm (with OIDC provenance)
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published, skipping"
+          else
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            fi
+            npm publish --access public --provenance --ignore-scripts $NPM_TAG
+          fi
+          echo "- **npm**: https://www.npmjs.com/package/${PKG_NAME}/v/${PKG_VERSION}" >> $GITHUB_STEP_SUMMARY
+
+  sdk_python:
+    name: SDK / Python (PyPI)
+    if: ${{ inputs.include_python }}
+    runs-on: ubuntu-latest
+    environment: release-pypi
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Sync version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          # PEP 440: convert -beta1 → b1, -rc1 → rc1, strip -lts (no PEP 440 equivalent)
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts//')
+          sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
+          echo "Publishing librefang-sdk==$PYPI_VERSION"
+          grep '^version' pyproject.toml
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Publish to PyPI
+        # OIDC trusted publishing — configure at:
+        # pypi.org/manage/project/librefang-sdk/settings/publishing
+        # workflow filename: release-sdks.yml, environment: release-pypi
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: sdk/python/dist/
+          skip-existing: true
+
+      - name: Output publish link
+        run: |
+          PYPI_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "- **PyPI**: https://pypi.org/project/librefang-sdk/${PYPI_VERSION}/" >> $GITHUB_STEP_SUMMARY
+
+  sdk_rust:
+    name: SDK / Rust (crates.io)
+    if: ${{ inputs.include_rust }}
+    runs-on: ubuntu-latest
+    environment: release-crates
+    defaults:
+      run:
+        working-directory: sdk/rust
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Sync version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+          sed -i '/^\[dependencies\]/,/^```/ s/librefang = "[^"]*"/librefang = "'"$MAJOR_MINOR"'"/' README.md
+          echo "Publishing librefang@$VERSION"
+          grep '^version' Cargo.toml
+
+      - name: Test
+        run: cargo test
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if cargo search librefang --limit 1 2>/dev/null | grep -q "librefang = \"$VERSION\""; then
+            echo "✓ librefang@$VERSION already published to crates.io, skipping"
+          else
+            cargo publish --allow-dirty
+          fi
+          echo "- **crates.io**: https://crates.io/crates/librefang/${VERSION}" >> $GITHUB_STEP_SUMMARY
+
+  sdk_go:
+    name: SDK / Go (tag)
+    if: ${{ inputs.include_go }}
+    runs-on: ubuntu-latest
+    environment: release-tag
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.tag }}
+      - name: Create Go module tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          REPO="${{ github.repository }}"
+
+          # Map CalVer to Go-compatible v0.YYYYMMDD.0 (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.21 → v0.20260321.0, 2026.3.21-rc1 → v0.20260321.0-rc1
+          YEAR=$(echo "$VERSION" | cut -d. -f1)
+          MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
+          DD=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.0${PRERELEASE}"
+          GO_TAG="sdk/go/v${GO_VERSION}"
+
+          if gh api "repos/$REPO/git/refs/tags/$GO_TAG" &>/dev/null; then
+            echo "Tag $GO_TAG already exists, skipping"
+            exit 0
+          fi
+
+          SHA=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')
+
+          gh api "repos/$REPO/git/refs" \
+            -f ref="refs/tags/$GO_TAG" \
+            -f sha="$SHA"
+          echo "✓ Published Go module tag: $GO_TAG (from $VERSION)"

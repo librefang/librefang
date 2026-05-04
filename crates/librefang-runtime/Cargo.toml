@@ -26,6 +26,7 @@ reqwest = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
@@ -59,6 +60,7 @@ libc = "0.2"
 
 [dev-dependencies]
 serial_test = "3"
+metrics-util = { version = "0.20", features = ["debugging"] }
 
 [features]
 landlock-sandbox = ["dep:landlock"]

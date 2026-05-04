@@ -979,6 +979,82 @@ mod tests {
             .expect("send must succeed with unsupported content");
     }
 
+    // ----- transport-layer tests for #3406 -----
+    //
+    // The Discord send path (`api_send_message`) currently has *no* 429
+    // retry and *no* idempotency / nonce token in the outbound payload:
+    // a 429 (with `X-RateLimit-Reset-After` / `Retry-After`) is logged via
+    // `warn!` and the call returns `Ok(())` (fail-open). These tests pin
+    // that behaviour. Promotion to a real backoff + nonce flow is tracked
+    // as follow-up on issue #3406.
+
+    /// Discord 429 with `X-RateLimit-Reset-After` is observed exactly
+    /// once — the adapter does NOT retry, and `send()` still returns Ok.
+    /// When real retry lands, flip `expect(1)` to `expect(2)`.
+    #[tokio::test]
+    async fn discord_send_does_not_retry_on_429_today() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/42/messages$"))
+            .and(header("Authorization", "Bot Bot-test-token"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("X-RateLimit-Reset-After", "1.5")
+                    .insert_header("X-RateLimit-Scope", "user")
+                    .set_body_json(serde_json::json!({
+                        "message": "You are being rate limited.",
+                        "retry_after": 1.5,
+                        "global": false,
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        // Current production behaviour: 429 is warned, send returns Ok.
+        adapter
+            .send(
+                &dummy_user("42"),
+                ChannelContent::Text("rate-limited write".into()),
+            )
+            .await
+            .expect("discord send is fail-open on 429 today");
+    }
+
+    /// Verify the outbound request shape is exactly the documented
+    /// `POST /channels/{id}/messages` schema — Bot auth header, JSON
+    /// body with a single `content` field. Locking this down so an
+    /// incidental refactor doesn't break Discord's payload contract.
+    #[tokio::test]
+    async fn discord_send_request_shape_matches_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/channels/777/messages$"))
+            .and(header("Authorization", "Bot Bot-test-token"))
+            .and(header("Content-Type", "application/json"))
+            .and(body_json(serde_json::json!({
+                "content": "exact shape",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "1",
+                "channel_id": "777",
+                "content": "exact shape",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("777"),
+                ChannelContent::Text("exact shape".into()),
+            )
+            .await
+            .expect("send must succeed");
+    }
+
     #[test]
     fn role_resolution_parses_member_role_ids() {
         let member = serde_json::json!({

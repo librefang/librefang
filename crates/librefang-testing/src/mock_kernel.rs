@@ -6,7 +6,7 @@
 
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::KernelConfig;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use tempfile::TempDir;
 
 /// Pin a deterministic vault master key for the test process the first
@@ -84,9 +84,13 @@ impl MockKernelBuilder {
 
     /// Builds the kernel instance.
     ///
-    /// Returns `(LibreFangKernel, TempDir)` — the caller must hold onto `TempDir`,
-    /// otherwise the temp directory will be deleted on drop, invalidating kernel file paths.
-    pub fn build(mut self) -> (LibreFangKernel, TempDir) {
+    /// Returns `(Arc<LibreFangKernel>, TempDir)` — the caller must hold onto
+    /// `TempDir`, otherwise the temp directory will be deleted on drop,
+    /// invalidating kernel file paths. The kernel is wrapped in `Arc` and has
+    /// `set_self_handle` called on it so internal `kernel_handle()` lookups
+    /// (used by `send_message_*`, agent forking, etc.) succeed in tests the
+    /// same way they do in production (#3652).
+    pub fn build(mut self) -> (Arc<LibreFangKernel>, TempDir) {
         ensure_test_vault_key();
         let tmp = tempfile::tempdir().expect("failed to create temp directory");
         let home_dir = tmp.path().to_path_buf();
@@ -114,8 +118,10 @@ impl MockKernelBuilder {
             f(&mut self.config);
         }
 
-        let kernel =
-            LibreFangKernel::boot_with_config(self.config).expect("failed to boot test kernel");
+        let kernel = Arc::new(
+            LibreFangKernel::boot_with_config(self.config).expect("failed to boot test kernel"),
+        );
+        kernel.set_self_handle();
 
         (kernel, tmp)
     }
@@ -130,6 +136,6 @@ impl Default for MockKernelBuilder {
 /// Quickly builds a default test kernel (convenience function).
 ///
 /// Equivalent to `MockKernelBuilder::new().build()`.
-pub fn test_kernel() -> (LibreFangKernel, TempDir) {
+pub fn test_kernel() -> (Arc<LibreFangKernel>, TempDir) {
     MockKernelBuilder::new().build()
 }

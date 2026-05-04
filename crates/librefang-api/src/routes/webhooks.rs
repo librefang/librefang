@@ -23,7 +23,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
@@ -239,8 +239,9 @@ pub async fn webhook_agent(
             }
         },
         None => {
-            // No agent specified — use the first available agent
-            match state.kernel.agent_registry().list().first() {
+            // No agent specified — use the first available agent. Read-only
+            // peek at the id, so use cheap Arc clones (#3569).
+            match state.kernel.agent_registry().list_arcs().first() {
                 Some(entry) => entry.id,
                 None => {
                     return ApiErrorResponse::not_found(err_no_agents).into_response();
