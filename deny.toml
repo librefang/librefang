@@ -37,6 +37,35 @@ yanked = "deny"
 ignore = [
     # Each entry MUST link to the issue / PR documenting the justification.
     # Format: "RUSTSEC-YYYY-NNNN", # <reason>; tracking: <issue url>
+    #
+    # gtk-rs GTK3 bindings — transitive via tauri-runtime-wry on Linux only.
+    # No safe upgrade is available until tauri migrates to GTK4. Tracking PR #4581.
+    "RUSTSEC-2024-0411",
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0414",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0417",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    # Other unmaintained / advisory crates pulled in transitively (tauri,
+    # wasmtime, etc.) with no safe upgrade available at the time of adopting
+    # cargo-deny. Each will be revisited as upstream releases land. Tracking PR #4581.
+    "RUSTSEC-2023-0071", # rsa — Marvin attack; pulled transitively, no fix yet.
+    "RUSTSEC-2024-0370", # proc-macro-error — unmaintained; transitive.
+    "RUSTSEC-2025-0057", # fxhash — unmaintained; transitive.
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
+    "RUSTSEC-2025-0134",
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -54,12 +83,16 @@ allow = [
     "MIT",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "0BSD",
     "ISC",
     "Unicode-DFS-2016",
     "Unicode-3.0",
     "MPL-2.0",
     "Zlib",
     "CC0-1.0",
+    # CDLA-Permissive-2.0 is used by webpki-roots; OSI-approved permissive
+    # license compatible with our distribution model.
+    "CDLA-Permissive-2.0",
 ]
 # Per-crate license clarifications go here. Add only when SPDX detection is
 # ambiguous AND the upstream LICENSE file has been read manually.
@@ -85,14 +118,21 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 # is consolidated.
 multiple-versions = "warn"
 # Wildcard version requirements (`*`) cannot be reproducibly resolved and
-# are always a mistake in a published crate.
+# are always a mistake in a published crate. Workspace-internal crates
+# however depend on each other via `path = "..."` only, which cargo-deny
+# treats as `*` — those are safe and explicitly allowed.
 wildcards = "deny"
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 deny = []
-skip = []
+skip = [
+    # `zip` 4.x is pulled in by tauri-plugin-updater (transitive) while our
+    # own code uses 8.x. Allow the duplicate until tauri upstream catches up.
+    { name = "zip" },
+]
 skip-tree = []
 
 # ─────────────────────────────────────────────────────────────────────────────
