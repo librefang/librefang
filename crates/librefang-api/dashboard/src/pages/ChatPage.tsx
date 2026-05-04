@@ -1170,16 +1170,24 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <button
               type="button"
               onClick={() => setThinkingExpanded((v) => !v)}
+              aria-expanded={thinkingExpanded}
+              aria-controls={`thinking-block-${message.id}`}
               className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-border-subtle bg-surface text-[10px] font-medium text-text-dim hover:text-text hover:border-border transition-colors"
             >
-              <Brain className="h-3 w-3" />
+              <Brain className="h-3 w-3" aria-hidden="true" />
               <span>{t("chat.thinking_label")}</span>
               <ChevronDown
                 className={`h-3 w-3 transition-transform ${thinkingExpanded ? "rotate-180" : ""}`}
+                aria-hidden="true"
               />
             </button>
             {thinkingExpanded && (
-              <div className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm">
+              <div
+                id={`thinking-block-${message.id}`}
+                role="region"
+                aria-label={t("chat.thinking_label")}
+                className="mt-1 px-3 py-2 rounded-lg border border-border-subtle bg-surface/50 text-[12px] leading-relaxed text-text-dim break-words prose-sm"
+              >
                 <MarkdownContent>{message.thinking ?? ""}</MarkdownContent>
               </div>
             )}
