@@ -59,6 +59,7 @@ libc = "0.2"
 
 [dev-dependencies]
 serial_test = "3"
+proptest = "1"
 
 [features]
 landlock-sandbox = ["dep:landlock"]
