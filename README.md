@@ -206,6 +206,22 @@ cargo clippy --workspace --all-targets -- -D warnings    # Zero warnings
 cargo fmt --all -- --check                               # Format check
 ```
 
+### Committing changes
+
+Use `scripts/commit.sh` instead of `git commit` directly so staged Rust
+files are rustfmt-clean before the pre-commit hook gates them:
+
+```bash
+scripts/commit.sh -m "feat: add foo"
+scripts/commit.sh -F .git/COMMIT_EDITMSG
+```
+
+The wrapper runs `cargo fmt` on staged `*.rs` files, re-stages them, and
+holds a soft lock against parallel commits in the same worktree. All flags
+are forwarded to `git commit` unchanged. If `cargo` is unavailable the
+script skips formatting and warns; the pre-commit hook still gates the
+commit.
+
 ## Comparison
 
 See [Comparison](https://docs.librefang.ai/getting-started/comparison#16-security-systems--defense-in-depth) for benchmarks and feature-by-feature comparison vs OpenClaw, ZeroClaw, CrewAI, AutoGen, and LangGraph.

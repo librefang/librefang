@@ -2375,7 +2375,8 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
               NPM_TAG="--tag next"
             elif echo "$PKG_VERSION" | grep -qE -- '\-lts'; then
               NPM_TAG="--tag lts"
@@ -2391,7 +2392,8 @@ jobs:
           npm config set registry https://npm.pkg.github.com
           PKG_VERSION=$(node -p "require('./package.json').version")
           GPR_TAG=""
-          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+          # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+          if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
             GPR_TAG="--tag next"
           elif echo "$PKG_VERSION" | grep -qE -- '-lts'; then
             GPR_TAG="--tag lts"
@@ -2431,7 +2433,8 @@ jobs:
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published, skipping"
           else
             NPM_TAG=""
-            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+            # Accept both canonical `-beta.N` (#3310) and legacy `-betaN`.
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)\.?[0-9]'; then
               NPM_TAG="--tag next"
             fi
             npm publish --access public --ignore-scripts $NPM_TAG
@@ -2463,8 +2466,11 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          # PEP 440: convert -beta1 → b1, -rc1 → rc1, strip -lts (no PEP 440 equivalent)
-          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/; s/-lts//')
+          # PEP 440: convert -beta.1 → b1, -rc.1 → rc1 (canonical form, #3310);
+          # also handle legacy -beta1 / -rc1; strip -lts (no PEP 440 equivalent).
+          # Order matters: dot-form first, otherwise the no-dot rule converts
+          # `-beta.1` → `b.1` (invalid PEP 440).
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta\./b/; s/-rc\./rc/; s/-beta/b/; s/-rc/rc/; s/-lts//')
           sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
           echo "Publishing librefang-sdk==$PYPI_VERSION"
           grep '^version' pyproject.toml

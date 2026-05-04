@@ -42,6 +42,35 @@ pub use kernel::DeliveryTracker;
 pub use kernel::LibreFangKernel;
 
 // ---------------------------------------------------------------------------
+// Runtime re-exports (refs #3596 — API → Kernel → Runtime layering)
+// ---------------------------------------------------------------------------
+//
+// `librefang-api` historically imported runtime types directly, which bypasses
+// kernel encapsulation. The intended layering is `API → Kernel → Runtime`;
+// API code should reach runtime types through the kernel boundary.
+//
+// These re-exports mirror the public modules of `librefang-runtime` that the
+// API layer needs as read-only types or trait surfaces. They do not introduce
+// new dependencies — `librefang-kernel` already depends on `librefang-runtime`.
+//
+// Migration is incremental (PR 1/N): adding the re-exports here unblocks API
+// callers from switching `use librefang_runtime::foo` to
+// `use librefang_kernel::foo` one file at a time, without breaking files that
+// have not yet been migrated. A follow-up PR will delete
+// `librefang-api/Cargo.toml`'s direct `librefang-runtime` dependency once the
+// last in-tree `use librefang_runtime::*` is gone, letting the compiler
+// enforce the boundary.
+pub use librefang_runtime::agent_loop;
+pub use librefang_runtime::audit;
+pub use librefang_runtime::kernel_handle;
+pub use librefang_runtime::llm_driver;
+pub use librefang_runtime::llm_errors;
+pub use librefang_runtime::mcp_oauth;
+pub use librefang_runtime::media;
+pub use librefang_runtime::str_utils;
+pub use librefang_runtime::tool_runner;
+
+// ---------------------------------------------------------------------------
 // Shared persist utility
 // ---------------------------------------------------------------------------
 
