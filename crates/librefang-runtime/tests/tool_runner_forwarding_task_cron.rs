@@ -68,13 +68,13 @@ impl AgentControl for CapturingKernel {
 }
 
 impl MemoryAccess for CapturingKernel {
-    fn memory_store(&self, _: &str, _: serde_json::Value, _: Option<&str>) -> Result<(), String> {
+    fn memory_store(&self, _: &str, _: serde_json::Value, _: Option<&str>) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    fn memory_recall(&self, _: &str, _: Option<&str>) -> Result<Option<serde_json::Value>, String> {
+    fn memory_recall(&self, _: &str, _: Option<&str>) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
-    fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, _: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not implemented".into())
     }
 }

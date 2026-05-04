@@ -67,7 +67,7 @@ impl MemoryAccess for CapturingFileKernel {
         _key: &str,
         _value: serde_json::Value,
         _peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
@@ -75,11 +75,11 @@ impl MemoryAccess for CapturingFileKernel {
         &self,
         _key: &str,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Err("not used".into())
     }
 }

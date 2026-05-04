@@ -45,7 +45,7 @@ impl MemoryAccess for TrackingSendHandle {
         _key: &str,
         _value: serde_json::Value,
         _peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 
@@ -53,11 +53,11 @@ impl MemoryAccess for TrackingSendHandle {
         &self,
         _key: &str,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Ok(None)
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }
@@ -207,7 +207,7 @@ impl MemoryAccess for TrackingSpawnHandle {
         _key: &str,
         _value: serde_json::Value,
         _peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 
@@ -215,11 +215,11 @@ impl MemoryAccess for TrackingSpawnHandle {
         &self,
         _key: &str,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Ok(None)
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }
@@ -368,7 +368,7 @@ impl MemoryAccess for TrackingApprovalHandle {
         _key: &str,
         _value: serde_json::Value,
         _peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         Ok(())
     }
 
@@ -376,11 +376,11 @@ impl MemoryAccess for TrackingApprovalHandle {
         &self,
         _key: &str,
         _peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         Ok(None)
     }
 
-    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         Ok(vec![])
     }
 }

@@ -64,7 +64,7 @@ impl MemoryAccess for CapturingKernel {
         _key: &str,
         _value: serde_json::Value,
         peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), librefang_kernel_handle::KernelOpError> {
         self.memory_store_calls
             .lock()
             .unwrap()
@@ -75,14 +75,14 @@ impl MemoryAccess for CapturingKernel {
         &self,
         _key: &str,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, librefang_kernel_handle::KernelOpError> {
         self.memory_recall_calls
             .lock()
             .unwrap()
             .push(peer_id.map(|s| s.to_string()));
         Ok(None)
     }
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, librefang_kernel_handle::KernelOpError> {
         self.memory_list_calls
             .lock()
             .unwrap()

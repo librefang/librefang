@@ -18007,7 +18007,8 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id);
         // Check whether key already exists to determine Created vs Updated
@@ -18019,7 +18020,7 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
             .is_some();
         self.memory
             .structured_set(agent_id, &scoped, value)
-            .map_err(|e| format!("Memory store failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Memory store failed: {e}")))?;
 
         // Publish MemoryUpdate event so triggers can react
         let operation = if had_old {
@@ -18059,20 +18060,25 @@ impl kernel_handle::MemoryAccess for LibreFangKernel {
         &self,
         key: &str,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String> {
+    ) -> Result<Option<serde_json::Value>, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let agent_id = shared_memory_agent_id();
         let scoped = peer_scoped_key(key, peer_id);
         self.memory
             .structured_get(agent_id, &scoped)
-            .map_err(|e| format!("Memory recall failed: {e}"))
+            .map_err(|e| KernelOpError::Other(format!("Memory recall failed: {e}")))
     }
 
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String> {
+    fn memory_list(
+        &self,
+        peer_id: Option<&str>,
+    ) -> Result<Vec<String>, kernel_handle::KernelOpError> {
+        use kernel_handle::KernelOpError;
         let agent_id = shared_memory_agent_id();
         let all_keys = self
             .memory
             .list_keys(agent_id)
-            .map_err(|e| format!("Memory list failed: {e}"))?;
+            .map_err(|e| KernelOpError::Other(format!("Memory list failed: {e}")))?;
         match peer_id {
             Some(pid) => {
                 let prefix = format!("peer:{pid}:");

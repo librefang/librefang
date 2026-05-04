@@ -255,7 +255,7 @@ pub trait MemoryAccess: Send + Sync {
         key: &str,
         value: serde_json::Value,
         peer_id: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> Result<(), KernelOpError>;
 
     /// Recall a value from shared memory.
     /// When `peer_id` is `Some`, only returns values stored under that peer's namespace.
@@ -263,11 +263,11 @@ pub trait MemoryAccess: Send + Sync {
         &self,
         key: &str,
         peer_id: Option<&str>,
-    ) -> Result<Option<serde_json::Value>, String>;
+    ) -> Result<Option<serde_json::Value>, KernelOpError>;
 
     /// List all keys in shared memory.
     /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
-    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
+    fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, KernelOpError>;
 
     /// Resolve the per-user memory ACL for the given sender + channel
     /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
@@ -1070,17 +1070,17 @@ mod tests {
             _key: &str,
             _value: serde_json::Value,
             _peer_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), super::KernelOpError> {
             Err("stub".into())
         }
         fn memory_recall(
             &self,
             _key: &str,
             _peer_id: Option<&str>,
-        ) -> Result<Option<serde_json::Value>, String> {
+        ) -> Result<Option<serde_json::Value>, super::KernelOpError> {
             Ok(None)
         }
-        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, super::KernelOpError> {
             Ok(vec![])
         }
     }
