@@ -6912,7 +6912,7 @@ mod monitoring_tests {
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
-    use librefang_runtime::audit::AuditAction;
+    use librefang_kernel::audit::AuditAction;
     use librefang_types::config::KernelConfig;
 
     fn monitoring_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
