@@ -18191,9 +18191,6 @@ impl kernel_handle::KnowledgeGraph for LibreFangKernel {
 
 #[async_trait::async_trait]
 impl kernel_handle::CronControl for LibreFangKernel {
-    /// Spawn with capability inheritance enforcement.
-    /// Parses the child manifest, extracts its capabilities, and verifies
-    /// every child capability is covered by the parent's grants.
     async fn cron_create(
         &self,
         agent_id: &str,
