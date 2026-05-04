@@ -101,6 +101,11 @@ async function handleRegistry(request, env, ctx, forceRefresh) {
     `SELECT value, updated_at FROM kv_store WHERE key = 'registry_data'`,
   ).first()
 
+  // The fresh-fetch path makes ~30+ GitHub subrequests, which exceeds the
+  // Workers Free 50-subrequest-per-request budget. Cron runs (02:00 UTC)
+  // get the higher quota, so we keep the staleness window honored even
+  // when `?refresh=1` is set — operators wanting an immediate rebuild
+  // should let the cron fire.
   if (row && (Date.now() / 1000 - row.updated_at) < REGISTRY_STALE_TTL) {
     const response = jsonResponse(row.value, REGISTRY_CACHE_TTL)
     ctx.waitUntil(caches.default.put(cacheKey, response.clone()))
@@ -461,7 +466,57 @@ async function refreshRegistryCache(env) {
 // Signed-index endpoints (Ed25519)
 // ---------------------------------------------------------------------------
 
+// Lazy-build `plugins_index` from the cron-built `registry_data` if it's
+// missing (e.g. on first deploy after the signing routes shipped, before
+// the next cron tick). The flat array we write here is byte-identical to
+// what `refreshRegistryCache` would have produced, so the daemon's
+// signature verification stays consistent across both build paths.
+async function ensurePluginsIndex(env) {
+  const present = await env.DB.prepare(
+    `SELECT 1 AS p FROM kv_store WHERE key = 'plugins_index'`,
+  ).first()
+  if (present) return
+  const dataRow = await env.DB.prepare(
+    `SELECT value FROM kv_store WHERE key = 'registry_data'`,
+  ).first()
+  if (!dataRow) return
+  let parsed
+  try {
+    parsed = JSON.parse(dataRow.value)
+  } catch (_) {
+    return
+  }
+  const flat = (parsed.plugins || [])
+    .map(p => {
+      const out = { name: p.name }
+      if (p.version) out.version = p.version
+      if (p.description) out.description = p.description
+      if (p.needs?.length) out.needs = p.needs
+      return out
+    })
+    .filter(p => p.name)
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const flatJson = JSON.stringify(flat)
+  const now = Math.floor(Date.now() / 1000)
+  await env.DB.prepare(
+    `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).bind(flatJson, now).run()
+  try {
+    const sig = await signWithRegistryKey(env, new TextEncoder().encode(flatJson))
+    if (sig) {
+      await env.DB.prepare(
+        `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).bind(sig, now).run()
+    }
+  } catch (e) {
+    console.error('Lazy plugins_index signing failed:', e.message)
+  }
+}
+
 async function handleSignedIndex(env) {
+  await ensurePluginsIndex(env)
   const row = await env.DB.prepare(
     `SELECT value FROM kv_store WHERE key = 'plugins_index'`,
   ).first()
@@ -476,6 +531,7 @@ async function handleSignedIndex(env) {
 }
 
 async function handleSignedIndexSig(env) {
+  await ensurePluginsIndex(env)
   const row = await env.DB.prepare(
     `SELECT value FROM kv_store WHERE key = 'plugins_index_sig'`,
   ).first()
