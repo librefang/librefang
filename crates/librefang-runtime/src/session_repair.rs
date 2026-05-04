@@ -3016,7 +3016,7 @@ mod tests {
                     tool_name: "any_tool".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
-                    status: ToolExecutionStatus::Success,
+                    status: ToolExecutionStatus::Completed,
                     approval_request_id: None,
                 }]),
                 pinned: false,
