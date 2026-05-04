@@ -174,7 +174,7 @@ gate (clippy, openapi/SDK drift, security audit, full test matrix).
 
 | Hook        | Runs                                                                  | Target time |
 |-------------|-----------------------------------------------------------------------|-------------|
-| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard, `detect-secrets` (if installed) | < 2s |
+| `pre-commit`| `cargo fmt --check` on staged `*.rs` only, CHANGELOG guard + `(@user)` attribution check, `detect-secrets` (if installed) | < 2s |
 | `pre-push`  | Refuses direct push to `main` / `master`. Nothing else.                | < 100ms |
 | `commit-msg`| Reject Claude / Anthropic attribution                                  | < 50ms |
 
@@ -764,6 +764,28 @@ Add Matrix channel adapter with E2EE support
 Fix session restore crash on kernel reboot
 Refactor capability manager to use DashMap
 ```
+
+### CHANGELOG Attribution
+
+When you add a bullet to the `## [Unreleased]` section of `CHANGELOG.md`,
+end the line with your GitHub login in parentheses, e.g.
+
+```
+- Add Matrix channel adapter with E2EE support (#1234) (@your-login)
+```
+
+This is enforced by `scripts/check-changelog-attribution.py` (wired into the
+`pre-commit` hook and the `CHANGELOG Attribution` CI job). The check runs
+**only against the lines your PR adds** — historical entries that predate
+this convention are not retroactively flagged, and you should not backfill
+them. To audit the current `[Unreleased]` block before cutting a release:
+
+```
+python3 scripts/check-changelog-attribution.py --all-unreleased
+```
+
+The accepted format is `(@username)` matching `\(@[A-Za-z0-9_][A-Za-z0-9_-]*\)`.
+See issue #3400 for the rationale.
 
 ---
 

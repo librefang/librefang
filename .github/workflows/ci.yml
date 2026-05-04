@@ -246,6 +246,28 @@ jobs:
             cargo clippy $PFLAGS --all-targets --all-features -- -D warnings
           fi
 
+  # ── CHANGELOG attribution check ────────────────────────────────────────────────
+  # Enforces the `(@username)` suffix on bullets *added* to the [Unreleased]
+  # section in this PR. Historical entries (1,800+ bullets, many predating
+  # any attribution convention) are NOT retroactively flagged — the validator
+  # only looks at lines this diff introduces. See #3400.
+  changelog-attribution:
+    name: CHANGELOG Attribution
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Validate (@user) attribution on new [Unreleased] bullets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-changelog-attribution.py
+
   # ── OpenAPI / SDK drift check ──────────────────────────────────────────────────
   # Regenerates openapi.json and the four SDKs and fails if anything differs
   # from what was committed. The pre-commit hook tries to keep these in sync

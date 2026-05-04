@@ -37,6 +37,20 @@ if git diff --cached --name-only | grep -qx "CHANGELOG.md"; then
         echo "Release tooling will silently drop entries from all but the first. Merge them into one block."
         exit 1
     fi
+
+    # 2b. (@username) attribution on staged additions to [Unreleased]. See
+    # #3400. Only fails when the staged diff adds a bullet without `(@user)`
+    # — never penalises historical entries. Soft-skip if python3 is missing.
+    if command -v python3 >/dev/null 2>&1; then
+        if ! python3 scripts/check-changelog-attribution.py --staged; then
+            echo 'Error: staged CHANGELOG.md additions to [Unreleased] are missing'
+            echo '       a `(@your-github-login)` suffix. Add it at the end of each bullet.'
+            echo '       Audit current section: python3 scripts/check-changelog-attribution.py --all-unreleased'
+            exit 1
+        fi
+    else
+        echo "warning: python3 not available; skipping CHANGELOG attribution check." >&2
+    fi
 fi
 
 # 3. Secret detection. Soft-fail if detect-secrets is not installed —
