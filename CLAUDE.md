@@ -221,6 +221,86 @@ The daemon command is `start` (not `daemon`).
 - **Worktree**: Use `git worktree add` on an external disk for new features; fall back to `/tmp/librefang-<feature>` only if no external disk is available. Never develop on the main worktree
 - **Worktree continuation = drive to PR**: When asked to continue half-done work in an existing worktree (uncommitted changes or unmerged commits), the workflow is **commit → push → open or update PR**. Don't stop at "local commits only". A new branch needs a fresh PR; an existing branch with an open PR gets a follow-up push to update it. If the dirty changes aren't real work (e.g., stale `Cargo.lock` after rebase on an already-merged branch), discard them with `git checkout` instead of half-committing
 
+## GitHub Collaboration & Wait Policy
+
+LibreFang is an open-source project with heavy AI-assistant traffic. The
+rules below codify the boundaries summarised in `AGENTS.md` ("AI Agent
+Collaboration") so that maintainers stay in control of their own PRs and
+issue threads.
+
+### Touching other people's work
+
+- **Maintainer-reviewed PRs are off-limits.** Once a human maintainer has
+  left review comments, an `Approve`, or a `Request changes` on a PR, do
+  not push additional commits to that branch unless the maintainer
+  explicitly asks for them. The right move is a follow-up PR that
+  references the original.
+- **Never close a PR or issue opened by someone else.** If you believe an
+  issue is fixed or a PR is superseded, post a comment recommending
+  closure with the linking commit / PR — let a maintainer pull the trigger.
+- **Force-push only to your own branches, only before review.** Once a
+  reviewer has loaded the diff, prefer fixup commits or a follow-up PR
+  over rewriting history. Force-push to `main` / `master` is blocked by
+  `guard-bash-safety.sh` and requires explicit user OK regardless.
+- **Don't reassign, re-label, or re-milestone** issues / PRs you did not
+  open unless asked. Adding `needs-review` or self-assigning a triage
+  label is fine; flipping `priority` / `release` labels is not.
+
+### Commit & PR hygiene
+
+- **No Claude / Anthropic / AI attribution** in commit messages, PR
+  bodies, or issue comments. The `commit-msg` git hook rejects matching
+  strings; the PreToolUse Bash hook catches the inline-flag form. Don't
+  try to route around either — the rule exists because attribution
+  pollutes `git log` and signals provenance the project does not want to
+  imply.
+- **One PR ↔ one issue (or one tight cluster).** Don't bundle unrelated
+  refactors with the requested change. If you find a real problem
+  out-of-scope, open a separate issue or follow-up PR; mention it in the
+  current PR's "Out-of-scope follow-ups" section.
+- **PR body must enumerate** the substantive changes, the verification
+  performed (integration test names, `cargo check --workspace --lib`
+  output, scoped `cargo test -p <crate>` runs), and any deferred work.
+  Bullet form, no marketing prose.
+
+### CI wait policy
+
+CI is shared infrastructure and frequently slow. Polling it from an AI
+session burns turns without producing information.
+
+- **Hard cap: ~5 minutes of polling.** After that, push, leave the run
+  URL in the PR / report, and **stop**. Don't loop a `gh run watch` for
+  half an hour.
+- **Don't pre-emptively re-run a check** that has not yet failed. Only
+  retry after a recorded failure, and only once.
+- **Don't open follow-up issues or pivot the plan** while waiting for CI
+  or review. If you cannot make further progress without information you
+  do not have, the correct action is to report status and yield — not to
+  invent more work.
+- **Don't add reviewers, flip `ready-for-review`, or `gh pr ready`** on
+  someone else's behalf, and don't re-request review on your own PR
+  unless a maintainer has explicitly asked you to ping them. Maintainers
+  pull work into their queue; AI agents do not push it onto theirs.
+
+### Issue / PR comment etiquette
+
+- **At most two follow-up comments** on the same thread without human
+  input. After that, stop and wait — repeated AI-generated pings on a
+  silent thread are noise, not progress.
+- **Don't comment on threads you have no action on.** "Looks good"
+  drive-bys from an AI account add nothing.
+- **When you reply, link evidence:** commit SHAs, file paths, test
+  names. No vibes-only comments.
+
+### Conflict resolution
+
+- **Latest maintainer intent wins.** When rebasing or resolving merge
+  conflicts that touch a human-authored hunk, keep the maintainer's
+  edit. If the two sides genuinely disagree, surface the conflict in the
+  PR body and ask — don't silently pick the smaller diff.
+- **Preserve both sides' intent** during conflict resolution. Dropping a
+  hunk because "it'll be reapplied later" is how regressions land.
+
 ## Common Gotchas
 - `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`

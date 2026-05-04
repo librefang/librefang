@@ -91,6 +91,56 @@ Routes are organized by domain in `crates/librefang-api/src/routes/`:
 - **Testing**: Tests live alongside source code in `#[cfg(test)]` modules; integration test helpers in `librefang-testing`
 - **Commits**: Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
 
+## AI Agent Collaboration
+
+LibreFang is an open-source project with heavy AI-assistant participation.
+To keep human reviewers in control and avoid noisy / destructive behaviour,
+AI agents working on this repo MUST observe the following boundaries.
+Detailed enforcement (hooks, wait policy, conflict resolution) lives in
+[`CLAUDE.md`](./CLAUDE.md#github-collaboration--wait-policy); this list is
+the single-page summary.
+
+### Boundaries
+- **Never modify a PR a human maintainer has already reviewed or approved**
+  unless the maintainer explicitly asks. Open a follow-up PR instead.
+- **Never close a PR or issue you did not open.** Recommend closure in a
+  comment and let a maintainer act.
+- **Don't force-push to someone else's branch.** Force-push to your own
+  branch is acceptable only while the PR is still un-reviewed.
+- **Don't bypass git verification flags.** No `--no-verify`, no
+  `--no-gpg-sign`, no skipping `commit-msg` / `pre-push` hooks.
+- **Don't add Claude / AI attribution** to commit messages or PR bodies
+  (`Co-Authored-By: Claude`, `🤖 Generated with …`, etc.). The `commit-msg`
+  hook rejects these.
+- **Don't edit files in the main worktree.** Always work from a linked
+  worktree (`git worktree add`).
+
+### Issue / PR interaction
+- **One PR ↔ one issue** (or one tightly-related cluster). Don't bundle
+  unrelated cleanups; open a separate PR.
+- **At most 2 follow-up comments** on the same issue / PR thread without
+  human input — then stop and wait. Repeated pings are noise.
+- **PR body must list:** substantive changes, how they were verified
+  (integration test names, scoped `cargo` invocations), and any
+  out-of-scope follow-ups left for a future PR.
+
+### CI wait policy
+- **Don't poll status checks for more than ~5 minutes.** CI is slow;
+  busy-waiting wastes turns. Push, report the run URL, and stop.
+- **Don't pre-emptively retry a check before it has failed.**
+- When you are blocked and cannot make progress without investigation,
+  **stop and report** — don't auto-open a follow-up issue, don't silently
+  switch plan.
+- While waiting for review, **don't add reviewers, don't flip
+  `ready-for-review`, don't re-request review** unless a maintainer
+  has set up an explicit convention asking for it.
+
+### Conflict resolution
+- A human maintainer's most recent intent **always wins** over an earlier
+  AI-authored change. When rebasing or resolving merge conflicts, preserve
+  both sides' intent — never silently drop a maintainer's edit because it
+  made the diff smaller.
+
 ## Important Notes
 
 - **Do not modify `librefang-cli`** without explicit instruction -- it is under active development.
