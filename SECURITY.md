@@ -132,6 +132,51 @@ LibreFang implements defense-in-depth with the following security controls:
 - **External tip anchor (Tier 1)**: every audit append also writes the new tip hash to `~/.librefang/data/audit.anchor` outside the SQLite database (see `AuditLog::with_db_anchored` in `crates/librefang-runtime/src/audit.rs`). On startup and on every `/api/audit/verify` call, the in-DB tip is reconciled against the anchor file; if they diverge, verification **fails closed** (`valid: false`, `anchor_status: "diverged"`). An attacker rewriting the SQLite chain from genesis must now also forge the anchor file in lockstep, defeating the trivial DB-only forgery. The verify response surfaces `anchor_status` as `ok`, `diverged`, or `none` so the dashboard can show the anchor state alongside the chain check.
 - **Threat model — what the anchor does and does not buy**: the anchor file lives next to the database by default. An attacker with full write access to `~/.librefang/data/` can still corrupt both files in lockstep — the anchor is meaningfully stronger only when operators sync `audit.anchor` to an append-only store they control (offsite cron rsync, signed systemd-journald mirror, transparency log). Tier-2 (journald mirror) and Tier-3 (Ed25519-signed offsite mirror, transparency log) are tracked as follow-up work in #3339. Until then, treat the audit log as tamper-evident against single-file tampering and cooperative against multi-file tampering by an attacker with full filesystem write.
 
+## Supply-chain audit (CI gate)
+
+PRs that touch `crates/librefang-skills/`, `crates/librefang-hands/`,
+`crates/librefang-extensions/`, or `examples/` are gated by the
+`supply-chain-audit` workflow
+(`.github/workflows/supply-chain-audit.yml`), which runs the static
+checker `scripts/check-skills-supply-chain.py`. The checker enforces:
+
+- **No `.pth` files** anywhere in skill / hand / extension bundles.
+  Python's `site-packages` loader auto-executes `.pth` content at
+  interpreter start, so a single shipped `.pth` is a full-process RCE.
+- **No `eval` / `exec` / `compile(..., 'exec')`** in embedded `.py`
+  files (AST-grep, not regex), and a dedicated rule for
+  `eval(base64.b64decode(...).decode())` shapes.
+- **No `sys.path` mutation** or `importlib.util.spec_from_file_location`
+  in shipped Python — both let a skill load attacker-controlled code
+  outside the bundle.
+- **No `eval` / `Function(...)` / `setTimeout(<string>, ...)`** in
+  embedded `.js`.
+- **Curated jailbreak phrase regex** on `.toml` / `.md` / `.prompt`
+  prompt-bearing content: `ignore previous instructions`, `exfiltrate`,
+  `post … to webhook`, `bypass safety`, `override system prompt`,
+  `disregard … rules`, `reveal/leak system prompt`. This is stricter
+  than the runtime warning layer in
+  `crates/librefang-skills/src/verify.rs` because PR review is the
+  right time to bounce content, not install time. False positives can
+  opt out per-file with the literal marker `supply-chain-audit: allow`
+  (every use is reviewable in `git diff`).
+
+The workflow runs a `--self-test` job first, replaying embedded
+clean + malicious fixtures through every rule and asserting each is
+caught with the expected rule name. If a rule is weakened or removed
+without updating the fixtures, the self-test fails and the audit job
+is gated behind it. The companion checked-in fixtures live at
+`crates/librefang-skills/tests/fixtures/supply-chain/` and are
+documented in the README there.
+
+The script is pure-stdlib Python 3.10+ (no third-party imports), so
+it adds no new dependency surface to the security tooling itself.
+
+Cargo-side dependency advisories (`cargo-deny` / `cargo-audit`) are
+tracked separately under #3305. A runtime install-time guard that
+re-runs these checks at marketplace install time is the next stage of
+#3333 and is tracked there.
+
 ## Dependencies
 
 Security-critical dependencies are pinned and audited:

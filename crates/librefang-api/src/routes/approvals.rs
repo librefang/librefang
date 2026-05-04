@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::prelude::*;
+use librefang_kernel::kernel_handle::prelude::*;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
 
@@ -437,7 +437,7 @@ pub async fn approve_request(
                         .into_json_tuple()
                         .into_response();
                     }
-                    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                    match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
                         &secret,
                         code,
                         &totp_issuer,
@@ -1144,12 +1144,13 @@ pub async fn totp_setup(
                     }
                     match state.kernel.vault_get("totp_secret") {
                         Some(secret) => {
-                            let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
-                                &secret,
-                                code,
-                                &totp_issuer,
-                            )
-                            .unwrap_or(false);
+                            let ok =
+                                crate::approval::ApprovalManager::verify_totp_code_with_issuer(
+                                    &secret,
+                                    code,
+                                    &totp_issuer,
+                                )
+                                .unwrap_or(false);
                             if ok {
                                 state.kernel.approvals().record_totp_code_used(code);
                             }
@@ -1293,7 +1294,7 @@ pub async fn totp_confirm(
         )
         .into_json_tuple();
     }
-    match librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+    match crate::approval::ApprovalManager::verify_totp_code_with_issuer(
         &secret,
         &body.code,
         &totp_issuer,
@@ -1424,7 +1425,7 @@ pub async fn totp_revoke(
         }
         match state.kernel.vault_get("totp_secret") {
             Some(secret) => {
-                let ok = librefang_kernel::approval::ApprovalManager::verify_totp_code_with_issuer(
+                let ok = crate::approval::ApprovalManager::verify_totp_code_with_issuer(
                     &secret,
                     &body.code,
                     &totp_issuer,

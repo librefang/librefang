@@ -5,8 +5,30 @@
 //! - Spinner with label
 //! - OSC 9;4 terminal progress protocol (ConEmu/Windows Terminal/iTerm2)
 //! - Delay suppression for fast operations
+//! - Trait-based facade (`ProgressReporter`) so call sites can stay agnostic
+//!   of TTY vs. non-TTY environments
+//!
+//! # Choosing a reporter
+//!
+//! Most callers should use [`auto`], which picks a sensible default based on
+//! whether stderr is a TTY:
+//!
+//! ```no_run
+//! use librefang_cli::progress::{auto, ProgressReporter};
+//!
+//! let mut p = auto("Indexing", Some(100));
+//! for i in 0..100 {
+//!     p.tick(1);
+//!     # let _ = i;
+//! }
+//! p.finish("Indexed 100 items");
+//! ```
+//!
+//! On a TTY this renders an animated unicode bar; over a pipe or dumb
+//! terminal it falls back to plain `[n/total] msg` lines on stderr so logs
+//! stay grep-friendly.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 /// Default progress bar width (in characters).
@@ -273,6 +295,106 @@ impl Drop for Spinner {
 }
 
 // ---------------------------------------------------------------------------
+// ProgressReporter trait + dynamic dispatch facade
+// ---------------------------------------------------------------------------
+
+/// Unified facade for CLI progress output.
+///
+/// Implementations are expected to be cheap to construct and to honour delay
+/// suppression / TTY detection internally — call sites should never need to
+/// branch on environment.
+pub trait ProgressReporter {
+    /// Advance progress by `delta`. For indeterminate reporters the delta is
+    /// treated as a single step.
+    fn tick(&mut self, delta: u64);
+    /// Update the label / message displayed alongside progress.
+    fn set_message(&mut self, msg: &str);
+    /// Mark progress as complete and emit a final message.
+    fn finish(&mut self, msg: &str);
+}
+
+impl ProgressReporter for ProgressBar {
+    fn tick(&mut self, delta: u64) {
+        self.inc(delta);
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.label = msg.to_string();
+    }
+    fn finish(&mut self, msg: &str) {
+        self.finish_with_message(msg);
+    }
+}
+
+impl ProgressReporter for Spinner {
+    fn tick(&mut self, _delta: u64) {
+        Spinner::tick(self);
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.set_label(msg);
+    }
+    fn finish(&mut self, msg: &str) {
+        Spinner::finish_with_message(self, msg);
+    }
+}
+
+/// Plain-text fallback reporter for non-TTY environments (CI logs, pipes,
+/// dumb terminals).
+///
+/// Emits one line per `tick` to stderr in the form `[current/total] label`,
+/// or `[current] label` when the total is unknown. Output is line-buffered
+/// so it interleaves cleanly with surrounding tracing logs.
+pub struct LogReporter {
+    label: String,
+    total: Option<u64>,
+    current: u64,
+}
+
+impl LogReporter {
+    /// Create a log-style reporter. `total = None` means indeterminate.
+    pub fn new(label: &str, total: Option<u64>) -> Self {
+        Self {
+            label: label.to_string(),
+            total,
+            current: 0,
+        }
+    }
+}
+
+impl ProgressReporter for LogReporter {
+    fn tick(&mut self, delta: u64) {
+        self.current = self.current.saturating_add(delta);
+        match self.total {
+            Some(t) => eprintln!("[{}/{}] {}", self.current.min(t), t, self.label),
+            None => eprintln!("[{}] {}", self.current, self.label),
+        }
+    }
+    fn set_message(&mut self, msg: &str) {
+        self.label = msg.to_string();
+    }
+    fn finish(&mut self, msg: &str) {
+        eprintln!("{msg}");
+    }
+}
+
+/// Pick a reporter based on whether stderr is a TTY.
+///
+/// On a TTY: animated [`ProgressBar`] when `total` is known, [`Spinner`]
+/// otherwise. Off a TTY (pipe, redirect, CI): [`LogReporter`].
+///
+/// The returned trait object has dynamic dispatch — fine for CLI call sites
+/// where we issue a handful of ticks per second, not millions.
+pub fn auto(label: &str, total: Option<u64>) -> Box<dyn ProgressReporter> {
+    if io::stderr().is_terminal() {
+        match total {
+            Some(t) => Box::new(ProgressBar::new(label, t)),
+            None => Box::new(Spinner::new(label)),
+        }
+    } else {
+        Box::new(LogReporter::new(label, total))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -318,5 +440,47 @@ mod tests {
         let mut pb = ProgressBar::new("Quick", 10).no_osc();
         pb.set(1);
         assert!(!pb.visible);
+    }
+
+    #[test]
+    fn log_reporter_tick_finish_round_trip() {
+        // LogReporter is the canonical fallback path; verify the trait
+        // contract (tick advances, finish doesn't panic, set_message
+        // mutates the label) without inspecting stderr output.
+        let mut r = LogReporter::new("Sync", Some(3));
+        ProgressReporter::tick(&mut r, 1);
+        ProgressReporter::tick(&mut r, 1);
+        assert_eq!(r.current, 2);
+        ProgressReporter::set_message(&mut r, "Sync (final)");
+        assert_eq!(r.label, "Sync (final)");
+        ProgressReporter::tick(&mut r, 1);
+        assert_eq!(r.current, 3);
+        ProgressReporter::finish(&mut r, "done");
+    }
+
+    #[test]
+    fn log_reporter_indeterminate_does_not_overflow() {
+        // total = None branch shouldn't gate on any total comparison.
+        let mut r = LogReporter::new("Loading", None);
+        ProgressReporter::tick(&mut r, u64::MAX / 2);
+        ProgressReporter::tick(&mut r, u64::MAX / 2);
+        // saturating_add prevents wraparound.
+        assert_eq!(r.current, u64::MAX - 1);
+        ProgressReporter::tick(&mut r, 100);
+        assert_eq!(r.current, u64::MAX);
+    }
+
+    #[test]
+    fn progress_bar_implements_reporter() {
+        // Compile-time check that ProgressBar / Spinner satisfy the trait
+        // (so `auto()` can box them) and that dispatching through &mut dyn
+        // forwards to inc / set_label correctly.
+        let mut pb = ProgressBar::new("T", 5).no_delay().no_osc();
+        let r: &mut dyn ProgressReporter = &mut pb;
+        r.tick(2);
+        r.set_message("renamed");
+        // Reach into the concrete type to verify side effects.
+        assert_eq!(pb.current, 2);
+        assert_eq!(pb.label, "renamed");
     }
 }

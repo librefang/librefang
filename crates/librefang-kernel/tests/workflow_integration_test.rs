@@ -19,7 +19,6 @@ use librefang_kernel::workflow::{
 use librefang_kernel::LibreFangKernel;
 use librefang_testing::MockKernelBuilder;
 use librefang_types::agent::AgentManifest;
-use std::sync::Arc;
 
 fn spawn_test_agent(
     kernel: &LibreFangKernel,
@@ -62,7 +61,6 @@ async fn test_workflow_register_and_resolve() {
             c.default_model.api_key_env = "OLLAMA_API_KEY".to_string();
         })
         .build();
-    let kernel = Arc::new(kernel);
 
     // Spawn agents
     let manifest: AgentManifest = toml::from_str(
@@ -334,8 +332,6 @@ async fn test_workflow_e2e_with_groq() {
             c.default_model.api_key_env = "GROQ_API_KEY".to_string();
         })
         .build();
-    let kernel = Arc::new(kernel);
-    kernel.set_self_handle();
 
     // Spawn two agents with distinct roles
     let _analyst_id = spawn_test_agent(

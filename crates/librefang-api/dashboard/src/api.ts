@@ -3125,7 +3125,13 @@ export async function getMetricsText(): Promise<string> {
 // ── Plugins ──────────────────────────────────────────
 
 export interface PluginItem {
+  // Canonical identifier — used as the path segment for
+  // /plugins/{name}/{enable,disable,reload,install-deps,uninstall}.
+  // Must NOT be the localized label.
   name: string;
+  // Localized display label resolved from `[i18n.<lang>]` on the
+  // plugin manifest. Falls back to `name` when no override is set.
+  display_name?: string;
   version: string;
   description?: string;
   author?: string;
@@ -3136,7 +3142,11 @@ export interface PluginItem {
 }
 
 export interface RegistryPluginListing {
+  // Canonical identifier sent back to POST /api/plugins/install — must
+  // match the directory name on the GitHub registry. Localized labels
+  // go on `display_name`.
   name: string;
+  display_name?: string;
   installed: boolean;
   version?: string | null;
   description?: string | null;
