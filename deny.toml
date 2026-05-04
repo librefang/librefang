@@ -64,15 +64,17 @@ ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; transitive. https://rustsec.org/advisories/RUSTSEC-2025-0134" },
 
     # ── rustls-webpki 0.102.x vulnerabilities (transitive via rumqttc) ─────
-    # rumqttc 0.25.1 (latest, no newer release) pins rustls-webpki 0.102.8.
-    # Workspace also resolves rustls-webpki 0.103.13 elsewhere — direct usage
-    # is on a fixed line. The scoped `crate = "rustls-webpki@0.102.8"` keys
-    # ensure that if anything pulls in a *new* vulnerable version these still
-    # fire. Tracking upstream MQTT crate: https://github.com/bytebeamio/rumqtt/issues
-    { id = "RUSTSEC-2026-0049", crate = "rustls-webpki@0.102.8", reason = "CRL distribution-point handling; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0049" },
-    { id = "RUSTSEC-2026-0098", crate = "rustls-webpki@0.102.8", reason = "name-constraint URI handling; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0098" },
-    { id = "RUSTSEC-2026-0099", crate = "rustls-webpki@0.102.8", reason = "wildcard name-constraint bypass; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0099" },
-    { id = "RUSTSEC-2026-0104", crate = "rustls-webpki@0.102.8", reason = "CRL parser DoS panic; only affects 0.102.x via rumqttc. https://rustsec.org/advisories/RUSTSEC-2026-0104" },
+    # rumqttc 0.25.1 (latest published) pins rustls-webpki 0.102.8. Workspace
+    # also resolves rustls-webpki 0.103.13 elsewhere where the patched code
+    # paths run. These 4 IDs are unfortunately blanket-ignored because the
+    # cargo-deny version on EmbarkStudios/cargo-deny-action@v2 does not
+    # support the per-crate-version `crate = "..."` ignore field yet — until
+    # that lands (or rumqttc bumps), a fresh occurrence in another crate
+    # WILL slip through. Track: https://github.com/bytebeamio/rumqtt/issues
+    { id = "RUSTSEC-2026-0049", reason = "rustls-webpki 0.102.8 CRL distribution-point handling (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0049" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.8 name-constraint URI handling (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0098" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.8 wildcard name-constraint bypass (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0099" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.102.8 CRL parser DoS panic (transitive via rumqttc). https://rustsec.org/advisories/RUSTSEC-2026-0104" },
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
