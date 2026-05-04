@@ -20,12 +20,14 @@ pub mod audit;
 pub mod authz;
 pub mod auto_dream;
 pub mod backup;
+pub mod bindings;
 pub mod budget;
 pub mod channels;
+pub mod commands;
 pub mod config;
 pub mod goals;
-pub mod hooks_commands;
 pub mod inbox;
+pub mod logs;
 pub mod mcp_auth;
 pub mod media;
 pub mod memory;
@@ -61,12 +63,14 @@ pub use audit::*;
 pub use authz::*;
 pub use auto_dream::*;
 pub use backup::*;
+pub use bindings::*;
 pub use budget::*;
 pub use channels::*;
+pub use commands::*;
 pub use config::*;
 pub use goals::*;
-pub use hooks_commands::*;
 pub use inbox::*;
+pub use logs::*;
 pub use mcp_auth::*;
 pub use media::*;
 pub use memory::*;
@@ -176,4 +180,15 @@ pub struct AppState {
     /// task can call `retain_recent()` to evict stale per-IP entries and prevent
     /// the DashMap from growing unbounded over a long-running daemon. See #3668.
     pub gcra_limiter: Arc<KeyedRateLimiter>,
+    /// Compiled `trusted_proxies` allowlist — built once at boot and shared with
+    /// the GCRA + auth-login middlewares (see `server.rs`). Re-used by WS
+    /// upgrade handlers (`ws::agent_ws`, `routes::terminal::terminal_ws`) to
+    /// resolve the real client IP for per-IP slot keying without re-parsing
+    /// the raw config strings (and re-emitting the malformed-entry warning)
+    /// on every upgrade.
+    pub trusted_proxies: Arc<crate::client_ip::TrustedProxies>,
+    /// Master switch matching `KernelConfig::trust_forwarded_for`. Cached at
+    /// boot alongside `trusted_proxies` so WS handlers don't have to hold a
+    /// `config_ref()` guard just to read this single bool.
+    pub trust_forwarded_for: bool,
 }
