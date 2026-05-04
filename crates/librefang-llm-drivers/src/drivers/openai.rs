@@ -334,25 +334,112 @@ impl OpenAIDriver {
     }
 }
 
-/// Append `x-librefang-{agent,session,step}-id` headers to a request when the
-/// caller populated the matching field on [`CompletionRequest`]. Headers are
-/// only emitted for fields that are `Some`; unset fields produce no header at
-/// all (rather than an empty value).
-fn inject_trace_headers(
-    builder: reqwest::RequestBuilder,
+/// Build the merged custom-header map for an outbound LLM request. Combines
+/// the driver-level `extra_headers` (configured via
+/// [`OpenAIDriver::with_extra_headers`], typically used for testing or IDE
+/// auth shims) with the per-request `x-librefang-{agent,session,step}-id`
+/// trace headers sourced from [`CompletionRequest`].
+///
+/// Casing convention: trace headers are emitted as **lowercase-with-dashes**
+/// (`x-librefang-agent-id`). HTTP header names are case-insensitive on the
+/// wire, but log-grep tooling and JSON-dump callers benefit from a single
+/// canonical spelling. The legacy `claude_code` MCP-bridge config still uses
+/// TitleCase (`X-LibreFang-Agent-Id`) — that path goes through axum's
+/// case-insensitive `HeaderMap` so it remains interoperable, but new code
+/// should follow the lowercase convention used here.
+///
+/// Precedence: trace headers always **replace** any same-named entries from
+/// `extra_headers`. An operator who sets `x-librefang-agent-id` via the
+/// extras override for diagnostics would otherwise see two values on the
+/// wire (`reqwest::RequestBuilder::header` appends on duplicate names),
+/// which makes downstream log correlation ambiguous. We unify everything
+/// in a single `HeaderMap` and use `insert` semantics so the trace IDs win.
+///
+/// Validation: each value is parsed via [`reqwest::header::HeaderValue::from_str`]
+/// before insertion. Values containing `\r`, `\n`, NUL, or other non-visible
+/// bytes are rejected with a `warn!` log and **silently skipped** — the
+/// underlying request still goes through. Failing the entire LLM call
+/// because of an unprintable trace ID would be far worse than dropping the
+/// observability hint, since the caller-provided ID is purely a debugging
+/// aid for sidecar log correlation.
+fn build_custom_header_map(
+    extra_headers: &[(String, String)],
     request: &CompletionRequest,
-) -> reqwest::RequestBuilder {
-    let mut b = builder;
-    if let Some(id) = request.agent_id.as_deref() {
-        b = b.header("x-librefang-agent-id", id);
+) -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+    let mut map = HeaderMap::new();
+
+    // First, replay the operator-provided extras. We use `append` here so
+    // that *non-trace* duplicates from the extras list are still preserved
+    // (some custom auth shims legitimately rely on multi-value headers).
+    for (k, v) in extra_headers {
+        match (
+            HeaderName::try_from(k.as_str()),
+            HeaderValue::from_str(v.as_str()),
+        ) {
+            (Ok(name), Ok(value)) => {
+                map.append(name, value);
+            }
+            (name_res, value_res) => {
+                warn!(
+                    invalid_header_value = true,
+                    name = %k,
+                    name_error = ?name_res.err().map(|e| e.to_string()),
+                    value_error = ?value_res.err().map(|e| e.to_string()),
+                    "extra header has invalid name or value; skipping",
+                );
+            }
+        }
     }
-    if let Some(id) = request.session_id.as_deref() {
-        b = b.header("x-librefang-session-id", id);
+
+    // Then layer trace headers on top with `insert` (overwrite semantics):
+    // any same-named entry from `extra_headers` is removed before our
+    // trace-id value is set, so the wire only carries one canonical value.
+    insert_trace_header(
+        &mut map,
+        "x-librefang-agent-id",
+        request.agent_id.as_deref(),
+    );
+    insert_trace_header(
+        &mut map,
+        "x-librefang-session-id",
+        request.session_id.as_deref(),
+    );
+    insert_trace_header(&mut map, "x-librefang-step-id", request.step_id.as_deref());
+
+    map
+}
+
+/// Insert one `x-librefang-*` trace header, validating the value and
+/// silently skipping (with a `warn!`) on parse failure. See
+/// [`build_custom_header_map`] for the rationale on swallow-on-invalid.
+fn insert_trace_header(
+    map: &mut reqwest::header::HeaderMap,
+    name: &'static str,
+    value: Option<&str>,
+) {
+    use reqwest::header::{HeaderName, HeaderValue};
+
+    let Some(raw) = value else {
+        return;
+    };
+    match HeaderValue::from_str(raw) {
+        Ok(hv) => {
+            // `insert` (vs `append`) drops any prior entry under this name —
+            // this is what guarantees trace IDs replace `extra_headers`
+            // values for the same key instead of duplicating on the wire.
+            map.insert(HeaderName::from_static(name), hv);
+        }
+        Err(err) => {
+            warn!(
+                invalid_header_value = true,
+                name = %name,
+                error = %err,
+                "trace header value rejected by HeaderValue::from_str (likely contains \\r, \\n, NUL, or non-visible bytes); skipping header but continuing request",
+            );
+        }
     }
-    if let Some(id) = request.step_id.as_deref() {
-        b = b.header("x-librefang-step-id", id);
-    }
-    b
 }
 
 /// Map a MIME type to a file extension for Moonshot file uploads.
@@ -1028,17 +1115,14 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            for (k, v) in &self.extra_headers {
-                req_builder = req_builder.header(k, v);
-            }
-            // Per-request caller-identity headers. Surface agent / session /
-            // step IDs from the CompletionRequest as `x-librefang-*` headers
-            // so any observability sidecar in front of the upstream provider
-            // can attach them to its own log records without parsing the
-            // JSON body. Only emitted when the caller actually populated the
-            // field — out-of-band callers (compaction, routing probes, tests)
-            // leave them None and the headers are absent from the wire.
-            req_builder = inject_trace_headers(req_builder, &request);
+            // Merge driver-level extra_headers with per-request caller-identity
+            // (`x-librefang-*`) trace headers into a single HeaderMap. The
+            // helper enforces validation (\r/\n/NUL → warn+skip) and gives
+            // trace headers `insert` precedence so they replace any
+            // same-named entries from `extra_headers` instead of duplicating
+            // on the wire. See `build_custom_header_map` doc-comment.
+            req_builder =
+                req_builder.headers(build_custom_header_map(&self.extra_headers, &request));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
@@ -1451,17 +1535,12 @@ impl LlmDriver for OpenAIDriver {
                         .header("authorization", format!("Bearer {}", self.api_key.as_str()));
                 }
             }
-            for (k, v) in &self.extra_headers {
-                req_builder = req_builder.header(k, v);
-            }
-            // Per-request caller-identity headers. Surface agent / session /
-            // step IDs from the CompletionRequest as `x-librefang-*` headers
-            // so any observability sidecar in front of the upstream provider
-            // can attach them to its own log records without parsing the
-            // JSON body. Only emitted when the caller actually populated the
-            // field — out-of-band callers (compaction, routing probes, tests)
-            // leave them None and the headers are absent from the wire.
-            req_builder = inject_trace_headers(req_builder, &request);
+            // Merge driver-level extra_headers with per-request caller-identity
+            // (`x-librefang-*`) trace headers into a single HeaderMap. Mirror
+            // of the non-streaming path; see `build_custom_header_map` for
+            // validation and precedence semantics.
+            req_builder =
+                req_builder.headers(build_custom_header_map(&self.extra_headers, &request));
             // Per-request timeout takes priority; fall back to driver-level config,
             // then a 300 s default so the daemon never waits indefinitely.
             let timeout_secs = request
