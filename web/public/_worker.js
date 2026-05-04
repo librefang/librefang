@@ -13,6 +13,16 @@ const SECURITY_HEADERS = {
 
 const IMMUTABLE_CACHE = 'public, max-age=31536000, immutable';
 
+// Plugin registry public key (raw 32-byte Ed25519, base64). Served at
+// /.well-known/registry-pubkey for the LibreFang daemon's TOFU resolver
+// (see crates/librefang-runtime/src/plugin_manager.rs::resolve_registry_pubkey
+// and docs/architecture/plugin-signing.md).
+//
+// Mirror of REGISTRY_PUBLIC_KEY in web/workers/{registry,marketplace}-worker/
+// wrangler.toml. Rotation: regenerate keypair via web/workers/keygen.mjs,
+// update both wrangler.toml files AND this constant in lockstep.
+const REGISTRY_PUBLIC_KEY = 'NEoveGRjRazzoiRFqozw0VEtF9N9elfwIAOqKzt4Ue4=';
+
 function addHeaders(response, url) {
   const headers = new Headers(response.headers);
 
@@ -76,6 +86,18 @@ function canonicalPath(pathname) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // Serve the registry pubkey BEFORE asset/SPA fallback — otherwise the SPA
+    // catch-all hands daemons an HTML page that fails base64 validation.
+    if (url.pathname === '/.well-known/registry-pubkey') {
+      return new Response(REGISTRY_PUBLIC_KEY + '\n', {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=86400',
+          ...SECURITY_HEADERS,
+        },
+      });
+    }
 
     // 301 redirect to canonical URL before serving. Preserves query + hash.
     const canonical = canonicalPath(url.pathname);
