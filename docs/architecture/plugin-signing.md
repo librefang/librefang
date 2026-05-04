@@ -104,7 +104,7 @@ or fall through to SHA-256-only (archive install).
 
 | Artefact | Signed by | Canonical bytes |
 |---|---|---|
-| Registry index | `registry-worker` cron, after each refresh | The exact bytes returned by `GET /api/registry/index.json` (committed canonical JSON). |
+| Registry index | `registry-worker` cron, after each refresh | The exact bytes returned by `GET https://stats.librefang.ai/api/registry/index.json` — a flat JSON array of `{name, version?, description?, needs?}` entries, sorted by name, rebuilt from the `librefang/librefang-registry` GitHub repo's plugin TOMLs. The dashboard's dict-shaped `GET /api/registry` is a separate KV row and is **not** what the daemon parses. |
 | Marketplace bundle metadata | `marketplace-worker` on `POST /v1/packages/<slug>/versions` | `<slug>@<version>\|<bundle_url>\|<bundle_sha256>` (UTF-8). The daemon reconstructs this string locally before verifying. |
 
 The bundle bytes themselves are NOT signed — only the metadata. The

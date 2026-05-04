@@ -29,6 +29,28 @@ use tracing::{debug, info, warn};
 /// See `docs/architecture/plugin-signing.md` for the full trust model.
 const OFFICIAL_PUBKEY_URL: &str = "https://librefang.ai/.well-known/registry-pubkey";
 
+/// `owner/repo` of the official LibreFang plugin registry on GitHub.
+///
+/// When `fetch_verified_index` is called with this exact value (the default),
+/// the daemon prefers the worker-signed `/api/registry/index.json` mirror at
+/// [`OFFICIAL_INDEX_URL`] / [`OFFICIAL_INDEX_SIG_URL`] over GitHub raw — the
+/// mirror serves a flat plugins array signed by the registry-worker on every
+/// cron tick, giving real Ed25519 verification end-to-end. Self-hosted forks
+/// (any other `owner/repo`) keep using the GitHub raw fallback unless the
+/// `LIBREFANG_REGISTRY_INDEX_URL` env override is set.
+const OFFICIAL_REGISTRY_REPO: &str = "librefang/librefang-registry";
+
+/// Daemon-shaped flat plugins index, signed and served by `registry-worker`.
+/// Format: `[{"name": "...", "version": "...", "description": "...",
+/// "needs": ["dep1", ...]}, ...]`. The signature at
+/// [`OFFICIAL_INDEX_SIG_URL`] covers these exact bytes.
+const OFFICIAL_INDEX_URL: &str = "https://stats.librefang.ai/api/registry/index.json";
+
+/// Base64-encoded Ed25519 signature over the bytes returned by
+/// [`OFFICIAL_INDEX_URL`].
+const OFFICIAL_INDEX_SIG_URL: &str =
+    "https://stats.librefang.ai/api/registry/index.json.sig";
+
 /// On-disk pin for the registry pubkey (TOFU cache).
 ///
 /// First successful fetch is written here; later calls read this file
@@ -289,6 +311,35 @@ fn save_registry_cache(path: &std::path::Path, bytes: &[u8]) {
     let _ = std::fs::write(path, bytes);
 }
 
+/// Pick the `(index_url, sig_url)` pair to fetch for `registry`, honoring
+/// `LIBREFANG_REGISTRY_INDEX_URL` / `LIBREFANG_REGISTRY_INDEX_SIG_URL`
+/// overrides. For the official registry the default is the worker-signed
+/// mirror at [`OFFICIAL_INDEX_URL`] / [`OFFICIAL_INDEX_SIG_URL`] (only path
+/// that yields a verifiable signature — the GitHub repo has no committed
+/// `index.json`). Self-hosted forks fall back to GitHub raw, which is
+/// unsigned by default; operators can opt back into signing by pointing the
+/// env vars at their own signed mirror.
+fn registry_index_urls(
+    registry: &str,
+    env_index: Option<String>,
+    env_sig: Option<String>,
+) -> (String, String) {
+    let default_index = if registry == OFFICIAL_REGISTRY_REPO {
+        OFFICIAL_INDEX_URL.to_string()
+    } else {
+        format!("https://raw.githubusercontent.com/{registry}/main/index.json")
+    };
+    let default_sig = if registry == OFFICIAL_REGISTRY_REPO {
+        OFFICIAL_INDEX_SIG_URL.to_string()
+    } else {
+        format!("https://raw.githubusercontent.com/{registry}/main/index.json.sig")
+    };
+    (
+        env_index.unwrap_or(default_index),
+        env_sig.unwrap_or(default_sig),
+    )
+}
+
 /// Fetch registry `index.json` and optionally verify its Ed25519 signature.
 ///
 /// Signature verification is skipped when:
@@ -319,8 +370,11 @@ pub async fn fetch_verified_index(
         }
     }
 
-    let index_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json");
-    let sig_url = format!("https://raw.githubusercontent.com/{registry}/main/index.json.sig");
+    let (index_url, sig_url) = registry_index_urls(
+        registry,
+        std::env::var("LIBREFANG_REGISTRY_INDEX_URL").ok(),
+        std::env::var("LIBREFANG_REGISTRY_INDEX_SIG_URL").ok(),
+    );
 
     // Fetch index bytes.
     let index_resp = client
@@ -4846,6 +4900,54 @@ description = "Spanish description"
             path,
             std::path::PathBuf::from("/tmp/librefang-test-home-pubkey/.librefang/registry.pub"),
         );
+    }
+
+    /// Official registry defaults to the worker-signed mirror — the GitHub
+    /// repo has no committed `index.json`, so any other choice would lose
+    /// the only end-to-end Ed25519-verifiable path.
+    #[test]
+    fn registry_index_urls_official_defaults_to_worker_mirror() {
+        let (idx, sig) = registry_index_urls("librefang/librefang-registry", None, None);
+        assert_eq!(idx, "https://stats.librefang.ai/api/registry/index.json");
+        assert_eq!(sig, "https://stats.librefang.ai/api/registry/index.json.sig");
+    }
+
+    /// Self-hosted forks fall back to GitHub raw — keeps the existing path
+    /// for forks that don't yet run a signed mirror, while still allowing
+    /// them to opt in via the env vars.
+    #[test]
+    fn registry_index_urls_fork_falls_back_to_github_raw() {
+        let (idx, sig) = registry_index_urls("acme/private-registry", None, None);
+        assert_eq!(
+            idx,
+            "https://raw.githubusercontent.com/acme/private-registry/main/index.json"
+        );
+        assert_eq!(
+            sig,
+            "https://raw.githubusercontent.com/acme/private-registry/main/index.json.sig"
+        );
+    }
+
+    /// Env overrides win regardless of which registry is in use — operators
+    /// of air-gapped / on-prem deployments must be able to redirect both
+    /// the official and the fork path at their own infrastructure.
+    #[test]
+    fn registry_index_urls_env_overrides_win_for_both_paths() {
+        let (idx, sig) = registry_index_urls(
+            "librefang/librefang-registry",
+            Some("https://internal.example/index.json".into()),
+            Some("https://internal.example/index.json.sig".into()),
+        );
+        assert_eq!(idx, "https://internal.example/index.json");
+        assert_eq!(sig, "https://internal.example/index.json.sig");
+
+        let (idx, sig) = registry_index_urls(
+            "acme/private-registry",
+            Some("https://internal.example/index.json".into()),
+            Some("https://internal.example/index.json.sig".into()),
+        );
+        assert_eq!(idx, "https://internal.example/index.json");
+        assert_eq!(sig, "https://internal.example/index.json.sig");
     }
 
     // ── Bug #3804 — hook script integrity check logic ────────────────────────

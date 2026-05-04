@@ -4,12 +4,17 @@
 //
 // Plugin signing (#3805): when REGISTRY_PRIVATE_KEY (PKCS#8 base64) is set as
 // a Worker secret and REGISTRY_PUBLIC_KEY (raw 32-byte base64) is set as a
-// var, the cron refresh signs the canonical index.json with Ed25519 and
-// stores the signature in kv_store('registry_data_sig'). The daemon
-// (librefang-runtime/plugin_manager.rs) fetches:
+// var, the cron refresh signs the daemon-shaped plugins index (a flat
+// JSON array of {name, version, description, needs}) with Ed25519. The
+// daemon (librefang-runtime/plugin_manager.rs::fetch_verified_index) fetches:
 //   GET /api/registry/index.json     — canonical bytes that were signed
+//                                      (a JSON array of plugin entries)
 //   GET /api/registry/index.json.sig — base64 Ed25519 signature
 //   GET /.well-known/registry-pubkey — base64 raw 32-byte Ed25519 pubkey
+//
+// The dashboard's /api/registry endpoint continues to return the dict-shaped
+// payload (hands/channels/plugins/skills/...) for the marketplace UI. The
+// two formats are stored separately in D1 (registry_data vs plugins_index).
 // See web/workers/SIGNING.md for keygen + deploy.
 
 const CORS = {
@@ -296,6 +301,13 @@ async function refreshRegistryCache(env) {
     return items.filter(f => f.type === 'dir' || (f.name.endsWith('.toml') && f.name !== 'README.md'))
   }
 
+  function parseStringArray(text, key) {
+    const m = text.match(new RegExp(`^${key}\\s*=\\s*\\[([^\\]]*)\\]`, 'm'))
+    if (!m) return undefined
+    const items = m[1].match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, ''))
+    return items?.length ? items : undefined
+  }
+
   async function fetchToml(path) {
     const res = await fetch(`${REGISTRY_RAW}/${path}`)
     if (!res.ok) return null
@@ -310,11 +322,14 @@ async function refreshRegistryCache(env) {
       if (descM) i18n[m[1]] = { description: descM[1] }
     }
 
-    const tagsM = text.match(/^tags\s*=\s*\[([^\]]*)\]/m)
-    const tags = tagsM ? tagsM[1].match(/"([^"]*)"/g)?.map(s => s.replace(/"/g, '')) : undefined
+    const tags = parseStringArray(text, 'tags')
+    const needs = parseStringArray(text, 'needs')
 
     const result = { id: get('id'), name: get('name'), description: get('description'), category: get('category'), icon: get('icon') }
+    const version = get('version')
+    if (version) result.version = version
     if (tags?.length) result.tags = tags
+    if (needs?.length) result.needs = needs
     if (Object.keys(i18n).length) result.i18n = i18n
     return result
   }
@@ -353,7 +368,10 @@ async function refreshRegistryCache(env) {
     const existing = await env.DB.prepare(
       `SELECT value FROM kv_store WHERE key = 'registry_data'`,
     ).first()
-    if (existing) {
+    const pluginsIndexExists = await env.DB.prepare(
+      `SELECT 1 AS present FROM kv_store WHERE key = 'plugins_index'`,
+    ).first()
+    if (existing && pluginsIndexExists) {
       try {
         if (JSON.parse(existing.value).signature === signature) {
           await env.DB.prepare(
@@ -395,19 +413,41 @@ async function refreshRegistryCache(env) {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     ).bind(indexJson, now).run()
 
-    // Sign the canonical index bytes if a private key is configured. Signing
-    // is best-effort — if the secret is missing we skip (the daemon can still
-    // fetch the index but signature verification will fail closed at its end).
+    // Build the daemon-shaped flat plugins array (sorted by name for byte
+    // determinism — the signature is over these exact bytes so any reordering
+    // would break verification). Only the fields the daemon actually uses are
+    // included: name, version, description, needs.
+    const pluginsIndex = pluginDetails
+      .map(p => {
+        const out = { name: p.name }
+        if (p.version) out.version = p.version
+        if (p.description) out.description = p.description
+        if (p.needs?.length) out.needs = p.needs
+        return out
+      })
+      .filter(p => p.name)
+      .sort((a, b) => a.name.localeCompare(b.name))
+    const pluginsIndexJson = JSON.stringify(pluginsIndex)
+
+    await env.DB.prepare(
+      `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(pluginsIndexJson, now).run()
+
+    // Sign the daemon-shaped plugins index if a private key is configured.
+    // Signing is best-effort — if the secret is missing we skip (the daemon
+    // can still fetch the index but signature verification will fail closed
+    // at its end).
     try {
-      const sig = await signWithRegistryKey(env, new TextEncoder().encode(indexJson))
+      const sig = await signWithRegistryKey(env, new TextEncoder().encode(pluginsIndexJson))
       if (sig) {
         await env.DB.prepare(
-          `INSERT INTO kv_store (key, value, updated_at) VALUES ('registry_data_sig', ?, ?)
+          `INSERT INTO kv_store (key, value, updated_at) VALUES ('plugins_index_sig', ?, ?)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
         ).bind(sig, now).run()
       }
     } catch (e) {
-      console.error('Registry signing failed:', e.message)
+      console.error('Plugins index signing failed:', e.message)
     }
 
     console.log('Registry refreshed:', hands.length, 'hands,', channels.length, 'channels,',
@@ -423,7 +463,7 @@ async function refreshRegistryCache(env) {
 
 async function handleSignedIndex(env) {
   const row = await env.DB.prepare(
-    `SELECT value FROM kv_store WHERE key = 'registry_data'`,
+    `SELECT value FROM kv_store WHERE key = 'plugins_index'`,
   ).first()
   if (!row) return errorResponse('index not yet built — try again after the next cron tick', 503)
   return new Response(row.value, {
@@ -437,7 +477,7 @@ async function handleSignedIndex(env) {
 
 async function handleSignedIndexSig(env) {
   const row = await env.DB.prepare(
-    `SELECT value FROM kv_store WHERE key = 'registry_data_sig'`,
+    `SELECT value FROM kv_store WHERE key = 'plugins_index_sig'`,
   ).first()
   if (!row) return errorResponse('signature not available — REGISTRY_PRIVATE_KEY may be unset', 503)
   return new Response(row.value, {

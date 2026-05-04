@@ -12,7 +12,7 @@ with SHA-256), see `docs/architecture/plugin-signing.md`.
 
 | Worker | Endpoint exposed to daemon | Bytes that are signed |
 |---|---|---|
-| `registry-worker` | `GET /api/registry/index.json.sig` | The exact bytes returned by `GET /api/registry/index.json` (the cron-refreshed canonical index). |
+| `registry-worker` | `GET /api/registry/index.json.sig` | The exact bytes returned by `GET /api/registry/index.json` — a flat JSON array of `{name, version?, description?, needs?}` entries, sorted by name, rebuilt by the cron from the GitHub registry's plugin TOMLs. The dashboard's dict-shaped `GET /api/registry` payload (hands/channels/plugins/skills/...) is a separate KV row and is **not** what the daemon consumes. |
 | `marketplace-worker` | `GET /v1/download/<slug>/<version>/signature` returns `{ signed, sig }` | `signed` is the canonical string `<slug>@<version>\|<bundle_url>\|<bundle_sha256>` — the daemon reconstructs this string locally and verifies. |
 
 Both workers also serve the public key:
