@@ -101,10 +101,11 @@ function makeUser(overrides: Partial<UserItem> = {}): UserItem {
     platform: "telegram",
     platform_id: "@alice",
     created_at: new Date().toISOString(),
-    // UserItem requires `channel_bindings: Record<string, string>` —
-    // UsersPage renders `Object.keys(u.channel_bindings).length`, so an
-    // unset value would crash with "Cannot convert undefined or null to
-    // object" before any assertion runs.
+    // `UserItem` types `channel_bindings` as a required
+    // `Record<string, string>`. UsersPage now defensively reads it as
+    // `Object.keys(u.channel_bindings ?? {}).length` (UsersPage.tsx:307,
+    // :312, :314, :1040), so an unset value no longer crashes — but the
+    // fixture still supplies `{}` to satisfy the type.
     channel_bindings: {},
     ...overrides,
   } as UserItem;
