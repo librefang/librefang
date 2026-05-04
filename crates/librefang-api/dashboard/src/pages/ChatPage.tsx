@@ -1,7 +1,5 @@
 import { formatCost } from "../lib/format";
 import { memo, useEffect, useMemo, useRef, useState, useCallback } from "react";
-import rehypeKatex from "rehype-katex";
-import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { motion } from "motion/react";
 import { messageIn, fadeInUp } from "../lib/motion";
@@ -30,6 +28,7 @@ import { ToolCallCard } from "../components/ui/ToolCallCard";
 import { filterVisible } from "../lib/hiddenModels";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { Typewriter_v2 } from "../components/Typewriter_v2";
+import { useMathPlugins } from "../lib/hooks/useMathPlugins";
 import {
   useCreateAgentSession,
   useDeleteAgentSession,
@@ -40,7 +39,6 @@ import {
   useStopAgent,
   useUploadAgentFile,
 } from "../lib/mutations/agents";
-import "katex/dist/katex.min.css";
 
 const isAuthUnavailable = (status?: string) =>
   !!status && status !== "configured" && status !== "validated_key" && status !== "configured_cli" && status !== "not_required" && status !== "auto_detected";
@@ -118,9 +116,6 @@ const SLASH_COMMANDS = [
 
 // Commands that require backend processing via WebSocket command protocol
 const BACKEND_COMMANDS = SLASH_COMMANDS.filter(c => c.backend).map(c => c.cmd.slice(1));
-
-const REMARK_PLUGINS = [remarkMath];
-const REHYPE_PLUGINS = [rehypeKatex];
 
 let _nextMessageId = 0;
 function makeMessageId(prefix: string): string {
@@ -1139,6 +1134,11 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
       .trim();
   }, [message.content, isUser]);
 
+  // Lazy-load remark-math / rehype-katex / katex CSS only when this message
+  // actually contains math delimiters. Saves ~280 KB of KaTeX from the
+  // initial bundle on math-free chats (#3381).
+  const mathPlugins = useMathPlugins(displayContent);
+
   return (
     <motion.div className={`flex ${isUser ? "justify-end" : "justify-start"}`} variants={messageIn} initial="initial" animate="animate">
       <div className={`flex flex-col min-w-0 w-fit max-w-[90%] sm:max-w-[min(75%,70ch)] ${isUser ? "items-end" : "items-start"}`}>
@@ -1262,8 +1262,8 @@ const MessageBubble = memo(function MessageBubble({ message, usageFooter, onCopy
             <p className="whitespace-pre-line [overflow-wrap:anywhere]">{displayContent}</p>
           ) : (
             <MarkdownContent
-              remarkPlugins={REMARK_PLUGINS}
-              rehypePlugins={REHYPE_PLUGINS}
+              remarkPlugins={mathPlugins.remarkPlugins}
+              rehypePlugins={mathPlugins.rehypePlugins}
             >
               {displayContent}
             </MarkdownContent>
