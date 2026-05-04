@@ -103,7 +103,7 @@ use axum::Json;
 use librefang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
 };
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
 use std::collections::HashMap;

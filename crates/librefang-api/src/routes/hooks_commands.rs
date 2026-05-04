@@ -13,7 +13,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_runtime::kernel_handle::KernelHandle;
+use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use librefang_types::i18n::ErrorTranslator;
 use std::sync::Arc;
@@ -96,7 +96,7 @@ pub async fn webhook_wake(
         "text": body.text,
     });
     if let Err(e) =
-        KernelHandle::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
+        EventBus::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
     {
         tracing::warn!("Webhook wake event publish failed: {e}");
         let err_msg = {
