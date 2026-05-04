@@ -130,6 +130,7 @@ pub mod validation;
 pub mod versioning;
 pub mod webchat;
 pub mod webhook_store;
+pub mod workflow;
 pub mod ws;
 
 #[cfg(feature = "telemetry")]

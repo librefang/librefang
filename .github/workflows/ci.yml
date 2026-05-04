@@ -268,11 +268,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          # Check out the PR head branch (not the merge commit) so the
-          # auto-codegen step below can `git push` back. For pushes to main
-          # this resolves to empty and `actions/checkout` falls back to its
-          # default — that path never reaches the push branch.
-          ref: ${{ github.head_ref }}
+          # Internal PRs only: check out the PR head branch (not the merge
+          # commit) so the auto-codegen step below can `git push` back. Fork
+          # PRs and push events leave `ref` empty so `actions/checkout` falls
+          # back to its default ref — that path never reaches the push branch
+          # and would otherwise fail at fetch (the fork's branch does not
+          # exist in this repo's `origin`).
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref || '' }}
           # `persist-credentials: true` is the default; we re-state it for
           # readability. Required for the auto-commit step below.
           persist-credentials: true

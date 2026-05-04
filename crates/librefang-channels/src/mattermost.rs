@@ -507,6 +507,90 @@ impl ChannelAdapter for MattermostAdapter {
 mod tests {
     use super::*;
 
+    // ----- send() path tests (issue #3820) -----
+    //
+    // `MattermostAdapter::server_url` is already the injectable base URL (passed
+    // via config), so no extra field is needed. Tests simply construct the adapter
+    // with the wiremock server URI and exercise `POST /api/v4/posts`.
+
+    use wiremock::matchers::{bearer_token, body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(server_url: String) -> MattermostAdapter {
+        MattermostAdapter::new(server_url, "test-mm-token".to_string(), vec![])
+    }
+
+    fn dummy_user(channel_id: &str) -> ChannelUser {
+        ChannelUser {
+            platform_id: channel_id.to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mattermost_send_posts_to_api_v4_posts_with_bearer_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/posts"))
+            .and(bearer_token("test-mm-token"))
+            .and(body_json(serde_json::json!({
+                "channel_id": "channel-abc-123",
+                "message": "hello from librefang"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "post-id-1",
+                "create_at": 1700000000000_u64,
+                "channel_id": "channel-abc-123",
+                "message": "hello from librefang"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("channel-abc-123"),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn mattermost_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/posts"))
+            .and(bearer_token("test-mm-token"))
+            .and(body_json(serde_json::json!({
+                "channel_id": "channel-xyz-456",
+                "message": "(Unsupported content type)"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "post-id-2",
+                "create_at": 1700000000001_u64,
+                "channel_id": "channel-xyz-456",
+                "message": "(Unsupported content type)"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("channel-xyz-456"),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
     #[test]
     fn test_mattermost_adapter_creation() {
         let adapter = MattermostAdapter::new(

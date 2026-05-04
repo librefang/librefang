@@ -96,13 +96,14 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 use crate::triggers::{Trigger, TriggerId, TriggerPatch, TriggerPattern};
+use crate::workflow::{
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId,
+    WorkflowRunState, WorkflowStep,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use librefang_kernel::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
-};
 use librefang_runtime::kernel_handle::prelude::*;
 use librefang_types::agent::AgentId;
 use serde::Deserialize;
@@ -414,7 +415,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
         total: usize,
         completed: usize,
         failed: usize,
-        latest: Option<&'a librefang_kernel::workflow::WorkflowRun>,
+        latest: Option<&'a WorkflowRun>,
     }
     let mut agg: std::collections::HashMap<String, RunAgg> = std::collections::HashMap::new();
     for r in &all_runs {
@@ -426,8 +427,8 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
         });
         entry.total += 1;
         match &r.state {
-            librefang_kernel::workflow::WorkflowRunState::Completed => entry.completed += 1,
-            librefang_kernel::workflow::WorkflowRunState::Failed => entry.failed += 1,
+            WorkflowRunState::Completed => entry.completed += 1,
+            WorkflowRunState::Failed => entry.failed += 1,
             _ => {}
         }
         match entry.latest {
@@ -437,13 +438,13 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
         }
     }
 
-    let state_kind = |s: &librefang_kernel::workflow::WorkflowRunState| -> &'static str {
+    let state_kind = |s: &WorkflowRunState| -> &'static str {
         match s {
-            librefang_kernel::workflow::WorkflowRunState::Pending => "pending",
-            librefang_kernel::workflow::WorkflowRunState::Running => "running",
-            librefang_kernel::workflow::WorkflowRunState::Paused { .. } => "paused",
-            librefang_kernel::workflow::WorkflowRunState::Completed => "completed",
-            librefang_kernel::workflow::WorkflowRunState::Failed => "failed",
+            WorkflowRunState::Pending => "pending",
+            WorkflowRunState::Running => "running",
+            WorkflowRunState::Paused { .. } => "paused",
+            WorkflowRunState::Completed => "completed",
+            WorkflowRunState::Failed => "failed",
         }
     };
 

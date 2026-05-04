@@ -365,6 +365,85 @@ impl ChannelAdapter for NtfyAdapter {
 mod tests {
     use super::*;
 
+    // ----- send() path tests (issue #3820) -----
+    //
+    // `NtfyAdapter::server_url` is the injectable base URL (passed via `new()`),
+    // so no extra field is needed. Tests stand up a wiremock server, pass its
+    // URI as the server URL, then assert that `send()` issues
+    // `POST /{topic}` with plain-text body and the correct headers.
+
+    use wiremock::matchers::{body_string, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn make_adapter(server_url: String) -> NtfyAdapter {
+        NtfyAdapter::new(server_url, "test-topic".to_string(), "".to_string())
+    }
+
+    fn dummy_user() -> ChannelUser {
+        ChannelUser {
+            platform_id: "ntfy-user".to_string(),
+            display_name: "tester".to_string(),
+            librefang_user: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ntfy_send_publishes_plaintext_with_title_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/test-topic"))
+            .and(header("Content-Type", "text/plain"))
+            .and(header("Title", "LibreFang"))
+            .and(body_string("hello from librefang"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "abc123",
+                "event": "message",
+                "topic": "test-topic",
+                "message": "hello from librefang"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Text("hello from librefang".into()),
+            )
+            .await
+            .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn ntfy_send_non_text_content_falls_back_to_placeholder() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/test-topic"))
+            .and(body_string("(Unsupported content type)"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "xyz456",
+                "event": "message",
+                "topic": "test-topic",
+                "message": "(Unsupported content type)"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user(),
+                ChannelContent::Command {
+                    name: "noop".into(),
+                    args: vec![],
+                },
+            )
+            .await
+            .expect("send must succeed with unsupported content");
+    }
+
     #[test]
     fn test_ntfy_adapter_creation() {
         let adapter = NtfyAdapter::new("".to_string(), "my-topic".to_string(), "".to_string());

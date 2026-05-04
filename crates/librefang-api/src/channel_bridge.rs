@@ -3,6 +3,7 @@
 //! Implements `ChannelBridgeHandle` on `LibreFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
+use crate::workflow::{StepAgent, WorkflowId};
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
@@ -1145,13 +1146,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .execute_run(
                 run_id,
                 |step_agent| match step_agent {
-                    librefang_kernel::workflow::StepAgent::ById { id } => {
+                    StepAgent::ById { id } => {
                         let aid: AgentId = id.parse().ok()?;
                         let entry = registry_ref.get(aid)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((aid, entry.name.clone(), inherit))
                     }
-                    librefang_kernel::workflow::StepAgent::ByName { name } => {
+                    StepAgent::ByName { name } => {
                         let entry = registry_ref.find_by_name(name)?;
                         let inherit = entry.manifest.inherit_parent_context;
                         Some((entry.id, entry.name.clone(), inherit))
@@ -1418,7 +1419,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 // Resolve workflow by UUID or name
                                 let resolved = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id)
                                 {
-                                    Some(librefang_kernel::workflow::WorkflowId(uuid))
+                                    Some(WorkflowId(uuid))
                                 } else {
                                     let workflows =
                                         self.kernel.workflow_engine().list_workflows().await;
