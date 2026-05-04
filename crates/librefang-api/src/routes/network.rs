@@ -82,19 +82,23 @@ use crate::types::ApiErrorResponse;
     get,
     path = "/api/peers",
     tag = "network",
+    params(
+        ("offset" = Option<usize>, Query, description = "Skip N items"),
+        ("limit" = Option<usize>, Query, description = "Max items to return; server-capped at 100"),
+    ),
     responses(
         (status = 200, description = "List known OFP peers", body = crate::types::JsonObject)
     )
 )]
-pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_peers(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(pagination): axum::extract::Query<crate::types::PaginationQuery>,
+) -> impl IntoResponse {
     // Peers are tracked in the wire module's PeerRegistry, owned by the kernel
     // and lazily initialized when the OFP peer node starts. Read it live on every
     // request — caching at boot would return a stale (or empty) snapshot if the
     // OFP node initialized after AppState was constructed (#3644).
-    //
-    // All peers are returned in a single page — the registry is in-memory
-    // and small — so `offset=0` and `limit=None` always.
-    let items: Vec<serde_json::Value> =
+    let all: Vec<serde_json::Value> =
         if let Some(peer_registry) = state.kernel.peer_registry_ref() {
             peer_registry
                 .all_peers()
@@ -117,12 +121,15 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
         } else {
             Vec::new()
         };
-    let total = items.len();
+    // Pagination (#3639): apply `?offset=&limit=` with a server-side cap of
+    // PAGINATION_MAX_LIMIT. Backward-compatible — when both query params are
+    // absent the full list is still returned.
+    let (items, total, offset, limit) = pagination.paginate(all);
     Json(crate::types::PaginatedResponse {
         items,
         total,
-        offset: 0,
-        limit: None,
+        offset,
+        limit,
     })
 }
 
@@ -2155,7 +2162,12 @@ mod tests {
             protocol_version: 1,
         });
 
-        let resp = super::list_peers(State(state)).await.into_response();
+        let resp = super::list_peers(
+            State(state),
+            axum::extract::Query(crate::types::PaginationQuery::default()),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
