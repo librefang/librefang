@@ -4708,6 +4708,7 @@ dependencies = [
  "http-body-util",
  "librefang-api",
  "librefang-kernel",
+ "librefang-memory",
  "librefang-runtime",
  "librefang-types",
  "serde_json",
