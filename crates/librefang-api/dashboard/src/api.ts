@@ -3065,8 +3065,17 @@ export interface A2ATaskStatus {
 }
 
 export async function listA2AAgents(): Promise<A2AAgentItem[]> {
-  const data = await get<{ agents?: A2AAgentItem[] }>("/api/a2a/agents");
-  return data.agents ?? [];
+  // #3842: backend now returns the canonical PaginatedResponse envelope
+  // (`items`/`total`/`offset`/`limit`). The legacy `agents` fallback below
+  // exists only so a freshly-shipped dashboard can talk to a daemon still
+  // running a pre-#3842 build during rolling upgrade. Remove the fallback
+  // (and the `agents?: ...` field in the response type) one daemon release
+  // after #3842 ships — by then no in-support daemon emits the old shape.
+  const data = await get<{
+    items?: A2AAgentItem[];
+    agents?: A2AAgentItem[];
+  }>("/api/a2a/agents");
+  return data.items ?? data.agents ?? [];
 }
 
 export async function discoverA2AAgent(url: string): Promise<ApiActionResponse> {
