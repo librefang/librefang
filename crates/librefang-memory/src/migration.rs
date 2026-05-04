@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 33;
+const SCHEMA_VERSION: u32 = 34;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -76,6 +76,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // v33 (this branch, #3548): rebuild sessions_fts with explicit
     // unicode61 tokenizer + backfill any sessions missing FTS rows.
     run_step!(33, migrate_v33);
+    // v34 (#3637): persistent Idempotency-Key cache for state-creating
+    // POSTs. The API layer reads/writes this table from the same shared
+    // SQLite connection (`MemorySubstrate::usage_conn`).
+    run_step!(34, migrate_v34);
 
     // Audit-trail consistency (#3538): user_version must match the count
     // of distinct rows in `migrations`. Drift means an earlier migration
@@ -1232,6 +1236,43 @@ fn migrate_v33(conn: &Connection) -> Result<(), rusqlite::Error> {
 #[cfg(test)]
 pub(crate) fn __test_only_run_v33(conn: &Connection) {
     migrate_v33(conn).expect("migrate_v33 in test harness must succeed");
+}
+
+/// Version 34: Persistent Idempotency-Key cache for state-creating POSTs (#3637).
+///
+/// Adds the `idempotency_keys` table consumed by the API layer's
+/// idempotency middleware. Requests that opt in via the
+/// `Idempotency-Key` HTTP header have their (status, response body)
+/// snapshot persisted here so a duplicate request — same key, same
+/// body — replays the prior response instead of re-executing the
+/// handler. A duplicate request with the same key but a *different*
+/// body produces 409 Conflict; the cache key is the operator-supplied
+/// `Idempotency-Key`, while `body_hash` (sha256 of the canonical JSON
+/// bytes) is the conflict detector.
+///
+/// Window: 24 hours. `expires_at = created_at + 86400`. Long enough
+/// to absorb realistic webhook / dashboard double-submit windows
+/// without retaining replayable state indefinitely. Expired rows are
+/// reclaimed lazily on read (the API layer's `prune_expired` hook).
+fn migrate_v34(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS idempotency_keys (
+             key             TEXT PRIMARY KEY,
+             body_hash       TEXT NOT NULL,
+             response_status INTEGER NOT NULL,
+             response_body   BLOB NOT NULL,
+             created_at      INTEGER NOT NULL,
+             expires_at      INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_idempotency_keys_expires_at
+             ON idempotency_keys(expires_at);",
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO migrations (version, applied_at, description) \
+         VALUES (34, datetime('now'), 'Add idempotency_keys table for Idempotency-Key replay cache (#3637)')",
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

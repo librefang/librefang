@@ -1072,6 +1072,14 @@ pub async fn build_router(
     };
     let trust_forwarded_for_cached = kernel.config_ref().trust_forwarded_for;
 
+    // Build the Idempotency-Key replay store (#3637) on top of the
+    // substrate's shared SQLite connection. Reuses the WAL pool so
+    // there's no separate file and no second open call.
+    let idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync> =
+        Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
+
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
@@ -1098,6 +1106,7 @@ pub async fn build_router(
         gcra_limiter: gcra_limiter_arc.clone(),
         trusted_proxies: trusted_proxies_arc.clone(),
         trust_forwarded_for: trust_forwarded_for_cached,
+        idempotency_store,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.

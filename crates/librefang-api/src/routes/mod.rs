@@ -191,4 +191,8 @@ pub struct AppState {
     /// boot alongside `trusted_proxies` so WS handlers don't have to hold a
     /// `config_ref()` guard just to read this single bool.
     pub trust_forwarded_for: bool,
+    /// Persistent Idempotency-Key replay cache (#3637). Reuses the
+    /// substrate's SQLite connection so replays survive daemon
+    /// restarts within the 24h TTL window.
+    pub idempotency_store: Arc<dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync>,
 }

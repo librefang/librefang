@@ -110,6 +110,7 @@ pub mod channel_bridge;
 pub mod client_ip;
 pub mod extensions;
 pub mod extractors;
+pub mod idempotency;
 pub mod mcp_oauth;
 pub mod middleware;
 pub mod oauth;

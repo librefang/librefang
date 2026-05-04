@@ -325,6 +325,11 @@ async fn resolve_manifest(
 }
 
 /// POST /api/agents — Spawn a new agent.
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of spawning a second agent. A different body under the same key is
+/// rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/agents",
@@ -332,20 +337,53 @@ async fn resolve_manifest(
     request_body = crate::types::SpawnRequest,
     responses(
         (status = 200, description = "Agent spawned", body = crate::types::SpawnResponse),
-        (status = 400, description = "Invalid manifest")
+        (status = 400, description = "Invalid manifest"),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     lang: Option<axum::Extension<RequestLanguage>>,
-    Json(req): Json<SpawnRequest>,
-) -> impl IntoResponse {
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
     let l = super::resolve_lang(lang.as_ref());
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { spawn_agent_inner(state, l, &inner_body).await },
+    )
+    .await
+}
+
+/// Inner handler — produces a `(StatusCode, Vec<u8>)` snapshot suitable
+/// for caching by the Idempotency-Key middleware. JSON-encodes once
+/// here so the cached and replay paths share the exact same bytes.
+async fn spawn_agent_inner(
+    state: Arc<AppState>,
+    l: &'static str,
+    body_bytes: &[u8],
+) -> (StatusCode, Vec<u8>) {
+    let req: SpawnRequest = match serde_json::from_slice(body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_json",
+                format!("Invalid JSON body: {e}"),
+            );
+        }
+    };
 
     let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
-            // Map specific errors to appropriate HTTP status codes
             let (status, code) = if e.message.contains("too large") {
                 (StatusCode::PAYLOAD_TOO_LARGE, "manifest_too_large")
             } else if e.message.contains("not found") && e.message.contains("Template") {
@@ -355,26 +393,19 @@ pub async fn spawn_agent(
             } else {
                 (StatusCode::BAD_REQUEST, "invalid_manifest")
             };
-            return ApiErrorResponse {
-                error: e.message,
-                code: Some(code.to_string()),
-                r#type: Some(code.to_string()),
-                details: None,
-                status,
-            }
-            .into_response();
+            return json_error(status, code, e.message);
         }
     };
 
     match state.kernel.spawn_agent(resolved.manifest) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!(SpawnResponse {
+        Ok(id) => {
+            let body = serde_json::to_vec(&SpawnResponse {
                 agent_id: id.to_string(),
                 name: resolved.name,
-            })),
-        )
-            .into_response(),
+            })
+            .unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::CREATED, body)
+        }
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
@@ -384,16 +415,26 @@ pub async fn spawn_agent(
                 ) => (StatusCode::CONFLICT, "agent_already_exists"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
             };
-            ApiErrorResponse {
-                error: t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
-                code: Some(code.to_string()),
-                r#type: Some(code.to_string()),
-                details: None,
+            json_error(
                 status,
-            }
-            .into_response()
+                code,
+                t.t_args("api-error-agent-error", &[("error", &e.to_string())]),
+            )
         }
     }
+}
+
+/// Shape an `ApiErrorResponse`-compatible JSON envelope into the
+/// `(status, bytes)` tuple the idempotency middleware caches.
+/// Mirrors `ApiErrorResponse::into_response` so callers see the same
+/// shape they did before this handler split.
+fn json_error(status: StatusCode, code: &str, error: String) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({
+        "error": error,
+        "code": code,
+        "type": code,
+    });
+    (status, serde_json::to_vec(&body).unwrap_or_default())
 }
 
 // ---------------------------------------------------------------------------
@@ -6912,6 +6953,11 @@ mod monitoring_tests {
         };
 
         let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
         let state = Arc::new(AppState {
             kernel,
             started_at: std::time::Instant::now(),
@@ -6936,6 +6982,7 @@ mod monitoring_tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         });
         (state, tmp)
     }

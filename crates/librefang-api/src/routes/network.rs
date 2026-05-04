@@ -992,45 +992,76 @@ pub async fn a2a_discover_external(
 }
 
 /// POST /api/a2a/send — Send a task to an external A2A agent.
+///
+/// Honours `Idempotency-Key` (#3637): when set, a duplicate request
+/// with the same key + same body replays the cached response instead
+/// of re-dispatching the outbound A2A task. A different body under
+/// the same key is rejected with 409 Conflict.
 #[utoipa::path(
     post,
     path = "/api/a2a/send",
     tag = "a2a",
     request_body = crate::types::JsonObject,
     responses(
-        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject)
+        (status = 200, description = "Send a task to an external A2A agent", body = crate::types::JsonObject),
+        (status = 409, description = "Idempotency-Key was reused with a different request body")
     )
 )]
 pub async fn a2a_send_external(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let key = crate::idempotency::extract_key(&headers);
+    let body_bytes: Vec<u8> = body.to_vec();
+    let store = Arc::clone(&state.idempotency_store);
+    let inner_body = body_bytes.clone();
+
+    crate::idempotency::run_idempotent(
+        store.as_ref(),
+        key.as_deref(),
+        &body_bytes,
+        move || async move { a2a_send_external_inner(state, &inner_body).await },
+    )
+    .await
+}
+
+async fn a2a_send_external_inner(state: Arc<AppState>, body_bytes: &[u8]) -> (StatusCode, Vec<u8>) {
+    let body: serde_json::Value = match serde_json::from_slice(body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_error_tuple(StatusCode::BAD_REQUEST, format!("Invalid JSON body: {e}"));
+        }
+    };
+
     let raw_url = match body["url"].as_str() {
         Some(u) => u.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'url' field").into_json_tuple(),
+        None => return json_error_tuple(StatusCode::BAD_REQUEST, "Missing 'url' field"),
     };
     // Canonicalize before any trust-list comparison so case / port /
     // trailing-slash variants all match the form stored at approve time.
     let url = match librefang_runtime::a2a::canonicalize_a2a_url(&raw_url) {
         Some(u) => u,
         None => {
-            return ApiErrorResponse::bad_request("URL is not a valid http(s) URL with a host")
-                .into_json_tuple();
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
+                "URL is not a valid http(s) URL with a host",
+            );
         }
     };
     let message = match body["message"].as_str() {
         Some(m) => m.to_string(),
-        None => return ApiErrorResponse::bad_request("Missing 'message' field").into_json_tuple(),
+        None => return json_error_tuple(StatusCode::BAD_REQUEST, "Missing 'message' field"),
     };
     let session_id = body["session_id"].as_str();
 
     // SECURITY (Bug #3786): Reject sends to agents that are still pending approval.
     if state.pending_a2a_agents.contains_key(&url) {
-        return ApiErrorResponse::bad_request(
+        return json_error_tuple(
+            StatusCode::BAD_REQUEST,
             "This agent is pending operator approval and cannot receive tasks. \
              Use POST /api/a2a/agents/{url}/approve to trust it first.",
-        )
-        .into_json_tuple();
+        );
     }
 
     // SECURITY (Bug #3786): Operator-approved trust gate. Without this check
@@ -1045,12 +1076,12 @@ pub async fn a2a_send_external(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if !trusted.iter().any(|(u, _)| u == &url) {
-            return ApiErrorResponse::bad_request(
+            return json_error_tuple(
+                StatusCode::BAD_REQUEST,
                 "Target URL is not a trusted A2A agent. \
                  Discover and approve it first via POST /api/a2a/discover \
                  followed by POST /api/a2a/agents/{url}/approve.",
-            )
-            .into_json_tuple();
+            );
         }
     }
 
@@ -1063,21 +1094,29 @@ pub async fn a2a_send_external(
         .ssrf_allowed_hosts
         .clone();
     if let Err(reason) = is_url_safe_for_ssrf(&url, &ssrf_allowed) {
-        return ApiErrorResponse::bad_request(reason).into_json_tuple();
+        return json_error_tuple(StatusCode::BAD_REQUEST, reason);
     }
 
     // Thread allowlist into client so redirects are re-validated against the same SSRF policy (#3782).
     let client = librefang_runtime::a2a::A2aClient::new_with_allowlist(ssrf_allowed);
     match client.send_task(&url, &message, session_id).await {
-        Ok(task) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(&task).unwrap_or_default()),
-        ),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        ),
+        Ok(task) => {
+            let body = serde_json::to_vec(&task).unwrap_or_else(|_| b"{}".to_vec());
+            (StatusCode::OK, body)
+        }
+        Err(e) => {
+            let body = serde_json::to_vec(&serde_json::json!({"error": e})).unwrap_or_default();
+            (StatusCode::BAD_GATEWAY, body)
+        }
     }
+}
+
+/// Match the legacy `ApiErrorResponse::bad_request().into_json_tuple()`
+/// shape (`{ "error": "<msg>" }`) so callers see the same field they
+/// did before the handler split. Used only by `a2a_send_external_inner`.
+fn json_error_tuple(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({ "error": msg.into() });
+    (status, serde_json::to_vec(&body).unwrap_or_default())
 }
 
 /// GET /api/a2a/tasks/{id}/status — Get task status from an external A2A agent.
@@ -2040,6 +2079,11 @@ mod tests {
         // No OFP node => registry is None at AppState-build time.
         assert!(kernel.peer_registry_ref().is_none());
 
+        let idempotency_store: Arc<
+            dyn librefang_memory::idempotency::IdempotencyStore + Send + Sync,
+        > = Arc::new(librefang_memory::idempotency::SqliteIdempotencyStore::new(
+            kernel.memory_substrate().usage_conn(),
+        ));
         let state = Arc::new(AppState {
             kernel: kernel.clone(),
             started_at: std::time::Instant::now(),
@@ -2064,6 +2108,7 @@ mod tests {
             gcra_limiter: crate::rate_limiter::create_rate_limiter(0),
             trusted_proxies: Arc::new(crate::client_ip::TrustedProxies::default()),
             trust_forwarded_for: false,
+            idempotency_store,
         });
 
         // Simulate OFP startup happening AFTER AppState construction.
