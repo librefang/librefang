@@ -5216,7 +5216,8 @@ pub async fn get_agent_file(
     Path((id, filename)): Path<(String, String)>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let resolved_lang = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(resolved_lang);
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -5291,8 +5292,13 @@ pub async fn get_agent_file(
     }
 
     // Off-runtime read so this axum handler never parks a tokio worker
-    // thread on a slow disk (#3579).
-    let content = match tokio::fs::read_to_string(&canonical).await {
+    // thread on a slow disk (#3579). `ErrorTranslator` is `!Send`, so it
+    // must be dropped before the `.await` and re-created afterwards or
+    // axum's `Handler` bound fails to compile.
+    drop(t);
+    let read_result = tokio::fs::read_to_string(&canonical).await;
+    let t = ErrorTranslator::new(resolved_lang);
+    let content = match read_result {
         Ok(c) => c,
         Err(_) => {
             return (
