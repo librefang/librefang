@@ -550,7 +550,11 @@ export function AuditPage() {
   const initialSeq = useMemo(() => search.seq, []);
   useEffect(() => {
     if (initialSeq == null || detailEntry) return;
-    const match = query.data?.entries.find((e) => e.seq === initialSeq);
+    // Defensive `?? []`: the backend returns `{count:0,limit:N}` without an
+    // `entries` field on cold registries / pre-first-action, even though the
+    // typed schema marks `entries` required. Prevents a render crash before
+    // the first audit row exists.
+    const match = (query.data?.entries ?? []).find((e) => e.seq === initialSeq);
     if (match) setDetailEntry(match);
   }, [initialSeq, query.data, detailEntry]);
 
@@ -943,7 +947,7 @@ export function AuditPage() {
 
       {query.isLoading ? (
         <ListSkeleton rows={5} />
-      ) : query.data && query.data.entries.length === 0 ? (
+      ) : query.data && (query.data.entries ?? []).length === 0 ? (
         <EmptyState
           icon={<ScrollText className="h-7 w-7" />}
           title={t("audit.empty_title")}
@@ -968,7 +972,7 @@ export function AuditPage() {
         />
       ) : query.data ? (
         <div className="flex flex-col gap-4">
-          {groupByDate(query.data.entries, t).map((group) => {
+          {groupByDate(query.data.entries ?? [], t).map((group) => {
             const tally = outcomeBreakdown(group.rows);
             return (
             <section key={group.label} className="flex flex-col gap-2">
