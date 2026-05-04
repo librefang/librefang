@@ -1,9 +1,31 @@
-//! Trait abstraction for kernel operations needed by the agent runtime.
+//! Role traits for kernel operations needed by the agent runtime.
 //!
-//! This trait allows `librefang-runtime` to call back into the kernel for
-//! inter-agent operations (spawn, send, list, kill) without creating
-//! a circular dependency. The kernel implements this trait and passes
-//! it into the agent loop.
+//! Historically this crate exposed a single 50+ method `KernelHandle`
+//! god-trait (issue #3746). It is now split into role traits — `AgentControl`,
+//! `MemoryAccess`, `TaskQueue`, `EventBus`, `KnowledgeGraph`, `CronControl`,
+//! `ApprovalGate`, `HandsControl`, `A2ARegistry`, `ChannelSender`,
+//! `PromptStore`, `WorkflowRunner`, `GoalControl`, `ToolPolicy` — so that
+//!
+//! 1. the trait file no longer mixes 14 unrelated domains in one place,
+//! 2. callers can express narrower bounds (e.g. `T: ApprovalGate`) instead of
+//!    pulling the whole kernel surface in,
+//! 3. test stubs/mocks group their fakes by capability and a missing
+//!    capability is a compile error in the role-trait impl, not a silent
+//!    `Err("not available")` at first runtime call.
+//!
+//! `KernelHandle` is preserved as a *supertrait alias* requiring all role
+//! traits, with a blanket impl, so existing `Arc<dyn KernelHandle>` call
+//! sites (117 of them at split time) keep working unchanged. Future PRs can
+//! narrow individual sites without further churn here.
+//!
+//! ### Default impls
+//!
+//! Defaults that hide a missing capability behind a runtime
+//! `Err("X not available")` are preserved as-is for now to keep this PR a
+//! pure structural refactor (zero behavior change). They are gathered onto
+//! the role trait that owns them, so a follow-up PR can tighten each role's
+//! contract independently rather than having to land 30+ default removals
+//! atomically.
 
 use async_trait::async_trait;
 
@@ -20,10 +42,14 @@ pub struct AgentInfo {
     pub tools: Vec<String>,
 }
 
-/// Handle to kernel operations, passed into the agent loop so agents
-/// can interact with each other via tools.
+// ============================================================================
+// 1. AgentControl — agent lifecycle, inter-agent send, listing, heartbeats,
+//    forked one-shot calls, plus a couple of agent-scoped config queries
+//    (`max_agent_call_depth`, `fire_agent_step`).
+// ============================================================================
+
 #[async_trait]
-pub trait KernelHandle: Send + Sync {
+pub trait AgentControl: Send + Sync {
     /// Spawn a new agent from a TOML manifest string.
     /// `parent_id` is the UUID string of the spawning agent (for lineage tracking).
     /// Returns (agent_id, agent_name) on success.
@@ -32,6 +58,21 @@ pub trait KernelHandle: Send + Sync {
         manifest_toml: &str,
         parent_id: Option<&str>,
     ) -> Result<(String, String), String>;
+
+    /// Spawn an agent with capability inheritance enforcement.
+    /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
+    /// that every capability in the child manifest is covered by `parent_caps`.
+    async fn spawn_agent_checked(
+        &self,
+        manifest_toml: &str,
+        parent_id: Option<&str>,
+        parent_caps: &[librefang_types::capability::Capability],
+    ) -> Result<(String, String), String> {
+        // Default: delegate to spawn_agent (no enforcement)
+        // The kernel MUST override this with real enforcement
+        let _ = parent_caps;
+        self.spawn_agent(manifest_toml, parent_id).await
+    }
 
     /// Send a message to another agent and get the response.
     async fn send_to_agent(&self, agent_id: &str, message: &str) -> Result<String, String>;
@@ -51,7 +92,7 @@ pub trait KernelHandle: Send + Sync {
         tracing::trace!(
             agent = %agent_id,
             parent = %parent_agent_id,
-            "send_to_agent_as: default impl — cancel cascade not supported by this KernelHandle"
+            "send_to_agent_as: default impl — cancel cascade not supported by this handle"
         );
         self.send_to_agent(agent_id, message).await
     }
@@ -62,6 +103,60 @@ pub trait KernelHandle: Send + Sync {
     /// Kill an agent by ID.
     fn kill_agent(&self, agent_id: &str) -> Result<(), String>;
 
+    /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
+    fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
+
+    /// Touch the agent's `last_active` timestamp to prevent heartbeat false-positives
+    /// during long-running operations (e.g., LLM calls).
+    fn touch_heartbeat(&self, agent_id: &str) {
+        let _ = agent_id;
+    }
+
+    /// Fire an `agent:step` external hook event.
+    /// Called by the runtime at the start of each agent loop iteration.
+    fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}
+
+    /// Run a forked agent turn that collapses to a single text response —
+    /// the "structured-output via forked call" primitive. Used by the
+    /// proactive memory extractor so its LLM call shares the parent
+    /// turn's `(system + tools + messages)` prefix for Anthropic prompt
+    /// cache alignment, instead of issuing a standalone `driver.complete()`
+    /// that always starts cold.
+    ///
+    /// Internally: spawn `run_forked_agent_streaming`, drain to completion,
+    /// return the final assistant text. Fork semantics apply — the call's
+    /// messages do NOT persist into the agent's canonical session, and the
+    /// turn-end hook fires with `is_fork: true` so auto-dream won't
+    /// recurse.
+    ///
+    /// `allowed_tools = Some(vec![])` keeps the fork single-turn (no tool
+    /// calls permitted — model returns text). Pass a larger allowlist only
+    /// when the caller actually expects tool use (e.g. future extractors
+    /// that want the fork to call `memory_store` directly).
+    ///
+    /// Default: error. The real kernel overrides; tests / stubs that
+    /// don't implement the full streaming path just fall back to a
+    /// standalone driver call through the extractor's own path.
+    async fn run_forked_agent_oneshot(
+        &self,
+        _agent_id: &str,
+        _prompt: &str,
+        _allowed_tools: Option<Vec<String>>,
+    ) -> Result<String, String> {
+        Err("run_forked_agent_oneshot not available in this handle".to_string())
+    }
+
+    /// Maximum inter-agent call depth (from config). Default: 5.
+    fn max_agent_call_depth(&self) -> u32 {
+        5
+    }
+}
+
+// ============================================================================
+// 2. MemoryAccess — shared cross-agent memory + per-user RBAC ACL resolution
+// ============================================================================
+
+pub trait MemoryAccess: Send + Sync {
     /// Store a value in shared memory (cross-agent accessible).
     /// When `peer_id` is `Some`, the key is scoped to that peer so different
     /// users of the same agent get isolated memory namespaces.
@@ -84,9 +179,34 @@ pub trait KernelHandle: Send + Sync {
     /// When `peer_id` is `Some`, only returns keys within that peer's namespace.
     fn memory_list(&self, peer_id: Option<&str>) -> Result<Vec<String>, String>;
 
-    /// Find agents by query (matches on name substring, tag, or tool name; case-insensitive).
-    fn find_agents(&self, query: &str) -> Vec<AgentInfo>;
+    /// Resolve the per-user memory ACL for the given sender + channel
+    /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
+    /// `UserMemoryAccess` so the runtime can build a
+    /// `MemoryNamespaceGuard` and gate proactive-memory reads.
+    ///
+    /// `None` means RBAC is disabled (no registered users) or the sender
+    /// could not be attributed to any registered user — callers should
+    /// treat this as "no per-user restriction" so the existing single-user
+    /// behaviour is preserved.
+    ///
+    /// Default impl returns `None` so embedders / stubs that haven't
+    /// wired RBAC keep the pre-M3 behaviour.
+    fn memory_acl_for_sender(
+        &self,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
+        let _ = (sender_id, channel);
+        None
+    }
+}
 
+// ============================================================================
+// 3. TaskQueue — shared task queue: post / claim / complete / list / etc.
+// ============================================================================
+
+#[async_trait]
+pub trait TaskQueue: Send + Sync {
     /// Post a task to the shared task queue. Returns the task ID.
     async fn task_post(
         &self,
@@ -122,14 +242,28 @@ pub trait KernelHandle: Send + Sync {
     /// Update a task's status to `pending` (reset) or `cancelled`.
     /// Returns true if the task was found and updated.
     async fn task_update_status(&self, task_id: &str, new_status: &str) -> Result<bool, String>;
+}
 
+// ============================================================================
+// 4. EventBus — fire-and-forget custom events for proactive triggers
+// ============================================================================
+
+#[async_trait]
+pub trait EventBus: Send + Sync {
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,
         event_type: &str,
         payload: serde_json::Value,
     ) -> Result<(), String>;
+}
 
+// ============================================================================
+// 5. KnowledgeGraph — entity/relation insert + pattern query
+// ============================================================================
+
+#[async_trait]
+pub trait KnowledgeGraph: Send + Sync {
     /// Add an entity to the knowledge graph.
     ///
     /// Takes `entity` by reference so callers that already hold an owned
@@ -157,7 +291,14 @@ pub trait KernelHandle: Send + Sync {
         &self,
         pattern: librefang_types::memory::GraphPattern,
     ) -> Result<Vec<librefang_types::memory::GraphMatch>, String>;
+}
 
+// ============================================================================
+// 6. CronControl — agent-owned scheduled jobs
+// ============================================================================
+
+#[async_trait]
+pub trait CronControl: Send + Sync {
     /// Create a cron job for the calling agent.
     async fn cron_create(
         &self,
@@ -179,7 +320,14 @@ pub trait KernelHandle: Send + Sync {
         let _ = job_id;
         Err("Cron scheduler not available".to_string())
     }
+}
 
+// ============================================================================
+// 7. ApprovalGate — approval policy queries + pending-approval lifecycle
+// ============================================================================
+
+#[async_trait]
+pub trait ApprovalGate: Send + Sync {
     /// Check if a tool requires approval based on current policy.
     fn requires_approval(&self, tool_name: &str) -> bool {
         let _ = tool_name;
@@ -207,27 +355,6 @@ pub trait KernelHandle: Send + Sync {
     ) -> bool {
         let _ = (tool_name, sender_id, channel);
         false
-    }
-
-    /// Resolve the per-user memory ACL for the given sender + channel
-    /// pair (RBAC M3, #3054 Phase 2). Returns the resolved
-    /// `UserMemoryAccess` so the runtime can build a
-    /// `MemoryNamespaceGuard` and gate proactive-memory reads.
-    ///
-    /// `None` means RBAC is disabled (no registered users) or the sender
-    /// could not be attributed to any registered user — callers should
-    /// treat this as "no per-user restriction" so the existing single-user
-    /// behaviour is preserved.
-    ///
-    /// Default impl returns `None` so embedders / stubs that haven't
-    /// wired RBAC keep the pre-M3 behaviour.
-    fn memory_acl_for_sender(
-        &self,
-        sender_id: Option<&str>,
-        channel: Option<&str>,
-    ) -> Option<librefang_types::user_policy::UserMemoryAccess> {
-        let _ = (sender_id, channel);
-        None
     }
 
     /// Resolve the per-user RBAC gate for a tool invocation (RBAC M3,
@@ -312,7 +439,14 @@ pub trait KernelHandle: Send + Sync {
         let _ = request_id;
         Ok(None)
     }
+}
 
+// ============================================================================
+// 8. HandsControl — Hand (specialized agent) lifecycle
+// ============================================================================
+
+#[async_trait]
+pub trait HandsControl: Send + Sync {
     /// List available Hands and their activation status.
     async fn hand_list(&self) -> Result<Vec<serde_json::Value>, String> {
         Err("Hands system not available".to_string())
@@ -349,7 +483,13 @@ pub trait KernelHandle: Send + Sync {
         let _ = instance_id;
         Err("Hands system not available".to_string())
     }
+}
 
+// ============================================================================
+// 9. A2ARegistry — discovered external A2A agents (read-only directory)
+// ============================================================================
+
+pub trait A2ARegistry: Send + Sync {
     /// List discovered external A2A agents as (name, url) pairs.
     fn list_a2a_agents(&self) -> Vec<(String, String)> {
         vec![]
@@ -360,7 +500,14 @@ pub trait KernelHandle: Send + Sync {
         let _ = name;
         None
     }
+}
 
+// ============================================================================
+// 10. ChannelSender — outbound channel adapters (text / media / file / poll)
+// ============================================================================
+
+#[async_trait]
+pub trait ChannelSender: Send + Sync {
     /// Send a message to a user on a named channel adapter (e.g., "email", "telegram").
     /// When `thread_id` is provided, the message is sent as a thread reply.
     /// When `account_id` is provided, routes through the specific configured bot with that ID.
@@ -451,27 +598,43 @@ pub trait KernelHandle: Send + Sync {
         Err("Channel poll send not available".to_string())
     }
 
-    /// Touch the agent's `last_active` timestamp to prevent heartbeat false-positives
-    /// during long-running operations (e.g., LLM calls).
-    fn touch_heartbeat(&self, agent_id: &str) {
-        let _ = agent_id;
-    }
-
-    /// Spawn an agent with capability inheritance enforcement.
-    /// `parent_caps` are the parent's granted capabilities. The kernel MUST verify
-    /// that every capability in the child manifest is covered by `parent_caps`.
-    async fn spawn_agent_checked(
+    /// Upsert a group roster member (channel bridge → persistent storage).
+    fn roster_upsert(
         &self,
-        manifest_toml: &str,
-        parent_id: Option<&str>,
-        parent_caps: &[librefang_types::capability::Capability],
-    ) -> Result<(String, String), String> {
-        // Default: delegate to spawn_agent (no enforcement)
-        // The kernel MUST override this with real enforcement
-        let _ = parent_caps;
-        self.spawn_agent(manifest_toml, parent_id).await
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+        _display_name: &str,
+        _username: Option<&str>,
+    ) -> Result<(), String> {
+        Ok(())
     }
 
+    /// List group roster members for a (channel, chat_id) pair.
+    fn roster_members(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Remove a member from the group roster.
+    fn roster_remove_member(
+        &self,
+        _channel: &str,
+        _chat_id: &str,
+        _user_id: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+// ============================================================================
+// 11. PromptStore — prompt versions + experiment metadata + auto-tracking
+// ============================================================================
+
+pub trait PromptStore: Send + Sync {
     /// Get the running experiment for an agent (if any). Default: None.
     fn get_running_experiment(
         &self,
@@ -582,7 +745,56 @@ pub trait KernelHandle: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+}
 
+// ============================================================================
+// 12. WorkflowRunner — declarative workflow execution
+// ============================================================================
+
+#[async_trait]
+pub trait WorkflowRunner: Send + Sync {
+    /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
+    /// workflow name. The `input` is an arbitrary string (typically JSON-encoded
+    /// parameters) passed to the first step. Returns `(run_id, output)` on success.
+    async fn run_workflow(
+        &self,
+        workflow_id: &str,
+        input: &str,
+    ) -> Result<(String, String), String> {
+        let _ = (workflow_id, input);
+        Err("Workflow engine not available".to_string())
+    }
+}
+
+// ============================================================================
+// 13. GoalControl — list and update agent goals
+// ============================================================================
+
+pub trait GoalControl: Send + Sync {
+    /// List active goals (pending or in_progress), optionally filtered by agent ID.
+    /// Returns a JSON array of goal objects.
+    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Update a goal's status and/or progress. Returns the updated goal JSON.
+    fn goal_update(
+        &self,
+        _goal_id: &str,
+        _status: Option<&str>,
+        _progress: Option<u8>,
+    ) -> Result<serde_json::Value, String> {
+        Err("Goal system not available".to_string())
+    }
+}
+
+// ============================================================================
+// 14. ToolPolicy — tool/agent config queries (timeouts, env passthrough,
+//     workspace prefixes). Pure read-side surface used by the runtime to
+//     parameterize tool execution against operator config.
+// ============================================================================
+
+pub trait ToolPolicy: Send + Sync {
     /// Tool execution timeout in seconds (from config). Default: 120.
     fn tool_timeout_secs(&self) -> u64 {
         120
@@ -600,11 +812,6 @@ pub trait KernelHandle: Send + Sync {
         self.tool_timeout_secs()
     }
 
-    /// Maximum inter-agent call depth (from config). Default: 5.
-    fn max_agent_call_depth(&self) -> u32 {
-        5
-    }
-
     /// Operator-side gate over skill `env_passthrough` requests, derived from
     /// `[skills]` config. `None` = no operator gate (only the built-in
     /// FORBIDDEN/kernel-reserved hard blocks apply). Default impl returns
@@ -614,99 +821,6 @@ pub trait KernelHandle: Send + Sync {
     ) -> Option<librefang_types::config::EnvPassthroughPolicy> {
         None
     }
-
-    /// List active goals (pending or in_progress), optionally filtered by agent ID.
-    /// Returns a JSON array of goal objects.
-    fn goal_list_active(&self, _agent_id: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-        Ok(Vec::new())
-    }
-
-    /// Run a workflow by ID or name. The `workflow_id` can be a UUID string or a
-    /// workflow name. The `input` is an arbitrary string (typically JSON-encoded
-    /// parameters) passed to the first step. Returns `(run_id, output)` on success.
-    async fn run_workflow(
-        &self,
-        workflow_id: &str,
-        input: &str,
-    ) -> Result<(String, String), String> {
-        let _ = (workflow_id, input);
-        Err("Workflow engine not available".to_string())
-    }
-
-    /// Update a goal's status and/or progress. Returns the updated goal JSON.
-    fn goal_update(
-        &self,
-        _goal_id: &str,
-        _status: Option<&str>,
-        _progress: Option<u8>,
-    ) -> Result<serde_json::Value, String> {
-        Err("Goal system not available".to_string())
-    }
-
-    /// Run a forked agent turn that collapses to a single text response —
-    /// the "structured-output via forked call" primitive. Used by the
-    /// proactive memory extractor so its LLM call shares the parent
-    /// turn's `(system + tools + messages)` prefix for Anthropic prompt
-    /// cache alignment, instead of issuing a standalone `driver.complete()`
-    /// that always starts cold.
-    ///
-    /// Internally: spawn `run_forked_agent_streaming`, drain to completion,
-    /// return the final assistant text. Fork semantics apply — the call's
-    /// messages do NOT persist into the agent's canonical session, and the
-    /// turn-end hook fires with `is_fork: true` so auto-dream won't
-    /// recurse.
-    ///
-    /// `allowed_tools = Some(vec![])` keeps the fork single-turn (no tool
-    /// calls permitted — model returns text). Pass a larger allowlist only
-    /// when the caller actually expects tool use (e.g. future extractors
-    /// that want the fork to call `memory_store` directly).
-    ///
-    /// Default: error. The real kernel overrides; tests / stubs that
-    /// don't implement the full streaming path just fall back to a
-    /// standalone driver call through the extractor's own path.
-    async fn run_forked_agent_oneshot(
-        &self,
-        _agent_id: &str,
-        _prompt: &str,
-        _allowed_tools: Option<Vec<String>>,
-    ) -> Result<String, String> {
-        Err("run_forked_agent_oneshot not available in this KernelHandle".to_string())
-    }
-
-    /// Upsert a group roster member (channel bridge → persistent storage).
-    fn roster_upsert(
-        &self,
-        _channel: &str,
-        _chat_id: &str,
-        _user_id: &str,
-        _display_name: &str,
-        _username: Option<&str>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// List group roster members for a (channel, chat_id) pair.
-    fn roster_members(
-        &self,
-        _channel: &str,
-        _chat_id: &str,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        Ok(Vec::new())
-    }
-
-    /// Remove a member from the group roster.
-    fn roster_remove_member(
-        &self,
-        _channel: &str,
-        _chat_id: &str,
-        _user_id: &str,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// Fire an `agent:step` external hook event.
-    /// Called by the runtime at the start of each agent loop iteration.
-    fn fire_agent_step(&self, _agent_id: &str, _step: u32) {}
 
     /// Return the canonicalized absolute paths of named workspaces declared as `read-only`
     /// for the given agent. Used by file-write tools to enforce workspace access modes.
@@ -749,5 +863,240 @@ pub trait KernelHandle: Send + Sync {
     /// legacy `<temp>/librefang_uploads`. See issue #4435.
     fn effective_upload_dir(&self) -> std::path::PathBuf {
         std::env::temp_dir().join("librefang_uploads")
+    }
+}
+
+// ============================================================================
+// KernelHandle — supertrait alias of all 14 role traits.
+//
+// Existing call sites take `Arc<dyn KernelHandle>`; that keeps working because
+// any type that impls every role trait automatically gets `KernelHandle` via
+// the blanket impl below. To narrow a new call site, take only the role bounds
+// you need (e.g. `fn foo<T: ApprovalGate + Send + Sync>(h: &T)`).
+// ============================================================================
+
+pub trait KernelHandle:
+    AgentControl
+    + MemoryAccess
+    + TaskQueue
+    + EventBus
+    + KnowledgeGraph
+    + CronControl
+    + ApprovalGate
+    + HandsControl
+    + A2ARegistry
+    + ChannelSender
+    + PromptStore
+    + WorkflowRunner
+    + GoalControl
+    + ToolPolicy
+    + Send
+    + Sync
+{
+}
+
+impl<T> KernelHandle for T where
+    T: AgentControl
+        + MemoryAccess
+        + TaskQueue
+        + EventBus
+        + KnowledgeGraph
+        + CronControl
+        + ApprovalGate
+        + HandsControl
+        + A2ARegistry
+        + ChannelSender
+        + PromptStore
+        + WorkflowRunner
+        + GoalControl
+        + ToolPolicy
+        + Send
+        + Sync
+        + ?Sized
+{
+}
+
+/// Prelude — glob-import this to bring `KernelHandle` plus every role trait
+/// into scope so that method calls like `kernel.send_channel_message(...)`
+/// resolve. Replaces the pre-#3746 single-trait import pattern.
+pub mod prelude {
+    pub use super::{
+        A2ARegistry, AgentControl, AgentInfo, ApprovalGate, ChannelSender, CronControl, EventBus,
+        GoalControl, HandsControl, KernelHandle, KnowledgeGraph, MemoryAccess, PromptStore,
+        TaskQueue, ToolPolicy, WorkflowRunner,
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Compile-only stub that implements every role trait, used to prove that:
+    ///   1. `KernelHandle` is reachable purely via the blanket impl,
+    ///   2. `Arc<dyn KernelHandle>` can be constructed from such a type,
+    ///   3. each role trait is individually object-safe.
+    struct StubKernel;
+
+    #[async_trait]
+    impl AgentControl for StubKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("stub".to_string())
+        }
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("stub".to_string())
+        }
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("stub".to_string())
+        }
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+    }
+
+    impl MemoryAccess for StubKernel {
+        fn memory_store(
+            &self,
+            _key: &str,
+            _value: serde_json::Value,
+            _peer_id: Option<&str>,
+        ) -> Result<(), String> {
+            Err("stub".to_string())
+        }
+        fn memory_recall(
+            &self,
+            _key: &str,
+            _peer_id: Option<&str>,
+        ) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        fn memory_list(&self, _peer_id: Option<&str>) -> Result<Vec<String>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl TaskQueue for StubKernel {
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("stub".to_string())
+        }
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_complete(
+            &self,
+            _agent_id: &str,
+            _task_id: &str,
+            _result: &str,
+        ) -> Result<(), String> {
+            Err("stub".to_string())
+        }
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Ok(vec![])
+        }
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Ok(false)
+        }
+        async fn task_get(&self, _task_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Ok(None)
+        }
+        async fn task_update_status(
+            &self,
+            _task_id: &str,
+            _new_status: &str,
+        ) -> Result<bool, String> {
+            Ok(false)
+        }
+    }
+
+    #[async_trait]
+    impl EventBus for StubKernel {
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl KnowledgeGraph for StubKernel {
+        async fn knowledge_add_entity(
+            &self,
+            _entity: &librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("stub".to_string())
+        }
+        async fn knowledge_add_relation(
+            &self,
+            _relation: &librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("stub".to_string())
+        }
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Ok(vec![])
+        }
+    }
+
+    impl CronControl for StubKernel {}
+    impl ApprovalGate for StubKernel {}
+    impl HandsControl for StubKernel {}
+    impl A2ARegistry for StubKernel {}
+    impl ChannelSender for StubKernel {}
+    impl PromptStore for StubKernel {}
+    impl WorkflowRunner for StubKernel {}
+    impl GoalControl for StubKernel {}
+    impl ToolPolicy for StubKernel {}
+
+    #[test]
+    fn stub_satisfies_kernel_handle_via_blanket_impl() {
+        fn assert_kernel_handle<T: KernelHandle + ?Sized>(_: &T) {}
+        let s = StubKernel;
+        assert_kernel_handle(&s);
+    }
+
+    #[test]
+    fn dyn_kernel_handle_is_object_safe() {
+        let _arc: Arc<dyn KernelHandle> = Arc::new(StubKernel);
+    }
+
+    #[test]
+    fn role_traits_are_individually_object_safe() {
+        // If any role trait gained a non-object-safe method (generic, Self by
+        // value, etc.), this stops compiling. That's the point.
+        let _agent: Arc<dyn AgentControl> = Arc::new(StubKernel);
+        let _mem: Arc<dyn MemoryAccess> = Arc::new(StubKernel);
+        let _tq: Arc<dyn TaskQueue> = Arc::new(StubKernel);
+        let _ev: Arc<dyn EventBus> = Arc::new(StubKernel);
+        let _kg: Arc<dyn KnowledgeGraph> = Arc::new(StubKernel);
+        let _cron: Arc<dyn CronControl> = Arc::new(StubKernel);
+        let _appr: Arc<dyn ApprovalGate> = Arc::new(StubKernel);
+        let _hand: Arc<dyn HandsControl> = Arc::new(StubKernel);
+        let _a2a: Arc<dyn A2ARegistry> = Arc::new(StubKernel);
+        let _ch: Arc<dyn ChannelSender> = Arc::new(StubKernel);
+        let _ps: Arc<dyn PromptStore> = Arc::new(StubKernel);
+        let _wf: Arc<dyn WorkflowRunner> = Arc::new(StubKernel);
+        let _goal: Arc<dyn GoalControl> = Arc::new(StubKernel);
+        let _tp: Arc<dyn ToolPolicy> = Arc::new(StubKernel);
     }
 }
