@@ -24,10 +24,10 @@ use zeroize::Zeroizing;
 const LINE_REPLY_URL: &str = "https://api.line.me/v2/bot/message/reply";
 
 /// Returns the default LINE Messaging API base URL. Used to initialise
-/// `LineAdapter::push_api_base`.
+/// `LineAdapter::push_api_base`. Scheme + host only — the message-type
+/// path (`/v2/bot/message/push`) is appended at each call site.
 #[inline]
 fn default_line_push_api_base() -> String {
-    // Strip the path suffix — only the scheme+host is stored; path is appended at call sites.
     "https://api.line.me".to_string()
 }
 
@@ -571,6 +571,44 @@ mod tests {
             )
             .await
             .expect("send must succeed against mock");
+    }
+
+    #[tokio::test]
+    async fn line_send_image_posts_image_message_with_push_api_base() {
+        // Locks the second `push_api_base` call site — the image branch in
+        // `send()` directly (not via `api_push_message`). Without this test
+        // a regression that reverts `self.client.post(&push_url)` back to
+        // `LINE_PUSH_URL` in the image branch would slip through CI even
+        // though the PR explicitly claims to refactor that branch.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/bot/message/push"))
+            .and(header("Authorization", "Bearer test-access-token"))
+            .and(body_json(serde_json::json!({
+                "to": "Uimage1234",
+                "messages": [{
+                    "type": "image",
+                    "originalContentUrl": "https://example.com/photo.jpg",
+                    "previewImageUrl": "https://example.com/photo.jpg",
+                }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let adapter = make_adapter(server.uri());
+        adapter
+            .send(
+                &dummy_user("Uimage1234"),
+                ChannelContent::Image {
+                    url: "https://example.com/photo.jpg".into(),
+                    caption: None,
+                    mime_type: None,
+                },
+            )
+            .await
+            .expect("image send must succeed against mock");
     }
 
     #[tokio::test]
