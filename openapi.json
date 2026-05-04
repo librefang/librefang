@@ -237,6 +237,7 @@
           "a2a"
         ],
         "summary": "POST /api/a2a/send — Send a task to an external A2A agent.",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof re-dispatching the outbound A2A task. A different body under\nthe same key is rejected with 409 Conflict.",
         "operationId": "a2a_send_external",
         "requestBody": {
           "content": {
@@ -258,6 +259,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
@@ -380,6 +384,7 @@
           "agents"
         ],
         "summary": "POST /api/agents — Spawn a new agent.",
+        "description": "Honours `Idempotency-Key` (#3637): when set, a duplicate request\nwith the same key + same body replays the cached response instead\nof spawning a second agent. A different body under the same key is\nrejected with 409 Conflict.",
         "operationId": "spawn_agent",
         "requestBody": {
           "content": {
@@ -404,6 +409,9 @@
           },
           "400": {
             "description": "Invalid manifest"
+          },
+          "409": {
+            "description": "Idempotency-Key was reused with a different request body"
           }
         }
       }
