@@ -1765,7 +1765,31 @@ pub async fn export_agent_memory(
 ///
 /// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
 /// Optionally accepts `clear_existing: true` to wipe existing memory before import.
-#[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = crate::types::JsonObject, responses((status = 200, description = "Memory imported", body = crate::types::JsonObject)))]
+///
+/// **Response contract — clients MUST inspect `body.status`, not just the
+/// HTTP status code.** A 200 may indicate either:
+///   - `{ "status": "imported", "keys_imported": N }` — every key written.
+///   - `{ "status": "partial", "keys_imported": N, "failed_keys": [...] }` —
+///     one or more keys failed at the substrate layer; the rest were
+///     written. The endpoint deliberately does not surface partial as
+///     207 Multi-Status to avoid breaking existing callers that gate on
+///     `status == 200`. Treat any non-`"imported"` body status as a
+///     soft failure that requires retrying the listed keys.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/memory/import",
+    tag = "memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::JsonObject,
+    responses(
+        (status = 200, description = "Memory imported (status=\"imported\") OR partial \
+            failure (status=\"partial\" with failed_keys list — clients must check body)",
+            body = crate::types::JsonObject),
+        (status = 400, description = "Missing or malformed `kv` object"),
+        (status = 404, description = "Agent not found, or caller is not the agent's author and not an admin"),
+        (status = 500, description = "Backend failure clearing existing memory before import")
+    )
+)]
 pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
     AgentIdPath(agent_id): AgentIdPath,
