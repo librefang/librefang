@@ -83,6 +83,8 @@ result
 !.claude/hooks/lib/
 .claude/hooks/lib/*
 !.claude/hooks/lib/check-bash-rules.py
+!.claude/prompts/
+!.claude/prompts/*.md
 .codex
 .omc/
 .qwen/

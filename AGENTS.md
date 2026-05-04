@@ -91,6 +91,35 @@ Routes are organized by domain in `crates/librefang-api/src/routes/`:
 - **Testing**: Tests live alongside source code in `#[cfg(test)]` modules; integration test helpers in `librefang-testing`
 - **Commits**: Conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
 
+## Maintainer prompts
+
+Maintainer responsibilities are codified as named role prompts under
+`.claude/prompts/`. Invoke a prompt by referencing the file in a Claude
+session (e.g., `@.claude/prompts/pr-maintainer.md`) or by saying
+"act as the pr-maintainer" — the prompts are self-contained and list
+their own checklist, output shape, and tool boundaries.
+
+- `.claude/prompts/pr-maintainer.md` — PR review and merge gating
+  (conventional-commit / CHANGELOG / attribution / CODEOWNERS / CI /
+  determinism / integration-test checks; outputs an approve / request
+  changes / comment verdict).
+- `.claude/prompts/release-maintainer.md` — release flow:
+  `[Unreleased]` → versioned CHANGELOG section, `articles/release-<calver>.md`
+  draft for the dev.to publish workflow, channel-aware copy, smoke
+  commands, rollback plan. Defers the actual `just release` /
+  `cargo xtask release` invocation to a human.
+- `.claude/prompts/ghsa-maintainer.md` — private security advisory
+  triage: reproduction, CVSS scoring, fix-in-private branch flow,
+  coordinated 7 / 14 / disclosure cadence, advisory-ignore handling
+  in `deny.toml`. Treats every invocation as embargoed by default.
+
+Prompts are scoped: each lists what it will not do (e.g., the
+release-maintainer never pushes tags; the ghsa-maintainer never opens
+public PRs before disclosure). When a request crosses prompt
+boundaries (e.g., a security release PR that needs both ghsa- and
+release-maintainer attention), invoke them sequentially rather than
+splicing the checklists.
+
 ## Important Notes
 
 - **Do not modify `librefang-cli`** without explicit instruction -- it is under active development.
