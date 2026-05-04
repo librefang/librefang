@@ -5,5 +5,6 @@
 //! already established for triggers in `crate::triggers`.
 
 pub use librefang_kernel::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRunId, WorkflowStep,
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowRun, WorkflowRunId,
+    WorkflowRunState, WorkflowStep,
 };
